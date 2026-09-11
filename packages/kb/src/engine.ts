@@ -662,7 +662,7 @@ export class GroupKBEngine {
   /**
    * Query the KB via PulseSeed structural resonance propagation.
    *
-   * 1. Bootstrap: FTS lookup finds ENTRY POINTS only (not the retrieval mechanism)
+   * 1. Bootstrap: structural seed lookup finds ENTRY POINTS (no FTS/embedding)
    * 2. Each entry point spawns a PulseSeed
    * 3. PulseSeeds propagate through group structure via edges with energy decay
    * 4. Nodes that structurally resonate (shared groups, edges, hierarchy) activate
@@ -676,7 +676,7 @@ export class GroupKBEngine {
     const budget = options?.budget ?? this.config.activationBudget;
     const psConfig = this.config.pulseSeed;
 
-    const seedNodes = this.store.searchMemories(queryText);
+    const seedNodes = this.store.findSeedNodes(queryText);
 
     const allPulseSeeds: PulseSeed[] = [];
     const activationMap = new Map<string, number>();

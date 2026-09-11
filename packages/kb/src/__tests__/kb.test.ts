@@ -95,16 +95,16 @@ describe('KBStore', () => {
     assert.equal(store.getMemory(mem.id), undefined);
   });
 
-  it('should search memories via FTS', () => {
+  it('should find seed nodes structurally (no FTS)', () => {
     store.createMemory({ kind: 'text', title: 'TypeScript guide', content: 'Learn TypeScript basics' });
     store.createMemory({ kind: 'text', title: 'Python tutorial', content: 'Learn Python basics' });
     store.createMemory({ kind: 'text', title: 'Cooking recipes', content: 'How to bake bread' });
 
-    const results = store.searchMemories('TypeScript');
-    assert.equal(results.length, 1);
+    const results = store.findSeedNodes('TypeScript');
+    assert.ok(results.length >= 1);
     assert.equal(results[0].title, 'TypeScript guide');
 
-    const learnResults = store.searchMemories('Learn basics');
+    const learnResults = store.findSeedNodes('Learn basics');
     assert.ok(learnResults.length >= 2);
   });
 

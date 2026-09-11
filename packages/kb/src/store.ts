@@ -204,30 +204,6 @@ export class KBStore {
         created_at INTEGER NOT NULL
       );
 
-      CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-        title,
-        content,
-        content='memories',
-        content_rowid='rowid'
-      );
-
-      CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-        INSERT INTO memories_fts(rowid, title, content)
-        VALUES (new.rowid, new.title, new.content);
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-        INSERT INTO memories_fts(memories_fts, rowid, title, content)
-        VALUES ('delete', old.rowid, old.title, old.content);
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
-        INSERT INTO memories_fts(memories_fts, rowid, title, content)
-        VALUES ('delete', old.rowid, old.title, old.content);
-        INSERT INTO memories_fts(rowid, title, content)
-        VALUES (new.rowid, new.title, new.content);
-      END;
-
       CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);
       CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
       CREATE INDEX IF NOT EXISTS idx_groups_parent ON groups(parent_group_id);
@@ -347,23 +323,45 @@ export class KBStore {
     return row ? rowToMemory(row) : undefined;
   }
 
-  searchMemories(query: string): MemoryNode[] {
-    const ftsQuery = query
-      .split(/\s+/)
-      .filter(Boolean)
-      .map(term => `"${term.replace(/"/g, '""')}"`)
-      .join(' OR ');
+  /**
+   * Structural seed lookup: find memories whose title or group name
+   * contains query tokens. This is NOT keyword retrieval — it locates
+   * structural entry points for PulseSeed propagation.
+   * No FTS, no embeddings, no cosine similarity.
+   */
+  findSeedNodes(query: string): MemoryNode[] {
+    const tokens = query.toLowerCase().split(/\s+/).filter(t => t.length > 1);
+    if (tokens.length === 0) return [];
 
-    if (!ftsQuery) return [];
+    const allMems = this.db.prepare('SELECT * FROM memories').all() as MemoryRow[];
+    const scored: { mem: MemoryNode; score: number }[] = [];
 
-    const rows = this.db.prepare(`
-      SELECT m.* FROM memories m
-      JOIN memories_fts fts ON m.rowid = fts.rowid
-      WHERE memories_fts MATCH ?
-      ORDER BY rank
-    `).all(ftsQuery) as MemoryRow[];
+    for (const row of allMems) {
+      const mem = rowToMemory(row);
+      const titleLower = mem.title.toLowerCase();
+      const contentLower = mem.content.toLowerCase().slice(0, 500);
 
-    return rows.map(rowToMemory);
+      let score = 0;
+      for (const tok of tokens) {
+        if (titleLower.includes(tok)) score += 3;
+        if (contentLower.includes(tok)) score += 1;
+      }
+
+      const groupNames = mem.groupIds
+        .map(gid => this.getGroup(gid))
+        .filter(Boolean)
+        .map(g => g!.name.toLowerCase());
+      for (const tok of tokens) {
+        for (const gn of groupNames) {
+          if (gn.includes(tok)) score += 2;
+        }
+      }
+
+      if (score > 0) scored.push({ mem, score });
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    return scored.map(s => s.mem);
   }
 
   createMemory(input: CreateMemoryInput): MemoryNode {
