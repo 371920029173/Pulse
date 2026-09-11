@@ -1,8 +1,8 @@
 # SHE v2 — Architecture
 
-**Structured Hierarchy Engine v2**: agent-runtime with Group Memory + PulseSeed retrieval.
-Design truth: AGI-3.5-v2 + how-to-do docs.
-Target deploy path: `D:\AGI\she-v2`
+**Structured Hierarchy Engine v2**: thin agent-runtime with Group Memory + PulseSeed retrieval.
+Design truth: AGI-3.5-v2 + how-to-do docs. NOT AGI-3.5 max.
+Landing path: `D:\AGI\AGI-use`
 
 ---
 

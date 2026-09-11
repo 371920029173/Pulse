@@ -7,10 +7,10 @@
     "build": "pnpm -r build",
     "dev:ui": "pnpm --filter @she/ui dev",
     "dev:server": "pnpm --filter @she/server dev",
-    "dev": "concurrently \"pnpm dev:server\" \"pnpm dev:ui\"",
+    "dev": "pnpm dev:ui",
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
-    "she": "node --import tsx packages/she-cli/src/index.ts"
+    "she": "node packages/she-cli/dist/index.js"
   },
   "engines": {
     "node": ">=20"
