@@ -1,0 +1,22 @@
+{
+  "name": "she-v2",
+  "private": true,
+  "version": "0.1.0",
+  "description": "SHE v2 — Structured Hierarchy Engine: agent-runtime with Group Memory + PulseSeed retrieval",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev:ui": "pnpm --filter @she/ui dev",
+    "dev:server": "pnpm --filter @she/server dev",
+    "dev": "concurrently \"pnpm dev:server\" \"pnpm dev:ui\"",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "she": "node --import tsx packages/she-cli/src/index.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.4",
+  "devDependencies": {
+    "@types/node": "^22.20.2"
+  }
+}

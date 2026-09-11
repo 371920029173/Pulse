@@ -1,0 +1,330 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.headerTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.headerDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: glow 2s ease-in-out infinite;
+}
+
+@keyframes glow {
+  0%, 100% { box-shadow: 0 0 4px var(--accent); opacity: 1; }
+  50% { box-shadow: 0 0 8px var(--accent); opacity: 0.7; }
+}
+
+.closeBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+  font-size: 14px;
+}
+
+.closeBtn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 10px;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  text-align: center;
+  padding: 20px;
+}
+
+.emptyIcon {
+  font-size: 32px;
+  opacity: 0.25;
+}
+
+.metaBar {
+  display: flex;
+  gap: 12px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.metaItem {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.metaValue {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+
+/* Trace entry */
+.traceEntry {
+  animation: fadeIn 200ms ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.seedNode {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  border-left: 3px solid var(--accent);
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.seedNode:hover {
+  background: var(--bg-hover);
+}
+
+.seedIcon {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.seedInfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.seedId {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.seedReason {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 1px;
+}
+
+.seedActivation {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.seedActivationValue {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.energyBar {
+  width: 40px;
+  height: 4px;
+  background: var(--bg-primary);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+
+.energyFill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  transition: width 300ms ease;
+}
+
+/* Hop arrow */
+.hopArrow {
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  gap: 8px;
+  min-height: 32px;
+}
+
+.hopLine {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 26px;
+  flex-shrink: 0;
+}
+
+.hopLineSegment {
+  width: 1px;
+  height: 12px;
+}
+
+.hopLineArrow {
+  font-size: 8px;
+  line-height: 1;
+}
+
+.hopDetail {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.hopBadge {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.hopBadge_weak {
+  background: rgba(139, 148, 158, 0.15);
+  color: var(--text-secondary);
+}
+
+.hopBadge_co_occurrence {
+  background: rgba(121, 192, 255, 0.15);
+  color: var(--info);
+}
+
+.hopBadge_temporal {
+  background: rgba(210, 153, 34, 0.15);
+  color: var(--warning);
+}
+
+.hopBadge_causal_candidate {
+  background: rgba(248, 81, 73, 0.12);
+  color: var(--danger);
+}
+
+.hopBadge_hierarchical {
+  background: rgba(163, 113, 247, 0.15);
+  color: #a371f7;
+}
+
+.hopBadge_cross_group {
+  background: rgba(63, 185, 80, 0.15);
+  color: var(--success);
+}
+
+.hopBadge_group_member {
+  background: rgba(88, 166, 255, 0.12);
+  color: var(--accent);
+}
+
+.hopBadge_parent_child {
+  background: rgba(163, 113, 247, 0.12);
+  color: #a371f7;
+}
+
+.hopEnergy {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+/* Trace detail (expandable) */
+.traceDetail {
+  padding: 6px 10px 10px;
+  margin-top: 2px;
+  background: var(--bg-primary);
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
+  animation: fadeIn 150ms ease-out;
+}
+
+.traceDetailRow {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0;
+}
+
+.traceDetailLabel {
+  color: var(--text-tertiary);
+}
+
+.traceDetailValue {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.groupPath {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 4px;
+}
+
+.groupPathSegment {
+  font-size: 10px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+}
+
+.groupPathArrow {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+}

@@ -1,5 +1,5 @@
 {
-  "name": "@she/server",
+  "name": "@she/sandbox",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,14 +7,11 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "dev": "node --import tsx src/index.ts",
+    "test": "node --import tsx --test src/__tests__/*.test.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@she/shared": "workspace:*",
-    "@she/kb": "workspace:*",
-    "@she/agent-runtime": "workspace:*",
-    "@she/sandbox": "workspace:*"
+    "@she/shared": "workspace:*"
   },
   "devDependencies": {
     "tsx": "^4.19.0",

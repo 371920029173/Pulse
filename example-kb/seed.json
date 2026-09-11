@@ -1,0 +1,67 @@
+{
+  "description": "Seed KB for SHE v2 demo. Ingest sample-workspace/ first, then load this to add structured knowledge.",
+  "groups": [
+    {
+      "name": "project-overview",
+      "memories": [
+        {
+          "kind": "fact",
+          "title": "Project Name",
+          "content": "SHE v2 — Structured Hierarchy Engine. A local coding agent with Group Memory knowledge base using PulseSeed structural resonance retrieval."
+        },
+        {
+          "kind": "fact",
+          "title": "Deploy Target",
+          "content": "Target deployment path is D:\\AGI\\she-v2. Designed for Windows with Node.js/TypeScript."
+        }
+      ]
+    },
+    {
+      "name": "architecture-decisions",
+      "memories": [
+        {
+          "kind": "fact",
+          "title": "KB Design Choice",
+          "content": "Group-structured knowledge base with PulseSeed retrieval instead of traditional vector RAG. Retrieval is structural resonance through groups and typed edges, not cosine similarity over embeddings."
+        },
+        {
+          "kind": "fact",
+          "title": "Edge Type Discipline",
+          "content": "Edge kinds are strictly distinct and never auto-promoted. co_occurrence records adjacency, temporal records order, causal_candidate requires direction + evidence + falsifiers. Weak edges are pre-activation hints only."
+        },
+        {
+          "kind": "fact",
+          "title": "Sandbox Model",
+          "content": "Windows Job Object sandbox with CWD jail, destructive command deny-list, and deny-by-default policy. On Linux: process groups as fallback."
+        }
+      ]
+    },
+    {
+      "name": "coding-patterns",
+      "memories": [
+        {
+          "kind": "code",
+          "title": "TypeScript Monorepo Structure",
+          "content": "packages/shared (types), packages/kb (Group KB engine), packages/agent-runtime (LLM + tools), packages/sandbox (shell isolation), packages/she-cli (CLI), packages/server (REST API), packages/ui (React)"
+        },
+        {
+          "kind": "preference",
+          "title": "Module Style",
+          "content": "ESM-only (type: module). All relative imports use .js extensions for NodeNext resolution. Use import type for type-only imports."
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "KB Design Choice",
+      "to": "Edge Type Discipline",
+      "kind": "co_occurrence"
+    },
+    {
+      "from": "Project Name",
+      "to": "Deploy Target",
+      "kind": "temporal"
+    }
+  ]
+}
