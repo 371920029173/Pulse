@@ -3131,9 +3131,29 @@ router.get('/api/fs/tree', (req, res) => {
     sendJSON(res, { ok: true });
   });
 
-  router.post('/api/tasks/clear-finished', (_req, res) => {
-    sendJSON(res, { ok: true, cleared: taskBoard.clearFinished() });
-  });
+    router.post('/api/tasks/clear-finished', (_req, res) => {
+      sendJSON(res, { ok: true, cleared: taskBoard.clearFinished() });
+    });
+
+    /*
+     * Mark every still-running task as failed.
+     *
+     * `TaskBoard.markStaleRunning()` existed and `TaskCards.tsx` called this endpoint, but no route
+     * exposed it — so the call 404'd and, being wrapped in `.catch(() => undefined)`, failed
+     * silently. The effect: the UI marked its own cards as failed when the connection dropped, the
+     * SERVER kept them `running` forever, and the next `GET /api/tasks` (or a reload) showed
+     * "进行中…" again for work that had already died. Half-wired features are the hardest kind to
+     * notice, because both halves look correct in isolation.
+     */
+    router.post('/api/tasks/mark-stale', async (req, res) => {
+      // The body is advisory: a missing or malformed one must still mark the tasks stale.
+      let reason: string | undefined;
+      try {
+        const body = await parseBody<{ reason?: string }>(req);
+        if (typeof body?.reason === 'string' && body.reason.trim()) reason = body.reason.trim();
+      } catch { /* fall back to the default reason in the store */ }
+      sendJSON(res, { ok: true, marked: taskBoard.markStaleRunning(reason) });
+    });
 
   router.get('/api/plans', (req, res) => {
     sendJSON(res, { plans: planStoreFor(req).list() });

@@ -18,6 +18,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { removeTempDir } from './lib/temp.mjs';
 
 const dir = mkdtempSync(join(tmpdir(), 'she-subagent-'));
 // Derive the project root from this file's location — never a literal path, so
@@ -76,5 +77,5 @@ const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length} 通过 / ${failed.length} 失败`);
 
 store.close();
-rmSync(dir, { recursive: true, force: true });
+removeTempDir(dir);
 process.exit(failed.length ? 1 : 0);

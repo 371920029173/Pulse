@@ -16,49 +16,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # No `version:` here on purpose.
+      #
+      # pnpm/action-setup@v4 FAILS when the action specifies a version and package.json also has a
+      # `packageManager` field:
+      #
+      #   Error: Multiple versions of pnpm specified:
+      #   - version 9 in the GitHub Action config with the key "version"
+      #   - version pnpm@9.15.4 in the package.json with the key "packageManager"
+      #
+      # That is what the first run of this workflow did: it died on this step, so every check below
+      # was skipped and the repo showed a red badge while nothing had actually been verified.
+      # package.json is the single source of truth for the toolchain version.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
+      # Node 20 is deprecated on GitHub runners; 22 matches the version this is developed and
+      # built against locally, so CI and development agree.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
 
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Build
-        run: pnpm -r build
-
-      - name: Unit tests
-        run: pnpm -r test
-
-      # Retrieval eval runs against the bundled fixture library when no real
-      # library is present, so it still asserts something in CI instead of
-      # silently skipping. Offline: no API keys needed.
-      - name: Retrieval eval
-        run: node evals/retrieval/run.mjs
-
-      # Verifies subagents cannot recurse and lose the tools that assume a human
-      # is present. Offline.
-      - name: Subagent wiring
-        run: node scripts/check-subagent.mjs
-
-      # Spins up the real server against throwaway workspaces to verify that
-      # state recovery cannot overwrite existing data.
-      - name: Data safety
-        run: node scripts/data-safety-check.mjs
-
-      # Verifies the local API refuses cross-site requests, foreign Host headers,
-      # workspace escapes and symlink escapes. Needs a running server.
-      - name: Security check
-        env:
-          SHE_WORKSPACE: ${{ github.workspace }}/sample-workspace
-        run: |
-          node packages/server/dist/index.js &
-          for i in $(seq 1 40); do
-            curl -sf http://127.0.0.1:4577/api/health >/dev/null && break
-            sleep 1
-          done
-          node scripts/security-check.mjs
+      # The whole offline gate, not a hand-picked subset.
+      #
+      # This used to run three checks out of twenty-one. The other eighteen — including the
+      # security, stylesheet, restart and bundle checks — had never executed on Linux, while the
+      # README stated the project works there. Anything that cannot run offline (the two evaluations
+      # that call a model) is excluded by name inside `check:offline`, so what runs here is a stable,
+      # documented set rather than whatever the workflow author remembered.
+      #
+      # Linux is also the only platform CI can exercise: the maintainer develops on Windows, so a
+      # failure here is the first real signal that a platform branch is wrong.
+      - name: Offline gate (build, tests, all offline checks)
+        run: pnpm check:offline

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { fetchJSON } from '../lib/api';
 import styles from '../styles/TaskCards.module.css';
+import { t } from '../lib/i18n';
 
 interface TaskCard {
   id: string;
@@ -40,7 +41,7 @@ export function TaskCards() {
       });
     };
     const onFailed = (ev: Event) => {
-      const message = String((ev as CustomEvent).detail?.message || '连接中断');
+      const message = String((ev as CustomEvent).detail?.message || t('连接中断'));
       setTasks((prev) =>
         prev.map((t) =>
           t.phase === 'running' ? { ...t, phase: 'error' as const, detail: message } : t,
@@ -83,24 +84,30 @@ export function TaskCards() {
   return (
     <div className={styles.wrap} aria-live="polite">
       <div className={styles.head}>
-        <span className={styles.title}>后台任务{running ? ` · ${running} 进行中` : ''}</span>
+        <span className={styles.title}>{t('后台任务')}{running ? ` · ${running} ${t('进行中')}` : ''}</span>
         <button type="button" className={styles.ghost} onClick={() => void clearFinished()}>
-          清除已结束
+          {t('清除已结束')}
         </button>
       </div>
       <div className={styles.list}>
-        {tasks.slice(0, 8).map((t) => (
-          <div key={t.id} className={`${styles.card} ${styles[t.phase]}`}>
+        {/*
+          The callback parameter is `task`, not `t`.
+          The i18n helper is a module-level `t()`, so a parameter named `t` shadows it and every
+          `t('…')` inside the block fails to compile — the same collision that was fixed once before
+          in `SchedulePanel`. Naming it `task` makes the shadowing impossible.
+        */}
+        {tasks.slice(0, 8).map((task) => (
+          <div key={task.id} className={`${styles.card} ${styles[task.phase]}`}>
             <div className={styles.row}>
-              <span className={styles.kind}>{t.kind === 'subagent' ? '子智能体' : t.kind === 'import' ? '导入' : t.kind}</span>
-              <button type="button" className={styles.x} onClick={() => void dismiss(t.id)} title="关闭">
+              <span className={styles.kind}>{task.kind === 'subagent' ? t('子智能体') : task.kind === 'import' ? t('导入') : task.kind}</span>
+              <button type="button" className={styles.x} onClick={() => void dismiss(task.id)} title={t('关闭')}>
                 ×
               </button>
             </div>
-            <div className={styles.label}>{t.label}</div>
-            {t.detail ? <div className={styles.detail}>{t.detail}</div> : null}
+            <div className={styles.label}>{task.label}</div>
+            {task.detail ? <div className={styles.detail}>{task.detail}</div> : null}
             <div className={styles.phase}>
-              {t.phase === 'running' ? '进行中…' : t.phase === 'done' ? '完成' : '失败'}
+              {task.phase === 'running' ? t('进行中…') : task.phase === 'done' ? t('完成') : t('失败')}
             </div>
           </div>
         ))}

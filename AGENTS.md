@@ -6,16 +6,26 @@ the setup; this file covers the things that are easy to get wrong.
 ## Verify with one command
 
 ```bash
-pnpm check:all
+pnpm check:offline   # everything that needs no API key — this is what CI runs
+pnpm check:all       # the above, plus the model-backed self-verification evaluation
 ```
 
-Twenty-five steps: build, unit tests (636), two LLM-backed evaluators, and twenty-one `check:*`
+`check:offline` chains the build, the unit suites, the offline retrieval evaluation, and every
+`check:*` covering security, shell quoting, host binding, the turn lock, custom stylesheets, UI
+structure, API wiring, the built bundle, log rotation, a real restart cycle, UTF-8 round-trips,
+accessibility, portability, metrics, scheduling, LSP, i18n coverage, control styling, and the
+container structure. `check:all` adds `eval:verify`, which calls a model and therefore needs a key.
+
+Deliberately not counted: the step count changed four times while this file was being written, and a
+number that must be edited on every unrelated change tells a reader nothing that "runs everything"
+does not. Say what runs; do not count it. (`check:docs` still fails on a stale count if someone
+writes one, so the number cannot rot quietly.)
+
+`check:offline` exists as a named target rather than a hand-picked list in the workflow, because the
+workflow used to run three checks out of twenty-one and the other eighteen had never executed on
+Linux. One shared definition means CI and a local run cannot diverge.
 
 Helper scripts used by the gate (not separate pnpm check:* aliases): scripts/safe-port.mjs (pick a Windows-safe listen port) and scripts/stage-desktop-runtime.mjs (stage packaged desktop runtime assets before electron-builder).
-
-commands covering security, shell quoting, host binding, the turn lock, custom stylesheets, the built bundle, log rotation, a real restart cycle, UTF-8 round-trips,
-UI structure, accessibility, portability, metrics, scheduling, LSP, i18n coverage, control
-styling, and the container structure. It must pass before a change is considered done.
 
 Individual pieces, when you want a faster loop:
 
@@ -25,6 +35,7 @@ pnpm check:shell             # shell quoting + command allowlist
 pnpm check:ui                # control styling: fills, hover, heights, dead CSS
 pnpm check:theme             # custom stylesheet: brick refusal, escape hatch, revert
 pnpm check:uistruct          # UI structure: root-level state, overlays in both branches
+pnpm check:api               # every endpoint the UI calls is actually routed
 pnpm check:dist              # the built bundle contains the wiring the browser needs
 pnpm check:logs              # logs are capped and crash.log is only for crashes
 pnpm check:restart           # hard-kill + reboot: settings, sessions, groups, schedules all survive

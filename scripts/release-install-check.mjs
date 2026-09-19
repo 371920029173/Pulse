@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
 import { pickSafePort } from './safe-port.mjs';
+import { removeTempDir } from './lib/temp.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -174,7 +175,7 @@ try {
     await sleep(1500);
   }
   // Leave the temp tree when something failed, so it can be inspected.
-  if (failures === 0) rmSync(tmp, { recursive: true, force: true });
+  if (failures === 0) removeTempDir(tmp);
   else console.log(`\n  临时目录保留以便排查: ${tmp}`);
 }
 

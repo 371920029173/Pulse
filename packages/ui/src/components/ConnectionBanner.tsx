@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { probeHealth } from '../lib/api';
+import { t } from '../lib/i18n';
 
 /**
  * Polls /api/health. When the local API is down, shows a non-blocking banner
@@ -15,7 +16,7 @@ export function ConnectionBanner() {
     setOnline(ok);
     if (wasOnline.current && !ok) {
       window.dispatchEvent(
-        new CustomEvent('she:offline', { detail: { message: '本地服务不可用' } }),
+        new CustomEvent('she:offline', { detail: { message: t('本地服务不可用') } }),
       );
     }
     wasOnline.current = ok;
@@ -72,7 +73,7 @@ export function ConnectionBanner() {
         boxShadow: '0 2px 8px rgba(0,0,0,0.25)',
       }}
     >
-      <span>本地服务连不上（期望 5577）。桌面用 SHE.bat 启动后再点重试。</span>
+      <span>{t('本地服务连不上（期望 5577）。桌面用 SHE.bat 启动后再点重试。')}</span>
       <button
         type="button"
         disabled={checking}
@@ -87,7 +88,7 @@ export function ConnectionBanner() {
           fontSize: 12,
         }}
       >
-        {checking ? '检测中…' : '重试'}
+        {checking ? t('检测中…') : t('重试')}
       </button>
     </div>
   );

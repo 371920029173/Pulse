@@ -25,7 +25,15 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const asJson = args.includes('--json');
 const dbArg = args.indexOf('--db');
-const requestedDb = dbArg >= 0 ? args[dbArg + 1] : (process.env.SHE_KB_PATH || 'D:/AGI/she-kb/kb.sqlite');
+/*
+ * No default library path.
+ *
+ * This used to default to `D:/AGI/she-kb/kb.sqlite` — the author's own machine, shipped as the
+ * default for everyone. Anyone else's run would look for a path that cannot exist, and it is the
+ * documented behaviour rather than a hidden fallback. `SHE_KB_PATH` is the honest way to point at a
+ * real library; with neither, the harness builds one from `fixture.json` and says so.
+ */
+const requestedDb = dbArg >= 0 ? args[dbArg + 1] : (process.env.SHE_KB_PATH || '');
 
 /**
  * Whether an embedding baseline can run.

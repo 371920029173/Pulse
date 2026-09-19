@@ -49,6 +49,21 @@ The image sets `SHE_HOST=0.0.0.0` so the port is reachable from outside the cont
 See [Deployment / 部署](#deployment--部署) for binding to a LAN address or running
 behind a reverse proxy.
 
+> ### ⚠️ 这个 API 没有认证 —— 绑定地址就是安全边界
+>
+> 上面的 `-p 5577:5577` 会把端口发布到**宿主机所有网卡**，而不只是本机回环。这个 API 能让
+> 调用者执行 shell 命令、读写工作区文件、改设置（包括打开"允许所有命令"），**它没有任何
+> 认证**。也就是说，同一局域网内的任何人、同一台宿主机上的任何容器，都可以像你一样使用它。
+>
+> 请按你的实际场景选一种：
+>
+> - **只在本机用**（推荐）：`-p 127.0.0.1:5577:5577` —— 端口只对宿主机自己可见。
+> - **要在局域网/手机上用**：放在反向代理后面并加认证，并设置 `SHE_ALLOWED_HOSTS`。
+> - **绝对不要**把端口直接暴露到公网。
+>
+> 这不是"以后再加"的待办：这是当前设计（单用户本地工具）的既定取舍，所以它必须在
+> 复制粘贴的路径上写清楚，而不是藏在安全文档里。
+
 ### Prerequisites / 前置条件
 
 - Node.js ≥ 20 — https://nodejs.org
@@ -427,6 +442,7 @@ pnpm check:schedule           # 定时任务：顺延语义、窗口外不中断
 pnpm check:lsp                # 语言服务器接线与正确性
 pnpm check:i18n               # 本地化覆盖率棘轮（不允许倒退）
 pnpm check:ui                 # 控件样式一致性：填充、hover、高度、死代码
+pnpm check:api                # UI 调用的接口在服务端都有路由（防半个功能）
 pnpm check:docker             # 容器镜像结构（无 docker 时的静态核对）
 pnpm check:release            # 发布包头结构（含 AGENTS.md 等顶层文档）
 

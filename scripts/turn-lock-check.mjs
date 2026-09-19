@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { pickSafePort } from './safe-port.mjs';
+import { removeTempDir } from './lib/temp.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -288,7 +289,7 @@ try {
 } finally {
   await shutdown();
   await new Promise((r) => stub.close(() => r()));
-  rmSync(workspace, { recursive: true, force: true });
+  removeTempDir(workspace);
 }
 
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`);

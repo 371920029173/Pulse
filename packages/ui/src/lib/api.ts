@@ -1,5 +1,7 @@
 const BASE = '';
 
+import { t } from './i18n';
+
 /** Default request timeout. Long agent turns use SSE with their own signal. */
 const DEFAULT_TIMEOUT_MS = 20_000;
 
@@ -17,7 +19,7 @@ function friendlyNetworkError(err: unknown): Error {
   }
   const msg = err instanceof Error ? err.message : String(err);
   if (/Failed to fetch|NetworkError|fetch failed|ECONNREFUSED|Load failed/i.test(msg)) {
-    return new Error('无法连接本地服务。请用桌面 SHE.bat 启动（API 5577），然后重试。');
+    return new Error(t('无法连接本地服务。请用桌面 SHE.bat 启动（API 5577），然后重试。'));
   }
   return err instanceof Error ? err : new Error(msg);
 }
@@ -55,7 +57,7 @@ export async function fetchJSON<T = unknown>(
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       if (opts.signal?.aborted) throw err;
-      throw new Error(`请求超时（${timeoutMs / 1000}s）。服务可能卡住或未启动。`);
+      throw new Error(t('请求超时（{s}s）。服务可能卡住或未启动。', { s: timeoutMs / 1000 }));
     }
     throw friendlyNetworkError(err);
   } finally {
@@ -101,7 +103,7 @@ export function streamSSE(
       local.abort();
       if (!settled) {
         settled = true;
-        callbacks.onError?.(new Error('连接长时间无响应，已中止本轮。请检查网络或重试。'));
+        callbacks.onError?.(new Error(t('连接长时间无响应，已中止本轮。请检查网络或重试。')));
       }
     }, idleTimeoutMs);
   };
@@ -159,7 +161,7 @@ export function streamSSE(
       if (settled) return;
       settled = true;
       if (!sawTerminal) {
-        callbacks.onError?.(new Error('连接中断，回复可能不完整。可点停止后重试。'));
+        callbacks.onError?.(new Error(t('连接中断，回复可能不完整。可点停止后重试。')));
         return;
       }
       callbacks.onDone?.();

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { fetchJSON } from '../lib/api';
 import styles from '../styles/Sidebar.module.css';
+import { t } from '../lib/i18n';
 
 export interface OutlineSymbol {
   name: string;
@@ -68,20 +69,20 @@ export function FileOutline({ path, onPickSymbol }: Props) {
   return (
     <div className={styles.treeContainer} style={{ maxHeight: 200 }}>
       <div className={styles.sectionHeader} style={{ paddingLeft: 0 }}>
-        <span title={path}>大纲 · {path.split(/[\\/]/).pop()}</span>
-        <button type="button" className={styles.iconBtn} onClick={() => void load()} title="刷新大纲">
+        <span title={path}>{t('大纲')} · {path.split(/[\\/]/).pop()}</span>
+        <button type="button" className={styles.iconBtn} onClick={() => void load()} title={t('刷新大纲')}>
           ↻
         </button>
       </div>
       {engine ? (
         <div className={styles.emptyState} style={{ padding: '2px 8px', fontSize: 11 }}>
-          {engine === 'typescript-ast' ? 'TypeScript AST' : '启发式'}
+          {engine === 'typescript-ast' ? 'TypeScript AST' : t('启发式')}
         </div>
       ) : null}
-      {loading ? <div className={styles.emptyState}>解析中…</div> : null}
+      {loading ? <div className={styles.emptyState}>{t('解析中…')}</div> : null}
       {err ? <div className={styles.emptyState}>{err}</div> : null}
       {!loading && !err && symbols.length === 0 ? (
-        <div className={styles.emptyState}>此文件没有可识别符号</div>
+        <div className={styles.emptyState}>{t('此文件没有可识别符号')}</div>
       ) : null}
       {symbols.map((s) => (
         <button

@@ -20,6 +20,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { removeTempDir } from './lib/temp.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -165,7 +166,7 @@ try {
 } catch (err) {
   check('检查过程未抛异常', false, err.stack ?? err.message);
 } finally {
-  rmSync(tmp, { recursive: true, force: true });
+  removeTempDir(tmp);
 }
 
 console.log('\n注意：这是结构检查。真正的验证需要在干净目录里');

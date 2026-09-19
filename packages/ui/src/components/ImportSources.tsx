@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { fetchJSON } from '../lib/api';
 import { toast } from '../lib/toast';
+import { t } from '../lib/i18n';
 import styles from '../styles/ImportSources.module.css';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
@@ -54,9 +55,9 @@ function fmtWhen(iso?: string): string {
   if (!iso) return '';
   const d = new Date(iso);
   const days = Math.floor((Date.now() - d.getTime()) / 86_400_000);
-  if (days === 0) return '今天';
-  if (days === 1) return '昨天';
-  if (days < 30) return `${days} 天前`;
+  if (days === 0) return t('今天');
+  if (days === 1) return t('昨天');
+  if (days < 30) return t('{n} 天前', { n: days });
   return d.toISOString().slice(0, 10);
 }
 
@@ -130,10 +131,10 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
         body: { ids: [...selected], destination: dest },
       });
       if (dest === 'chat') {
-        toast(`已导入 ${r.imported} 段对话到 .she/imports/（会话里只挂文件路径）`);
+        toast(t('已导入 {n} 段对话到 .she/imports/（会话里只挂文件路径）', { n: r.imported }));
         onImported?.();
       } else {
-        toast(`已导入 ${r.imported} 个对话（${r.memoriesAdded ?? 0} 条知识）`);
+        toast(t('已导入 {n} 个对话（{k} 条知识）', { n: r.imported, k: r.memoriesAdded ?? 0 }));
       }
       setSelected(new Set());
     } catch (e) {
@@ -146,7 +147,7 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
   /** One-click: select every discovered conversation and import them. */
   const importAll = useCallback(async () => {
     if (!allItemIds.length) {
-      toast("没有可导入的对话");
+      toast(t('没有可导入的对话'));
       return;
     }
     setImporting(true);
@@ -162,10 +163,10 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
         body: { ids: allItemIds, destination: dest },
       });
       if (dest === "chat") {
-        toast(`已全部导入 ${r.imported} 段对话到 .she/imports/`);
+        toast(t('已全部导入 {n} 段对话到 .she/imports/', { n: r.imported }));
         onImported?.();
       } else {
-        toast(`已全部导入 ${r.imported} 段对话（${r.memoriesAdded ?? 0} 条知识）`);
+        toast(t('已全部导入 {n} 段对话（{k} 条知识）', { n: r.imported, k: r.memoriesAdded ?? 0 }));
       }
       setSelected(new Set());
     } catch (e) {
@@ -180,7 +181,7 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
       <div className={styles.panel} data-surface="panel" onClick={(e) => e.stopPropagation()}>
         <header className={styles.header}>
           <div>
-            <h2 className={styles.title}>导入对话记录</h2>
+            <h2 className={styles.title}>{t('导入对话记录')}</h2>
             <p className={styles.sub}>
               扫描本机的 Cursor / Claude Code / Codex 记录；默认把这些对话作为上下文<b>适配复制到工作区</b>，让智能体接着往下做。
             </p>
@@ -193,14 +194,14 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
             className={styles.filter}
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            placeholder="筛选对话标题或项目…"
+            placeholder={t('筛选对话标题或项目…')}
             spellCheck={false}
           />
           <button type="button" className={styles.ghost} onClick={() => void scan()} disabled={loading}>
-            {loading ? '扫描中…' : '重新扫描'}
+            {loading ? t('扫描中…') : t('重新扫描')}
           </button>
           <button type="button" className={styles.ghost} onClick={toggleAll} disabled={!allItemIds.length}>
-            {selected.size === allItemIds.length && allItemIds.length > 0 ? '取消全选' : '全选'}
+            {selected.size === allItemIds.length && allItemIds.length > 0 ? t('取消全选') : t('全选')}
           </button>
         </div>
 
@@ -208,7 +209,7 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
 
         <div className={styles.body}>
           {loading ? (
-            <div className={styles.loading}>正在扫描本机记录…</div>
+            <div className={styles.loading}>{t('正在扫描本机记录…')}</div>
           ) : (
             sources.map((s) => {
               const visible = s.conversations.filter(
@@ -228,7 +229,7 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
                     </span>
                     <span className={styles.sourceLabel}>{s.label}</span>
                     <span className={styles.sourceCount}>
-                      {s.found ? `${visible.length} 个对话` : '未找到'}
+                      {s.found ? t('{n} 个对话', { n: visible.length }) : t('未找到')}
                     </span>
                     <span className={styles.sourceRoot} title={s.root}>{s.root}</span>
                   </div>
@@ -236,7 +237,7 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
                   {s.note ? <div className={styles.sourceNote}>{s.note}</div> : null}
 
                   {visible.length === 0 && s.found ? (
-                    <div className={styles.sourceNote}>没有可导入的对话。</div>
+                    <div className={styles.sourceNote}>{t('没有可导入的对话。')}</div>
                   ) : null}
 
                   <div className={styles.items}>
@@ -250,7 +251,7 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
                       >
                         <span className={styles.check}>{selected.has(c.id) ? '✓' : ''}</span>
                         <span className={styles.itemMain}>
-                          <span className={styles.itemTitle}>{c.title || '未命名对话'}</span>
+                          <span className={styles.itemTitle}>{c.title || t('未命名对话')}</span>
                           {c.project ? <span className={styles.itemProject}>{c.project}</span> : null}
                         </span>
                         <span className={styles.itemMeta}>
@@ -267,7 +268,7 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
         </div>
 
         <footer className={styles.footer}>
-          <span className={styles.selCount}>已选 {selected.size} 个</span>
+          <span className={styles.selCount}>{t('已选 {n} 个', { n: selected.size })}</span>
           <div className={styles.destRow}>
             <label className={styles.destOpt}>
               <input
@@ -275,7 +276,7 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
                 checked={dest === 'chat'}
                 onChange={() => setDest('chat')}
               />
-              <span>适配复制到工作区</span>
+              <span>{t('适配复制到工作区')}</span>
             </label>
             <label className={styles.destOpt}>
               <input
@@ -283,7 +284,7 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
                 checked={dest === 'kb'}
                 onChange={() => setDest('kb')}
               />
-              <span>写入知识库</span>
+              <span>{t('写入知识库')}</span>
             </label>
           </div>
           <button
@@ -292,16 +293,16 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
             disabled={importing || selected.size === 0}
             onClick={() => void doImport()}
           >
-            {importing ? '导入中…' : `导入选中(${selected.size})`}
+            {importing ? t('导入中…') : t('导入选中({n})', { n: selected.size })}
           </button>
           <button
             type="button"
             className={styles.primary}
             disabled={importing || allItemIds.length === 0}
             onClick={() => void importAll()}
-            title="扫描结果里全部对话一次导入"
+            title={t('扫描结果里全部对话一次导入')}
           >
-            {importing ? '导入中…' : `一键全部导入(${allItemIds.length})`}
+            {importing ? t('导入中…') : t('一键全部导入({n})', { n: allItemIds.length })}
           </button>
         </footer>
       </div>

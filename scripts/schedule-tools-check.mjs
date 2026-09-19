@@ -22,6 +22,7 @@ import { executeScheduleTool, makeScheduleTools } from '../packages/agent-runtim
 import { loadConfig } from '../packages/shared/dist/index.js';
 import { KBStore, GroupKBEngine } from '../packages/kb/dist/index.js';
 import { SandboxShell, createTools } from '../packages/sandbox/dist/index.js';
+import { removeTempDir } from './lib/temp.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -215,7 +216,7 @@ console.log('\n=== Agent 集成 ===');
   await child.dispose();
   await noBridge.dispose();
   store.close();
-  rmSync(dir, { recursive: true, force: true });
+  removeTempDir(dir);
 }
 
 console.log('\n=== 系统提示是否提到调度 ===');

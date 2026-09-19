@@ -33,6 +33,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
+import { removeTempDir } from './lib/temp.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -144,7 +145,7 @@ console.log('\n=== 黑名单仍然生效（白名单是叠加，不是替换）=
   check('已知破坏性命令被拒绝', r.denied === true, JSON.stringify(r).slice(0, 160));
 }
 
-rmSync(workspace, { recursive: true, force: true });
+removeTempDir(workspace);
 
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`);
 process.exit(failures === 0 ? 0 : 1);

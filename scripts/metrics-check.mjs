@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { pickSafePort } from './safe-port.mjs';
+import { removeTempDir } from './lib/temp.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -67,7 +68,7 @@ async function waitForHealth(timeoutMs = 30_000) {
 
 function cleanup() {
   try { child.kill(); } catch { /* already gone */ }
-  rmSync(workspace, { recursive: true, force: true });
+  removeTempDir(workspace);
 }
 
 console.log('\n指标端点检查（用临时工作区启动真实服务，不调用 LLM）\n');

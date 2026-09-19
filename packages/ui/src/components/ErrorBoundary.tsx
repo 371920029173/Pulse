@@ -1,4 +1,5 @@
 import React from 'react';
+import { t } from '../lib/i18n';
 
 interface Props {
   children: React.ReactNode;
@@ -58,9 +59,9 @@ export class ErrorBoundary extends React.Component<Props, State> {
             background: 'var(--surface, #161b22)',
           }}
         >
-          <h1 style={{ margin: '0 0 8px', fontSize: 18, fontWeight: 600 }}>界面出错了</h1>
+          <h1 style={{ margin: '0 0 8px', fontSize: 18, fontWeight: 600 }}>{t('界面出错了')}</h1>
           <p style={{ margin: '0 0 12px', opacity: 0.85, fontSize: 14, lineHeight: 1.5 }}>
-            会话数据还在本地。刷新通常就能恢复；若反复出现，用桌面 SHE-stop.bat 再 SHE.bat。
+            {t('会话数据还在本地。刷新通常就能恢复；若反复出现，用桌面 SHE-stop.bat 再 SHE.bat。')}
           </p>
           <pre
             style={{
@@ -79,10 +80,10 @@ export class ErrorBoundary extends React.Component<Props, State> {
           </pre>
           <div style={{ display: 'flex', gap: 8 }}>
             <button type="button" onClick={this.reload} style={btnPrimary}>
-              刷新页面
+              {t('刷新页面')}
             </button>
             <button type="button" onClick={this.dismiss} style={btnGhost}>
-              尝试继续
+              {t('尝试继续')}
             </button>
           </div>
         </div>

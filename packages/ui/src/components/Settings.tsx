@@ -186,7 +186,7 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
   async function bindSharedKb() {
     const path = (sharePath || kbDbPath).trim();
     if (!path) {
-      setMsg('请填写共享知识库的 sqlite 路径');
+      setMsg(t('请填写共享知识库的 sqlite 路径'));
       return;
     }
     setKbBusy(true);
@@ -198,7 +198,7 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
       });
       setKbDbPath(res.dbPath);
       setKbMode((res.mode as any) || 'shared');
-      setMsg(`已挂载共享知识库：${res.dbPath}`);
+      setMsg(t('已挂载共享知识库：{path}', { path: res.dbPath }));
       await refreshKbLink();
     } catch (e: any) {
       setMsg(e.message || String(e));
@@ -217,7 +217,7 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
       });
       setKbDbPath(res.dbPath);
       setKbMode((res.mode as any) || 'local');
-      setMsg(`已恢复本工作区知识库：${res.dbPath}`);
+      setMsg(t('已恢复本工作区知识库：{path}', { path: res.dbPath }));
     } catch (e: any) {
       setMsg(e.message || String(e));
     } finally {
@@ -228,7 +228,7 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
   async function publishSharedKb() {
     const path = sharePath.trim();
     if (!path) {
-      setMsg('请填写要发布到的共享路径（例如 D:/AGI/she-kb/shared.sqlite）');
+      setMsg('请填写要发布到的共享路径（例如 ./shared/kb.sqlite，或局域网共享盘的绝对路径）');
       return;
     }
     setKbBusy(true);
@@ -240,7 +240,7 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
       });
       setKbDbPath(res.dbPath);
       setKbMode('shared');
-      setMsg(`已复制并挂载共享库：${res.dbPath}${res.from ? `（来自 ${res.from}）` : ''}`);
+      setMsg(t('已复制并挂载共享库：{path}{from}', { path: res.dbPath, from: res.from ? t('（来自 {src}）', { src: res.from }) : '' }));
       await refreshKbLink();
     } catch (e: any) {
       setMsg(e.message || String(e));
@@ -252,7 +252,7 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
   async function mergeOtherKb() {
     const source = mergeSourcePath.trim();
     if (!source) {
-      setMsg('请填写要合并进来的另一份 sqlite 路径');
+      setMsg(t('请填写要合并进来的另一份 sqlite 路径'));
       return;
     }
     setKbBusy(true);
@@ -266,8 +266,8 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
       );
       setKbDbPath(res.dbPath);
       setMsg(
-        `合并完成，当前库：${res.dbPath}` +
-          (res.memoriesAdded != null ? `（写入 ${res.memoriesAdded} 条）` : ''),
+        t('合并完成，当前库：{path}', { path: res.dbPath }) +
+          (res.memoriesAdded != null ? t('（写入 {n} 条）', { n: res.memoriesAdded }) : ''),
       );
       await refreshKbLink();
     } catch (e: any) {
@@ -303,8 +303,8 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
         method: 'PUT',
         body,
       });
-      const saved = res.llm.hasKey ? '已保存（含 API key）' : '已保存';
-      setMsg(res.restartRequired ? `${saved}；工作区 / 知识库路径已变更，需重启服务端后生效` : saved);
+      const saved = res.llm.hasKey ? t('已保存（含 API key）') : t('已保存');
+      setMsg(res.restartRequired ? t('{saved}；工作区 / 知识库路径已变更，需重启服务端后生效', { saved }) : saved);
       setApiKey('');
       const d = await fetchJSON<SettingsData>('/api/settings');
       setData(d);
@@ -386,7 +386,7 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
               加载 <code>.she/skills/_common</code> + 对应档目录。自定义 skill 放到 <code>.she/skills/custom/*.md</code>。侧栏状态栏也可快速切换。
             </p>
             <label className={styles.field}>
-              <span>知识库路径（本工作区或共享）</span>
+              <span>{t('知识库路径（本工作区或共享）')}</span>
               <input
                 value={kbDbPath}
                 onChange={(e) => setKbDbPath(e.target.value)}
@@ -402,44 +402,44 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
               。保存设置仍会写入路径；要用「贯穿」请用下面的共享操作。
             </p>
             <div className={styles.field} style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
-              <span style={{ fontSize: 13, fontWeight: 600 }}>多工作区共享知识库</span>
+              <span style={{ fontSize: 13, fontWeight: 600 }}>{t('多工作区共享知识库')}</span>
               <input
                 value={sharePath}
                 onChange={(e) => setSharePath(e.target.value)}
-                placeholder="共享 sqlite 路径，例如 D:/AGI/she-kb/shared.sqlite"
+                placeholder={t('共享 sqlite 路径，例如 ./shared/kb.sqlite（也可填局域网共享盘）')}
                 spellCheck={false}
               />
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 <button type="button" className="she-btn she-btn--sm" disabled={kbBusy} onClick={() => void bindSharedKb()}>
-                  挂到此共享库
+                  {t('挂到此共享库')}
                 </button>
                 <button type="button" className="she-btn she-btn--sm" disabled={kbBusy} onClick={() => void publishSharedKb()}>
-                  把当前库发布到该路径
+                  {t('把当前库发布到该路径')}
                 </button>
                 <button type="button" className="she-btn she-btn--sm" disabled={kbBusy} onClick={() => void restoreLocalKb()}>
-                  恢复本工作区库
+                  {t('恢复本工作区库')}
                 </button>
               </div>
               <input
                 value={mergeSourcePath}
                 onChange={(e) => setMergeSourcePath(e.target.value)}
-                placeholder="要合并进来的另一份 sqlite（另一工作区的库）"
+                placeholder={t('要合并进来的另一份 sqlite（另一工作区的库）')}
                 spellCheck={false}
               />
               <input
                 value={mergeTargetPath}
                 onChange={(e) => setMergeTargetPath(e.target.value)}
-                placeholder="可选：合并结果写到新共享路径（留空则并入当前库）"
+                placeholder={t('可选：合并结果写到新共享路径（留空则并入当前库）')}
                 spellCheck={false}
               />
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 <button type="button" className="she-btn she-btn--sm" disabled={kbBusy} onClick={() => void mergeOtherKb()}>
-                  合并另一库
+                  {t('合并另一库')}
                 </button>
               </div>
               <p className={styles.hint} style={{ margin: 0 }}>
-                推荐流程：工作区 A「发布到共享路径」→ 工作区 B「挂到此共享库」→ 两边贯穿同一套知识。
-                若两套库都有内容，用「合并另一库」拼成一份再挂载。
+                {t('推荐流程：工作区 A「发布到共享路径」→ 工作区 B「挂到此共享库」→ 两边贯穿同一套知识。')}
+                {t('若两套库都有内容，用「合并另一库」拼成一份再挂载。')}
               </p>
             </div>
               

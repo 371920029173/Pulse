@@ -21,6 +21,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
+import { removeTempDir } from './lib/temp.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -151,7 +152,7 @@ console.log('\n数据安全回归（会启动真实服务，用临时工作区�
     healthy && after === before,
     after === before ? '' : `内容被改写了: ${before} -> ${after}`,
   );
-  rmSync(ws, { recursive: true, force: true });
+  removeTempDir(ws);
 }
 
 // ── 2. Normal case must also be preserved ──
@@ -162,7 +163,7 @@ console.log('\n数据安全回归（会启动真实服务，用临时工作区�
   const { healthy } = await bootOnce(ws);
   const after = existsSync(file) ? sessionFingerprint(JSON.parse(readFileSync(file, 'utf8'))) : null;
   record('有消息的会话保持原样', healthy && after === before, after === before ? '' : `内容被改写了: ${before} -> ${after}`);
-  rmSync(ws, { recursive: true, force: true });
+  removeTempDir(ws);
 }
 
 // ── 3. An empty workspace may legitimately be recovered ──
@@ -182,7 +183,7 @@ console.log('\n数据安全回归（会启动真实服务，用临时工作区�
     sessionsProbe.status === 200 && sessionsProbe.isArray,
     `status=${sessionsProbe.status} isArray=${sessionsProbe.isArray}${recovered ? '（已从别处恢复）' : ''}`,
   );
-  rmSync(ws, { recursive: true, force: true });
+  removeTempDir(ws);
 }
 
 // ── 4. A corrupt file: the quarantine suffix and the preserved bytes ──
@@ -213,7 +214,7 @@ console.log('\n数据安全回归（会启动真实服务，用临时工作区�
     quarantined.length ? `备份: ${quarantined.join(', ')}` : `没有留底（目录: ${readdirSync(sheDir).join(', ')}）`,
   );
   record('留底的是原始字节，不是空壳', preserved, preserved ? '' : '备份内容与原始损坏内容不一致');
-  rmSync(ws, { recursive: true, force: true });
+  removeTempDir(ws);
 }
 
 // ── 5. A corrupt file must be quarantined, never silently emptied ──
@@ -239,7 +240,7 @@ console.log('\n数据安全回归（会启动真实服务，用临时工作区�
     /无法读取|已保留为备份/.test(out),
     /无法读取|已保留为备份/.test(out) ? '' : '日志里没有提示',
   );
-  rmSync(ws, { recursive: true, force: true });
+  removeTempDir(ws);
 }
 
 // ── 6. A file from an unknown (newer) version must not be guessed at ──
@@ -260,7 +261,7 @@ console.log('\n数据安全回归（会启动真实服务，用临时工作区�
     .some((f) => readFileSync(join(sheDir, f), 'utf8') === future);
 
   record('未知版本的会话文件被原样留底（降级后不丢数据）', healthy && kept, kept ? '' : '原文没有保留');
-  rmSync(ws, { recursive: true, force: true });
+  removeTempDir(ws);
 }
 
 // ── 7. A corrupt work-group file must be handled the same way ──
@@ -276,7 +277,7 @@ console.log('\n数据安全回归（会启动真实服务，用临时工作区�
     .filter((f) => f.includes('.unusable-'))
     .some((f) => readFileSync(join(clusterDir, f), 'utf8') === broken);
   record('损坏的讨论组文件同样被留底，不会静默清空', healthy && kept, kept ? '' : '原文没有保留');
-  rmSync(ws, { recursive: true, force: true });
+  removeTempDir(ws);
 }
 
 // ── 8. An older but valid version must be MIGRATED, not quarantined ──
@@ -305,7 +306,7 @@ console.log('\n数据安全回归（会启动真实服务，用临时工作区�
       ? `版本 ${after.schema_version}${quarantined.length ? '，但出现了隔离' : ''}`
       : '内容丢失了',
   );
-  rmSync(ws, { recursive: true, force: true });
+  removeTempDir(ws);
 }
 
 const failed = results.filter((r) => !r.pass);
