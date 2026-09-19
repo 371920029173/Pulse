@@ -460,7 +460,14 @@ pnpm check:all                # 以上全部 + 构建 + 单测，一次跑完
 ```bash
 pnpm release                  # 跑门禁 → 构建 → 打包到 release/
 pnpm release:verify           # 解压归档、真正 pnpm install、启动并探活
+pnpm pack:win                 # 打 Windows 安装包；结尾自动跑 check:packaged 验证产物真能启动
+pnpm check:packaged           # 只验证已打好的产物：跑解包后的服务端并探活
 ```
+
+> `pack:win` 结尾会跑 `check:packaged`。**一个装完起不来的安装包不可能被打出来** —— 这条是因为
+> 之前真的发生过：打包用的 `pnpm deploy` 默认是虚拟存储结构，某个包依赖写在它的**同级目录**，
+> 而打包脚本把符号链接展平成实体目录后，那些依赖就找不到了。当时 `@she/shared` 还没有运行时依赖，
+> 所以问题潜伏到新增一个（`yaml`）才暴露 —— 安装包启动即报 `ERR_MODULE_NOT_FOUND`。
 
 ### 当前状态
 

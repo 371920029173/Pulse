@@ -25,7 +25,19 @@ writes one, so the number cannot rot quietly.)
 workflow used to run three checks out of twenty-one and the other eighteen had never executed on
 Linux. One shared definition means CI and a local run cannot diverge.
 
-Helper scripts used by the gate (not separate pnpm check:* aliases): scripts/safe-port.mjs (pick a Windows-safe listen port) and scripts/stage-desktop-runtime.mjs (stage packaged desktop runtime assets before electron-builder).
+Helper scripts used by the gate (not separate pnpm check:* aliases):
+
+- `scripts/safe-port.mjs` — pick a Windows-safe listen port.
+- `scripts/stage-desktop-runtime.mjs` — stage the packaged desktop runtime before electron-builder.
+  It uses `pnpm deploy --node-linker=hoisted`, and **that flag is load-bearing.** pnpm's default
+  virtual store keeps a package's dependencies as SIBLINGS of it, reached through symlinks; resolving
+  those into plain directories (which the previous version did, with a Python `copytree`) leaves the
+  dependencies unreachable and the packaged app dies at startup with `ERR_MODULE_NOT_FOUND`. It was
+  latent for as long as no workspace package had a runtime dependency of its own.
+- `scripts/packaged-smoke.mjs` — boots the packaged server and probes it. Runs as `check:packaged`,
+  which `pnpm pack:win` chains, so an installer that cannot start fails the build instead of reaching
+  a user. `SHE_RUNTIME=staged` points it at `packages/desktop/runtime` to test the staging step
+  without paying for a full electron-builder run.
 
 Individual pieces, when you want a faster loop:
 
