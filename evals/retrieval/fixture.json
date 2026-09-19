@@ -1,0 +1,105 @@
+{
+  "$comment": [
+    "Fixture library for CI.",
+    "",
+    "The retrieval eval normally runs against a real Group Memory library. CI has",
+    "no such library, and a test that silently skips in CI is not a test — so this",
+    "fixture reproduces the structural shape the cases depend on (nested groups",
+    "with slashes in their paths, a group whose name shares no tokens with its",
+    "memories, a distractor pair, and an absent topic).",
+    "",
+    "Contents are synthetic but shaped like real knowledge: decisions, tool",
+    "outcomes and preferences grouped by area."
+  ],
+  "groups": [
+    { "name": "ops" },
+    { "name": "env", "parent": "ops" },
+    { "name": "kb-connectivity", "parent": "ops" },
+    { "name": "session-context", "parent": "ops" },
+    { "name": "user" },
+    { "name": "preferences", "parent": "user" },
+    { "name": "passphrases", "parent": "user" },
+    { "name": "imports" },
+    { "name": "notes", "parent": "imports" }
+  ],
+  "memories": [
+    {
+      "group": "ops/env",
+      "kind": "tool_outcome",
+      "title": "沙箱控制台编码坑：GBK(936) 代码页导致中文乱码",
+      "content": "Windows 控制台默认代码页 936，输出 UTF-8 中文会乱码。解决：脚本统一 UTF-8 写盘，控制台只输出 ASCII。"
+    },
+    {
+      "group": "ops/env",
+      "kind": "tool_outcome",
+      "title": "写入双通道不一致：fs_write 被审批门拦截，shell 重定向可直落盘",
+      "content": "fs_write 会生成待批准补丁，shell 重定向不经过审批。两条通道行为不同，排查写入问题时要注意。"
+    },
+    {
+      "group": "ops/env",
+      "kind": "fact",
+      "title": "pending-patches 里残留过期补丁",
+      "content": "编码测试遗留了 2 条过期补丁，未落盘。"
+    },
+    {
+      "group": "ops/kb-connectivity",
+      "kind": "tool_outcome",
+      "title": "外挂 KB 读取异常排查",
+      "content": "WINDOW-B 会话中发现读取异常，后确认是空库而非 WAL 或重启问题。"
+    },
+    {
+      "group": "ops/kb-connectivity",
+      "kind": "fact",
+      "title": "更正：外挂 KB 读写正常，此前为空库",
+      "content": "之前的结论作废。读写都正常。"
+    },
+    {
+      "group": "ops/kb-connectivity",
+      "kind": "tool_outcome",
+      "title": "修正：中文入向乱码是间歇性的",
+      "content": "不要绝对化为“不可用”，实际是间歇性出现。"
+    },
+    {
+      "group": "ops/session-context",
+      "kind": "fact",
+      "title": "工作区状态快照（2026-09-12，会话上下文恢复用）",
+      "content": "沙箱根目录是临时工作区，用于会话上下文恢复。"
+    },
+    {
+      "group": "ops/session-context",
+      "kind": "fact",
+      "title": "工作区脏树快照 HEAD 7f8c3b2",
+      "content": "大量未提交改动，提交前需分类。"
+    },
+    {
+      "group": "ops/session-context",
+      "kind": "fact",
+      "title": "跨会话记忆召回验证",
+      "content": "抽查跨会话记忆召回正常，验证了偏好与暗号的持久性。"
+    },
+    {
+      "group": "user/preferences",
+      "kind": "preference",
+      "title": "回复风格：用户发「1」时不要打招呼",
+      "content": "收到「1」直接继续正事，不要寒暄。"
+    },
+    {
+      "group": "user/passphrases",
+      "kind": "fact",
+      "title": "暗号 PERSIST-42",
+      "content": "用于跨会话召回验证的暗号。"
+    },
+    {
+      "group": "imports/notes",
+      "kind": "text",
+      "title": "部署规范",
+      "content": "部署流程与回滚步骤。"
+    },
+    {
+      "group": "imports/notes",
+      "kind": "text",
+      "title": "密钥管理",
+      "content": "密钥只存本地 .env，不入库不外传。"
+    }
+  ]
+}

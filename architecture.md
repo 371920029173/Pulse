@@ -2,7 +2,6 @@
 
 **Structured Hierarchy Engine v2**: thin agent-runtime with Group Memory + PulseSeed retrieval.
 Design truth: AGI-3.5-v2 + how-to-do docs. NOT AGI-3.5 max.
-Landing path: `D:\AGI\AGI-use`
 
 ---
 
@@ -77,17 +76,22 @@ PulseSeed is the retrieval primitive. It replaces traditional RAG (cosine simila
 Query Text
     │
     ▼
-┌──────────────────────┐
-│ 1. Bootstrap Lookup  │  ← Lexical index finds entry points
-│    (FTS5, structural)│     into the group structure. This is
-└──────────┬───────────┘     NOT the retrieval mechanism.
+┌──────────────────────────┐
+│ 1a. Lexical channel      │  ← BM25 over title + content: real IDF
+│     (traditional IR)     │     weighting, title field boosted. Decides
+└──────────┬───────────────┘     which docs are about these exact terms.
+           │
+           ▼
+┌──────────────────────────┐
+│ 1b. Explicit anchors     │  ← @group:name / #title / node id are
+│     (highest precision)  │     full-confidence entry points.
+└──────────┬───────────────┘
            │
            ▼
 ┌──────────────────────┐
-│ 2. Create PulseSeeds │  ← Each seed node spawns a PulseSeed
-│    energy = 1.0      │     with initial energy bound to its
-│    hop = 0           │     source group.
-└──────────┬───────────┘
+│ 2. Create PulseSeeds │  ← Each entry point spawns a PulseSeed whose
+│    energy ∝ relevance│     energy is PROPORTIONAL to its lexical score,
+└──────────┬───────────┘     so a common-word match cannot flood the graph.
            │
            ▼
 ┌──────────────────────────────────────┐
@@ -113,26 +117,67 @@ Query Text
 │  e. Dormancy gate:                  │
 │     skip dormant unless energy > 2x  │
 │     threshold                        │
+│                                      │
+│  f. Budget is a real ceiling:        │
+│     a shared counter caps how many   │
+│     nodes are examined (more budget  │
+│     can only ADD results, never      │
+│     remove them)                     │
 └──────────┬───────────────────────────┘
            │
            ▼
 ┌──────────────────────┐
-│ 4. Collect & Score   │  ← Nodes sorted by total received
-│    activation traces │     energy. Each trace shows the
-│    group paths       │     structural path that activated it.
-└──────────────────────┘
+│ 4. Fusion & signals  │  ← 0.55·structural + 0.45·lexical, then
+│    activation traces │     × trust/hormone/用进废退/recency/dormancy.
+└──────────────────────┘     Each trace shows its full score breakdown.
 ```
 
-### Why not RAG?
+### Why hybrid (structure + traditional IR)?
 
-Traditional RAG uses embedding vectors + cosine similarity to find "semantically similar" chunks. This is opaque — you cannot explain *why* a result was returned beyond "the vectors were close."
+SHE v2 fuses two channels:
 
-PulseSeed retrieval is **structural and explainable**:
+1. **Lexical (BM25)** — real IDF weighting over title + content. This is the part
+   traditional IR is genuinely better at: knowing *which document is about these
+   exact terms*. Rare terms outweigh common ones, so a document that merely
+   shares a common word cannot dominate.
+2. **Structural (PulseSeed)** — group membership, typed edges and hierarchy,
+   which pure lexical search cannot see at all. This is what recalls knowledge
+   that is related but worded differently.
+
+Old pure-vector RAG is opaque — you cannot explain *why* a result was returned
+beyond "the vectors were close." SHE v2 keeps every score explainable:
+
 - Every result comes with an activation trace showing exactly which groups, edges, and hops led to it
+- The trace also reports the lexical contribution and the signal multipliers applied
 - The group hierarchy provides organizational context (like folders, but with cross-references)
 - Edge types preserve the *nature* of relationships (co-occurrence ≠ causation)
 - Competition subgroups maintain contradictory possibilities instead of averaging them away
 - Dormancy implements 用进废退 (use-advance / waste-retreat) — knowledge that isn't used fades
+
+### Ranking signals
+
+Beyond the two channels, the fused score is multiplied by signals already present
+in the model, so the score reflects more than raw similarity:
+
+| Signal | Effect |
+|---|---|
+| `trustConstant` (group) | reliable groups rank higher (clamped 0.5–2.0) |
+| `hormoneMarker` (group) | priority/arousal raises ranking (clamped 0.5–2.0) |
+| `accessCount` (node) | 用进废退 — frequently recalled knowledge ranks higher |
+| recency (`updatedAt`) | gentle preference for fresh knowledge |
+| `isDormant` | demoted ×0.6, never hidden |
+
+### Group health (maxChildrenBeforeSplit)
+
+`maxChildrenBeforeSplit` is **enforced**, not decorative: ingestion and agent
+writes go through `addMemoryMaintained`, which splits an overfull group into
+structurally even subgroups. Without this, one giant group makes co-membership
+resonance meaningless — every member inherits identical activation from any one
+member, and genuine hits get buried under irrelevant siblings.
+
+Subgroup parts are numbered against the parent's existing child count, so
+repeated splits produce unique names (`x/part-1 … x/part-9`) instead of
+`part-1..3` repeating.
 
 ### Edge Type Discipline (non-negotiable rules)
 

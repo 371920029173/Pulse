@@ -9,9 +9,24 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-secondary);
+  /*
+   * Floating card, not an edge-to-edge bar.
+   *
+   * As a full-width strip with a hard `border-bottom` and no radius, this read
+   * as a sharp dark slab sitting on top of the wallpaper. Inset it and round it
+   * so it belongs to the same floating-panel language as the input area.
+   *
+   * Note it also has to carry its own frosted treatment: global.css styles the
+   * `header` ELEMENT for wallpapers, which never matched this `div.header`
+   * (CSS Modules hashes the class name).
+   */
+  margin: 10px 12px 0;
+  padding: 9px 14px;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-secondary) 78%, transparent);
+  backdrop-filter: saturate(140%) blur(16px);
+  -webkit-backdrop-filter: saturate(140%) blur(16px);
   flex-shrink: 0;
 }
 
@@ -36,7 +51,7 @@
   font-size: 12px;
   color: var(--text-secondary);
   background: var(--bg-tertiary);
-  border: 1px solid var(--border);
+  border: none;
   cursor: pointer;
   transition: background var(--transition), color var(--transition);
 }
@@ -47,9 +62,21 @@
 }
 
 .messages {
+  scroll-behavior: smooth;
   flex: 1;
   overflow-y: auto;
-  padding: 16px;
+  /* Horizontal padding matches the 12px inset of .header / .inputArea so the
+     bubbles line up with the floating bars above and below them. */
+  padding: 14px 12px 8px;
+  /*
+   * Keep the scrollbar clear of the splitter.
+   *
+   * The scrollbar renders at the element's inner edge, so `padding-right` does
+   * NOT move it — only the element's own width does. Flush against the 8px
+   * drag handle (gap measured at 0px), grabbing the scrollbar hit the
+   * col-resize zone instead. This margin separates the two.
+   */
+  margin-right: 8px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -81,7 +108,8 @@
 
 .messageRow {
   display: flex;
-  animation: fadeIn 200ms ease-out;
+  animation: sheBubbleIn 380ms var(--ease-sheet) both;
+  will-change: transform, opacity;
 }
 
 @keyframes fadeIn {
@@ -128,10 +156,18 @@
 }
 
 .toolCallCard {
-  max-width: 72%;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--warning);
-  background: rgba(210, 153, 34, 0.08);
+  /*
+   * A quiet action row, not a bordered card.
+   *
+   * Every tool previously rendered as a boxed card with a border and its own
+   * background, which made the transcript read as a column of similar boxes.
+   * A coding agent reports steps in the flow of the document, so this keeps a
+   * single hairline on the left as an anchor and drops the box.
+   */
+  max-width: 100%;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 0 8px 8px 0;
+  background: color-mix(in srgb, var(--bg-secondary) 42%, transparent);
   overflow: hidden;
   animation: fadeIn 200ms ease-out;
 }
@@ -148,19 +184,33 @@
   padding: 8px 12px;
   cursor: pointer;
   transition: background var(--transition);
+  /*
+   * This is a <button> now, so the browser defaults have to be neutralised: a button
+   * centres its text, does not inherit `width`, and ships its own border, background
+   * and font. Without these the header would shrink to its content and render its
+   * label centred, which is exactly what it did as a <div> — only now it is also
+   * reachable by keyboard, which is the point of the change.
+   */
+  width: 100%;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
 }
 
 .toolCallHeader:hover {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--fill-control);
 }
 
 .toolCallLabel {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: 7px;
+  font-size: 12.5px;
   font-weight: 500;
-  color: var(--warning);
+  color: var(--text-primary);
+  min-width: 0;
 }
 
 .toolCallLabelDenied {
@@ -168,12 +218,52 @@
 }
 
 .toolCallIcon {
-  font-size: 14px;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
 }
 
 .toolCallName {
   font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+/* The target of the action (path, command, query) — what makes the line useful. */
+.toolCallSummary {
+  font-family: var(--font-mono);
   font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.toolCallRight {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.toolCallMeta {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+
+/* One-line peek at the result so the outcome is visible without expanding. */
+.toolCallResultPreview {
+  padding: 0 12px 8px 27px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toolCallChevron {
@@ -195,7 +285,7 @@
 }
 
 .toolCallSection {
-  margin-top: 6px;
+  margin-top: 8px;
 }
 
 .toolCallSectionLabel {
@@ -226,7 +316,7 @@
   background: var(--accent);
   border-radius: 50%;
   margin-left: 4px;
-  animation: pulse 1s ease-in-out infinite;
+  animation: shePulseSoft 1.2s var(--ease-out) infinite;
 }
 
 @keyframes pulse {
@@ -235,9 +325,18 @@
 }
 
 .inputArea {
-  padding: 12px 16px;
-  border-top: 1px solid var(--border);
-  background: var(--bg-secondary);
+  /*
+   * Floating card, matching .header. Was a full-width footer with a hard
+   * `border-top` and square corners, which clashed with the pill-shaped
+   * controls inside it.
+   */
+  margin: 0 12px 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--bg-secondary) 78%, transparent);
+  backdrop-filter: saturate(140%) blur(16px);
+  -webkit-backdrop-filter: saturate(140%) blur(16px);
   flex-shrink: 0;
 }
 
@@ -245,15 +344,24 @@
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  background: var(--bg-primary);
+  background: color-mix(in srgb, var(--bg-primary) 92%, transparent);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 8px 12px;
-  transition: border-color var(--transition);
+  /* Slightly less than the 18px parent so the two read as nested, not doubled. */
+  border-radius: 13px;
+  padding: 10px 12px;
+  box-shadow: var(--shadow-sm);
+  transition:
+    border-color var(--transition),
+    box-shadow var(--transition-med),
+    transform 220ms var(--ease-spring);
 }
 
 .inputWrapper:focus-within {
   border-color: var(--border-focus);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent),
+    var(--shadow-md);
+  transform: translateY(-1px);
 }
 
 .textarea {
@@ -278,32 +386,52 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-md);
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: none;
+  /* A circle, because it holds a single icon and nothing else. The earlier
+     revision made it a wide pill (padding 0 16px, width auto) while the content
+     was still just a `↑` glyph — which is why it looked like an empty capsule. */
+  border-radius: var(--radius-full);
   background: var(--accent);
   color: #fff;
   cursor: pointer;
   flex-shrink: 0;
-  transition: background var(--transition), opacity var(--transition);
-  font-size: 15px;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--accent) 35%, transparent);
+  transition:
+    background var(--transition-fast),
+    opacity var(--transition-fast),
+    transform 180ms var(--ease-spring),
+    box-shadow var(--transition-fast);
 }
 
-.sendBtn:hover {
-  background: #4c8ade;
+.sendBtn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 88%, #fff);
+  /* Barely perceptible: enough to feel responsive, not enough to make the
+     composer's primary control wobble under the pointer. */
+  transform: scale(1.05);
+}
+
+.sendBtn:active:not(:disabled) {
+  transform: scale(0.93);
+  box-shadow: none;
 }
 
 .sendBtnDisabled {
   opacity: 0.4;
-  cursor: not-allowed;
+  cursor: default;
+  transform: none !important;
+  box-shadow: none;
 }
 
 .sendBtnStop {
   background: var(--danger);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--danger) 35%, transparent);
 }
 
-.sendBtnStop:hover {
-  background: #d63d37;
+.sendBtnStop:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 88%, #fff);
 }
 
 .inputHint {
@@ -311,4 +439,1249 @@
   text-align: right;
   font-size: 11px;
   color: var(--text-tertiary);
+}
+
+.bubbleSystem {
+  align-self: stretch;
+  background: transparent;
+  border: 1px dashed rgba(139, 147, 167, 0.45);
+  color: #8b93a7;
+  font-size: 12px;
+}
+
+.confirmBar {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin: 0 16px 10px;
+  padding: 12px 14px;
+  border: 1px solid rgba(245, 165, 36, 0.45);
+  border-radius: 12px;
+  background: rgba(245, 165, 36, 0.08);
+}
+
+.confirmTitle {
+  font-weight: 650;
+  color: #f5a524;
+  margin-bottom: 4px;
+}
+
+.confirmSummary {
+  font-size: 13px;
+  color: #e8eaed;
+}
+
+.confirmTicket {
+  margin-top: 4px;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 11px;
+  color: #8b93a7;
+}
+
+.confirmActions {
+  display: flex;
+  gap: 8px;
+}
+
+.confirmYes,
+.confirmNo {
+  border-radius: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font: inherit;
+  border: 1px solid transparent;
+}
+
+.confirmYes {
+  background: #6ea8fe;
+  color: #0b0d10;
+  font-weight: 600;
+}
+
+.confirmNo {
+  background: transparent;
+  border-color: #262b36;
+  color: #e8eaed;
+}
+
+.mentionMenu {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(100% - 4px);
+  max-height: 220px;
+  overflow: auto;
+  z-index: var(--z-dropdown);
+  background: var(--bg-secondary, #151922);
+  border: 1px solid var(--border, #262b36);
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+
+/* Floating "jump to latest" — only present when the reader scrolled away.
+   `sticky` keeps it pinned to the bottom of the scrollport; `absolute` would
+   scroll away with the content. */
+.jumpLatest {
+  position: sticky;
+  bottom: 4px;
+  align-self: center;
+  z-index: var(--z-popover);
+  margin-top: -6px;
+  padding: 5px 14px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.22);
+  transition: color var(--transition), border-color var(--transition), transform var(--transition-fast);
+}
+
+.jumpLatest:hover {
+  color: var(--text-primary);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  transform: translateY(-1px);
+}
+
+/* ── Assistant prose: no bubble, just the document ── */
+.proseRow {
+  position: relative;
+  padding: 2px 4px;
+}
+
+.prose {
+  font-size: 13.5px;
+  line-height: 1.68;
+  color: var(--text-primary);
+  max-width: 100%;
+  min-width: 0;
+}
+
+.prose > :first-child { margin-top: 0; }
+.prose > :last-child { margin-bottom: 0; }
+
+/* ── Tool call: a concise monospace action line ── */
+.toolCallVerb {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.toolCallChip {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+
+/* ── Live state while a tool call is in flight ── */
+
+.toolCallRunning {
+  border-left-color: var(--accent);
+}
+
+/* Rotating glyph for lookups (search) — signals "working", not "stuck". */
+.searchIcon {
+  display: inline-block;
+  color: var(--accent);
+  animation: sheSpinScan 1.4s linear infinite;
+}
+
+@keyframes sheSpinScan {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.toolCallRunningLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11.5px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+/* Three pulsing dots — the conventional "still working" indicator. */
+.dots { display: inline-flex; gap: 1px; margin-left: 1px; }
+.dots i {
+  width: 2.5px;
+  height: 2.5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: sheDot 1.2s ease-in-out infinite;
+}
+.dots i:nth-child(2) { animation-delay: 0.15s; }
+.dots i:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes sheDot {
+  0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-2px); }
+}
+
+/* Indeterminate sweep along the bottom edge of the running card. */
+.toolCallProgress {
+  position: relative;
+  height: 2px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.toolCallProgress::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: sheSweep 1.25s var(--ease-out) infinite;
+}
+
+@keyframes sheSweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .searchIcon, .dots i, .toolCallProgress::after { animation: none !important; }
+}
+
+/* Code / diff bodies inside a collapsed tool card. */
+.toolCallCode {
+  margin: 0;
+  padding: 6px 12px 9px 27px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow: auto;
+}
+
+/* ── Unified diff ── */
+.diffView {
+  margin: 0;
+  padding: 4px 0 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  overflow-x: auto;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.diffLine {
+  padding: 0 12px 0 6px;
+  white-space: pre;
+  display: flex;
+  gap: 2px;
+}
+
+/* The +/- glyph, dimmed so it does not compete with the highlighted code. */
+.diffMarker {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  opacity: 0.55;
+  user-select: none;
+}
+
+.diffAdd {
+  background: color-mix(in srgb, #3fb950 18%, transparent);
+  color: #7ee787;
+}
+
+.diffDel {
+  background: color-mix(in srgb, #f85149 16%, transparent);
+  color: #ffa198;
+}
+
+.diffHunk {
+  color: var(--text-tertiary);
+  background: color-mix(in srgb, var(--bg-primary) 60%, transparent);
+}
+
+.diffCtx { color: var(--text-tertiary); }
+
+/* Light theme needs darker ink on those tints. */
+:global(html[data-theme="light"]) .diffAdd { color: #116329; }
+:global(html[data-theme="light"]) .diffDel { color: #a40e26; }
+
+/* ── Collapsible knowledge-base hit list ── */
+.kbResult {
+  padding: 2px 12px 8px 27px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.kbSummary {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+
+.kbHit {
+  padding: 5px 8px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg-primary) 55%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.kbHitHead {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.kbHitRank {
+  flex-shrink: 0;
+  width: 15px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.kbHitTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kbHitScore {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--accent);
+}
+
+.kbHitGroup {
+  padding-left: 22px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.kbHitPreview {
+  padding-left: 22px;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.kbMore {
+  align-self: flex-start;
+  padding: 2px 8px;
+  border: 1px dashed color-mix(in srgb, var(--border) 90%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.kbMore:hover {
+  color: var(--text-primary);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* ── Collapsible knowledge-base hit list ends ── */
+
+/* ── Attached file/folder references (graphical, not raw @tokens) ── */
+.refChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px 2px;
+}
+
+.refChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 260px;
+  padding: 3px 6px 3px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text-primary);
+  font-size: 11.5px;
+}
+
+.refChipIcon { font-size: 11px; flex-shrink: 0; }
+
+.refChipName {
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.refChipRemove {
+  flex-shrink: 0;
+  /* 16px: the inline-affordance size. It sits inside a chip and must stay
+     proportionate to it, but 15px was an arbitrary one-off that did not match the
+     × anywhere else in the UI. */
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.refChipRemove:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+/* Suggestion row: leaf name first, parent path dimmed after it. */
+.mentionLeaf {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  flex-shrink: 0;
+}
+
+.mentionItem {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.mentionItemActive,
+.mentionItem:hover {
+  background: rgba(110, 168, 254, 0.12);
+}
+
+.mentionKind {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8b93a7;
+  min-width: 28px;
+}
+
+.mentionPath {
+  font-family: var(--font-mono, Consolas, monospace);
+  font-size: 12px;
+}
+
+.inputArea {
+  position: relative;
+}
+
+.bubbleWrap {
+  position: relative;
+  max-width: 72%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.messageRowUser .bubbleWrap {
+  align-items: flex-end;
+}
+
+.bubbleWrap .bubble {
+  max-width: 100%;
+}
+
+.copyBtn {
+  transition: opacity var(--transition), transform var(--transition-fast), background var(--transition);
+  opacity: 0;
+  align-self: flex-start;
+  border: none;
+  background: var(--bg-secondary);
+  color: var(--text-tertiary);
+  border-radius: var(--radius-sm);
+  padding: 1px 8px;
+  font-size: var(--text-xs, 11px);
+  cursor: pointer;
+  transition: opacity var(--transition), color var(--transition), background var(--transition);
+}
+
+.messageRowUser .copyBtn,
+.copyBtnUser {
+  align-self: flex-end;
+}
+
+.bubbleWrap:hover .copyBtn,
+.bubbleWrap:focus-within .copyBtn {
+  opacity: 1;
+}
+
+.copyBtn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.dragOver {
+  outline: 1px dashed var(--accent, #7c9cff);
+  outline-offset: -6px;
+}
+.dropOverlay {
+  position: absolute;
+  inset: 12px;
+  z-index: var(--z-popover);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14px;
+  border: 1px dashed rgba(124,156,255,0.55);
+  background: rgba(12,16,28,0.72);
+  color: #dce6ff;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+}
+.container { position: relative; }
+
+/* The `.sendBtn` overrides that used to sit here are gone: three separate
+   definitions of the same class meant the winner depended on file order, which is
+   how the button ended up as a wide pill holding a single glyph. There is now one
+   definition, above. */
+
+.emptyMessages { position: relative; overflow: hidden; }
+.emptyOrb {
+  position: absolute;
+  width: 180px; height: 180px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--accent-muted), transparent 70%);
+  filter: blur(8px);
+  opacity: 0.85;
+  animation: shePulseSoft 3.2s var(--ease-out) infinite;
+  pointer-events: none;
+}
+.emptyShortcuts {
+  margin-top: 8px;
+  font-size: 11px;
+  opacity: 0.55;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.emptyShortcuts kbd {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+.skeletonRow {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: 8px;
+}
+.skeletonBubble {
+  width: min(280px, 60%);
+  height: 56px;
+  border-radius: var(--radius-lg);
+}
+
+/* "Load earlier messages" — shown when a long conversation is windowed. */
+.loadEarlier {
+  align-self: center;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  margin: 2px auto 10px;
+  padding: 7px 16px;
+  border-radius: 999px;
+  border: 1px dashed var(--border);
+  background: color-mix(in srgb, var(--bg-secondary) 70%, transparent);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+}
+
+.loadEarlier:hover {
+  color: var(--text-primary);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.loadEarlierMeta { font-size: 10px; color: var(--text-tertiary); }
+
+@media (prefers-reduced-motion: reduce) {
+  .inputWrapper:focus-within { transform: none !important; }
+  .sendBtn:hover, .sendBtn:active { transform: none !important; }
+  .messages { scroll-behavior: auto !important; }
+}
+
+.modeSwitchRow {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 0 2px;
+}
+.modeSwitch {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-tertiary) 80%, transparent);
+  border: 1px solid var(--border);
+}
+
+/* ---- reasoning (chain-of-thought) block ---- */
+.reasoning {
+  margin: 4px 0 6px 12px;
+  /*
+   * Use the full transcript width, not a fraction of it.
+   *
+   * This was `min(880px, 92%)`, so with side panels open the chat column could
+   * shrink to ~400px and the reasoning box ended up ~348px wide — unreadable
+   * for the long, code-heavy chains these models produce. Reasoning is
+   * reference material, so it should not be narrower than the prose.
+   */
+  max-width: 100%;
+  border-left: 2px solid var(--accent, #6c7cff);
+  background: color-mix(in srgb, var(--bg-secondary) 70%, transparent);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.reasoningHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* `flex: 1`, not `width: 100%`: it now shares a row with the expand control. */
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 10px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: left;
+}
+
+.reasoningHeader:hover { color: var(--text-primary); }
+
+.reasoningChevron { opacity: 0.7; font-size: 11px; }
+
+.reasoningLabel { font-weight: 600; }
+
+.reasoningMeta { margin-left: auto; opacity: 0.55; font-variant-numeric: tabular-nums; }
+
+/* Collapsed preview so a long chain is obviously present, not missing. */
+.reasoningPreview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.55;
+  font-size: 11.5px;
+}
+
+/* The scroll container keeps very long chains usable instead of clipped. */
+/*
+ * Reasoning content flows with the page — no inner scroll box.
+ *
+ * It was `max-height: min(70vh, 720px); overflow-y: auto`, so a long chain sat
+ * in a nested scroll area inside the transcript's own scroll area. That is what
+ * made it look "rendered but not visible": the text was there, clipped to a
+ * fraction of its height. Expanding the block is now the only two states —
+ * one collapsed line, or the whole chain inline.
+ */
+.reasoningFlow {
+  padding: 0 12px 10px;
+}
+
+.reasoningBody {
+  margin: 0;
+  padding: 0 12px 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  opacity: 0.9;
+}
+
+.headerHint { font-size: 12px; opacity: 0.6; }
+
+/* ============================================================
+   Composer controls — skill profile + thinking level
+   These classes are referenced by Chat.tsx but were never defined,
+   so the buttons rendered as unstyled native controls.
+   ============================================================ */
+
+.modeSwitchRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 0 2px;
+  flex-wrap: wrap;
+}
+
+.modeSwitch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-tertiary) 72%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.thinkLabel {
+  padding: 0 8px 0 6px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
+}
+
+/* ---- skill profile buttons: one colour per profile ---- */
+.modeBtn {
+  position: relative;
+  border: none;
+  border-radius: 999px;
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-secondary);
+  transition:
+    background 220ms var(--ease-out),
+    color 220ms var(--ease-out),
+    transform 240ms var(--ease-spring),
+    box-shadow 240ms var(--ease-out);
+}
+
+.modeBtn:hover {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  transform: translateY(-1px);
+}
+
+.modeBtn:active { transform: scale(0.95); }
+
+/* Each profile gets its own hue so the active mode is readable at a glance. */
+.modeBtn[data-profile='dev']        { --profile-hue: 217; }
+.modeBtn[data-profile='liberal']    { --profile-hue: 275; }
+.modeBtn[data-profile='general']    { --profile-hue: 160; }
+.modeBtn[data-profile='custom']     { --profile-hue: 35; }
+
+.modeBtnActive {
+  color: #fff;
+  font-weight: 600;
+  background: hsl(var(--profile-hue, 217) 78% 58%);
+  box-shadow:
+    0 2px 10px hsl(var(--profile-hue, 217) 78% 50% / 0.42),
+    inset 0 1px 0 rgb(255 255 255 / 0.22);
+  animation: modePop 320ms var(--ease-spring);
+}
+
+.modeBtnActive:hover {
+  background: hsl(var(--profile-hue, 217) 82% 63%);
+  color: #fff;
+}
+
+@keyframes modePop {
+  0%   { transform: scale(0.9); }
+  60%  { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
+
+/* ---- thinking-level buttons ---- */
+.thinkBtn {
+  border: none;
+  border-radius: 999px;
+  min-width: 26px;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-tertiary);
+  transition:
+    background 200ms var(--ease-out),
+    color 200ms var(--ease-out),
+    transform 220ms var(--ease-spring);
+}
+
+.thinkBtn:hover {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+
+.thinkBtn:active { transform: scale(0.93); }
+
+/* ============================================================
+   Rounded, less angular bubbles
+   ============================================================ */
+.bubble {
+  border-radius: 22px;
+}
+
+.bubbleUser {
+  border-bottom-right-radius: 8px;
+}
+
+.bubbleAssistant {
+  border-bottom-left-radius: 8px;
+}
+
+/* The second and third `.sendBtn` blocks that used to live here are removed. Both
+   were later-in-file overrides of the definition near the composer, so which one
+   applied depended on ordering — and their combined effect turned a single-icon
+   button into a 16px-padded pill. One definition, kept next to the composer. */
+
+/* ============================================================
+   Empty-conversation state: make "开始对话" actually noticeable
+   ============================================================ */
+
+/* ============================================================
+   Empty-conversation state: make "开始对话" actually noticeable
+   ============================================================ */
+.emptyMessages {
+  color: var(--text-secondary);
+}
+
+.emptyIcon {
+  font-size: 46px;
+  opacity: 0.9;
+  filter: drop-shadow(0 2px 12px color-mix(in srgb, var(--accent) 45%, transparent));
+  animation: emptyFloat 4.5s ease-in-out infinite;
+}
+
+@keyframes emptyFloat {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-6px); }
+}
+
+.emptyText {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  text-shadow:
+    0 0 26px color-mix(in srgb, var(--accent) 52%, transparent),
+    0 2px 8px color-mix(in srgb, var(--bg-primary) 80%, transparent);
+}
+
+.emptyHint {
+  font-size: 12.5px;
+  opacity: 0.9;
+  max-width: 460px;
+  text-align: center;
+  line-height: 1.6;
+}
+
+.emptyShortcuts {
+  margin-top: 4px;
+  opacity: 0.75;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .emptyIcon,
+  .modeBtnActive,
+  .thinkBtnActive {
+    animation: none !important;
+  }
+}
+
+/* ============================================================
+   Tool-result card (collapsed by default)
+   Raw tool output is reference material, not conversation.
+   ============================================================ */
+.toolResult {
+  max-width: min(880px, 88%);
+  margin: 2px 0;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent);
+  overflow: hidden;
+}
+
+.toolResultHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 12px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: background 180ms var(--ease-out), color 180ms var(--ease-out);
+}
+
+.toolResultHeader:hover {
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  color: var(--text-primary);
+}
+
+.toolResultChevron { opacity: 0.65; font-size: 10px; }
+
+.toolResultLabel {
+  font-weight: 600;
+  font-family: var(--font-mono);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.toolResultPreview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.62;
+}
+
+.toolResultMeta {
+  flex-shrink: 0;
+  opacity: 0.45;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+.toolResultBody {
+  margin: 0;
+  padding: 0 12px 10px;
+  max-height: 340px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+/* ============================================================
+   Thinking-level slider
+   ============================================================ */
+.thinkSlider {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-tertiary) 72%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.thinkTrackWrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  /* Wider than before: the 4-level range needs room to feel continuous. */
+  width: 148px;
+  height: 22px;
+}
+
+.thinkRange {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  /* Tall hit area; the visible track stays thin. */
+  height: 22px;
+  background: transparent;
+  outline: none;
+  cursor: grab;
+  /* Smooth continuous movement rather than 1-step notches. */
+  transition: opacity 200ms var(--ease-out);
+}
+
+.thinkRange:active { cursor: grabbing; }
+
+.thinkRange::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--accent) 90%, transparent),
+    color-mix(in srgb, var(--accent) 30%, transparent));
+}
+
+/*
+  Codex-like thumb: a filled accent dot that grows on hover instead of a
+  white bead with a hard ring, which read as a stray "origin" marker.
+*/
+.thinkRange::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--bg-secondary) 88%, transparent),
+    0 1px 6px color-mix(in srgb, var(--accent) 50%, transparent);
+  transition:
+    transform 280ms var(--ease-spring),
+    box-shadow 280ms var(--ease-out);
+}
+
+.thinkRange::-webkit-slider-thumb:hover {
+  transform: scale(1.18);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--bg-secondary) 88%, transparent),
+    0 0 0 8px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.thinkRange:active::-webkit-slider-thumb {
+  transform: scale(1.26);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--bg-secondary) 88%, transparent),
+    0 0 0 10px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.thinkRange::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--accent) 90%, transparent),
+    color-mix(in srgb, var(--accent) 30%, transparent));
+}
+
+.thinkRange::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--bg-secondary) 88%, transparent),
+    0 1px 6px color-mix(in srgb, var(--accent) 50%, transparent);
+  transition: transform 280ms var(--ease-spring);
+}
+
+.thinkRange::-moz-range-thumb:hover { transform: scale(1.18); }
+
+/* clickable ticks over the track */
+.thinkTicks {
+  position: absolute;
+  inset: 0;
+  /* Transparent to clicks except on the dots themselves. */
+  pointer-events: none;
+}
+
+.thinkTick {
+  position: absolute;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  margin-left: -3px;
+  transform: translateY(-50%);
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  /* The dots are a real affordance: clicking one snaps to that level. */
+  background: color-mix(in srgb, var(--text-tertiary) 55%, transparent);
+  pointer-events: auto;
+  cursor: pointer;
+  /* Enlarge the hit area well beyond the visible 6px dot. */
+  box-shadow: 0 0 0 6px transparent;
+  transition:
+    transform 260ms var(--ease-spring),
+    background 220ms var(--ease-out),
+    box-shadow 260ms var(--ease-out);
+}
+
+.thinkTickActive {
+  background: var(--accent);
+  transform: translateY(-50%) scale(1.3);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.thinkValue {
+  min-width: 20px;
+  text-align: center;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  transition: color 220ms var(--ease-out), transform 220ms var(--ease-spring);
+}
+
+.thinkValueHigh {
+  color: var(--accent);
+  transform: scale(1.08);
+}
+
+/* ============================================================
+   Empty-state typography — match the "开始对话" treatment
+   ============================================================ */
+.emptyHint {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.005em;
+  opacity: 0.92;
+  /* Same glow treatment as the 开始对话 headline. */
+  text-shadow:
+    0 0 18px color-mix(in srgb, var(--accent) 40%, transparent),
+    0 1px 3px color-mix(in srgb, var(--bg-primary) 85%, transparent);
+}
+
+.emptyShortcuts {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 1;
+  line-height: 1.9;
+  text-shadow: 0 0 14px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.emptyShortcuts kbd {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 1.5px 5px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-tertiary) 85%, transparent);
+  color: var(--text-secondary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinkRange::-webkit-slider-thumb,
+  .thinkTick,
+  .thinkValue {
+    transition: none !important;
+  }
+}
+
+/* Chat-scoped action chips under the composer. */
+.chatActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  padding: 0 2px;
+  flex-wrap: wrap;
+}
+
+/* `.actionChip` was removed: it is superseded by the shared `.she-btn--chip` in
+   global.css, and dead CSS is how two styling systems start to coexist. The chips
+   in the composer now use the shared class directly. */
+
+.inputHintInline {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  opacity: 0.75;
+  padding-right: 2px;
+}
+
+/* ============================================================
+   Work-group peers: the agents sharing this conversation.
+   Only rendered in group mode, so a 1:1 chat is unchanged.
+   ============================================================ */
+.peerStrip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 14px 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  flex-shrink: 0;
+}
+
+.peerChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px 3px 4px;
+  border-radius: 999px;
+  border: none;
+  background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent);
+  font-size: 11.5px;
+  opacity: 0.6;
+  transition:
+    opacity 240ms var(--ease-out),
+    border-color 240ms var(--ease-out),
+    background 240ms var(--ease-out),
+    transform 260ms var(--ease-spring);
+}
+
+.peerAvatar {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.peerName { color: var(--text-primary); }
+
+.peerActive {
+  opacity: 1;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  transform: translateY(-1px);
+  animation: peerPulse 1.9s ease-in-out infinite;
+}
+
+@keyframes peerPulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 38%, transparent); }
+  50%      { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 0%, transparent); }
+}
+
+.peerDone {
+  opacity: 0.95;
+  border-color: color-mix(in srgb, var(--success) 55%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .peerChip, .peerActive { animation: none !important; transition: none !important; }
 }

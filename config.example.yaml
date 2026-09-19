@@ -1,12 +1,64 @@
 # SHE v2 Agent Configuration
-# Landing path: D:\AGI\AGI-use
+#
+# Everything here is optional — the defaults in code are used for anything omitted,
+# and `.env` overrides the values below. Copy this file to `she.config.yaml` (either
+# name is picked up: she.config.yaml, config.yaml, she.config.yml, config.yml).
 
 llm:
+  # Top-level endpoint. Used for anything the registry does not override, and as the
+  # default for registry entries that omit fields.
   provider: openai
-  model: gpt-4o
-  baseUrl: https://api.openai.com/v1
+  model: deepseek-flash
+  baseUrl: https://api.deepseek.com
   maxTokens: 4096
   temperature: 0.3
+  # low | medium | high | ... — how much reasoning budget to ask for.
+  thinkingLevel: medium
+
+  # ─── Model registry ───
+  #
+  # Why: so "which vendor?" is a configuration change, not a code change, and so
+  # different jobs can use different models. A subagent doing grep/read does not need
+  # the model the main reasoning loop uses, and paying for one is the easiest money
+  # to waste.
+  #
+  # An entry only needs `id` and `model` when it shares the top-level vendor — the
+  # provider, baseUrl and apiKey are inherited. Use `${VAR}` to keep secrets out of
+  # this file.
+  #
+  # Select one with `activeModel` below, or from `.env`:
+  #     SHE_MODEL=fast
+  #     SHE_SUBAGENT_MODEL=fast
+  #
+  # models:
+  #   - id: smart
+  #     label: 主力模型
+  #     provider: anthropic
+  #     model: claude-sonnet-4-20250514
+  #     apiKey: ${ANTHROPIC_API_KEY}
+  #   - id: fast
+  #     label: 快速 / 省钱
+  #     model: deepseek-chat            # provider and baseUrl inherited
+  #     baseUrl: https://api.deepseek.com
+  #     apiKey: ${DEEPSEEK_API_KEY}
+  #   - id: local
+  #     model: qwen2.5-coder:14b
+  #     baseUrl: http://127.0.0.1:11434/v1
+  #     apiKey: not-needed              # Ollama ignores it, but some clients require one
+  #
+  # Which registry entry the main conversation uses. Omit to use the top-level
+  # settings above.
+  # activeModel: smart
+  #
+  # Which one delegated subtasks use. Omit to follow the main model.
+  # subagentModel: fast
+
+  # Secondary endpoint, tried when the primary fails.
+  # fallback:
+  #   provider: openai
+  #   model: gpt-4o-mini
+  #   baseUrl: https://api.openai.com/v1
+  #   apiKey: ${OPENAI_API_KEY}
 
 workspace:
   root: "."
@@ -27,8 +79,48 @@ sandbox:
   shell: auto
   timeout: 30000
   maxOutputBytes: 524288
+  # Destructive command patterns are blocked unless explicitly lifted. This is a
+  # DENYLIST: it can only block harmful forms someone anticipated.
   denyDestructiveByDefault: true
+  # Lifts the confirm step entirely. Off by default on purpose: it means the agent
+  # can run anything without asking.
+  allowAllCommands: false
+  # Command allowlist — the fail-closed control. Empty means not enforced.
+  #
+  # The denylist above is fail-open by construction; this refuses everything not named.
+  # Every command in a line is checked (so ls && rm -rf / is refused), and shell
+  # substitution is refused because what it runs cannot be inspected.
+  #
+  # Opt-in, because switching it on breaks workflows whose commands are not listed.
+  # A starting point for a repo workspace:
+  #
+  # allowedCommands: [node, npm, pnpm, git, grep, rg, ls, cat, echo, mkdir, mv, cp]
+  allowedCommands: []
+
+skills:
+  # dev | liberal | general | custom — which skill files get injected.
+  profile: general
+
+# Skip confirms and ask fewer questions. This is a conversational stance, NOT a
+# permission grant: it never enables allowAllCommands.
+automationMode: true
+
+schedule:
+  enabled: true
+  tickSeconds: 30
+  # When the agent may START new work. A task due outside this window is deferred to
+  # the next opening, never dropped, and a run in flight is never interrupted.
+  # 'HH:MM' local time; if end <= start the window wraps past midnight.
+  # Omit for no restriction. Days are 0=Sunday.
+  #
+  # workingWindow:
+  #   start: "09:00"
+  #   end: "18:00"
+  #   days: [1, 2, 3, 4, 5]
+  workingWindow: null
 
 server:
-  port: 4577
+  port: 5577
+  # 127.0.0.1 = this machine only. Use 0.0.0.0 for a container or the LAN.
+  # Hostnames also need SHE_ALLOWED_HOSTS; literal IPs are always accepted.
   host: 127.0.0.1

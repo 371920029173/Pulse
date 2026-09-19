@@ -1,22 +1,29 @@
 {
   "name": "@she/server",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
+    "test": "node --import tsx --test src/__tests__/*.test.ts",
     "dev": "node --import tsx src/index.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@she/shared": "workspace:*",
-    "@she/kb": "workspace:*",
+    "@larksuiteoapi/node-sdk": "^1.73.3",
     "@she/agent-runtime": "workspace:*",
-    "@she/sandbox": "workspace:*"
+    "@she/kb": "workspace:*",
+    "@she/sandbox": "workspace:*",
+    "@she/shared": "workspace:*",
+    "better-sqlite3": "^11.0.0",
+    "typescript": "^5.5.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^22.20.2",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0"
   }

@@ -1,0 +1,385 @@
+/* ─────────────────────────────────────────────────────────────
+   Landing page: the user's wallpaper, with ONE frosted-glass panel.
+   ───────────────────────────────────────────────────────────── */
+
+.page {
+  /* Leave room for the fixed frameless titlebar in Electron. */
+
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-page);
+  overflow-y: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 24px;
+  /* Wallpaper shows here; the panel below is the frosting. */
+  background:
+    radial-gradient(1200px 620px at 12% -12%, rgba(90, 120, 255, 0.16), transparent 58%),
+    radial-gradient(900px 520px at 100% 0%, rgba(160, 90, 255, 0.11), transparent 52%),
+    var(--bg-primary);
+}
+
+/* When a wallpaper is set, don't paint over it. */
+:global(html[data-bg="image"]) .page,
+:global(html[data-bg="video"]) .page {
+  background: transparent;
+}
+
+/* The single frosted panel. */
+.panel {
+  position: relative;
+  width: min(600px, 94vw);
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 26px 28px 22px;
+  border-radius: 22px;
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  /* Frosted glass: heavy blur + a solid-ish tint so text always reads. */
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  border-color: var(--glass-border);
+  box-shadow:
+    0 24px 70px rgb(0 0 0 / 0.42),
+    inset 0 1px 0 rgb(255 255 255 / 0.06);
+  animation: homeIn 340ms var(--ease-sheet) both;
+}
+
+:global(html[data-theme="light"]) .panel {
+  background: var(--glass-bg);
+  box-shadow: 0 24px 60px rgb(31 35 40 / 0.18), inset 0 1px 0 rgb(255 255 255 / 0.8);
+}
+
+@keyframes homeIn {
+  from { opacity: 0; transform: translateY(12px) scale(0.99); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ── hero ──
+   `.hero` is a <header> element, so the wallpaper rules in global.css
+   (`html[data-bg] header`) give it a translucent frosted background. Those
+   rules set no radius, which left a hard-edged box behind the wordmark. */
+.hero {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  border-radius: 18px;
+}
+
+.mark {
+  display: grid;
+  place-items: center;
+
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  display: grid;
+  place-items: center;
+  font-size: 23px;
+  font-weight: 700;
+  color: #fff;
+  flex-shrink: 0;
+  background: linear-gradient(150deg,
+    color-mix(in srgb, var(--accent) 90%, transparent),
+    color-mix(in srgb, var(--accent) 50%, transparent));
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.22);
+}
+
+.heroText { min-width: 0; }
+.wordmark {
+  margin: 0;
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--text-primary);
+  line-height: 1.15;
+}
+.tagline {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  letter-spacing: 0.01em;
+}
+
+.error {
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 32%, transparent);
+}
+
+/* ── rows (appearance) ── */
+.appearance {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+.row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.rowLabel {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  width: 42px;
+  flex-shrink: 0;
+}
+.rowHint { font-size: 11.5px; color: var(--text-tertiary); }
+
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-tertiary) 70%, transparent);
+}
+.seg {
+  border: none;
+  border-radius: 999px;
+  padding: 5px 15px;
+  font-size: 12px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-secondary);
+  transition: background 200ms var(--ease-out), color 200ms var(--ease-out);
+}
+.seg:hover { color: var(--text-primary); }
+.segOn {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 1px 8px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.bgControls { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+
+.smallBtn {
+  padding: 5px 12px;
+  border-radius: 9px;
+  border: none;
+  background: var(--fill-control);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: color 170ms var(--ease-out), background 170ms var(--ease-out), border-color 170ms var(--ease-out);
+}
+.smallBtn:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
+.smallBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+.smallBtnOn {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.bgErr { font-size: 11.5px; color: var(--danger); }
+
+/* ── workspace picker ── */
+.picker { display: flex; flex-direction: column; gap: 10px; }
+
+.pickerHead { display: flex; align-items: baseline; gap: 10px; }
+
+.empty { font-size: 12.5px; color: var(--text-tertiary); padding: 10px 0; line-height: 1.7; }
+
+.list { display: flex; flex-direction: column; gap: 6px; }
+
+/* Fold control for the workspace list. */
+.wsMore {
+  margin-top: 2px;
+  padding: 6px 10px;
+  border: 1px dashed color-mix(in srgb, var(--border) 90%, transparent);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition), background var(--transition);
+}
+
+.wsMore:hover {
+  color: var(--text-primary);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.wsRow {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 11px 13px;
+  border-radius: 13px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent);
+  cursor: pointer;
+  text-align: left;
+  transition: background 180ms var(--ease-out), border-color 180ms var(--ease-out), transform 200ms var(--ease-spring);
+}
+.wsRow:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 14%, color-mix(in srgb, var(--bg-tertiary) 55%, transparent));
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  transform: translateX(2px);
+}
+.wsRow:disabled { opacity: 0.5; cursor: not-allowed; }
+.wsRowCurrent { border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+
+.wsIcon { font-size: 16px; color: var(--accent); opacity: 0.9; flex-shrink: 0; width: 18px; text-align: center; }
+.wsBody { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.wsName { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
+.wsPath {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wsBadge, .wsBadgeMuted, .wsBadgeOn {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.wsBadge { background: var(--bg-hover); color: var(--text-secondary); }
+.wsBadgeMuted { border: 1px solid var(--border); color: var(--text-tertiary); }
+.wsBadgeOn { background: color-mix(in srgb, var(--accent) 26%, transparent); color: var(--accent); font-weight: 600; }
+
+.pickerActions { display: flex; gap: 8px; padding-top: 2px; }
+
+.primaryBtn {
+  padding: 8px 18px;
+  border-radius: 11px;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 180ms var(--ease-out), transform 200ms var(--ease-spring);
+}
+.primaryBtn:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 86%, #fff); transform: translateY(-1px); }
+.primaryBtn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.ghostBtn {
+  padding: 8px 15px;
+  border-radius: 11px;
+  border: none;
+  background: var(--fill-control);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.ghostBtn:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+.manual { display: flex; gap: 8px; animation: homeFade 200ms var(--ease-out) both; }
+@keyframes homeFade { from { opacity: 0; } to { opacity: 1; } }
+
+.manualInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 9px 13px;
+  border-radius: 11px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-primary) 70%, transparent);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-family: var(--font-mono);
+  outline: none;
+}
+.manualInput:focus { border-color: var(--border-focus); }
+
+/* ── footer ── */
+.footer {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  /*
+   * A full border, not `border-top`.
+   *
+   * This is a <footer> element, so the wallpaper rules in global.css
+   * (`html[data-bg] footer`) paint a translucent frosted background on it. That
+   * background plus `border-radius` needs a border on all sides: a lone
+   * `border-top` curves down at the two ends and stops, which drew a floating
+   * arc across the corners — the "broken rounding" visible in light theme.
+   */
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 14px;
+}
+
+.linkBtn {
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.linkBtn:hover { color: var(--accent); }
+
+.dockFloat {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  width: min(420px, 90vw);
+  max-height: 52vh;
+  overflow-y: auto;
+  z-index: var(--z-page-float);
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  box-shadow: 0 20px 56px rgb(0 0 0 / 0.4);
+  animation: homeFade 200ms var(--ease-out) both;
+}
+
+@media (max-width: 560px) {
+  .panel { padding: 20px 18px 18px; }
+  .rowLabel { width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel, .manual, .dockFloat, .wsRow { animation: none !important; transition: none !important; }
+}
+
+
+.markPulse {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: radial-gradient(circle at 30% 30%, #9fd0ff, #3d7dff 55%, #2554d6);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, #3d7dff 28%, transparent),
+    0 0 18px color-mix(in srgb, #5aaaff 45%, transparent);
+}
+
+.markLetter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: #fff;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  text-transform: lowercase;
+}
+
+:global(html.she-desktop) .page,
+:global(body.she-desktop) .page {
+  padding-top: 36px;
+  box-sizing: border-box;
+}

@@ -1,5 +1,7 @@
 import { useCallback } from 'react';
 import styles from '../styles/GroupBrowser.module.css';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { t } from '../lib/i18n';
 
 interface GroupData {
   id: string;
@@ -66,13 +68,16 @@ function StatItem({ label, value }: { label: string; value: string | number }) {
 }
 
 export function GroupBrowser({ group, memories, onClose }: GroupBrowserProps) {
+  // Escape closes this dialog: the backdrop click is a mouse convenience, not a keyboard path.
+  useEscapeToClose(onClose);
+
   const handleOverlayClick = useCallback((e: React.MouseEvent) => {
     if (e.target === e.currentTarget) onClose();
   }, [onClose]);
 
   return (
     <div className={styles.overlay} onClick={handleOverlayClick}>
-      <div className={styles.modal}>
+      <div className={styles.modal} data-surface="modal">
         <div className={styles.header}>
           <div className={styles.headerLeft}>
             <span className={styles.headerIcon}>⬡</span>
@@ -80,7 +85,7 @@ export function GroupBrowser({ group, memories, onClose }: GroupBrowserProps) {
             {group.isDormant && <span className={styles.dormantTag}>dormant</span>}
             {group.isCompetitionSubgroup && <span className={styles.competitionTag}>competition</span>}
           </div>
-          <button className={styles.closeBtn} onClick={onClose}>×</button>
+          <button className={styles.closeBtn} onClick={onClose} title={t('关闭')} aria-label={t('关闭')}>×</button>
         </div>
 
         <div className={styles.stats}>

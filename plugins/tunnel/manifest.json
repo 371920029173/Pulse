@@ -1,0 +1,31 @@
+{
+  "name": "tunnel",
+  "version": "0.1.0",
+  "description": "把本机的 SHE 服务通过隧道暴露到公网，手机或另一台电脑就能打开同一个界面。不内建任何隧道实现，而是调用你已安装的工具（cloudflared / ngrok / tailscale），所以链路和账号都由你自己掌握。",
+  "author": "SHE built-in",
+  "enabled": true,
+  "permissions": ["shell", "network"],
+  "tools": [
+    {
+      "name": "tunnel_providers",
+      "description": "Detect which tunnel CLIs are installed on this machine (cloudflared, ngrok, tailscale) and show the exact command SHE would run.",
+      "parameters": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "tunnel_start",
+      "description": "Start a tunnel to the local SHE server using one of the detected providers. Returns the public URL once it appears in the provider's output.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "provider": { "type": "string", "enum": ["cloudflared", "ngrok", "tailscale"], "description": "Which CLI to use" },
+          "port": { "type": "number", "description": "Local port to expose (default 5577)" },
+          "seconds": { "type": "number", "description": "How long to wait for the URL (default 25)" }
+        },
+        "required": ["provider"]
+      }
+    }
+  ],
+  "commands": [
+    { "id": "tunnel.detect", "title": "检测隧道工具", "description": "看看机器上有没有 cloudflared / ngrok / tailscale" }
+  ]
+}

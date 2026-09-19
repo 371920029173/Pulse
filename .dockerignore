@@ -1,0 +1,49 @@
+# Build context for the container image.
+#
+# Excludes everything the image does not need to BUILD. The runtime stage copies from
+# the build stage explicitly, so nothing here ends up in the final image even if it is
+# not ignored — but a smaller context makes the build faster and avoids shipping a
+# developer's local state to the daemon.
+#
+# The one that matters: `.env`. It holds API keys and must never enter a build context.
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local state — the agent's workspace history, KB, wallpapers, captures
+.she/
+**/.she/
+workspace/
+**/captures/
+
+# Installed dependencies are reinstalled inside the image
+node_modules/
+**/node_modules/
+.pnpm-store/
+
+# Build output is produced inside the image
+**/dist/
+**/*.tsbuildinfo
+
+# Tests and their fixtures are not needed to build or run
+**/__tests__/
+**/*.test.ts
+**/*.test.tsx
+
+# Version control and editor noise
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+**/.DS_Store
+
+# Tool scratch output
+.playwright-mcp/
+.hermes/
+*.log
+*.tmp

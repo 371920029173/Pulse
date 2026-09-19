@@ -1,0 +1,700 @@
+/*
+ * Dock styles.
+ *
+ * The rules above the "additive" banner were recovered from the last build
+ * after this file was accidentally overwritten (it was untracked, so there was
+ * no git copy). Declarations are byte-identical to the compiled output; only the
+ * CSS-Modules scope hash was stripped back off the selectors.
+ */
+
+.wrap {
+  display:flex;
+  flex-direction:column;
+  height:100%;
+  min-height:0;
+}
+
+.head {
+  display:flex;
+  align-items:center;
+  gap:6px;
+  padding:9px 12px;
+  border-bottom:1px solid var(--border);
+  flex-shrink:0;
+}
+
+.headTitle {
+  font-size:12.5px;
+  font-weight:600;
+  color:var(--text-primary);
+}
+
+.headMeta {
+  font-size:11px;
+  color:var(--text-tertiary);
+  margin-left:auto;
+}
+
+.iconBtn {
+  width:22px;
+  height:22px;
+  border-radius:7px;
+  border: none;
+  background: var(--fill-control);
+  color:var(--text-secondary);
+  font-size:12px;
+  line-height:1;
+  cursor:pointer;
+}
+
+.iconBtn:hover {
+  color:var(--text-primary);
+  background:var(--bg-hover);
+}
+
+.error {
+  margin:8px 12px 0;
+  padding:6px 10px;
+  border-radius:8px;
+  font-size:11.5px;
+  color:var(--danger);
+  background:color-mix(in srgb,var(--danger) 12%,transparent);
+}
+
+.body {
+  flex:1 1 auto;
+  overflow-y:auto;
+  padding:8px 10px;
+  display:flex;
+  flex-direction:column;
+  gap:7px;
+}
+
+.empty {
+  padding:16px 8px;
+  font-size:11.5px;
+  color:var(--text-tertiary);
+  line-height:1.8;
+  text-align:center;
+}
+
+.empty code {
+  font-family:var(--font-mono);
+  font-size:10.5px;
+  padding:1px 4px;
+  border-radius:4px;
+  background:var(--bg-tertiary);
+}
+
+.plugin {
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:8px 10px;
+  background:color-mix(in srgb,var(--bg-tertiary) 45%,transparent);
+}
+
+.pluginOff {
+  opacity:.55;
+}
+
+.pluginHead {
+  display:flex;
+  align-items:flex-start;
+  gap:7px;
+}
+
+.dot {
+  width:8px;
+  height:8px;
+  border-radius:50%;
+  margin-top:4px;
+  flex-shrink:0;
+  background:var(--text-tertiary);
+}
+
+.dotOn {
+  background:var(--success);
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--success) 20%,transparent);
+}
+
+.pluginMain {
+  flex:1 1 auto;
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  gap:2px;
+}
+
+.pluginName {
+  font-size:12px;
+  font-weight:600;
+  color:var(--text-primary);
+  display:flex;
+  align-items:center;
+  gap:6px;
+}
+
+.ver {
+  font-size:9.5px;
+  font-weight:400;
+  padding:1px 5px;
+  border-radius:4px;
+  background:var(--bg-hover);
+  color:var(--text-tertiary);
+}
+
+.pluginDesc {
+  font-size:11px;
+  color:var(--text-tertiary);
+  line-height:1.55;
+}
+
+.small,.smallDanger {
+  flex-shrink:0;
+  padding:3px 9px;
+  border-radius:7px;
+  font-size:10.5px;
+  cursor:pointer;
+}
+
+.small {
+  border:1px solid var(--border);
+  background:transparent;
+  color:var(--text-secondary);
+}
+
+.small:hover:not(:disabled) {
+  color:var(--text-primary);
+  background:var(--bg-hover);
+}
+
+.small:disabled {
+  opacity:.4;
+  cursor:not-allowed;
+}
+
+.smallDanger {
+  border:1px solid color-mix(in srgb,var(--danger) 40%,transparent);
+  background:transparent;
+  color:var(--danger);
+}
+
+.smallDanger:hover {
+  background:color-mix(in srgb,var(--danger) 12%,transparent);
+}
+
+.detail {
+  margin-top:9px;
+  padding-top:9px;
+  border-top:1px dashed var(--border);
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+
+.row {
+  display:flex;
+  gap:8px;
+  font-size:11px;
+  color:var(--text-secondary);
+}
+
+.row b {
+  flex-shrink:0;
+  width:42px;
+  color:var(--text-tertiary);
+  font-weight:600;
+}
+
+.row code {
+  font-family:var(--font-mono);
+  font-size:10.5px;
+  word-break:break-all;
+}
+
+.perm {
+  color:var(--warning);
+}
+
+.section {
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+  font-size:11px;
+}
+
+.section>b {
+  color:var(--text-tertiary);
+  font-weight:600;
+}
+
+.item {
+  display:flex;
+  flex-direction:column;
+  gap:1px;
+  padding:5px 8px;
+  border-radius:7px;
+  background:var(--bg-secondary);
+  font-size:11px;
+  color:var(--text-secondary);
+}
+
+.item code {
+  font-family:var(--font-mono);
+  font-size:10.5px;
+  color:var(--accent);
+}
+
+.docs {
+  margin-top:6px;
+  font-size:11.5px;
+}
+
+.docs summary {
+  cursor:pointer;
+  color:var(--text-tertiary);
+  padding:6px 2px;
+}
+
+.docs summary:hover {
+  color:var(--text-primary);
+}
+
+.docsBody {
+  padding:6px 2px 10px;
+  color:var(--text-secondary);
+  line-height:1.75;
+}
+
+.docsBody p {
+  margin:0 0 6px;
+}
+
+.docsBody code {
+  font-family:var(--font-mono);
+  font-size:10.5px;
+  padding:1px 4px;
+  border-radius:4px;
+  background:var(--bg-tertiary);
+}
+
+.docsBody pre {
+  margin:0 0 8px;
+  padding:9px 10px;
+  border-radius:8px;
+  background:var(--bg-primary);
+  border:1px solid var(--border);
+  font-family:var(--font-mono);
+  font-size:10.5px;
+  line-height:1.6;
+  overflow-x:auto;
+  white-space:pre;
+}
+
+.docsNote {
+  color:var(--text-tertiary);
+  font-size:11px;
+}
+
+.remote {
+  border:1px solid color-mix(in srgb,var(--accent) 40%,transparent);
+  border-radius:10px;
+  padding:9px 11px;
+  background:color-mix(in srgb,var(--accent) 9%,transparent);
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+
+.remoteHead {
+  display:flex;
+  align-items:center;
+  gap:7px;
+}
+
+.remoteTitle {
+  font-size:12px;
+  font-weight:600;
+  color:var(--text-primary);
+  flex:1 1 auto;
+}
+
+.remoteHint {
+  font-size:11px;
+  color:var(--text-secondary);
+  line-height:1.6;
+}
+
+.urlRow {
+  display:flex;
+  align-items:center;
+  gap:6px;
+}
+
+.url {
+  flex:1 1 auto;
+  min-width:0;
+  font-family:var(--font-mono);
+  font-size:10.5px;
+  padding:4px 7px;
+  border-radius:6px;
+  background:var(--bg-primary);
+  color:var(--accent);
+  overflow-x:auto;
+  white-space:nowrap;
+}
+
+.remoteMeta {
+  font-size:10.5px;
+  color:var(--text-tertiary);
+}
+
+.remoteWarn {
+  font-size:10.5px;
+  color:var(--warning);
+  line-height:1.55;
+}
+
+.fsRecent {
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+  padding:5px 7px;
+  border-radius:7px;
+  background:color-mix(in srgb,var(--bg-primary) 70%,transparent);
+}
+
+.fsRecentRow {
+  display:flex;
+  align-items:baseline;
+  gap:6px;
+  font-size:10.5px;
+}
+
+.fsOk {
+  color:var(--success, #3ecf8e);
+  flex:0 0 auto;
+}
+
+.fsNo {
+  color:var(--text-tertiary);
+  flex:0 0 auto;
+}
+
+.fsRecentText {
+  flex:1 1 auto;
+  min-width:0;
+  color:var(--text-secondary);
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.fsRecentWhy {
+  flex:0 0 auto;
+  color:var(--warning);
+  font-size:10px;
+}
+
+.fsAllow {
+  flex:0 0 auto;
+  padding:2px 8px;
+  border-radius:999px;
+  border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);
+  background:color-mix(in srgb,var(--accent) 12%,transparent);
+  color:var(--accent);
+  font-size:10px;
+  font-family:var(--font-mono);
+  cursor:pointer;
+  transition:background .15s ease,color .15s ease;
+}
+
+.fsAllow:hover:not(:disabled) {
+  background:color-mix(in srgb,var(--accent) 24%,transparent);
+  color:var(--text-primary);
+}
+
+.fsAllow:disabled {
+  opacity:.5;
+  cursor:default;
+}
+
+.fsForm {
+  display:flex;
+  flex-direction:column;
+  gap:7px;
+  margin-top:3px;
+  padding-top:8px;
+  border-top:1px dashed color-mix(in srgb,var(--accent) 25%,transparent);
+}
+
+.fsField {
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+}
+
+.fsField>span {
+  font-size:10.5px;
+  color:var(--text-secondary);
+}
+
+.fsField input,.fsField textarea {
+  font-family:var(--font-mono);
+  font-size:11px;
+  padding:5px 8px;
+  border-radius:7px;
+  border:1px solid var(--border);
+  background:var(--bg-primary);
+  color:var(--text-primary);
+  outline:none;
+  resize:vertical;
+  transition:border-color .15s var(--ease, ease);
+}
+
+.fsField input:focus,.fsField textarea:focus {
+  border-color:color-mix(in srgb,var(--accent) 60%,transparent);
+}
+
+.fsHelp {
+  font-size:10.5px;
+  color:var(--text-tertiary);
+  line-height:1.65;
+}
+
+.fsHelpNote {
+  display:inline-block;
+  margin-top:4px;
+  padding-left:6px;
+  border-left:2px solid color-mix(in srgb,var(--accent) 45%,transparent);
+  color:var(--text-secondary);
+}
+
+.fsHelp code {
+  font-family:var(--font-mono);
+  font-size:10px;
+  padding:1px 4px;
+  border-radius:4px;
+  background:var(--bg-primary);
+  color:var(--accent);
+}
+
+/* ============================================================
+   Additive: tabs, permission chips, form cards, source editor.
+   Added with the graphical plugin manager. Nothing above is restyled.
+   ============================================================ */
+
+/* ── Tabs ── */
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 10px 0;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 7px 7px 0 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: color var(--transition), background var(--transition), border-color var(--transition);
+}
+
+.tab:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
+.tab:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.tabOn {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border-color: var(--border);
+}
+
+.tabBadge {
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  color: var(--accent);
+  font-size: 9.5px;
+  font-weight: 600;
+  text-align: center;
+}
+
+/* ── Permission chips ── */
+.permRow { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+
+.permChip {
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
+  background: color-mix(in srgb, var(--bg-primary) 60%, transparent);
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
+/* Anything that can touch the machine, rather than just read from it. */
+.permChipWarn {
+  border-color: color-mix(in srgb, var(--warning) 45%, transparent);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  color: var(--warning);
+}
+
+.permNone { font-size: 10px; color: var(--text-tertiary); font-style: italic; }
+
+/* A permission the runtime does not recognise: it declares nothing real, so it
+   is styled as a defect rather than as a capability. */
+.permChipUnknown {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+}
+
+/* Declarations that cannot work (missing module, absent panel file, …). */
+.issueList {
+  margin: 3px 0 0;
+  padding-left: 16px;
+  font-size: 10.5px;
+  line-height: 1.55;
+  color: var(--warning);
+}
+
+/* ── Plugin row extras ── */
+.pluginMetaRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 3px;
+}
+
+.toolCount { font-size: 10.5px; color: var(--text-tertiary); }
+
+.warnBadge {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: var(--warning);
+  font-size: 9.5px;
+  font-weight: 600;
+}
+
+.dotBad { background: var(--warning); }
+
+/* ── Form cards (新建 tab) ── */
+.formCard {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-secondary) 55%, transparent);
+}
+
+.formTitle { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.formHint { font-size: 11px; color: var(--text-tertiary); line-height: 1.65; }
+
+.pathCode {
+  display: inline-block;
+  margin-top: 3px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--bg-primary);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  word-break: break-all;
+}
+
+/* Security disclosure — deliberately prominent, not a footnote. */
+.disclosure {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
+  border-left: 3px solid var(--warning);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
+
+.disclosure b { color: var(--text-primary); }
+
+/* ── Source editor ── */
+.editorOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: saturate(140%) blur(10px);
+  -webkit-backdrop-filter: saturate(140%) blur(10px);
+}
+
+.editorPanel {
+  display: flex;
+  flex-direction: column;
+  width: min(760px, 94vw);
+  height: min(76vh, 720px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-secondary);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.editorHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.editorTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+
+.editorTabs { display: flex; gap: 4px; margin-left: auto; }
+
+.editorArea {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 10px 12px;
+  border: none;
+  outline: none;
+  resize: none;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  tab-size: 2;
+}
+
+.editorFoot {
+  padding: 7px 12px;
+  border-top: 1px solid var(--border);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}

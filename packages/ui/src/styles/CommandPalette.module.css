@@ -1,0 +1,94 @@
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-command);
+  background: rgba(4, 6, 10, 0.62);
+  backdrop-filter: saturate(160%) blur(18px);
+  -webkit-backdrop-filter: saturate(160%) blur(18px);
+  display: flex;
+  justify-content: center;
+  padding-top: min(18vh, 140px);
+  animation: sheFade 200ms var(--ease-out) both;
+}
+.panel {
+  width: min(560px, 92vw);
+  background: linear-gradient(180deg, #161922 0%, #12141a 100%);
+  border: 1px solid var(--border, #2a2f3a);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(0,0,0,.55), 0 0 0 1px rgba(91,140,255,.08);
+  overflow: hidden;
+  animation: shePop 360ms var(--ease-sheet) both;
+}
+.input {
+  width: 100%;
+  box-sizing: border-box;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--she-text, #e8eaed);
+  font-size: 15px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border, #2a2f3a);
+}
+.list {
+  max-height: 360px;
+  overflow: auto;
+  padding: 8px;
+}
+.item, .itemActive {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: inherit;
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+.itemActive {
+  background: rgba(91,140,255,.16);
+}
+.itemTitle {
+  font-size: 13px;
+  color: #e8eaed;
+}
+.itemMeta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #9aa0a6;
+  font-size: 11px;
+}
+.itemMeta kbd {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  border: 1px solid #2a2f3a;
+  border-radius: 6px;
+  padding: 1px 6px;
+  background: #0b0d12;
+}
+.empty {
+  padding: 18px 12px;
+  color: #9aa0a6;
+  font-size: 13px;
+}
+.footer {
+  display: flex;
+  gap: 14px;
+  padding: 8px 14px 10px;
+  border-top: 1px solid #1f2430;
+  color: #6b7280;
+  font-size: 11px;
+}
+@keyframes fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes pop {
+  from { transform: translateY(-6px) scale(.98); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}

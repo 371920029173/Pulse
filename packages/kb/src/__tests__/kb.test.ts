@@ -397,6 +397,37 @@ describe('GroupKBEngine', () => {
     assert.equal(totalMems, 6);
   });
 
+  it('should auto-split a group once it exceeds the threshold', () => {
+    const config = { ...defaultKbConfig, maxChildrenBeforeSplit: 3 };
+    const eng = new GroupKBEngine(store, config);
+
+    const g = eng.createGroup('auto');
+    for (let i = 0; i < 8; i++) {
+      eng.addMemoryMaintained(g.id, 'text', `Auto node ${i}`, `content ${i}`);
+    }
+
+    const parent = store.getGroup(g.id)!;
+    // The policy layer must have drained the overfull group into subgroups.
+    assert.equal(parent.memoryIds.length, 0);
+    assert.ok(parent.childGroupIds.length >= 2);
+
+    let moved = 0;
+    for (const childId of parent.childGroupIds) {
+      const child = store.getGroup(childId)!;
+      moved += child.memoryIds.length;
+      assert.equal(child.parentGroupId, g.id);
+    }
+    assert.equal(moved, 8);
+
+    // And the primitive is untouched: adding directly still does NOT split.
+    const g2 = eng.createGroup('manual');
+    for (let i = 0; i < 8; i++) {
+      eng.addMemory(g2.id, 'text', `Manual node ${i}`, `content ${i}`);
+    }
+    assert.equal(store.getGroup(g2.id)!.memoryIds.length, 8);
+    assert.equal(eng.shouldSplit(g2.id), true);
+  });
+
   // ─── Competition subgroups ───
 
   it('should create and resolve competition subgroups', () => {

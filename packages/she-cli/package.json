@@ -1,6 +1,7 @@
 {
   "name": "@she/she-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "bin": {
@@ -14,7 +15,8 @@
     "@she/shared": "workspace:*",
     "@she/kb": "workspace:*",
     "@she/agent-runtime": "workspace:*",
-    "@she/sandbox": "workspace:*"
+    "@she/sandbox": "workspace:*",
+    "@she/server": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.5.0"

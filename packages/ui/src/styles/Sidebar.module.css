@@ -6,7 +6,7 @@
 }
 
 .logo {
-  padding: 16px;
+  padding: 12px 12px 10px;
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
@@ -14,17 +14,21 @@
 }
 
 .logoIcon {
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius-md);
-  background: linear-gradient(135deg, var(--accent), #a371f7);
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: linear-gradient(145deg,
+    color-mix(in srgb, var(--accent) 78%, transparent),
+    color-mix(in srgb, var(--accent) 38%, transparent));
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-weight: 700;
-  font-size: 13px;
+  font-weight: 600;
+  font-size: 12px;
   color: #fff;
   flex-shrink: 0;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.18);
 }
 
 .logoText {
@@ -45,7 +49,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px 6px;
+  padding: 10px 12px 4px;
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
@@ -53,22 +57,81 @@
   color: var(--text-tertiary);
 }
 
-.sectionAction {
-  display: flex;
+/*
+ * `.sectionAction` (singular) is gone, along with the 20px geometry it used. Every
+ * icon button in the sidebar and the file tree now uses `.iconBtn`, which is 24px —
+ * a 20px target is cramped, and two near-identical icon-button classes is how they
+ * drift apart. `.sectionActions` (plural) remains: it is the row that holds them.
+ */
+.sectionActions {
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  border-radius: var(--radius-sm);
-  color: var(--text-tertiary);
-  cursor: pointer;
-  transition: background var(--transition), color var(--transition);
-  font-size: 14px;
+  gap: 2px;
 }
 
-.sectionAction:hover {
-  background: var(--bg-hover);
+.actionDanger:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+/*
+ * Icon buttons.
+ *
+ * 24px hit target rather than 20: a 20px square is below the comfortable minimum
+ * for a pointer, and these sit on a dense surface where a mis-click is easy. The
+ * extra 4px costs nothing visually because the icon inside stays 15px.
+ *
+ * No border and no resting fill — they appear only on hover, so a row of them does
+ * not read as a toolbar competing with the session titles beside it.
+ */
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.iconBtn:hover {
+  background: var(--fill-control);
   color: var(--text-primary);
+}
+
+.iconBtn:active {
+  transform: scale(0.94);
+}
+
+/* Row actions on a session: same treatment, slightly tighter to fit the row. */
+.rowAction {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.rowAction:hover {
+  background: var(--fill-control);
+  color: var(--text-primary);
+}
+
+.rowActionDanger:hover {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
 }
 
 .sessionList {
@@ -76,13 +139,64 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
+  /*
+   * Bounded so a long list cannot crowd out MCP and the knowledge tree.
+   * Without this the list grew unbounded and squeezed every panel below it.
+   */
+  max-height: 38vh;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+/* Collapsible section header (MCP / 知识库). */
+.collapseHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 12px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  text-align: left;
+  transition: color var(--transition), background var(--transition);
+}
+
+.collapseHeader:hover {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.collapseChevron {
+  /*
+   * Sized for an SVG now, not a character. A glyph like `▾` renders at a different
+   * optical weight and vertical position than the text beside it, which is why the
+   * collapsible headers looked slightly off-centre.
+   */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  opacity: 0.7;
+  flex-shrink: 0;
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+
+.collapseHeader:hover .collapseChevron {
+  opacity: 1;
 }
 
 .sessionItem {
+  transition: background var(--transition), transform var(--transition-fast);
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 7px 8px;
+  gap: 6px;
+  padding: 5px 8px;
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: background var(--transition);
@@ -103,8 +217,43 @@
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--accent);
   flex-shrink: 0;
+}
+
+/* States must differ visibly: the dot previously never changed, which is what
+   made session switching look like a stale icon. */
+.sessionDotActive {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.sessionDotIdle {
+  background: var(--text-tertiary);
+  opacity: 0.55;
+}
+
+.sessionDotGroup {
+  background: var(--warning, #d29922);
+  border-radius: 2px;
+}
+
+/* Fold control for a long session list. */
+.foldToggle {
+  margin: 4px 4px 2px;
+  padding: 5px 8px;
+  border: 1px dashed color-mix(in srgb, var(--border) 90%, transparent);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition), background var(--transition);
+}
+
+.foldToggle:hover {
+  color: var(--text-primary);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
 .sessionDotInactive {
@@ -123,6 +272,7 @@
 }
 
 .treeNodeRow {
+  transition: background var(--transition), transform var(--transition-fast);
   display: flex;
   align-items: center;
   gap: 4px;
@@ -185,9 +335,11 @@
 }
 
 .emptyState {
-  padding: 16px;
+  margin: 4px 4px 8px;
+  padding: 14px 12px;
   text-align: center;
   font-size: 12px;
+  line-height: 1.6;
   color: var(--text-tertiary);
 }
 
@@ -195,4 +347,132 @@
   height: 1px;
   background: var(--border);
   margin: 4px 16px;
+}
+
+.renameInput {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid var(--accent, #7c9cff);
+  background: var(--bg-primary, #0b0d12);
+  color: var(--text-primary, #e8eeff);
+  font-size: 12px;
+  padding: 0 8px;
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft, rgba(124,156,255,0.14));
+}
+
+.sessionFilterWrap {
+  padding: 0 8px 6px;
+}
+
+.sessionFilter {
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: var(--text-xs, 11px);
+}
+
+.sessionFilter::placeholder {
+  color: var(--text-tertiary);
+}
+
+.sessionFilter:focus {
+  border-color: var(--border-focus);
+}
+
+.sessionItem:active, .treeNodeRow:active {
+  transform: scale(0.985);
+}
+
+.sessionItem {
+  animation: sessionItemEnter 420ms var(--ease-spring) both;
+  animation-delay: calc(var(--i, 0) * 28ms);
+}
+@keyframes sessionItemEnter {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.sessionItemActive {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+[data-theme="light"] .sessionItemActive {
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-secondary));
+}
+[data-theme="light"] .sessionFilter {
+  background: var(--bg-secondary);
+  box-shadow: var(--shadow-sm);
+}
+@media (prefers-reduced-motion: reduce) {
+  .sessionItem {
+    animation: none !important;
+  }
+}
+
+/* Work-group entries in the session rail. */
+.sessionDotGroup {
+  background: hsl(275 68% 58%) !important;
+  box-shadow: 0 0 0 3px hsl(275 68% 58% / 0.18);
+}
+
+.groupBadge {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: hsl(275 68% 58% / 0.18);
+  color: hsl(275 68% 68%);
+  font-weight: 600;
+}
+
+/* MCP section occupies the slot the file browser used to take. */
+.mcpSection {
+  flex: 0 1 auto;
+  /* Was min-height 180px: it reserved space even when idle, which is part of
+     why the sidebar felt cramped. Let it size to content and scroll instead. */
+  min-height: 0;
+  max-height: 38%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* The brand mark doubles as "go home". */
+.logoHome {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  transition: opacity 180ms var(--ease-out), transform 200ms var(--ease-spring);
+}
+.logoHome:hover { opacity: 0.85; transform: translateY(-1px); }
+.logoHome:active { transform: scale(0.97); }
+
+
+.logoPulse {
+  display: block;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: radial-gradient(circle at 30% 30%, #9fd0ff, #3d7dff 60%, #2554d6);
+  box-shadow: 0 0 0 2px color-mix(in srgb, #3d7dff 30%, transparent);
+}
+.logoIcon {
+  display: inline-grid !important;
+  place-items: center;
+  font-size: 0 !important;
 }

@@ -125,6 +125,18 @@
   border-left: 3px solid var(--accent);
   cursor: pointer;
   transition: background var(--transition);
+  /*
+   * A <button> now, so the browser defaults are neutralised: a button centres text,
+   * does not fill its container and carries its own font/border/background. Without
+   * these the row would shrink to its content and centre its label.
+   */
+  width: 100%;
+  border-top: none;
+  border-right: none;
+  border-bottom: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
 }
 
 .seedNode:hover {

@@ -1,4 +1,4 @@
-import type { LLMProvider, LLMMessage, ToolDefinition, ToolCall, StreamChunk } from '@she/shared';
+﻿import type { LLMProvider, LLMMessage, ToolDefinition, ToolCall, StreamChunk } from '@she/shared';
 
 interface AnthropicContentBlock {
   type: 'text' | 'tool_use';
@@ -27,6 +27,7 @@ export class AnthropicProvider implements LLMProvider {
     messages: LLMMessage[],
     tools?: ToolDefinition[],
     onChunk?: (chunk: StreamChunk) => void,
+    signal?: AbortSignal,
   ): Promise<LLMMessage> {
     let system = '';
     const anthropicMessages: Array<{ role: string; content: string | AnthropicContentBlock[] }> = [];
@@ -86,6 +87,7 @@ export class AnthropicProvider implements LLMProvider {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify(body),
+      signal,
     });
 
     if (!response.ok) {

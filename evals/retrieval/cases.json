@@ -1,0 +1,129 @@
+{
+  "$comment": [
+    "Retrieval evaluation cases, written against a real Group Memory library.",
+    "Ground truth is deliberately defensible: a group-path query must return a",
+    "node that BELONGS to that group, and a title query must return that exact",
+    "node. Semantic cases accept any node from a set of acceptable groups,",
+    "because more than one group legitimately covers the topic.",
+    "",
+    "Negative cases are included so a system cannot score well by returning",
+    "everything: an absent topic must produce no confident hit."
+  ],
+  "cases": [
+    {
+      "id": "group-ops-env",
+      "kind": "group",
+      "query": "ops/env",
+      "expectGroups": ["ops/env"],
+      "note": "组路径精确查询"
+    },
+    {
+      "id": "group-ops-kb-connectivity",
+      "kind": "group",
+      "query": "ops/kb-connectivity",
+      "expectGroups": ["ops/kb-connectivity"],
+      "note": "组路径精确查询"
+    },
+    {
+      "id": "group-user-preferences",
+      "kind": "group",
+      "query": "user/preferences",
+      "expectGroups": ["user/preferences"],
+      "note": "组路径精确查询"
+    },
+    {
+      "id": "group-user-passphrases",
+      "kind": "group",
+      "query": "user/passphrases",
+      "expectGroups": ["user/passphrases"],
+      "note": "组路径精确查询"
+    },
+    {
+      "id": "group-name-only",
+      "kind": "group",
+      "query": "ops/session-context",
+      "expectGroups": ["ops/session-context"],
+      "note": "组路径，不带额外关键词"
+    },
+
+    {
+      "id": "title-passphrase",
+      "kind": "title",
+      "query": "暗号 PERSIST-42",
+      "expectTitle": "暗号 PERSIST-42",
+      "note": "标题精确查询"
+    },
+    {
+      "id": "title-encoding-gbk",
+      "kind": "title",
+      "query": "沙箱控制台编码坑：GBK(936) 代码页导致中文乱码",
+      "expectTitle": "沙箱控制台编码坑：GBK(936) 代码页导致中文乱码",
+      "note": "长标题精确查询"
+    },
+    {
+      "id": "title-workspace-snapshot",
+      "kind": "title",
+      "query": "工作区状态快照（2026-09-12，会话上下文恢复用）",
+      "expectTitle": "工作区状态快照（2026-09-12，会话上下文恢复用）",
+      "note": "长标题精确查询"
+    },
+
+    {
+      "id": "semantic-encoding-issue",
+      "kind": "semantic",
+      "query": "中文乱码 编码问题",
+      "expectGroups": ["ops/env", "ops/kb-connectivity"],
+      "note": "语义意图：编码坑，两个组都记录了"
+    },
+    {
+      "id": "semantic-write-channel",
+      "kind": "semantic",
+      "query": "fs_write 被审批拦截",
+      "expectGroups": ["ops/env"],
+      "note": "语义意图：写入双通道"
+    },
+    {
+      "id": "semantic-workspace-state",
+      "kind": "semantic",
+      "query": "沙箱根目录是什么",
+      "expectGroups": ["ops/session-context"],
+      "note": "语义意图：工作区快照"
+    },
+    {
+      "id": "semantic-reply-style",
+      "kind": "semantic",
+      "query": "用户偏好 回复风格",
+      "expectGroups": ["user/preferences"],
+      "note": "语义意图：偏好"
+    },
+    {
+      "id": "semantic-pending-patches",
+      "kind": "semantic",
+      "query": "pending-patches 过期补丁残留",
+      "expectGroups": ["ops/env"],
+      "note": "语义意图：残留文件"
+    },
+    {
+      "id": "semantic-cross-session-recall",
+      "kind": "semantic",
+      "query": "跨会话记忆召回测试",
+      "expectGroups": ["ops/session-context", "user/passphrases"],
+      "note": "语义意图：召回验证"
+    },
+
+    {
+      "id": "distractor-passphrase-vs-style",
+      "kind": "title",
+      "query": "回复风格：用户发「1」时不要打招呼",
+      "expectTitle": "回复风格：用户发「1」时不要打招呼",
+      "note": "与「暗号 PERSIST-42」共享关键词「1」，考区分能力"
+    },
+    {
+      "id": "distractor-hosts-file",
+      "kind": "negative",
+      "query": "量子计算 硬件架构",
+      "expectNoConfidentHit": true,
+      "note": "库里完全没有的主题，不应给出高相关命中"
+    }
+  ]
+}

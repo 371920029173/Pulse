@@ -1,0 +1,107 @@
+.bar {
+  /* Full-width strip, flush to the bottom edge — as originally intended.
+     An earlier rounded-card treatment made it read as a floating panel, which
+     is not what this bar is: it is the window's status line, so it stays
+     attached to the frame. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-wrap: nowrap;
+  scrollbar-width: thin;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-top: 1px solid var(--border);
+  background: var(--bg-tertiary, var(--bg-secondary));
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  min-height: 28px;
+  flex-shrink: 0;
+}
+
+.item { display: inline-flex; gap: 6px; align-items: center; min-width: 0; }
+.label { color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.4px; font-size: 10px; }
+.value { font-family: var(--font-mono); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 360px; }
+.sep { color: var(--text-tertiary); }
+.ok { color: #3fb950; }
+.warn { color: #d29922; }
+/*
+ * Status-bar controls.
+ *
+ * These used to be `padding: 1px 8px` with `border: 1px solid transparent`, and
+ * the hover rule set a VISIBLE border. Two problems:
+ *
+ *   1. 1px of vertical padding makes a 19px-tall target. That is below the
+ *      comfortable minimum for a pointer and reads as cramped text rather than a
+ *      control.
+ *   2. A transparent border that becomes visible on hover is a reserved-space hack:
+ *      the control appears to grow an outline when the pointer arrives. Apple's
+ *      bars fill instead — nothing changes size, only emphasis.
+ *
+ * All four now share one geometry (22px tall, 8px side padding), so they line up as
+ * a row of equals rather than four differently-sized pills.
+ */
+.refresh,
+.timeline,
+.undo,
+.focusBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.refresh { margin-left: auto; }
+.timeline { margin-left: var(--space-2); }
+.undo { margin-left: var(--space-1); }
+.focusBtn { margin-left: 8px; }
+
+.refresh:hover,
+.timeline:hover,
+.undo:hover:not(:disabled),
+.focusBtn:hover {
+  color: var(--text-primary);
+  background: var(--fill-control);
+}
+
+.undo:disabled { opacity: 0.4; cursor: default; }
+
+.hint { color: var(--text-tertiary); font-family: var(--font-mono); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/*
+ * `.profiles`, `.profile`, `.profileActive` and `.segActive` were removed here.
+ * They became unreachable when the skill-profile picker moved into the composer,
+ * and deleting them is the point rather than a side effect: a rule nothing renders
+ * still looks maintained, so a later change edits it under the impression it
+ * matters.
+ */
+
+.meta { font-size: 11px; color: var(--text-tertiary); padding: 0 6px; }
+
+.btn, .timeline {
+  transition: transform var(--transition-fast), background var(--transition), color var(--transition);
+}
+.btn:active, .timeline:active {
+  transform: scale(0.96);
+}
+
+
+@media (max-width: 980px) {
+  .value { max-width: 140px; }
+  .label { display: none; }
+  .sep { display: none; }
+}
+@media (max-width: 720px) {
+  .item:nth-child(n+5) .value { max-width: 96px; }
+}

@@ -1,0 +1,146 @@
+{
+  "$comment": [
+    "End-to-end agent tasks. Grading is DETERMINISTIC — filesystem assertions and",
+    "string checks on the reply — so no second LLM call is needed to score. That",
+    "keeps a full run to one API call per task.",
+    "",
+    "Each task runs in its own temp workspace with the fixtures below, so tasks",
+    "cannot contaminate each other."
+  ],
+  "tasks": [
+    {
+      "id": "create-file",
+      "prompt": "在当前目录创建 notes.txt，内容写三行：第一行 'eval-ok'，第二行 '第二行'，第三行 'third'。创建完就结束，不要解释。",
+      "fixtures": {},
+      "check": {
+        "type": "fileContains",
+        "path": "notes.txt",
+        "expect": ["eval-ok", "第二行", "third"]
+      },
+      "note": "最基本的 fs_write 往返，含中文"
+    },
+    {
+      "id": "fix-bug",
+      "prompt": "bug.js 里的 add 函数算错了。修好它，让 `node bug.js` 输出 42。改完运行一次确认。",
+      "fixtures": {
+        "bug.js": "function add(a, b) { return a - b; }\nconsole.log(add(40, 2));\n"
+      },
+      "check": {
+        "type": "commandOutput",
+        "command": "node bug.js",
+        "expect": "42"
+      },
+      "note": "读→改→跑，最小闭环"
+    },
+    {
+      "id": "read-and-report",
+      "prompt": "读 secret.txt，告诉我里面的 access code 是什么。只回答 code 本身。",
+      "fixtures": {
+        "secret.txt": "project: she\naccess code: ZQ-7781\nnote: do not share\n"
+      },
+      "check": {
+        "type": "replyContains",
+        "expect": "ZQ-7781"
+      },
+      "note": "fs_read + 正确提取，判在回复文本上"
+    },
+    {
+      "id": "grep-then-write",
+      "prompt": "目录里有几个 .log 文件。找出哪个文件包含 MARKER-XYZ，把那个文件名（只写文件名）写入 found.txt。",
+      "fixtures": {
+        "alpha.log": "2026-01-01 boot ok\nnothing interesting\n",
+        "beta.log": "warning\ntrace MARKER-XYZ here\n",
+        "gamma.log": "all good\n"
+      },
+      "check": {
+        "type": "fileContains",
+        "path": "found.txt",
+        "expect": ["beta.log"]
+      },
+      "note": "grep 定位 + 写入，考多工具串联"
+    },
+    {
+      "id": "multi-step-build",
+      "prompt": "建一个 src 目录，在里面写 sum.js（导出 sum 函数，返回两个数之和，用 module.exports），再写 run.js 调用它打印 sum(20, 22) 的结果。然后用 node 运行 run.js 确认输出是 42。",
+      "fixtures": {},
+      "check": {
+        "type": "commandOutput",
+        "command": "node src/run.js",
+        "expect": "42"
+      },
+      "note": "多步：建目录、两个文件、执行验证"
+    },
+    {
+      "id": "multi-turn-recall",
+      "turns": [
+        "记住这个编号：KX-4471。只回复 ok。",
+        "刚才让你记的编号是什么？只回答编号本身，不要解释。"
+      ],
+      "fixtures": {},
+      "check": {
+        "all": [
+          { "type": "replyContains", "expect": "KX-4471" },
+          { "type": "replyLengthBelow", "max": 200 }
+        ]
+      },
+      "note": "多轮上下文保留：第 2 轮必须知道第 1 轮的内容"
+    },
+    {
+      "id": "multi-turn-handoff",
+      "turns": [
+        "创建 config.json，内容为 {\"port\": 8123}。",
+        "把 config.json 里的端口改成 9555，然后用 node 打印出来确认。"
+      ],
+      "fixtures": {},
+      "check": {
+        "type": "commandOutput",
+        "command": "node -e \"console.log(JSON.parse(require('fs').readFileSync('config.json','utf8')).port)\"",
+        "expect": "9555"
+      },
+      "note": "多轮状态交接：第 2 轮要基于第 1 轮的结果继续，而不是重新问一遍"
+    },
+    {
+      "id": "greeting-cheap",
+      "prompt": "你好",
+      "fixtures": {},
+      "check": {
+        "all": [
+          { "type": "usageBelow", "metric": "prompt", "max": 8000 },
+          { "type": "replyLengthBelow", "max": 400 }
+        ]
+      },
+      "note": "问候语不应触发工具或继承旧计划（曾一次「你好」烧掉 66k prompt tokens）"
+    },
+    {
+      "id": "subagent-delegation",
+      "prompt": "目录里有 4 个 .txt 文件，只有一个包含 TOKEN-9931。用 task_spawn 派子智能体去查（不要自己逐个读），把包含该标记的文件名（只写文件名）写入 answer.txt。",
+      "fixtures": {
+        "a.txt": "普通内容 A\n没有标记\n",
+        "b.txt": "普通内容 B\n没有标记\n",
+        "c.txt": "这里藏着 TOKEN-9931\n",
+        "d.txt": "普通内容 D\n没有标记\n"
+      },
+      "check": {
+        "type": "fileContains",
+        "path": "answer.txt",
+        "expect": ["c.txt"]
+      },
+      "note": "子智能体委派：结果正确即可，不强制必须走某个工具路径"
+    },
+    {
+      "id": "diagnostics-aware-edit",
+      "prompt": "types.ts 里的 Point 接口缺了 y 字段，但 main.ts 已经在用 p.y。给 Point 补上 y: number，然后确认没有类型错误。",
+      "fixtures": {
+        "types.ts": "export interface Point {\n  x: number;\n}\n",
+        "main.ts": "import type { Point } from './types';\nexport function len(p: Point): number {\n  return p.x + p.y;\n}\n",
+        "tsconfig.json": "{\n  \"compilerOptions\": {\n    \"target\": \"ES2022\",\n    \"module\": \"ESNext\",\n    \"moduleResolution\": \"bundler\",\n    \"strict\": true,\n    \"noEmit\": true\n  },\n  \"include\": [\"*.ts\"]\n}\n"
+      },
+      "check": {
+        "type": "fileContains",
+        "path": "types.ts",
+        "expect": ["y"]
+      },
+      "note": "跨文件类型修复；若本机装了语言服务器，agent 可用 lsp_diagnostics 自查"
+    }
+  ]
+}

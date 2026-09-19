@@ -1,84 +1,108 @@
 .layout {
   display: flex;
+  flex-direction: column;
   height: 100%;
   width: 100%;
   overflow: hidden;
   background: var(--bg-primary);
 }
 
+.layoutBody {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
 .sidebar {
-  width: 240px;
-  min-width: 240px;
+  /*
+   * `0 0 auto`, not `0 1 auto`: with flex-shrink the layout overrode the width
+   * we asked for, so dragging a splitter only moved the edge a fraction of the
+   * cursor's travel (600px requested rendered as ~290px, then saturated) — the
+   * "resize doesn't follow the mouse" complaint. The panel's width must be
+   * authoritative; the chat column absorbs the slack instead.
+   */
+  flex: 0 0 auto;
+  width: var(--sidebar-w, 240px);
+  min-width: 0;
+  max-width: min(1200px, 92vw);
   height: 100%;
   border-right: 1px solid var(--border);
   background: var(--bg-secondary);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  transition: width var(--transition), min-width var(--transition);
+  /* Slightly richer than the plain token: the sidebar read a touch washed out. */
+  filter: saturate(1.08);
+  transition: width var(--transition-med), min-width var(--transition-med), opacity var(--transition);
+}
+
+/*
+ * While a splitter is being dragged, widths must track the cursor exactly.
+ *
+ * The transition above made resizing feel like it only applied on mouseup:
+ * `mousemove` sets --sidebar-w every frame, each write starts a fresh 280ms
+ * transition, and the element never catches up until the drag stops.
+ */
+.layoutDragging .sidebar,
+.layoutDragging .tracePanel {
+  transition: none !important;
+}
+
+.layoutDragging {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.center {
+  /* The only flexible column: it absorbs whatever the fixed-width side panels
+     leave, so a splitter drag lands exactly where the cursor is. */
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .main {
+  flex: 1 1 auto;
+  min-width: 0;
   flex: 1;
   display: flex;
   flex-direction: column;
-  height: 100%;
+  min-height: 0;
   min-width: 0;
   overflow: hidden;
 }
 
 .tracePanel {
-  width: 320px;
-  min-width: 320px;
+  /* Same reasoning as .sidebar — see the comment there. */
+  flex: 0 0 auto;
+  width: var(--trace-w, 320px);
+  min-width: 0;
+  max-width: min(1200px, 92vw);
   height: 100%;
   border-left: 1px solid var(--border);
   background: var(--bg-secondary);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  transition: width var(--transition), min-width var(--transition), opacity var(--transition);
-}
-
-.tracePanelHidden {
-  width: 0;
-  min-width: 0;
-  opacity: 0;
-  border-left: none;
-  overflow: hidden;
-}
-
-.tracePanelToggle {
-  position: fixed;
-  right: 12px;
-  top: 12px;
-  z-index: 100;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-md);
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: background var(--transition), color var(--transition);
-}
-
-.tracePanelToggle:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
+  transition: width var(--transition-med), min-width var(--transition-med), opacity var(--transition);
 }
 
 .overlay {
   position: fixed;
   inset: 0;
-  z-index: 200;
-  background: rgba(0, 0, 0, 0.6);
+  z-index: var(--z-modal);
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: saturate(140%) blur(14px);
+  -webkit-backdrop-filter: saturate(140%) blur(14px);
   display: flex;
   align-items: center;
   justify-content: center;
-  animation: fadeIn 200ms ease-out;
+  animation: sheFade 240ms var(--ease-out) both;
 }
 
 @keyframes fadeIn {
@@ -86,16 +110,288 @@
   to { opacity: 1; }
 }
 
-@media (max-width: 860px) {
-  .sidebar {
-    width: 0;
-    min-width: 0;
-    border-right: none;
-  }
-
-  .tracePanel {
-    width: 0;
-    min-width: 0;
+/* Narrow: prefer chat — collapse side panels */
+@media (max-width: 1000px) {
+  .layout:not(.layoutFocus) .tracePanel {
+    width: 0 !important;
+    min-width: 0 !important;
+    max-width: 0 !important;
+    opacity: 0;
     border-left: none;
+    pointer-events: none;
+  }
+  .layout:not(.layoutFocus) .resizeHandleTrace {
+    display: none !important;
   }
 }
+
+@media (max-width: 780px) {
+  .layout:not(.layoutFocus) .sidebar {
+    width: 0 !important;
+    min-width: 0 !important;
+    max-width: 0 !important;
+    opacity: 0;
+    border-right: none;
+    pointer-events: none;
+  }
+  .layout:not(.layoutFocus) .resizeHandleSidebar {
+    display: none !important;
+  }
+  .center {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .layout {
+    min-width: 0;
+  }
+}
+
+
+.resizeHandle {
+  flex: 0 0 8px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  z-index: var(--z-sticky);
+}
+.resizeHandle::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 3px;
+  height: 28px;
+  border-radius: 999px;
+  transform: translate(-50%, -50%) scaleY(0.55);
+  background: color-mix(in srgb, var(--text-tertiary) 55%, transparent);
+  opacity: 0;
+  transition:
+    opacity var(--transition-fast),
+    transform 280ms var(--ease-spring),
+    background var(--transition),
+    height var(--transition-med);
+}
+.resizeHandle:hover::after,
+.resizeHandleActive::after {
+  opacity: 1;
+  transform: translate(-50%, -50%) scaleY(1);
+  height: 48px;
+  background: var(--accent);
+}
+.resizeHandle:hover,
+.resizeHandleActive {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.layoutFocus :global(.sidebar),
+.layoutFocus .sidebar {
+  display: none !important;
+}
+.layoutFocus .resizeHandle {
+  display: none !important;
+}
+.layoutFocus .tracePanel {
+  display: none !important;
+}
+.layoutFocus .main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+
+.resizeHandleRow {
+  flex: 0 0 8px;
+  cursor: row-resize;
+  background: transparent;
+  position: relative;
+  z-index: var(--z-sticky);
+}
+.resizeHandleRow::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  height: 3px;
+  width: 28px;
+  border-radius: 999px;
+  transform: translate(-50%, -50%) scaleX(0.55);
+  background: color-mix(in srgb, var(--text-tertiary) 55%, transparent);
+  opacity: 0;
+  transition:
+    opacity var(--transition-fast),
+    transform 280ms var(--ease-spring),
+    background var(--transition),
+    width var(--transition-med);
+}
+.resizeHandleRow:hover::after,
+.resizeHandleRow:active::after {
+  opacity: 1;
+  transform: translate(-50%, -50%) scaleX(1);
+  width: 48px;
+  background: var(--accent);
+}
+.resizeHandleRow:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+
+@media (prefers-reduced-motion: reduce) {
+  .resizeHandle::after,
+  .resizeHandleRow::after {
+    transition: none !important;
+    transform: translate(-50%, -50%) !important;
+  }
+}
+
+
+.sidebarFab {
+  display: none;
+  position: fixed;
+  left: 10px;
+  bottom: 52px;
+  z-index: var(--z-fab);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-secondary) 90%, transparent);
+  backdrop-filter: blur(10px);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+}
+@media (max-width: 780px) {
+.sidebarFab { display: inline-flex; }
+}
+.layoutSidebarForce .sidebar {
+  width: min(320px, 92vw) !important;
+  min-width: 0 !important;
+  max-width: 84vw !important;
+  opacity: 1 !important;
+  pointer-events: auto !important;
+  border-right: 1px solid var(--border) !important;
+  position: relative;
+  z-index: var(--z-sidebar-force);
+  box-shadow: var(--shadow-lg);
+}
+.layoutSidebarForce .resizeHandleSidebar {
+  display: none !important;
+}
+
+/* ── Proper collapse (distinct from the narrow-screen "force" mode) ── */
+.layoutSidebarCollapsed .sidebar {
+  width: 0 !important;
+  min-width: 0 !important;
+  opacity: 0;
+  border-right-color: transparent;
+  pointer-events: none;
+}
+
+.layoutSidebarCollapsed .resizeHandleSidebar {
+  display: none !important;
+}
+
+/* Slim rail with an expand affordance, visible only while collapsed. */
+.sidebarRail {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-right: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-secondary) 70%, transparent);
+  backdrop-filter: blur(14px) saturate(150%);
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
+  animation: railIn 220ms var(--ease-out) both;
+}
+
+@keyframes railIn {
+  from { opacity: 0; transform: translateX(-6px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+.railBtn {
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  border: none;
+  background: var(--fill-control);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 170ms var(--ease-out), background 170ms var(--ease-out);
+}
+.railBtn:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+.railLabel {
+  writing-mode: vertical-rl;
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  color: var(--text-tertiary);
+  user-select: none;
+}
+
+/* Collapse button inside the sidebar header area. */
+.sidebarCollapseBtn {
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 160ms var(--ease-out), background 160ms var(--ease-out);
+}
+.sidebarCollapseBtn:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+/* Reopen handle for the trace panel (shown after the panel is closed). */
+.traceFab {
+  position: fixed;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: var(--z-fab);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 8px 14px;
+  border-radius: 999px 0 0 999px;
+  border: 1px solid var(--border);
+  border-right: none;
+  background: color-mix(in srgb, var(--bg-secondary) 88%, transparent);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  writing-mode: vertical-rl;
+  letter-spacing: 0.14em;
+  transition:
+    background 200ms var(--ease-out),
+    color 200ms var(--ease-out),
+    padding 220ms var(--ease-spring);
+}
+
+.traceFab:hover {
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg-secondary));
+  color: var(--text-primary);
+  padding-right: 18px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .traceFab { transition: none !important; }
+}
+
+
+
+.layoutDesktop { min-height: 100vh; display: flex; flex-direction: column; }

@@ -7,6 +7,16 @@ interface PulseTracePanelProps {
   onClose: () => void;
 }
 
+const EDGE_LABELS: Record<string, string> = {
+  weak: '弱边',
+  co_occurrence: '共现',
+  temporal: '时序',
+  causal_candidate: '因果候选',
+  hierarchical: '层级',
+  cross_group: '跨组',
+  group_member: '同组',
+  parent_child: '父→子',
+};
 function energyColor(energy: number): string {
   const h = 210;
   const s = 80;
@@ -34,7 +44,7 @@ function HopArrow({ hop }: { hop: PulseHop }) {
       </div>
       <div className={styles.hopDetail}>
         <span className={`${styles.hopBadge} ${badgeClass}`}>
-          {hop.edgeKind}
+          {EDGE_LABELS[hop.edgeKind] ?? hop.edgeKind}
         </span>
         <span className={styles.hopEnergy}>
           {hop.energyBefore.toFixed(2)} → {hop.energyAfter.toFixed(2)}
@@ -61,7 +71,17 @@ function TraceEntry({ trace }: { trace: ActivationTrace }) {
 
   return (
     <div className={styles.traceEntry}>
-      <div className={styles.seedNode} onClick={toggleExpand}>
+      {/*
+        A <button> rather than a div with onClick: this expands the trace entry, so it
+        is a control and has to be reachable and operable from the keyboard. Marked up
+        as a disclosure so the state is announced instead of only being visible.
+      */}
+      <button
+        type="button"
+        className={styles.seedNode}
+        onClick={toggleExpand}
+        aria-expanded={expanded}
+      >
         <div
           className={styles.seedIcon}
           style={{ background: energyColor(trace.activationLevel) }}
@@ -91,7 +111,7 @@ function TraceEntry({ trace }: { trace: ActivationTrace }) {
             />
           </div>
         </div>
-      </div>
+      </button>
 
       {allHops.map((hop, i) => (
         <HopArrow key={`${hop.fromId}-${hop.toId}-${i}`} hop={hop} />
@@ -107,7 +127,7 @@ function TraceEntry({ trace }: { trace: ActivationTrace }) {
           </div>
           <div className={styles.hopDetail}>
             <span className={styles.hopEnergy}>
-              {trace.pulseSeeds.length} seed{trace.pulseSeeds.length !== 1 ? 's' : ''} · Σ energy {totalEnergy.toFixed(3)}
+              {trace.pulseSeeds.length} 个种子 · 总能量 {totalEnergy.toFixed(3)}
             </span>
           </div>
         </div>
@@ -116,19 +136,19 @@ function TraceEntry({ trace }: { trace: ActivationTrace }) {
       {expanded && (
         <div className={styles.traceDetail}>
           <div className={styles.traceDetailRow}>
-            <span className={styles.traceDetailLabel}>Node ID</span>
+            <span className={styles.traceDetailLabel}>节点 ID</span>
             <span className={styles.traceDetailValue}>{trace.nodeId}</span>
           </div>
           <div className={styles.traceDetailRow}>
-            <span className={styles.traceDetailLabel}>Activation</span>
+            <span className={styles.traceDetailLabel}>激活能量</span>
             <span className={styles.traceDetailValue}>{trace.activationLevel.toFixed(4)}</span>
           </div>
           <div className={styles.traceDetailRow}>
-            <span className={styles.traceDetailLabel}>Seeds</span>
+            <span className={styles.traceDetailLabel}>种子数</span>
             <span className={styles.traceDetailValue}>{trace.pulseSeeds.length}</span>
           </div>
           <div className={styles.traceDetailRow}>
-            <span className={styles.traceDetailLabel}>Total hops</span>
+            <span className={styles.traceDetailLabel}>跳数</span>
             <span className={styles.traceDetailValue}>{allHops.length}</span>
           </div>
           {trace.groupPath.length > 0 && (
@@ -149,13 +169,13 @@ function TraceEntry({ trace }: { trace: ActivationTrace }) {
 
 export function PulseTracePanel({ result, onClose }: PulseTracePanelProps) {
   return (
-    <div className={styles.panel}>
+    <div className={styles.panel} data-surface="panel">
       <div className={styles.header}>
         <div className={styles.headerTitle}>
           <span className={styles.headerDot} />
-          PulseSeed Trace
+          组结构共振轨迹
         </div>
-        <button className={styles.closeBtn} onClick={onClose} title="Close panel (Esc)">
+        <button className={styles.closeBtn} onClick={onClose} title="关闭面板（Esc）">
           ×
         </button>
       </div>
@@ -163,29 +183,29 @@ export function PulseTracePanel({ result, onClose }: PulseTracePanelProps) {
       {!result ? (
         <div className={styles.empty}>
           <div className={styles.emptyIcon}>◉</div>
-          <div>No activation traces yet</div>
+          <div>还没有共振轨迹</div>
           <div style={{ fontSize: '11px', opacity: 0.7 }}>
-            Traces appear when the agent queries the KB
+            智能体查询知识库时，这里会显示激活路径
           </div>
         </div>
       ) : (
         <>
           <div className={styles.metaBar}>
             <div className={styles.metaItem}>
-              Nodes: <span className={styles.metaValue}>{result.nodes.length}</span>
+              命中: <span className={styles.metaValue}>{result.nodes.length}</span>
             </div>
             <div className={styles.metaItem}>
-              Scanned: <span className={styles.metaValue}>{result.totalNodesScanned}</span>
+              扫描: <span className={styles.metaValue}>{result.totalNodesScanned}</span>
             </div>
             <div className={styles.metaItem}>
-              Time: <span className={styles.metaValue}>{result.queryTimeMs}ms</span>
+              耗时: <span className={styles.metaValue}>{result.queryTimeMs}ms</span>
             </div>
           </div>
 
           <div className={styles.body}>
             {result.traces.length === 0 ? (
               <div className={styles.empty}>
-                <div>No activation traces in this result</div>
+                <div>本次查询没有共振轨迹</div>
               </div>
             ) : (
               result.traces.map((trace, i) => (

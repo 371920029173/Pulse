@@ -1,0 +1,86 @@
+/*
+ * Syntax highlighting theme for highlight.js output.
+ *
+ * Hand-written against the app's own tokens rather than importing one of
+ * highlight.js's bundled themes: those carry their own background and fixed
+ * colours, which clash with the shell (and break in light mode). Here every
+ * colour is theme-aware, so code reads correctly in both.
+ *
+ * Class names come from highlight.js: .hljs-keyword, .hljs-string, etc.
+ */
+
+.hljs {
+  color: var(--text-primary);
+  background: transparent;
+}
+
+/* Comments are deliberately muted — they should recede, not compete. */
+.hljs-comment,
+.hljs-quote {
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-doctag,
+.hljs-name {
+  color: var(--syntax-keyword);
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute,
+.hljs-meta .hljs-string {
+  color: var(--syntax-string);
+}
+
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-selector-attr,
+.hljs-selector-pseudo {
+  color: var(--syntax-number);
+}
+
+.hljs-title,
+.hljs-section,
+.hljs-title.class_,
+.hljs-title.function_ {
+  color: var(--syntax-function);
+}
+
+.hljs-type,
+.hljs-class .hljs-title,
+.hljs-built_in,
+.hljs-builtin-name {
+  color: var(--syntax-type);
+}
+
+.hljs-attr,
+.hljs-property,
+.hljs-selector-class,
+.hljs-selector-id {
+  color: var(--syntax-attr);
+}
+
+.hljs-params,
+.hljs-punctuation {
+  color: var(--text-primary);
+}
+
+.hljs-meta,
+.hljs-meta .hljs-keyword {
+  color: var(--text-tertiary);
+}
+
+.hljs-deletion {
+  color: var(--danger);
+}
+
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }

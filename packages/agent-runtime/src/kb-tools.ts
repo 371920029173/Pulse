@@ -1,4 +1,4 @@
-import type { ToolDefinition, EdgeKind } from '@she/shared';
+import type { ToolDefinition, EdgeKind, KBQueryResult } from '@she/shared';
 import type { GroupKBEngine } from '@she/kb';
 
 export interface KBToolSet {
@@ -6,7 +6,16 @@ export interface KBToolSet {
   execute: (name: string, args: Record<string, unknown>) => Promise<string>;
 }
 
-export function createKBTools(engine: GroupKBEngine): KBToolSet {
+export interface KBToolOptions {
+  /**
+   * Called with the full structured result whenever `kb_query` runs, so the UI
+   * can render the activation trace. Previously the UI only ever saw the tool
+   * *arguments*, which is why the trace panel stayed empty.
+   */
+  onQueryResult?: (result: KBQueryResult) => void;
+}
+
+export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBToolSet {
   const toolMap = new Map<string, { def: ToolDefinition; fn: (args: Record<string, unknown>) => Promise<string> }>();
 
   function reg(def: ToolDefinition, fn: (args: Record<string, unknown>) => Promise<string>) {
@@ -31,35 +40,38 @@ export function createKBTools(engine: GroupKBEngine): KBToolSet {
       const budget = args.budget as number | undefined;
       const result = engine.query(query, { budget });
 
+      // Surface the structured result so the UI trace panel can render it.
+      opts?.onQueryResult?.(result);
+
       if (result.nodes.length === 0) {
         return 'No results found in Group KB.';
       }
 
       const lines: string[] = [];
       lines.push(`Found ${result.nodes.length} nodes across ${result.groupsVisited.length} groups (${result.queryTimeMs.toFixed(1)}ms, ${result.totalNodesScanned} scanned)`);
-      lines.push(`PulseSeeds emitted: ${result.pulseSeeds.length}`);
       lines.push('');
 
-      for (let i = 0; i < result.nodes.length && i < 10; i++) {
+      // Keep the payload small: every extra token here is re-sent on each
+      // tool-loop iteration, which is how a one-word greeting burned ~20k.
+      const MAX_NODES = 6;
+      const PREVIEW = 180;
+
+      for (let i = 0; i < result.nodes.length && i < MAX_NODES; i++) {
         const node = result.nodes[i];
         const trace = result.traces[i];
-        lines.push(`[${i + 1}] ${node.title} (${node.kind}) — activation: ${trace?.activationLevel.toFixed(3)}`);
+        const score = trace?.finalScore !== undefined
+          ? trace.finalScore.toFixed(3)
+          : trace?.activationLevel.toFixed(3);
+        lines.push(`[${i + 1}] ${node.title} (${node.kind}) score=${score}`);
         if (trace?.groupPath.length) {
-          lines.push(`    Group path: ${trace.groupPath.join(' | ')}`);
+          lines.push(`    group: ${trace.groupPath.join(' | ')}`);
         }
-        if (trace?.reason) {
-          lines.push(`    Reason: ${trace.reason}`);
-        }
-        if (trace?.pulseSeeds.length) {
-          for (const ps of trace.pulseSeeds.slice(0, 3)) {
-            const hops = ps.path.map(h => `${h.edgeKind}(${h.energyAfter.toFixed(2)})`).join(' → ');
-            lines.push(`    PulseSeed: ${hops || 'direct'}`);
-          }
-        }
-        const preview = node.content.slice(0, 300).replace(/\n/g, ' ');
-        lines.push(`    Content: ${preview}`);
+        const preview = node.content.slice(0, PREVIEW).replace(/\n/g, ' ');
+        lines.push(`    ${preview}${node.content.length > PREVIEW ? '…' : ''}`);
         lines.push(`    [Node: ${node.id}]`);
-        lines.push('');
+      }
+      if (result.nodes.length > MAX_NODES) {
+        lines.push(`… ${result.nodes.length - MAX_NODES} more omitted; refine the query if needed.`);
       }
 
       return lines.join('\n');
@@ -97,7 +109,8 @@ export function createKBTools(engine: GroupKBEngine): KBToolSet {
         ? kind as (typeof validKinds)[number]
         : 'fact' as const;
 
-      const mem = engine.addMemory(group.id, nodeKind, title, content);
+      // Maintained write: keeps the target group from growing unbounded.
+      const mem = engine.addMemoryMaintained(group.id, nodeKind, title, content);
       return `Added memory "${title}" to group "${groupName}" [Node: ${mem.id}, Group: ${group.id}]`;
     },
   );

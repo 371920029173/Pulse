@@ -1,0 +1,80 @@
+{
+  "name": "@she/desktop",
+  "version": "0.2.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "description": "Pulse — local coding agent (desktop)",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "dist:win": "node ../../scripts/stage-desktop-runtime.mjs && electron-builder --win nsis portable --x64",
+    "dist:dir": "electron-builder --win dir --x64",
+    "stage": "node ../../scripts/stage-desktop-runtime.mjs"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "productName": "Pulse",
+  "author": "Pulse",
+  "build": {
+    "appId": "com.she.pulse",
+    "productName": "Pulse",
+    "copyright": "Copyright © Pulse",
+    "directories": {
+      "output": "../../release/desktop",
+      "buildResources": "assets"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "runtime",
+        "to": "runtime",
+        "filter": [
+          "**/*",
+          "!**/*.d.ts",
+          "!**/*.d.ts.map",
+          "!**/*.map",
+          "!**/README*",
+          "!**/CHANGELOG*"
+        ]
+      }
+    ],
+    "asar": true,
+    "icon": "assets/icon.ico",
+    "win": {
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Pulse-${version}-${os}-${arch}.${ext}",
+      "executableName": "Pulse",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Pulse",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico"
+    },
+    "portable": {
+      "artifactName": "Pulse-Portable-${version}.${ext}"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "electronVersion": "33.4.11"
+  }
+}

@@ -1,0 +1,322 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: color-mix(in srgb, var(--bg-primary) 55%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: clFade 180ms var(--ease-out) both;
+}
+@keyframes clFade { from { opacity: 0; } to { opacity: 1; } }
+
+.panel {
+  width: min(1080px, 97vw);
+  height: min(820px, 92vh);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--bg-secondary) 97%, transparent);
+  backdrop-filter: blur(24px) saturate(150%);
+  -webkit-backdrop-filter: blur(24px) saturate(150%);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: clIn 260ms var(--ease-sheet) both;
+}
+@keyframes clIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.99); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 20px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.title { margin: 0; font-size: 15px; font-weight: 600; color: var(--text-primary); }
+.sub { margin: 4px 0 0; font-size: 12.5px; color: var(--text-secondary); line-height: 1.6; }
+.close {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.close:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+.body { flex: 1 1 auto; display: flex; min-height: 0; }
+
+/* ── left rail ── */
+.rail {
+  width: 210px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  padding: 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.roomItem {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 9px 11px;
+  border-radius: 11px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: background 160ms var(--ease-out), border-color 160ms var(--ease-out);
+}
+.roomItem:hover { background: var(--bg-hover); }
+.roomItemOn {
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.roomName { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
+.roomMeta { font-size: 11px; color: var(--text-tertiary); }
+
+.hint { font-size: 12px; color: var(--text-tertiary); margin: 6px 0; line-height: 1.6; }
+
+/* ── right main ── */
+.main { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 12px 16px; }
+
+.placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.placeholderIcon { font-size: 34px; opacity: 0.4; }
+.placeholderText { font-size: 14.5px; font-weight: 600; color: var(--text-primary); }
+.placeholderHint { font-size: 12.5px; color: var(--text-secondary); text-align: center; line-height: 1.7; }
+
+.roomHeader { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.roomTitleInput {
+  flex: 1 1 160px;
+  min-width: 120px;
+  padding: 6px 10px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  outline: none;
+}
+.roomTitleInput:hover { border-color: var(--border); }
+.roomTitleInput:focus { border-color: var(--border-focus); background: var(--bg-tertiary); }
+.roomStatus { font-size: 11.5px; color: var(--text-tertiary); margin-left: auto; }
+
+/* ── role editor ── */
+.roleEditor {
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 12px;
+  margin-bottom: 10px;
+  background: color-mix(in srgb, var(--bg-tertiary) 45%, transparent);
+  max-height: 46%;
+  overflow-y: auto;
+  animation: clFade 200ms var(--ease-out) both;
+}
+.roleEditorHead { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); margin-bottom: 9px; }
+
+.roleGrid { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+
+.roleCard {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+.roleDot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.roleInfo { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.roleName { font-size: 12.5px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; }
+.roleCustom {
+  font-style: normal;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--accent);
+}
+.roleTitle { font-size: 11px; color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.counter { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.counter button {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  /* Filled, not outlined — consistent with every other control. */
+  border: none;
+  background: var(--fill-control);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+.counter button:hover:not(:disabled) { background: var(--fill-control-hover); }
+.counter button:disabled { opacity: 0.35; cursor: not-allowed; }
+.countVal { min-width: 18px; text-align: center; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+
+.roleDel {
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.roleDel:hover { color: var(--danger); }
+
+.roleAddRow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.roleAddLabel { font-size: 11.5px; color: var(--text-tertiary); margin-right: 2px; }
+.presetChip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: color 160ms var(--ease-out), border-color 160ms var(--ease-out);
+}
+.presetChip:hover:not(:disabled) { color: var(--text-primary); border-color: var(--accent); }
+.presetChip:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.customRole { border-top: 1px dashed var(--border); padding-top: 10px; }
+.customRow { display: flex; gap: 6px; margin: 6px 0; flex-wrap: wrap; }
+
+.input, .select, .textarea, .goalInput {
+  padding: 7px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  outline: none;
+}
+.input:focus, .select:focus, .textarea:focus, .goalInput:focus { border-color: var(--border-focus); }
+.input { flex: 1 1 140px; min-width: 110px; }
+.select { flex: 0 0 auto; }
+.textarea { width: 100%; resize: vertical; margin-bottom: 8px; font-family: inherit; }
+
+/* ── member strip ── */
+.strip { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+
+.memberChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px 4px 5px;
+  border-radius: 999px;
+  border: none;
+  background: var(--bg-secondary);
+  font-size: 11.5px;
+  transition: border-color 200ms var(--ease-out), background 200ms var(--ease-out);
+}
+.memberAvatar {
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.memberName { color: var(--text-primary); font-weight: 500; }
+.memberPhase { color: var(--text-tertiary); font-size: 10px; }
+
+.mIdle { opacity: 0.65; }
+.mRunning {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  animation: clPulse 2s ease-in-out infinite;
+}
+.mDone { border-color: color-mix(in srgb, var(--success) 60%, transparent); }
+.mError { border-color: var(--danger); }
+
+@keyframes clPulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 40%, transparent); }
+  50%      { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 0%, transparent); }
+}
+
+/* ── transcript ── */
+.transcript {
+  flex: 1 1 auto;
+  min-height: 120px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--bg-primary);
+  margin-bottom: 10px;
+}
+
+.msg { margin-bottom: 12px; }
+.msgHead { display: flex; align-items: center; gap: 7px; margin-bottom: 3px; }
+.msgName { font-size: 12px; color: var(--text-secondary); }
+.msgTag {
+  font-size: 9.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+.msgBody { font-size: 13px; line-height: 1.6; color: var(--text-primary); white-space: pre-wrap; word-break: break-word; }
+
+.goalInput { width: 100%; resize: vertical; margin-bottom: 8px; font-family: inherit; }
+
+.actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.err { font-size: 11.5px; color: var(--danger); }
+
+.primaryBtn {
+  padding: 8px 16px;
+  border-radius: 10px;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 180ms var(--ease-out), transform 200ms var(--ease-spring);
+}
+.primaryBtn:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 86%, #fff); transform: translateY(-1px); }
+.primaryBtn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.ghostBtn {
+  padding: 7px 13px;
+  border-radius: 10px;
+  border: none;
+  background: var(--fill-control);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: color 160ms var(--ease-out), background 160ms var(--ease-out);
+}
+.ghostBtn:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
+.ghostBtn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+@media (prefers-reduced-motion: reduce) {
+  .backdrop, .panel, .roleEditor, .mRunning { animation: none !important; transition: none !important; }
+}

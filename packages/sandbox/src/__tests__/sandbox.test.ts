@@ -1,4 +1,4 @@
-import { describe, it, before, after } from 'node:test';
+﻿import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -37,7 +37,8 @@ describe('SandboxShell', () => {
   });
 
   it('should time out long commands', async () => {
-    const result = await shell.exec('sleep 60', { timeout: 500 });
+    const hang = process.platform === 'win32' ? 'ping -n 60 127.0.0.1 >nul' : 'sleep 60';
+    const result = await shell.exec(hang, { timeout: 500 });
     assert.equal(result.timedOut, true);
     assert.equal(result.exitCode, 124);
   });
@@ -112,7 +113,14 @@ describe('Tool: fs_read', () => {
 describe('Tool: fs_write', () => {
   it('should write a file', async () => {
     const tools = createTools(shell, tempDir);
-    const result = await tools.execute('fs_write', { path: 'new-file.txt', content: 'written content' });
+    const first = await tools.execute('fs_write', { path: 'new-file.txt', content: 'written content' });
+    const parsed = JSON.parse(first);
+    assert.ok(parsed.needs_confirm);
+    const result = await tools.execute('fs_write', {
+      path: 'new-file.txt',
+      content: 'written content',
+      _confirm_ticket: parsed.needs_confirm.ticket_id,
+    });
     assert.ok(result.includes('Wrote'));
 
     const content = await readFile(join(tempDir, 'new-file.txt'), 'utf-8');
@@ -121,7 +129,13 @@ describe('Tool: fs_write', () => {
 
   it('should create parent directories', async () => {
     const tools = createTools(shell, tempDir);
-    await tools.execute('fs_write', { path: 'deep/nested/dir/file.txt', content: 'deep' });
+    const first = await tools.execute('fs_write', { path: 'deep/nested/dir/file.txt', content: 'deep' });
+    const parsed = JSON.parse(first);
+    await tools.execute('fs_write', {
+      path: 'deep/nested/dir/file.txt',
+      content: 'deep',
+      _confirm_ticket: parsed.needs_confirm.ticket_id,
+    });
 
     const content = await readFile(join(tempDir, 'deep/nested/dir/file.txt'), 'utf-8');
     assert.equal(content, 'deep');
@@ -166,6 +180,21 @@ describe('Tool: unknown', () => {
   });
 });
 
+
+describe('Confirm tickets', () => {
+  it('should require confirm for shell tool', async () => {
+    const tools = createTools(shell, tempDir);
+    const first = await tools.execute('shell', { command: 'echo hi' });
+    const parsed = JSON.parse(first);
+    assert.ok(parsed.needs_confirm);
+    const second = await tools.execute('shell', {
+      command: 'echo hi',
+      _confirm_ticket: parsed.needs_confirm.ticket_id,
+    });
+    assert.ok(second.includes('exit code'));
+  });
+});
+
 describe('ToolSet definitions', () => {
   it('should have all 8 tool definitions', () => {
     const tools = createTools(shell, tempDir);
@@ -191,3 +220,4 @@ describe('ToolSet definitions', () => {
     assert.equal(readDef.isDangerous, undefined);
   });
 });
+

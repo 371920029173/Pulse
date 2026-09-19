@@ -7,3 +7,20 @@ dist/
 .env
 .she/
 *.tsbuildinfo
+
+# One-off debug probes (not part of the product)
+_*.mjs
+
+# Local run logs
+_srv.*.log
+*.log
+
+# 打包产物（node scripts/release.mjs 生成）
+release/
+_*.js
+_*.py
+*.corrupt-*
+
+# Electron staged runtime (rebuilt by stage-desktop-runtime.mjs)
+packages/desktop/runtime/
+

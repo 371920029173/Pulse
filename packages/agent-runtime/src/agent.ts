@@ -4,74 +4,450 @@ import type {
   LLMMessage,
   ToolDefinition,
   StreamChunk,
+  ConfirmTicketInfo,
+  PendingPatchInfo,
 } from '@she/shared';
-import { createLogger } from '@she/shared';
+import { createLogger, resolveModel, resolveSubagentModel, describeModel } from '@she/shared';
 import type { GroupKBEngine } from '@she/kb';
 import { OpenAIProvider } from './providers/openai.js';
 import { AnthropicProvider } from './providers/anthropic.js';
 import { getSystemPrompt } from './system-prompt.js';
 import type { ToolSet } from '@she/sandbox';
+import { PendingPatchStore, CheckpointStore, resolveInsideWorkspace } from '@she/sandbox';
 import { createKBTools } from './kb-tools.js';
+import { createPlanTools } from './plan-tools.js';
+import { LspManager, makeLspTools, executeLspTool } from './lsp-tools.js';
+import { makeScheduleTools, executeScheduleTool } from './schedule-tools.js';
+import type { ScheduleBridge, WindowView } from './schedule-tools.js';
+import { createIngestTools } from './ingest-tools.js';
+import { createMemoTools } from './memo-tools.js';
+import { createSubagentTools, type SubagentRunner } from './subagent-tools.js';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 
 const log = createLogger('agent');
 
+/**
+ * A turn is already running for this conversation.
+ *
+ * A distinct type rather than a bare Error so the server can answer 409 (the request
+ * conflicts with current state) instead of 500 (the request itself was wrong). The
+ * distinction matters to a client: 409 is retryable once the turn finishes, 500 is
+ * not.
+ */
+export class TurnInProgressError extends Error {
+  constructor(message = '这一轮对话还在进行中。请等它结束，或使用「追加」把内容接在后面。') {
+    super(message);
+    this.name = 'TurnInProgressError';
+  }
+}
+
 export class Agent {
   private provider: LLMProvider;
+  private fallbackProvider: LLMProvider | null = null;
   private history: LLMMessage[] = [];
+  // reasoning_tokens is tracked because the thinking-level slider is only
+  // verifiable if its effect (a separate reasoning budget) is visible.
+  // Cache counters are tracked because a prompt-cache regression is otherwise
+  // invisible until the bill arrives — see docs/context-and-caching.md.
+  private tokenUsage = {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    reasoning_tokens: 0,
+    cache_hit_tokens: 0,
+    cache_miss_tokens: 0,
+  };
   private allToolDefs: ToolDefinition[] = [];
+  /** Code intelligence; null when no language server is installed. */
+  private lsp: LspManager | null = null;
+  /**
+   * Notified after every tool call with its name, duration, and whether it failed.
+   *
+   * A callback rather than a counter so agent-runtime stays free of any dependency
+   * on where metrics are collected.
+   */
+  private toolObserver: ((name: string, ms: number, failed: boolean) => void) | null = null;
+
+  /** Observe tool calls. Used by the server to expose usage metrics. */
+  setToolObserver(fn: ((name: string, ms: number, failed: boolean) => void) | null): void {
+    this.toolObserver = fn;
+  }
   private executors: Map<string, (args: Record<string, unknown>) => Promise<string>> = new Map();
   private systemPrompt: string;
+  private lastPending: { ticket: ConfirmTicketInfo; toolCallId: string; name: string; args: Record<string, unknown> } | null = null;
+  private lastPatch: PendingPatchInfo | null = null;
+  private patches: PendingPatchStore;
+  private checkpoints: CheckpointStore;
+  /**
+   * User messages supplied while a turn is already running. Drained into the
+   * conversation at the next tool-loop iteration so the user can add context
+   * without stopping the agent.
+   */
+  private pendingInterjections: string[] = [];
+
+  /**
+   * Sink for tool-originated stream events during the current turn. Set on
+   * entry to each public method and cleared in a finally block.
+   */
+  private toolEventSink: ((chunk: StreamChunk) => void) | null = null;
+  /** Delegation runner; null means this agent cannot spawn children. */
+  private subagentRunner: SubagentRunner | null = null;
+  /** Scheduling bridge; null means this agent cannot schedule work. */
+  private scheduleBridge: ScheduleBridge | null = null;
+  /** Applies a working-window change. Injected by the server, which owns config. */
+  private setScheduleWindow: ((w: WindowView | null) => Promise<void> | void) | null = null;
+  /** True when this agent is itself a delegated child (see constructor opts). */
+  private isSubagent = false;
+  /** Optional sink for TaskCards (server-owned board). */
+  private onTaskEvent: ((e: { id: string; kind: string; label: string; phase: 'running' | 'done' | 'error'; detail?: string }) => void) | null = null;
+  private taskIdByLabel = new Map<string, string>();
+  /** Aborts the in-flight turn (LLM request + tool loop). */
+  private aborter: AbortController | null = null;
+  /**
+   * True while a turn is executing, for ANY entry point.
+   *
+   * Separate from `aborter`, which only `chat()` sets — so `isRunning()` used to
+   * report false while a patch-application loop was running, and nothing stopped a
+   * second path from running the loop concurrently.
+   */
+  private turnActive = false;
 
   constructor(
     private config: SheConfig,
     kbEngine: GroupKBEngine,
     sandboxTools: ToolSet,
+    /** Conversation this agent serves; scopes per-chat state such as plans. */
+    private sessionId: string | null = null,
+    opts?: {
+      /**
+       * Enables `schedule_*` tools when provided.
+       *
+       * Injected because the task store belongs to the scheduler in the server,
+       * and both must see the same tasks — the agent creating its own store would
+       * produce two files that overwrite each other.
+       */
+      scheduleBridge?: ScheduleBridge;
+      /** Applies a working-window change; the server owns that config. */
+      setScheduleWindow?: (w: WindowView | null) => Promise<void> | void;
+      /**
+       * Enables `task_spawn` when provided.
+       *
+       * Injected rather than imported: constructing a child agent needs the
+       * server's tool wiring, and agent-runtime must not depend on that. Absent
+       * means no delegation tool at all — which is exactly how a CHILD agent is
+       * built, so recursion is structurally impossible rather than merely
+       * guarded.
+       */
+      subagentRunner?: SubagentRunner;
+      /** UI TaskCards sink (background long-task progress). */
+      onTaskEvent?: (e: { id: string; kind: string; label: string; phase: 'running' | 'done' | 'error'; detail?: string }) => void;
+      /**
+       * Marks this agent as a delegated child.
+       *
+       * Children run unattended, so `ask_user` is removed: a question nobody
+       * can answer would stall the subtask until its timeout. They also must
+       * not write shared artifacts (reports, plans) that the parent owns.
+       */
+      isSubagent?: boolean;
+    },
   ) {
-    if (config.llm.provider === 'anthropic') {
+    this.subagentRunner = opts?.subagentRunner ?? null;
+    this.onTaskEvent = opts?.onTaskEvent ?? null;
+    this.isSubagent = Boolean(opts?.isSubagent);
+    const level = config.llm.thinkingLevel || 'medium';
+    /*
+     * Which model this agent talks to.
+     *
+     * A subagent resolves through `resolveSubagentModel`, so delegating mechanical
+     * work (grep, read, summarise) can use a cheaper model than the main reasoning
+     * loop. Everything else resolves through the registry, which is also what makes
+     * "add another vendor" a config change rather than a code change.
+     */
+    const resolution = this.isSubagent ? resolveSubagentModel(config) : { model: resolveModel(config) };
+    if (resolution.warning) log.warn(resolution.warning);
+    const chosen = resolution.model;
+    /*
+     * A literal name is normal when there is no registry (`SHE_MODEL=gpt-4o`), but
+     * when a registry IS declared it usually means a mistyped id. We honour it —
+     * changing the model under someone who asked for a specific name would be worse —
+     * and say so, so the warning is in the log next to the provider's complaint.
+     */
+    if (!this.isSubagent && chosen.source === 'literal' && (config.llm.models?.length ?? 0) > 0) {
+      log.warn(
+        `模型「${chosen.model}」不在注册表里（可用: ${(config.llm.models ?? []).map((m) => m.id).join(', ')}）。`
+        + '按字面模型名使用；如果这是打错了 id，请修正 SHE_MODEL。',
+      );
+    }
+    log.info(`Model: ${describeModel(chosen)}`);
+
+    if (chosen.provider === 'anthropic') {
       this.provider = new AnthropicProvider(
-        config.llm.apiKey, config.llm.model,
+        chosen.apiKey, chosen.model,
         config.llm.maxTokens, config.llm.temperature,
       );
     } else {
       this.provider = new OpenAIProvider(
-        config.llm.apiKey, config.llm.baseUrl, config.llm.model,
-        config.llm.maxTokens, config.llm.temperature,
+        chosen.apiKey, chosen.baseUrl, chosen.model,
+        config.llm.maxTokens, config.llm.temperature, level,
       );
     }
 
-    this.systemPrompt = getSystemPrompt(config.workspace.root);
+    const fb = config.llm.fallback;
+    if (fb && (fb.apiKey || fb.baseUrl) && (fb.model || fb.baseUrl)) {
+      const fProvider = fb.provider || 'openai';
+      const fKey = fb.apiKey || chosen.apiKey;
+      const fModel = fb.model || chosen.model;
+      const fBase = fb.baseUrl || chosen.baseUrl;
+      if (fProvider === 'anthropic') {
+        this.fallbackProvider = new AnthropicProvider(fKey, fModel, config.llm.maxTokens, config.llm.temperature);
+      } else if (fKey || fBase) {
+        this.fallbackProvider = new OpenAIProvider(fKey, fBase, fModel, config.llm.maxTokens, config.llm.temperature, level);
+      }
+    }
+
+    this.systemPrompt = getSystemPrompt(config.workspace.root, undefined, config.automationMode !== false);
+    this.patches = new PendingPatchStore(config.workspace.root);
+    this.checkpoints = new CheckpointStore(config.workspace.root);
 
     for (const def of sandboxTools.definitions) {
       this.allToolDefs.push(def);
       this.executors.set(def.name, (args) => sandboxTools.execute(def.name, args));
     }
 
-    const kbTools = createKBTools(kbEngine);
+    const kbTools = createKBTools(kbEngine, {
+      onQueryResult: (result) => {
+        this.toolEventSink?.({ type: 'kb_result', kbResult: result });
+      },
+    });
     for (const def of kbTools.definitions) {
       this.allToolDefs.push(def);
       this.executors.set(def.name, (args) => kbTools.execute(def.name, args));
     }
+
+    // Scheduling: the agent's own future work. Only when the server supplied a
+    // bridge — the store lives there and both sides must see the same tasks.
+    if (opts?.scheduleBridge) {
+      this.scheduleBridge = opts.scheduleBridge;
+      this.setScheduleWindow = opts.setScheduleWindow ?? null;
+      for (const def of makeScheduleTools(opts.scheduleBridge, this.sessionId)) {
+        this.allToolDefs.push(def);
+        this.executors.set(def.name, async (args) => {
+          const r = await executeScheduleTool(
+            def.name, args, opts.scheduleBridge!, this.sessionId, this.setScheduleWindow ?? (() => {}),
+          );
+          return r ? r.output : `未知工具 ${def.name}`;
+        });
+      }
+    }
+
+    // Long-horizon affordances: durable plans, report artifacts, and asking.
+    const planTools = createPlanTools(config.workspace.root, this.sessionId);
+    for (const def of planTools.definitions) {
+      this.allToolDefs.push(def);
+      this.executors.set(def.name, (args) => planTools.execute(def.name, args));
+    }
+
+    // Code intelligence. Only registered when a language server is actually
+    // installed for this workspace's languages — advertising a tool that always
+    // fails wastes a round-trip and teaches the model to distrust the tool list.
+    this.lsp = new LspManager(config.workspace.root);
+    for (const def of makeLspTools(config.workspace.root, this.lsp)) {
+      this.allToolDefs.push(def);
+      this.executors.set(def.name, async (args) => {
+        const r = await executeLspTool(def.name, args, config.workspace.root, this.lsp!);
+        return r ? r.output : `未知工具 ${def.name}`;
+      });
+    }
+
+    // Knowledge ingestion: stage files, then file each item into the tree.
+    // `store` is a private member of the engine; reach it the same way the KB
+    // tools do, keeping this factory decoupled from the kb package types.
+    const kbStore = (kbEngine as unknown as { store: Parameters<typeof createIngestTools>[2] }).store;
+    const ingestTools = createIngestTools(
+      config.workspace.root,
+      kbEngine as unknown as Parameters<typeof createIngestTools>[1],
+      kbStore,
+    );
+    for (const def of ingestTools.definitions) {
+      this.allToolDefs.push(def);
+      this.executors.set(def.name, (args) => ingestTools.execute(def.name, args));
+    }
+
+    // Shared scratchpad, editable by both the user and the agent.
+    const memoTools = createMemoTools(config.workspace.root);
+    for (const def of memoTools.definitions) {
+      this.allToolDefs.push(def);
+      this.executors.set(def.name, (args) => memoTools.execute(def.name, args));
+    }
+
+    // Delegation. Only registered when a runner was injected — a child agent is
+    // constructed without one, so it cannot recurse.
+    if (this.subagentRunner) {
+      const subTools = createSubagentTools(this.subagentRunner, {
+        onProgress: (e) => {
+          let id = this.taskIdByLabel.get(e.description);
+          if (e.phase === 'start' || !id) {
+            id = `sub-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+            this.taskIdByLabel.set(e.description, id);
+          }
+          const phase = e.phase === 'start' ? 'running' as const : (e.ok ? 'done' as const : 'error' as const);
+          const card = { id, kind: 'subagent', label: e.description, phase };
+          this.onTaskEvent?.(card);
+          this.toolEventSink?.({
+            type: 'status',
+            content: e.phase === 'start'
+              ? `子智能体开始：${e.description}`
+              : `子智能体${e.ok ? '完成' : '失败'}：${e.description}`,
+            task: card,
+          });
+          if (e.phase === 'done') this.taskIdByLabel.delete(e.description);
+        },
+      });
+      for (const def of subTools.definitions) {
+        this.allToolDefs.push(def);
+        this.executors.set(def.name, (args) => subTools.execute(def.name, args));
+      }
+    }
+
+    /*
+     * Children run unattended, so they lose the tools that assume a human is
+     * present or that mutate state owned by the parent:
+     *   ask_user   — nobody can answer; the subtask would stall until timeout
+     *   task_spawn — recursion (the runner is already absent, this is belt-and-braces)
+     *   plan_*     — the parent owns the plan; a child editing it would clobber it
+     *   memo_*     — shared scratchpad, same reasoning
+     *   report_*   — long-lived artifacts belong to the parent's turn
+     *   kb_ingest_*— staging files is a side effect the parent should decide on
+     *   schedule_* — a child must not be able to schedule the parent's future work
+     */
+    if (this.isSubagent) {
+      const denied = /^(ask_user|task_spawn|plan_|memo_|report_|kb_ingest_|schedule_)/;
+      this.allToolDefs = this.allToolDefs.filter((d) => {
+        const blocked = denied.test(d.name);
+        if (blocked) this.executors.delete(d.name);
+        return !blocked;
+      });
+    }
   }
 
-  async chat(
-    userMessage: string,
+  /**
+   * Queue a user message to be folded into the running turn at the next
+   * iteration. Used for "append context without interrupting".
+   *
+   * The text lands in `history` immediately (so it is persisted and visible
+   * even if no turn is running); `pendingInterjections` only controls when it
+   * is injected into the in-flight request array.
+   */
+  interject(text: string): void {
+    const t = String(text ?? '').trim();
+    if (!t) return;
+    this.pendingInterjections.push(t);
+    this.history.push({ role: 'user', content: `[用户补充] ${t}` });
+  }
+
+  /** Move queued interjections into the live request array. */
+  private drainInterjections(messages: LLMMessage[], onChunk?: (chunk: StreamChunk) => void): void {
+    if (this.pendingInterjections.length === 0) return;
+    const pending = this.pendingInterjections.splice(0, this.pendingInterjections.length);
+    for (const text of pending) {
+      // history already holds this message; only the request array needs it.
+      messages.push({ role: 'user', content: `[用户补充] ${text}` });
+      onChunk?.({ type: 'status', content: `已追加补充信息：${text.slice(0, 80)}` });
+    }
+  }
+
+  private async runLoop(
+    messages: LLMMessage[],
     onChunk?: (chunk: StreamChunk) => void,
   ): Promise<LLMMessage> {
-    this.history.push({ role: 'user', content: userMessage });
-
-    const messages: LLMMessage[] = [
-      { role: 'system', content: this.systemPrompt },
-      ...this.history,
-    ];
-
     let iterations = 0;
-    const maxIterations = 15;
+    /**
+     * Runaway guard only.
+     *
+     * Deliberately NOT a budget: an earlier version capped prompt tokens per
+     * turn, which silently cut work off mid-task. The only thing this prevents
+     * is a genuinely non-terminating loop. Raise it with SHE_MAX_TOOL_ROUNDS if
+     * a task legitimately needs more.
+     */
+    const maxIterations = Number(process.env.SHE_MAX_TOOL_ROUNDS) > 0
+      ? Number(process.env.SHE_MAX_TOOL_ROUNDS)
+      : 1000;
+    let turnPromptTokens = 0;
+    const signal = this.aborter?.signal;
+
+    /*
+     * Repeated-call detection.
+     *
+     * `maxIterations` only catches a loop that never ends. The failure mode that
+     * actually burns budget is a loop that is *stuck*: the model calls the same tool
+     * with the same arguments and gets the same result, over and over, because it
+     * believes the call has not happened yet. With a 1000-round guard that is
+     * thousands of requests before anything stops it, and the user sees a spinner
+     * rather than an error.
+     *
+     * The signature is tool + arguments + result, so a retry that finally succeeds
+     * (same call, different result) is NOT flagged — only a call that produced
+     * identical output again.
+     */
+    const callSignatures = new Map<string, { count: number; result: string }>();
+    /*
+     * Three by default. Two would flag a legitimate single retry (a flaky command,
+     * a file that was being written); three means the model had two chances to
+     * notice and changed nothing. Overridable for tests and for a workspace with
+     * unusually slow or eventually-consistent tools.
+     */
+    const repeatLimit = Number(process.env.SHE_REPEAT_LIMIT) > 0
+      ? Number(process.env.SHE_REPEAT_LIMIT)
+      : 3;
+    /**
+     * Whether the model has already been told that it is stuck.
+     *
+     * One nudge, not a loop: a second identical call after being told explicitly
+     * means the model cannot find its way out, and further rounds only spend money.
+     */
+    let recoveryAttempted = false;
 
     while (iterations < maxIterations) {
+      if (signal?.aborted) {
+        const stopped: LLMMessage = { role: 'assistant', content: '（已中断）' };
+        onChunk?.({ type: 'status', content: '已中断当前执行' });
+        this.history.push(stopped);
+        return stopped;
+      }
       iterations++;
       log.debug(`Tool loop iteration ${iterations}`);
 
-      const response = await this.provider.chat(messages, this.allToolDefs, onChunk);
+      // Fold in anything the user appended while this turn was running.
+      this.drainInterjections(messages, onChunk);
+
+      const track = (chunk: StreamChunk) => {
+        if (chunk.type === 'usage' && chunk.usage) {
+          this.tokenUsage.prompt_tokens += chunk.usage.prompt_tokens || 0;
+          this.tokenUsage.completion_tokens += chunk.usage.completion_tokens || 0;
+          this.tokenUsage.total_tokens += chunk.usage.total_tokens || 0;
+          this.tokenUsage.reasoning_tokens += chunk.usage.reasoning_tokens || 0;
+          this.tokenUsage.cache_hit_tokens += chunk.usage.cache_hit_tokens || 0;
+          this.tokenUsage.cache_miss_tokens += chunk.usage.cache_miss_tokens || 0;
+          turnPromptTokens += chunk.usage.prompt_tokens || 0;
+        }
+        onChunk?.(chunk);
+      };
+      let response: LLMMessage;
+      try {
+        response = await this.provider.chat(messages, this.allToolDefs, track, signal);
+      } catch (err) {
+        if (signal?.aborted) {
+          const stopped: LLMMessage = { role: 'assistant', content: '（已中断）' };
+          onChunk?.({ type: 'status', content: '已中断当前执行' });
+          this.history.push(stopped);
+          return stopped;
+        }
+        if (!this.fallbackProvider) throw err;
+        const msg = err instanceof Error ? err.message : String(err);
+        track({ type: 'status', content: `primary LLM failed (${msg}); trying fallback…` });
+        response = await this.fallbackProvider.chat(messages, this.allToolDefs, track, signal);
+      }
 
       this.history.push(response);
       messages.push(response);
@@ -89,9 +465,111 @@ export class Agent {
           result = `Error: unknown tool "${name}"`;
         } else {
           try {
-            const args = JSON.parse(tc.function.arguments);
+            const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
+            /*
+             * A ticket supplied by the MODEL is always discarded.
+             *
+             * The only legitimate way to redeem a confirm ticket is the human path: the UI posts
+             * to `/api/chat/confirm`, which calls `confirmTool(ticketId)` and takes the arguments
+             * from `lastPending` — the server's own record — rather than from the model. Nothing
+             * the model can send should ever satisfy the gate, so a `_confirm_ticket` in its
+             * arguments is dropped here.
+             *
+             * This is deliberately redundant with redacting the ticket out of the model's tool
+             * result. Either one alone would close the hole; keeping both means a future change
+             * that re-exposes the ticket (a log, a new chunk type, a different tool) still cannot
+             * let a prompt-injected agent approve its own dangerous command.
+             */
+            if ('_confirm_ticket' in args) {
+              log.warn(`丢弃模型自带的 _confirm_ticket（工具 ${name}）：确认只能由用户发起`);
+              delete args._confirm_ticket;
+            }
+            /*
+             * Stage file writes only when a human actually has to review them.
+             *
+             * This used to be unconditional, so EVERY fs_write produced a
+             * staged diff with Apply/Reject — even with "allow all commands" on.
+             * That is why enabling 自动运行 / allowAllCommands still asked for
+             * approval on every edit. In allow-all mode the write goes straight
+             * through; otherwise the diff is staged for review.
+             */
+            if (name === 'fs_write' && !this.config.sandbox.allowAllCommands) {
+              args._stage = true;
+            }
             log.info(`Executing tool: ${name}`);
-            result = await executor(args);
+            const toolStart = Date.now();
+            let toolFailed = false;
+            try {
+              result = await executor(args);
+              // Tools report failure as text, so a thrown error is not the only
+              // signal — a tool that always returns "Error: ..." would otherwise
+              // look perfectly healthy.
+              if (typeof result !== 'string' || /^Error:/i.test(result)) toolFailed = true;
+            } catch (err) {
+              toolFailed = true;
+              throw err;
+            } finally {
+              // In a `finally` so a throwing tool is still counted.
+              this.toolObserver?.(name, Date.now() - toolStart, toolFailed);
+            }
+            /*
+             * ─────────────────────────────────────────────────────────────────────────
+             * A confirmation request must not hand its ticket to the model.
+             *
+             * The confirm gate exists so a HUMAN approves a dangerous action. It did not:
+             * the raw tool result — which contains the fresh ticket id — was pushed into
+             * `history`, so the model could call `shell`, read the ticket out of its own
+             * tool result, and immediately call again with `_confirm_ticket` set. The store
+             * only checks the tool name, an argument fingerprint that deliberately ignores
+             * `_`-prefixed keys, and a TTL — nothing ties redemption to a person. So a
+             * prompt-injected agent could approve its own dangerous command, and the user
+             * never saw a prompt.
+             *
+             * The ticket goes to the UI (it has to — that is what the confirm card posts
+             * back) and to `lastPending` for the agent's own confirm path. What the MODEL
+             * sees is replaced with a message that says the call is waiting, and explicitly
+             * tells it not to retry, so it neither learns the ticket nor loops on it.
+             * ─────────────────────────────────────────────────────────────────────────
+             */
+            if (typeof result === 'string' && result.includes('"needs_confirm"')) {
+              try {
+                const parsed = JSON.parse(result) as { needs_confirm?: ConfirmTicketInfo };
+                if (parsed?.needs_confirm) {
+                  this.lastPending = {
+                    ticket: parsed.needs_confirm,
+                    toolCallId: tc.id,
+                    name,
+                    args,
+                  };
+                  // The UI needs the real ticket to render the confirm card.
+                  onChunk?.({
+                    type: 'needs_confirm',
+                    content: `needs confirm: ${parsed.needs_confirm.ticket_id}`,
+                    ticket: parsed.needs_confirm,
+                  });
+                  // The model gets a redacted result. Keep the shape honest: it IS waiting.
+                  result = JSON.stringify({
+                    needs_confirm: true,
+                    awaiting: 'user_approval',
+                    tool: name,
+                    note: '这个操作需要用户确认，已经向用户发起请求。不要重试，也不要试图自行批准；等用户确认后再继续。',
+                  });
+                }
+              } catch { /* ignore */ }
+            }
+            if (typeof result === 'string' && result.includes('"needs_apply"')) {
+              try {
+                const parsed = JSON.parse(result) as { needs_apply?: PendingPatchInfo };
+                if (parsed?.needs_apply) {
+                  this.lastPatch = parsed.needs_apply;
+                  onChunk?.({
+                    type: 'needs_apply',
+                    content: `needs apply: ${parsed.needs_apply.path}`,
+                    patch: parsed.needs_apply,
+                  });
+                }
+              } catch { /* ignore */ }
+            }
           } catch (err: unknown) {
             result = `Error: ${err instanceof Error ? err.message : String(err)}`;
           }
@@ -104,26 +582,617 @@ export class Agent {
         };
         this.history.push(toolMsg);
         messages.push(toolMsg);
+
+        // Stream the output so the UI can show what the tool actually did while
+        // the turn is still running. Previously results existed only in history,
+        // so they appeared only after a reload — the transcript looked empty of
+        // tool activity during live streaming.
+        onChunk?.({ type: 'tool_result', toolCallId: tc.id, toolName: name, content: result });
+
+        /*
+         * Flag a genuinely stuck loop.
+         *
+         * The result is part of the signature so that a call which keeps failing
+         * differently is not flagged, and one that finally succeeds resets nothing —
+         * it simply never reaches the limit, because the result changed.
+         */
+        const signature = `${name}:${tc.function.arguments}:${result.slice(0, 500)}`;
+        const seen = callSignatures.get(signature);
+        if (seen) {
+          seen.count++;
+          if (seen.count >= repeatLimit) {
+            const detail = `「${name}」用同样的参数连续调用 ${seen.count} 次，返回的内容完全一致。`;
+            log.warn(`Detected a stuck tool loop: ${detail}`);
+
+            /*
+             * Try to recover before giving up.
+             *
+             * A stuck loop almost always means the APPROACH is wrong rather than the
+             * task being impossible — the file was not written, the path is wrong, the
+             * command needs a flag. Telling the model that, once, resolves most of
+             * them; stopping immediately throws away a task that was one correction
+             * from working.
+             *
+             * Bounded to a single attempt: if the same call comes back again after
+             * being told explicitly, the model is not going to find its way out, and
+             * more rounds only spend money. That is when a human should look.
+             */
+            if (!recoveryAttempted) {
+              recoveryAttempted = true;
+              onChunk?.({
+                type: 'status',
+                content: '检测到重复调用，已提示模型换个思路再试一次',
+              });
+              const nudge: LLMMessage = {
+                role: 'user',
+                content:
+                  `[系统提示] ${detail}\n\n`
+                  + '这说明当前方法没有产生任何变化，再调一次也是一样的结果。\n'
+                  + '请先判断原因（文件是否真的写进去了？路径对吗？是不是缺依赖或权限不足？），'
+                  + '然后用**不同的方式**再试一次。如果确实无法继续，直接告诉用户你卡在哪、需要什么。',
+              };
+              /*
+               * Added to the REQUEST only, never to `history`.
+               *
+               * History is persisted and rendered, so a message pushed there appears
+               * in the transcript — and with `role: 'user'` the user would see a line
+               * they never wrote. The nudge is meaningful only for the remaining
+               * rounds of this turn, so it belongs in the request alone.
+               */
+              messages.push(nudge);
+              // Allow this call to be retried after the nudge, but remember that we
+              // have already used our one chance.
+              callSignatures.delete(signature);
+              callSignatures.set(signature, { count: repeatLimit - 1, result });
+              continue;
+            }
+
+            onChunk?.({ type: 'status', content: `重复调用未改善，已停止：${detail}` });
+
+            /*
+             * Say what happened AND what to do. An agent that silently stops looks
+             * broken; one that explains a stuck loop is understood, and the user can
+             * point it at the actual problem (a missing dependency, a wrong path).
+             */
+            const stalled: LLMMessage = {
+              role: 'assistant',
+              content:
+                `（已停止：提示过之后仍重复调用）${detail}\n\n`
+                + '这通常意味着有东西没变——例如文件没写进去、命令一直报同一个错、'
+                + '或需要的依赖不存在。请说明你期望的结果，或直接告诉我错误原因，我换个方向试。',
+            };
+            this.history.push(stalled);
+            return stalled;
+          }
+        } else {
+          callSignatures.set(signature, { count: 1, result });
+        }
       }
     }
 
     const fallback: LLMMessage = {
       role: 'assistant',
-      content: 'Tool loop reached maximum iterations. Please try a simpler request.',
+      content:
+        `（已达到本轮工具调用上限 ${maxIterations} 轮，为避免失控循环而停止。）\n\n` +
+        '这不是知识库次数限制——如果任务没做完，直接说「继续」即可接着做。',
     };
     this.history.push(fallback);
     return fallback;
   }
 
-  clearHistory(): void {
-    this.history = [];
+  /**
+   * Compaction of old history — designed around prompt caching.
+   *
+   * The previous approach trimmed from the FRONT on every turn once a size
+   * budget was exceeded. Prompt caching is PREFIX-based, so a changing front
+   * means the request diverges immediately after the system prompt and the
+   * cache hit rate collapses to 0% for the rest of the conversation. Measured
+   * on DeepSeek: appending kept 74% of a 7.3k prompt cached, while
+   * front-trimming the same content kept 0% (docs/context-and-caching.md).
+   *
+   * This replaces a *span* of old history with a digest that is:
+   *   - **frozen** once produced — never regenerated for the same span
+   *   - **append-only** — a later compaction extends the previous digest rather
+   *     than rewriting it, so the leading bytes stay identical
+   *
+   * The result is that only the first compaction (and the rare re-digest when
+   * the digest itself outgrows its cap) costs a cache miss; every other turn is
+   * a plain append and keeps hitting.
+   *
+   * `history` itself is never modified: compaction is purely how a request is
+   * assembled, so the stored transcript and the UI are unaffected.
+   */
+  private compacted: { upTo: number; digest: string } | null = null;
+
+  /** Condense one message into a single short line, deterministically. */
+  private static condenseLine(m: LLMMessage): string {
+    const role = m.role === 'tool' ? `tool${m.name ? `:${m.name}` : ''}` : m.role;
+    let text = typeof m.content === 'string' ? m.content : '';
+    // Reasoning is display-only and never sent to the model, so it must not
+    // leak into the digest either.
+    if (m.tool_calls?.length) {
+      text += ` [调用 ${m.tool_calls.map((c) => c.function?.name).filter(Boolean).join(', ')}]`;
+    }
+    const flat = text.replace(/\s+/g, ' ').trim();
+    const cap = m.role === 'tool' ? 120 : 240;
+    return flat.length > cap ? `${role}: ${flat.slice(0, cap)}…` : `${role}: ${flat}`;
+  }
+
+  /** Deterministic condensation of a span. Same input always yields same output. */
+  private static condense(span: LLMMessage[]): string {
+    return span.map((m) => Agent.condenseLine(m)).join('\n');
+  }
+
+  /**
+   * Compact if the history has outgrown the trigger.
+   *
+   * Compacts a LARGE span down to a small tail in one step rather than nudging
+   * the boundary every turn: each compaction is a cache miss, so they should be
+   * rare, and the boundary must not drift.
+   */
+  private maybeCompact(): void {
+    const h = this.history;
+    const size = (m: LLMMessage): number => {
+      let n = typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content ?? '').length;
+      if (m.tool_calls) n += JSON.stringify(m.tool_calls).length;
+      return n + 32;
+    };
+
+    const COMPACT_TRIGGER = 120_000; // ≈ 35k tokens
+    const COMPACT_KEEP = 30_000;     // keep roughly this much of the recent tail
+    const DIGEST_MAX = 8_000;        // ≈ 2.5k tokens
+
+    let total = 0;
+    for (const m of h) total += size(m);
+    if (total <= COMPACT_TRIGGER) return;
+
+    // Keep the newest messages that fit, so recent continuity survives.
+    let kept = 0;
+    let cut = h.length;
+    for (let i = h.length - 1; i >= 0; i--) {
+      const n = size(h[i]);
+      if (kept + n > COMPACT_KEEP && cut < h.length) break;
+      kept += n;
+      cut = i;
+    }
+    // Never orphan a tool result: OpenAI-compatible APIs reject one whose
+    // originating assistant message is gone.
+    while (cut < h.length && h[cut].role === 'tool') cut++;
+
+    const from = this.compacted?.upTo ?? 0;
+    if (cut <= from) return; // nothing new to fold in
+
+    const span = h.slice(from, cut);
+    const prev = this.compacted?.digest ?? '';
+
+    // Extend, don't rewrite: the previous digest stays byte-identical, which is
+    // what keeps the cached prefix valid.
+    let digest = prev ? `${prev}\n${Agent.condense(span)}` : Agent.condense(span);
+
+    if (digest.length > DIGEST_MAX) {
+      // The digest itself outgrew its cap. Re-condense it once — this is the only
+      // path that rewrites the prefix, and it is deliberately rare.
+      const folded = Agent.condense(digest.split('\n').map((line) => ({
+        role: 'user' as const,
+        content: line,
+      })));
+      digest = folded.slice(0, DIGEST_MAX);
+    }
+
+    this.compacted = { upTo: cut, digest };
+    log.info(`Compacted ${span.length} earlier message(s) into ${digest.length} chars (cache-stable digest)`);
+  }
+
+  /**
+   * Build the message array for a request.
+   *
+   * `history` is untouched; this is where compaction is applied.
+   */
+  private messagesForRequest(): { messages: LLMMessage[]; compactedCount: number } {
+    this.maybeCompact();
+    const c = this.compacted;
+    const tail = c ? this.history.slice(c.upTo) : this.history;
+    const messages: LLMMessage[] = [{ role: 'system', content: this.systemPrompt }];
+    if (c) {
+      messages.push({
+        role: 'system',
+        content:
+          `（以下是对更早 ${c.upTo} 条对话的压缩记录，按顺序保留要点。`
+          + '原始消息仍在本地历史里；需要细节时可以查询知识库或让用户补充。）\n\n'
+          + c.digest,
+      });
+    }
+    messages.push(...tail);
+    return { messages, compactedCount: c?.upTo ?? 0 };
+  }
+
+  async chat(
+    userMessage: string,
+    onChunk?: (chunk: StreamChunk) => void,
+  ): Promise<LLMMessage> {
+    /*
+     * One turn at a time per conversation.
+     *
+     * Two concurrent turns on the same agent interleave writes into a single
+     * `history`: each pushes its own user message, each builds its request from that
+     * same array, and tool results get paired with the wrong assistant message. The
+     * transcript becomes incoherent in a way that is hard to notice and impossible to
+     * repair after the fact.
+     *
+     * `aborter` is also a single field, so the second turn would overwrite the first's
+     * controller and "stop" would silently only stop the newer one.
+     *
+     * The UI already avoids this (the send button becomes a stop button while a turn
+     * runs), but the API is reachable from two windows, from scripts, and over the
+     * network. The guarantee belongs here, not in the caller.
+     */
+    if (this.turnActive) {
+      throw new TurnInProgressError();
+    }
+
+    this.history.push({ role: 'user', content: userMessage });
+
+    /*
+     * Compaction replaces the old front-trimming window. It keeps the request
+     * prefix stable so prompt caching survives — see `maybeCompact`.
+     */
+    const { messages, compactedCount } = this.messagesForRequest();
+    if (compactedCount > 0) {
+      onChunk?.({
+        type: 'status',
+        content: `已把更早的 ${compactedCount} 条对话压缩成要点（保留在本地历史里，缓存不受影响）`,
+      });
+    }
+
+    this.toolEventSink = onChunk ?? null;
+    try {
+      const reply = await this.runExclusive(messages, onChunk);
+      const stagedPatches = this.getPendingPatches();
+      if (stagedPatches.length > 1) {
+        const summary = {
+          role: 'assistant' as const,
+          content: `已暂存 ${stagedPatches.length} 个补丁（多文件 Composer）。请批量应用或逐个处理。`,
+        };
+        this.history.push(summary);
+        onChunk?.({ type: 'status', content: summary.content });
+        return summary;
+      }
+      return reply;
+    } finally {
+      this.toolEventSink = null;
+    }
+  }
+
+  /**
+   * Run the tool loop, refusing to start if a turn is already in flight.
+   *
+   * Every entry point goes through here rather than calling `runLoop` directly, so a future entry
+   * point cannot accidentally reintroduce concurrent turns. The flag is cleared in a `finally` so
+   * a throwing tool cannot leave the agent permanently "busy" — which would make the conversation
+   * unusable until restart.
+   *
+   * The abort controller is created HERE rather than in `chat()`, so every turn is interruptible.
+   * It used to be owned by `chat()`, which meant a confirm or patch-apply turn had no controller:
+   * `stop()` returned false and the user could not interrupt a call they could see running.
+   * `runLoop` reads `this.aborter.signal`, so creating it before entering the loop is what makes
+   * the difference.
+   */
+  private async runExclusive(
+    messages: LLMMessage[],
+    onChunk?: (chunk: StreamChunk) => void,
+  ): Promise<LLMMessage> {
+    return this.withTurn(() => this.runLoop(messages, onChunk));
+  }
+
+  /**
+   * Run `fn` while holding the conversation exclusively, with an abort controller installed.
+   *
+   * Extracted from `runExclusive` because applying a patch has to do real work — take the patch
+   * from the store, validate the path, write the file — and that work must happen INSIDE the lock.
+   * It used to happen before: `applyPatch` took the patch, pushed a checkpoint and wrote the file,
+   * and only then entered `runExclusive`, which throws `TurnInProgressError` when a turn is already
+   * running. A refused apply therefore reported a 409 to the user while the file had already been
+   * written and the patch had been consumed — the edit landed, the user saw a failure, and there was
+   * nothing left to retry or reject.
+   */
+  private async withTurn<T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    if (this.turnActive) throw new TurnInProgressError();
+    this.turnActive = true;
+    const controller = new AbortController();
+    this.aborter = controller;
+    try {
+      return await fn(controller.signal);
+    } finally {
+      if (this.aborter === controller) this.aborter = null;
+      this.turnActive = false;
+    }
+  }
+
+  /**
+   * Interrupt the running turn. Aborts the in-flight LLM request so the server
+   * actually stops working (previously "stop" only detached the browser).
+   */
+  stop(): boolean {
+    if (!this.aborter) return false;
+    this.aborter.abort();
+    return true;
+  }
+
+  /**
+   * True while a turn is in flight.
+   *
+   * Must be `turnActive`, not `aborter !== null`. Only `chat()` sets `aborter`, so during a
+   * confirm or patch-apply turn — which also hold the conversation exclusively — this reported
+   * false. The consequences were not cosmetic:
+   *
+   *   - `GET /api/chat/running` said idle, so the UI showed Send instead of Stop during a patch
+   *     application, and the user had no way to interrupt a call they could see running;
+   *   - `POST /api/chat/stop` returned `stopped: false`;
+   *   - a second message was accepted into a busy conversation and came back as an SSE error
+   *     event rather than the documented 409.
+   *
+   * `turnActive` is the flag `runExclusive` already sets for exactly this purpose.
+   */
+  isRunning(): boolean {
+    return this.turnActive;
+  }
+
+  async confirmTool(
+    ticketId: string,
+    onChunk?: (chunk: StreamChunk) => void,
+  ): Promise<LLMMessage> {
+    const pending = this.lastPending;
+    if (!pending || pending.ticket.ticket_id !== ticketId) {
+      throw new Error('no matching pending confirm ticket');
+    }
+    this.toolEventSink = onChunk ?? null;
+    try {
+      return await this.confirmToolInner(pending, ticketId, onChunk);
+    } finally {
+      this.toolEventSink = null;
+    }
+  }
+
+  private async confirmToolInner(
+    pending: { ticket: ConfirmTicketInfo; toolCallId: string; name: string; args: Record<string, unknown> },
+    ticketId: string,
+    onChunk?: (chunk: StreamChunk) => void,
+  ): Promise<LLMMessage> {
+    const executor = this.executors.get(pending.name);
+    if (!executor) throw new Error(`unknown tool "${pending.name}"`);
+
+    const args: Record<string, unknown> = { ...pending.args, _confirm_ticket: ticketId };
+    // Same rule as the main loop: only stage when review is still required.
+    if (pending.name === 'fs_write' && !this.config.sandbox.allowAllCommands) {
+      args._stage = true;
+    }
+    log.info(`Confirming tool: ${pending.name} ticket=${ticketId}`);
+    const result = await executor(args);
+    this.lastPending = null;
+
+    if (typeof result === 'string' && result.includes('"needs_apply"')) {
+      try {
+        const parsed = JSON.parse(result) as { needs_apply?: PendingPatchInfo };
+        if (parsed?.needs_apply) {
+          this.lastPatch = parsed.needs_apply;
+          onChunk?.({
+            type: 'needs_apply',
+            content: `needs apply: ${parsed.needs_apply.path}`,
+            patch: parsed.needs_apply,
+          });
+        }
+      } catch { /* ignore */ }
+    }
+
+    const toolMsg: LLMMessage = {
+      role: 'tool',
+      content: result,
+      tool_call_id: pending.toolCallId,
+    };
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const m = this.history[i];
+      if (m.role === 'tool' && m.tool_call_id === pending.toolCallId) {
+        this.history[i] = toolMsg;
+        break;
+      }
+    }
+
+    onChunk?.({ type: 'status', content: `confirmed ${pending.name}` });
+
+    // Continue the tool/LLM loop so multiple files can stage into Composer.
+    const messages: LLMMessage[] = [
+      { role: 'system', content: this.systemPrompt },
+      ...this.history,
+    ];
+    const reply = await this.runExclusive(messages, onChunk);
+    const staged = this.getPendingPatches();
+    if (staged.length) {
+      const summary = {
+        role: 'assistant' as const,
+        content: staged.length === 1
+          ? `已暂存 1 个补丁：\`${staged[0].path}\`。请在 Composer / Diff 面板应用或拒绝。`
+          : `已暂存 ${staged.length} 个补丁（多文件 Composer）。请批量应用或逐个处理。`,
+      };
+      this.history.push(summary);
+      onChunk?.({ type: 'status', content: summary.content });
+      return summary;
+    }
+    return reply;
+  }
+
+  async applyPatch(
+    patchId: string,
+    onChunk?: (chunk: StreamChunk) => void,
+    opts?: { continueLoop?: boolean },
+  ): Promise<LLMMessage> {
+    return this.withTurn(async () => {
+      const patch = this.patches.take(patchId) ?? (this.lastPatch?.patch_id === patchId ? this.lastPatch : null);
+      if (!patch) throw new Error('unknown or expired patch');
+
+      /*
+       * The patch path is re-validated HERE, at the point of the write.
+       *
+       * `.she/pending-patches.json` is a plain file inside the workspace, so the workspace's own
+       * contents decide what a patch entry says — and the agent can write `.she/**` (the fs jail
+       * permits it, because that is where staged state lives). A forged entry with
+       * `path: "../../../Users/<user>/.ssh/authorized_keys"` was written outside the workspace when
+       * the user clicked Apply, through the "reviewed diff" UI. The textual jail is the same one the
+       * file tools use, shared rather than reimplemented so the two cannot drift.
+       */
+      const abs = resolveInsideWorkspace(this.config.workspace.root, patch.path);
+      mkdirSync(dirname(abs), { recursive: true });
+      this.checkpoints.push({
+        patch_id: patch.patch_id,
+        path: patch.path,
+        before: patch.before,
+        after: patch.after,
+      });
+      writeFileSync(abs, patch.after, 'utf8');
+      this.lastPatch = null;
+      onChunk?.({ type: 'status', content: `applied ${patch.path}` });
+
+      const msg: LLMMessage = {
+        role: 'assistant',
+        content: `Applied edit to \`${patch.path}\`.`,
+      };
+      this.history.push(msg);
+
+      if (opts?.continueLoop === false) {
+        return msg;
+      }
+
+      // Already holding the turn lock — go straight to the loop.
+      const messages: LLMMessage[] = [
+        { role: 'system', content: this.systemPrompt },
+        ...this.history,
+      ];
+      this.toolEventSink = onChunk ?? null;
+      try {
+        return await this.runLoop(messages, onChunk);
+      } finally {
+        this.toolEventSink = null;
+      }
+    });
+  }
+
+  async rejectPatch(patchId: string): Promise<{ ok: true; path?: string }> {
+    const patch = this.patches.take(patchId) ?? (this.lastPatch?.patch_id === patchId ? this.lastPatch : null);
+    if (!patch) throw new Error('unknown or expired patch');
+    this.lastPatch = null;
+    this.history.push({
+      role: 'assistant',
+      content: `Rejected edit to \`${patch.path}\`.`,
+    });
+    return { ok: true, path: patch.path };
+  }
+
+  clearHistory(): void {    this.history = [];
+    this.lastPending = null;
+    this.lastPatch = null;
+    this.pendingInterjections = [];
+  }
+
+  getTokenUsage() {
+    return { ...this.tokenUsage };
+  }
+
+  resetTokenUsage() {
+    this.tokenUsage = {
+      prompt_tokens: 0, completion_tokens: 0, total_tokens: 0,
+      reasoning_tokens: 0, cache_hit_tokens: 0, cache_miss_tokens: 0,
+    };
   }
 
   getHistory(): LLMMessage[] {
     return [...this.history];
   }
 
+  setHistory(messages: LLMMessage[]): void {
+    this.history = [...messages];
+    this.lastPending = null;
+    this.lastPatch = null;
+  }
+
+  
+  listCheckpoints(limit = 20) {
+    return this.checkpoints.list(limit);
+  }
+
+  undoLastCheckpoint(): { ok: true; path: string; checkpoint_id: string } {
+    const cp = this.checkpoints.takeLatest();
+    if (!cp) throw new Error('no checkpoint to undo');
+    // Same jail as applying: a checkpoint entry is a file inside the workspace that decides where a
+    // write goes, so it must be validated at the point of the write.
+    const abs = resolveInsideWorkspace(this.config.workspace.root, cp.path);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, cp.before, 'utf8');
+    this.history.push({
+      role: 'assistant',
+      content: `Undid apply on \`${cp.path}\` (restored pre-apply content).`,
+    });
+    return { ok: true, path: cp.path, checkpoint_id: cp.checkpoint_id };
+  }
+
+  undoCheckpoint(checkpointId: string): { ok: true; path: string; checkpoint_id: string } {
+    const cp = this.checkpoints.take(checkpointId);
+    if (!cp) throw new Error('unknown checkpoint');
+    const abs = resolveInsideWorkspace(this.config.workspace.root, cp.path);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, cp.before, 'utf8');
+    this.history.push({
+      role: 'assistant',
+      content: `Undid checkpoint on \`${cp.path}\`.`,
+    });
+    return { ok: true, path: cp.path, checkpoint_id: cp.checkpoint_id };
+  }
+  getPendingConfirm(): ConfirmTicketInfo | null {
+    return this.lastPending?.ticket ?? null;
+  }
+
+  getPendingPatch(): PendingPatchInfo | null {
+    if (this.lastPatch) return this.lastPatch;
+    const all = this.patches.list();
+    return all.length ? (all[all.length - 1] as PendingPatchInfo) : null;
+  }
+
+  getPendingPatches(): PendingPatchInfo[] {
+    return this.patches.list() as PendingPatchInfo[];
+  }
+
+  async applyAllPatches(onChunk?: (chunk: StreamChunk) => void): Promise<LLMMessage> {
+    const ids = this.patches.list().map((p) => p.patch_id);
+    if (!ids.length) throw new Error('no pending patches');
+    for (let i = 0; i < ids.length; i++) {
+      const isLast = i === ids.length - 1;
+      await this.applyPatch(ids[i], onChunk, { continueLoop: isLast });
+    }
+    // applyPatch on last already continued the loop; return last history assistant-ish
+    return this.history[this.history.length - 1] ?? { role: 'assistant', content: `Applied ${ids.length} patches.` };
+  }
+
+  async rejectAllPatches(): Promise<{ rejected: string[] }> {
+    const all = this.patches.list();
+    const rejected: string[] = [];
+    for (const p of all) {
+      await this.rejectPatch(p.patch_id);
+      rejected.push(p.path);
+    }
+    this.lastPatch = null;
+    return { rejected };
+  }
+
   getToolDefinitions(): ToolDefinition[] {
     return [...this.allToolDefs];
+  }
+
+  /**
+   * Release resources the agent owns.
+   *
+   * Language servers are real child processes with their own memory footprint,
+   * so they must not outlive the agent that started them.
+   */
+  async dispose(): Promise<void> {
+    await this.lsp?.dispose();
+    this.lsp = null;
   }
 }

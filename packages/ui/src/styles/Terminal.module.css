@@ -1,0 +1,101 @@
+﻿.panel {
+  transition: height var(--transition-med), max-height var(--transition-med);
+  display: flex;
+  flex-direction: column;
+  height: 220px;
+  min-height: 120px;
+  max-height: 70vh;
+  border-top: 1px solid var(--border);
+  background: #0a0e14;
+  font-family: var(--font-mono);
+  flex-shrink: 0;
+}
+
+.collapsedBar {
+  height: 28px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  padding: 0 12px;
+}
+.collapsedBar:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+.title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.cwd { font-size: 11px; color: var(--text-tertiary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.headerBtn {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--fill-control);
+  border: none;
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.headerBtn:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+.body {
+  flex: 1;
+  overflow: auto;
+  padding: 8px 10px;
+}
+.line {
+  margin: 0 0 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.in { color: #79c0ff; }
+.out { color: var(--text-primary); }
+.err { color: var(--danger); }
+.sys { color: var(--text-tertiary); }
+
+.confirmBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #3d2a00;
+  border-top: 1px solid var(--warning);
+  color: #ffdf9a;
+  font-size: 12px;
+}
+.confirmOk, .confirmNo {
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  padding: 2px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.confirmOk { background: var(--warning); color: #111; border-color: transparent; }
+.confirmNo { background: transparent; color: var(--text-secondary); }
+
+.inputRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  background: #0a0e14;
+}
+.prompt { color: #3fb950; font-weight: 700; }
+.input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}

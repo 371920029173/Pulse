@@ -1,0 +1,24 @@
+{
+  "name": "workspace-insight",
+  "version": "0.1.0",
+  "description": "给智能体一个「看清工作区」的工具：统计代码规模、找出最大的文件、列出最近改动的文件。适合在动手前快速摸清一个陌生项目。",
+  "author": "SHE built-in",
+  "enabled": true,
+  "permissions": ["read"],
+  "tools": [
+    {
+      "name": "ws_overview",
+      "description": "Summarise the workspace: file count, total lines by extension, the largest files, and the most recently modified files. Use this to orient yourself in an unfamiliar project before making changes.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "maxDepth": { "type": "number", "description": "How deep to walk (default 6)" },
+          "topN": { "type": "number", "description": "How many largest / newest files to list (default 8)" }
+        }
+      }
+    }
+  ],
+  "commands": [
+    { "id": "ws.overview", "title": "工作区概览", "description": "统计规模、最大文件、最近改动" }
+  ]
+}

@@ -3,10 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SHE — Structured Hierarchy Engine</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <title>bot</title>
+    <!--
+      Fonts are vendored, not linked.
+
+      This file used to load Inter and JetBrains Mono from fonts.googleapis.com, which meant two
+      requests to Google on every page load — one of them a font download. That is exactly what
+      the custom-stylesheet validator refuses to let a user do ("这会泄露你这台机器在运行本应用"),
+      so the app should not do it either; and a local-first desktop app should not need the
+      network to look like itself.
+
+      The files live in `public/fonts/` and the @font-face rules are generated into
+      `src/styles/fonts.css` by `pnpm vendor:fonts`. Run that script only to add or update a
+      family or weight; the results are committed, so a normal build needs no network.
+    -->
   </head>
   <body>
     <div id="root"></div>

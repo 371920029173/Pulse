@@ -1,0 +1,24 @@
+{
+  "name": "env-doctor",
+  "version": "0.1.0",
+  "description": "体检本机开发环境：Node / pnpm / git / 端口占用 / .env 关键项是否齐全。每换一台机器、每次「明明装了却跑不起来」，先用它看一眼。",
+  "author": "SHE built-in",
+  "enabled": true,
+  "permissions": ["shell", "read"],
+  "tools": [
+    {
+      "name": "env_check",
+      "description": "Check the local development environment: runtime versions (node/pnpm/git), whether the SHE port is already in use, and which expected .env keys are missing. Use this when something 'should work but does not'.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "port": { "type": "number", "description": "Port to check for occupancy (default 5577)" },
+          "envFile": { "type": "string", "description": "Path to the env file to audit (default .env)" }
+        }
+      }
+    }
+  ],
+  "commands": [
+    { "id": "env.check", "title": "环境体检", "description": "版本、端口占用、.env 缺项" }
+  ]
+}

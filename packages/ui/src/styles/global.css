@@ -1,4 +1,30 @@
 :root {
+  /*
+   * Layering scale.
+   *
+   * Every z-index in the app comes from here. Before this, 22 declarations
+   * across 14 files used 14 arbitrary values, which produced real bugs: the
+   * Home page (300) sat ABOVE every modal, so opening Settings from Home hid it
+   * behind the page; the command palette and toasts (80) sat BELOW the modals
+   * (200–250), so Ctrl+K was covered and notifications vanished while a panel
+   * was open.
+   *
+   * Rules of thumb:
+   *   - a page is BELOW any overlay that can open on top of it
+   *   - a modal is above a page, and above other modals it may stack on
+   *   - toasts are above everything, always
+   */
+  --z-sticky: 5;         /* in-flow handles inside a scroll container */
+  --z-dropdown: 20;      /* @-mention menu, autocomplete */
+  --z-popover: 30;       /* copy buttons, drop overlay, jump-to-latest */
+  --z-fab: 120;          /* floating action buttons over the layout */
+  --z-sidebar-force: 130;/* sidebar when forced open on a narrow viewport */
+  --z-page: 200;         /* full-page surface (Home) */
+  --z-page-float: 210;   /* floating element owned by a page (dock) */
+  --z-modal: 300;        /* dialogs, side panels, backdrops */
+  --z-command: 400;      /* command palette: invoked from anywhere, above panels */
+  --z-toast: 500;        /* never hidden */
+
   --bg-primary: #0d1117;
   --bg-secondary: #161b22;
   --bg-tertiary: #21262d;
@@ -20,19 +46,80 @@
   --danger: #f85149;
   --info: #79c0ff;
 
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+  /* Frosted glass — dark: keep body readable, still show wallpaper through */
+  --glass-bg: color-mix(in srgb, var(--bg-secondary) 38%, transparent);
+  --glass-bg-strong: color-mix(in srgb, var(--bg-secondary) 52%, transparent);
+  --glass-titlebar: color-mix(in srgb, var(--bg-secondary) 18%, transparent);
+  --glass-border: color-mix(in srgb, var(--border) 50%, transparent);
+  --glass-blur: 30px;
+  --glass-saturate: 165%;
 
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
+  /*
+   * Control fills.
+   *
+   * Apple's secondary controls are a low-opacity neutral laid over whatever is
+   * behind them, rather than a fixed grey. That is why they sit correctly on both
+   * a dark panel and a light one without a separate palette per surface, and why
+   * they never look like a coloured box pasted on top.
+   */
+  --fill-control: rgb(255 255 255 / 0.08);
+  --fill-control-hover: rgb(255 255 255 / 0.14);
+  /* For controls on an already-elevated surface, where the above disappears. */
+  --fill-control-strong: rgb(255 255 255 / 0.12);
+
+  /*
+   * Apple-aligned type.
+   *
+   * SF Pro on macOS; on Windows the closest native match is Segoe UI Variable
+   * (optically sized, humanist — the Windows 11 system face). Both are listed
+   * before the webfont so the local native face wins and text stays crisp
+   * without a network round-trip.
+   */
+  --font-sans: 'Segoe UI Variable Display', 'Segoe UI Variable Text', -apple-system,
+    BlinkMacSystemFont, 'SF Pro Text', 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'Cascadia Code', 'SF Mono', 'JetBrains Mono', ui-monospace, 'Cascadia Mono', monospace;
+
+  /* Apple's corner language scales with element size; 6/10/14/20 reads softer
+     than the previous 4/8/12 which looked sharp at these sizes. */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
   --radius-full: 9999px;
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  /* Layered, low-opacity shadows — a single hard shadow is what made surfaces
+     read as flat cutouts. */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24), 0 0 0 0.5px rgba(0, 0, 0, 0.12);
+  --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.28), 0 8px 24px rgba(0, 0, 0, 0.24);
+  --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.3), 0 16px 48px rgba(0, 0, 0, 0.34);
 
-  --transition: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --ease-sheet: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+  --ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+  --transition: 180ms var(--ease-out);
+  --transition-fast: 120ms var(--ease-out);
+  --transition-med: 280ms var(--ease-sheet);
+  --transition-slow: 420ms var(--ease-sheet);
+
+  /* type scale — nudged up ~0.5-1px; Apple's UI text reads consistently
+     larger relative to its line box than the previous scale did. */
+  --text-xs: 11.5px;
+  --text-sm: 12.5px;
+  --text-md: 13.5px;
+  --text-base: 14.5px;
+  --text-lg: 16.5px;
+  --leading-tight: 1.3;
+  --leading-normal: 1.6;
+  --leading-relaxed: 1.75;
+
+  /* 4px spacing grid */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
 }
 
 *, *::before, *::after {
@@ -49,12 +136,24 @@ html, body, #root {
 
 body {
   font-family: var(--font-sans);
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
   color: var(--text-primary);
   background: var(--bg-primary);
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  /*
+   * NOT `-webkit-font-smoothing: antialiased`.
+   *
+   * That setting disables subpixel rendering, which thins and greys text on
+   * Windows — it is tuned for macOS's renderer. Leaving it at the default
+   * (`auto`) is what makes glyphs carry the weight Apple's UI has. This is the
+   * main reason the text read as too light.
+   */
+  -webkit-font-smoothing: auto;
+  -moz-osx-font-smoothing: auto;
+  /* Apple tightens large text slightly and loosens small text. */
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: 'kern' 1, 'liga' 1, 'calt' 1;
 }
 
 ::-webkit-scrollbar {
@@ -106,6 +205,146 @@ input, textarea {
   outline: none;
 }
 
+/* ============================================================
+   Button system.
+
+   Deliberately FILLED rather than OUTLINED.
+
+   The previous buttons used a 1px border with a transparent background, which is
+   what made them read as abrupt: on a busy transcript a dozen hairline rectangles
+   compete with the content. A subtle fill recedes at rest and needs no line to
+   define its edge, which is the approach macOS and iOS take for secondary
+   controls.
+
+   Sizes come from one place so a button in the sidebar and one in a dialog are the
+   same height. Variants differ only in fill and emphasis — never in geometry — so
+   they line up when placed in a row.
+   ============================================================ */
+
+.she-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+
+  /* 28px tall reads as a control, not a chip. */
+  height: 28px;
+  padding: 0 12px;
+
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--fill-control);
+  color: var(--text-primary);
+
+  /* 500, not 600/700: bold text is the fastest way to look non-native. */
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background var(--transition-fast),
+    color var(--transition-fast),
+    opacity var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+.she-btn:hover:not(:disabled) {
+  background: var(--fill-control-hover);
+}
+
+/* Press feedback is a small scale plus a slight dimming; no shadow change, which
+   would make the button appear to lift off the page. */
+.she-btn:active:not(:disabled) {
+  transform: scale(0.97);
+  opacity: 0.88;
+}
+
+.she-btn:disabled {
+  opacity: 0.36;
+  cursor: default;
+}
+
+/* Primary: the one action the current context is about. Filled with the accent,
+   which is the only place colour carries meaning. */
+.she-btn--primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.she-btn--primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 88%, #fff);
+}
+
+/* Plain: no fill at all until hovered. For rows of low-priority actions where a
+   dozen fills would be visual noise. */
+.she-btn--plain {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.she-btn--plain:hover:not(:disabled) {
+  background: var(--fill-control);
+  color: var(--text-primary);
+}
+
+/* Destructive: red text on a plain button at rest. Filling it red by default makes
+   a delete affordance shout from every row. */
+.she-btn--danger {
+  background: transparent;
+  color: var(--danger);
+}
+
+.she-btn--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+
+/* Small: for dense surfaces (list rows, toolbar strips). */
+.she-btn--sm {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 11.5px;
+  border-radius: var(--radius-sm);
+}
+
+/* Icon-only: square, so it aligns with text buttons in a row. */
+.she-btn--icon {
+  width: 28px;
+  padding: 0;
+}
+
+.she-btn--icon.she-btn--sm {
+  width: 24px;
+}
+
+/* Compact pill, for the composer's action chips. Kept as a variant rather than a
+   separate class so its geometry still matches the rest. */
+.she-btn--chip {
+  height: 26px;
+  padding: 0 11px;
+  border-radius: var(--radius-full);
+  background: transparent;
+  /*
+   * Secondary, not tertiary.
+   *
+   * These chips have no border and no resting fill, so the text alone has to signal
+   * "this is tappable". At tertiary they were dim enough to read as captions beside
+   * the composer rather than controls — the border that used to carry that meaning
+   * was removed on purpose, and the colour has to take over the job.
+   */
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+
+.she-btn--chip:hover:not(:disabled) {
+  background: var(--fill-control);
+  color: var(--text-primary);
+}
+
 /* Utility classes */
 .flex { display: flex; }
 .flex-col { flex-direction: column; }
@@ -138,3 +377,410 @@ input, textarea {
 .animate-pulse { animation: pulse 2s ease-in-out infinite; }
 .animate-fadeIn { animation: fadeIn 200ms ease-out; }
 .animate-slideIn { animation: slideIn 200ms ease-out; }
+
+
+/* SHE polish */
+:root {
+  --she-bg: #0b0d12;
+  --she-panel: #12141a;
+  --she-border: #2a2f3a;
+  --she-accent: #5b8cff;
+  --she-accent-2: #22c55e;
+  --she-text: #e8eaed;
+  --she-muted: #9aa0a6;
+  --she-radius: 12px;
+  --she-shadow: 0 18px 50px rgba(0,0,0,.4);
+}
+body {
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(91,140,255,.12), transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, rgba(34,197,94,.08), transparent 50%),
+    var(--she-bg) !important;
+  letter-spacing: 0.01em;
+}
+::selection {
+  background: rgba(91,140,255,.35);
+}
+
+
+/* she-art-polish */
+:root {
+  --bg-primary: #0b0d12;
+  --bg-secondary: #11151e;
+  --bg-tertiary: #171c28;
+  --border: rgba(130, 150, 190, 0.18);
+  --accent: #7c9cff;
+  --accent-soft: rgba(124, 156, 255, 0.14);
+
+  /*
+   * Syntax colours, tuned for the dark surface.
+   *
+   * Deliberately desaturated relative to a typical editor theme: code appears
+   * inside a chat transcript next to prose, and full-saturation hues there read
+   * as noise. Contrast against --bg-secondary stays above 4.5:1 for every role.
+   */
+  --syntax-keyword: #c295f0;
+  --syntax-string: #7fd88f;
+  --syntax-number: #e5b567;
+  --syntax-function: #7c9cff;
+  --syntax-type: #6fd0d8;
+  --syntax-attr: #e6a3c7;
+}
+body {
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(90,120,255,0.16), transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, rgba(160,90,255,0.10), transparent 50%),
+    var(--bg-primary);
+}
+::selection { background: var(--accent-soft); color: #e8eeff; }
+
+
+/* Light theme */
+[data-theme="light"] {
+  --bg-primary: #f6f8fa;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #eef2f6;
+  --bg-hover: #e6ebf1;
+  --bg-active: #ddf4ff;
+
+  --border: #d0d7de;
+  --border-focus: #0969da;
+
+  /*
+   * Control fills, light mode.
+   *
+   * A dark scrim over white looks like dirt, so this flips to a black scrim. The
+   * opacity is deliberately lower than the dark theme's: the same numeric value
+   * reads much heavier against white.
+   */
+  --fill-control: rgb(0 0 0 / 0.05);
+  --fill-control-hover: rgb(0 0 0 / 0.09);
+  --fill-control-strong: rgb(0 0 0 / 0.07);
+
+  /* Frosted glass — light: breathe more; wallpaper must read through panels */
+  --glass-bg: rgba(255, 255, 255, 0.22);
+  --glass-bg-strong: rgba(255, 255, 255, 0.36);
+  --glass-titlebar: rgba(255, 255, 255, 0.16);
+  --glass-border: rgba(15, 23, 42, 0.08);
+  --glass-blur: 40px;
+  --glass-saturate: 180%;
+
+  /* Light-mode syntax colours need more saturation: pastel hues that read well
+     on a dark surface wash out to near-grey on white. */
+  --syntax-keyword: #8250df;
+  --syntax-string: #1a7f37;
+  --syntax-number: #953800;
+  --syntax-function: #0969da;
+  --syntax-type: #0f7b8a;
+  --syntax-attr: #bf3989;
+
+  --text-primary: #1f2328;
+  --text-secondary: #656d76;
+  --text-tertiary: #8c959f;
+  --text-link: #0969da;
+
+  --accent: #0969da;
+  --accent-muted: #54aeff66;
+  --success: #1a7f37;
+  --warning: #9a6700;
+  --danger: #cf222e;
+  --info: #0969da;
+
+  --shadow-sm: 0 1px 2px rgba(31, 35, 40, 0.08);
+  --shadow-md: 0 4px 12px rgba(31, 35, 40, 0.12);
+  --shadow-lg: 0 8px 24px rgba(31, 35, 40, 0.16);
+}
+
+[data-theme="light"] body {
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(9,105,218,.08), transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, rgba(26,127,55,.06), transparent 50%),
+    var(--bg-primary) !important;
+}
+
+/* —— Motion system (Apple-ish) —— */
+@keyframes sheFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes sheBubbleIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); filter: blur(2px); }
+  to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+}
+@keyframes sheSheetIn {
+  from { opacity: 0; transform: translateY(18px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes shePop {
+  from { opacity: 0; transform: translateY(-8px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes sheToastIn {
+  from { opacity: 0; transform: translate(-50%, 12px) scale(0.96); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+@keyframes sheSlideInLeft {
+  from { opacity: 0; transform: translateX(-12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes shePulseSoft {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.92); }
+}
+
+button, .she-pressable {
+  transition: transform var(--transition-fast), background var(--transition), color var(--transition), border-color var(--transition), box-shadow var(--transition);
+}
+button:active:not(:disabled), .she-pressable:active {
+  transform: scale(0.97);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  button:active:not(:disabled), .she-pressable:active {
+    transform: none;
+  }
+}
+
+
+/* —— Focus ring (Apple-ish) —— */
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--accent-muted);
+}
+button:focus-visible,
+[role="button"]:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--accent-muted);
+}
+
+@keyframes sheSkeleton {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+.she-skeleton {
+  border-radius: var(--radius-md);
+  background: linear-gradient(
+    90deg,
+    var(--bg-tertiary) 0%,
+    var(--bg-hover) 45%,
+    var(--bg-tertiary) 90%
+  );
+  background-size: 200% 100%;
+  animation: sheSkeleton 1.2s var(--ease-out) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .she-skeleton { animation: none; opacity: 0.7; }
+}
+
+
+@media (prefers-reduced-motion: reduce) {
+  :global(.resizeHandle)::after,
+  :global(.resizeHandleRow)::after {
+    transition: none !important;
+  }
+  .inputWrapper:focus-within { transform: none !important; }
+  .sendBtn:hover, .sendBtn:active { transform: none !important; }
+  .messages { scroll-behavior: auto !important; }
+}
+
+/* Theme switch crossfade (scoped — avoid lagging every transform) */
+html[data-theme] {
+  transition: background-color 320ms var(--ease-sheet), color 320ms var(--ease-sheet);
+}
+html[data-theme] body,
+html[data-theme] [class*="module"],
+html[data-theme] .layout,
+html[data-theme] aside,
+html[data-theme] main,
+html[data-theme] header,
+html[data-theme] footer {
+  transition: background-color 280ms var(--ease-sheet), border-color 280ms var(--ease-sheet), color 220ms var(--ease-out), box-shadow 280ms var(--ease-sheet);
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-theme],
+  html[data-theme] body,
+  html[data-theme] [class*="module"] {
+    transition: none !important;
+  }
+}
+/* ============================================================
+   User background (image / video) + frosted glass
+   Activated by html[data-bg="image"|"video"], set by useBackground().
+
+   Layering:
+     video element / html background  →  z-index -2   (the wallpaper)
+     body::before scrim               →  z-index -1   (theme-tinted veil)
+     app content                      →  normal flow
+
+   The scrim is what makes text readable on ANY wallpaper. It is tinted by
+   theme, so the same photo works in both dark and light mode.
+   ============================================================ */
+
+/* Image wallpapers paint on the root element. Video uses the <video> element
+   instead (a video URL in CSS url() would not render). */
+html[data-bg="image"] {
+  background-image: var(--app-bg-image);
+  background-size: cover;
+  background-position: center center;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+}
+
+/* Video wallpaper sits behind everything. */
+.she-bg-video {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  object-fit: cover;
+  z-index: -2;
+  pointer-events: none;
+}
+
+/* Drop the decorative gradients so the photo shows cleanly. */
+html[data-bg="image"] body,
+html[data-bg="video"] body {
+  background: transparent !important;
+}
+
+/* Scrim: a light theme-tinted veil. Keeps contrast predictable instead of
+   fighting whatever the user picked as wallpaper.
+   Light mode also desaturates the wallpaper — a vivid photo under a bright
+   veil read as "too saturated". Dark mode is deliberately left untouched. */
+html[data-bg="image"] body::before,
+html[data-bg="video"] body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: rgba(11, 13, 18, 0.46);
+}
+
+html[data-bg="image"][data-theme="light"] body::before,
+html[data-bg="video"][data-theme="light"] body::before {
+  background: rgba(248, 249, 251, 0.72);
+  backdrop-filter: saturate(0.55) brightness(1.06) contrast(0.97);
+  -webkit-backdrop-filter: saturate(0.55) brightness(1.06) contrast(0.97);
+}
+
+/* ---- Chrome panels: light blur, low tint. Wallpaper reads through. ---- */
+html[data-bg="image"] aside,
+html[data-bg="video"] aside,
+html[data-bg="image"] header,
+html[data-bg="video"] header,
+html[data-bg="image"] footer,
+html[data-bg="video"] footer {
+  background-color: color-mix(in srgb, var(--bg-secondary) 48%, transparent) !important;
+  backdrop-filter: blur(24px) saturate(150%);
+  -webkit-backdrop-filter: blur(24px) saturate(150%);
+}
+
+/* Layout wrappers stay fully transparent — the wallpaper is the backdrop. */
+html[data-bg="image"] [class*="layout"],
+html[data-bg="video"] [class*="layout"],
+html[data-bg="image"] main,
+html[data-bg="video"] main {
+  background-color: transparent !important;
+}
+
+/* Content surfaces: keep just enough backing for text.
+   Targets `[data-surface=...]`, NOT `[class*="..."]`.
+   Substring matching also hit every descendant whose class merely started with
+   the same word: `[class*="toolCall"]` matched 36 inner elements
+   (toolCallHeader, toolCallName, …) and `[class*="reasoning"]` matched 30. Each
+   one painted its own background and ran its own backdrop-filter, and since the
+   inner elements have no border-radius, that showed up as square patches over a
+   wallpaper — very obvious in light theme. */
+html[data-bg="image"] [data-surface="bubble"],
+html[data-bg="video"] [data-surface="bubble"],
+html[data-bg="image"] [data-surface="input"],
+html[data-bg="video"] [data-surface="input"],
+html[data-bg="image"] [data-surface="mention"],
+html[data-bg="video"] [data-surface="mention"],
+html[data-bg="image"] [data-surface="panel"],
+html[data-bg="video"] [data-surface="panel"],
+html[data-bg="image"] [data-surface="card"],
+html[data-bg="video"] [data-surface="card"],
+html[data-bg="image"] [data-surface="modal"],
+html[data-bg="video"] [data-surface="modal"],
+html[data-bg="image"] [data-surface="backdrop"],
+html[data-bg="video"] [data-surface="backdrop"] {
+  background-color: color-mix(in srgb, var(--bg-secondary) 80%, transparent) !important;
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  border-color: color-mix(in srgb, var(--border) 70%, transparent) !important;
+}
+
+/* Tool-call / reasoning chrome sits on top of the chat surface. */
+html[data-bg="image"] [data-surface="tool"],
+html[data-bg="video"] [data-surface="tool"],
+html[data-bg="image"] [data-surface="reasoning"],
+html[data-bg="video"] [data-surface="reasoning"] {
+  background-color: color-mix(in srgb, var(--bg-tertiary) 70%, transparent) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+/* ---- Light theme readability over bright photos ---- */
+html[data-bg="image"][data-theme="light"] [data-surface="bubble"],
+html[data-bg="video"][data-theme="light"] [data-surface="bubble"],
+html[data-bg="image"][data-theme="light"] [data-surface="panel"],
+html[data-bg="video"][data-theme="light"] [data-surface="panel"],
+html[data-bg="image"][data-theme="light"] [data-surface="card"],
+html[data-bg="video"][data-theme="light"] [data-surface="card"],
+html[data-bg="image"][data-theme="light"] [data-surface="tool"],
+html[data-bg="video"][data-theme="light"] [data-surface="tool"],
+html[data-bg="image"][data-theme="light"] [data-surface="reasoning"],
+html[data-bg="video"][data-theme="light"] [data-surface="reasoning"] {
+  background-color: rgba(255, 255, 255, 0.90) !important;
+  color: #1f2328;
+}
+
+html[data-bg="image"][data-theme="light"] aside,
+html[data-bg="video"][data-theme="light"] aside,
+html[data-bg="image"][data-theme="light"] header,
+html[data-bg="video"][data-theme="light"] header,
+html[data-bg="image"][data-theme="light"] footer,
+html[data-bg="video"][data-theme="light"] footer {
+  background-color: rgba(255, 255, 255, 0.76) !important;
+}
+
+/* Text needs a slight halo only where it sits directly on the photo. */
+html[data-bg="image"] [class*="emptyMessages"],
+html[data-bg="video"] [class*="emptyMessages"],
+html[data-bg="image"] [class*="emptyText"],
+html[data-bg="video"] [class*="emptyText"],
+html[data-bg="image"] [class*="emptyHint"],
+html[data-bg="video"] [class*="emptyHint"] {
+  text-shadow: 0 1px 3px color-mix(in srgb, var(--bg-primary) 85%, transparent);
+}
+
+/* ---- Terminal: readable over any wallpaper ---- */
+html[data-bg="image"] [class*="terminal"],
+html[data-bg="video"] [class*="terminal"] {
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+html[data-bg="image"][data-theme="dark"] [class*="terminal"],
+html[data-bg="video"][data-theme="dark"] [class*="terminal"],
+html[data-bg="image"][data-theme="dark"] [class*="terminal"] *,
+html[data-bg="video"][data-theme="dark"] [class*="terminal"] * {
+  background-color: rgba(8, 10, 16, 0.78) !important;
+  color: #e8eefc !important;
+}

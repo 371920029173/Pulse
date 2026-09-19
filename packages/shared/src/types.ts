@@ -102,8 +102,17 @@ export interface ActivationTrace {
   nodeId: string;
   groupPath: string[];
   pulseSeeds: PulseSeed[];
+  /** Structural (PulseSeed) activation energy. */
   activationLevel: number;
   reason: string;
+  /** Traditional lexical relevance (BM25), raw score. */
+  lexicalScore?: number;
+  /** Fused score actually used for ordering (structural + lexical + signals). */
+  finalScore?: number;
+  /** Multiplicative boost from structural signals (trust / hormone / use / recency / dormancy). */
+  signalBoost?: number;
+  /** Human-readable list of the signals that moved this node up or down. */
+  signalNotes?: string[];
 }
 
 export interface KBQueryResult {
@@ -123,6 +132,11 @@ export interface LLMMessage {
   name?: string;
   tool_call_id?: string;
   tool_calls?: ToolCall[];
+  /**
+   * Chain-of-thought emitted by reasoning models (DeepSeek `reasoning_content`,
+   * Anthropic thinking blocks, OpenAI o-series). Never sent back to the API.
+   */
+  reasoning?: string;
 }
 
 export interface ToolCall {
@@ -147,16 +161,86 @@ export interface ToolResult {
   isError?: boolean;
 }
 
+export interface ConfirmTicketInfo {
+  ticket_id: string;
+  tool: string;
+  summary: string;
+  created_at?: string;
+  expires_at?: string;
+}
+
+export interface PendingPatchInfo {
+  patch_id: string;
+  path: string;
+  before: string;
+  after: string;
+  unified: string;
+  created_at?: string;
+  expires_at?: string;
+}
+
 export interface StreamChunk {
-  type: 'text' | 'tool_call_start' | 'tool_call_delta' | 'tool_call_end' | 'done' | 'error';
+  type:
+    | 'text'
+    /** Chain-of-thought delta from a reasoning model. Display-only. */
+    | 'reasoning'
+      | 'tool_call_start'
+      | 'tool_call_delta'
+      | 'tool_call_end'
+      /**
+       * Output of a finished tool call.
+       *
+       * Without this the transcript showed tool calls but never their results
+       * while streaming — results only appeared after a reload, because
+       * normalizeHistory rebuilds them from stored history.
+       */
+      | 'tool_result'
+    /** Structured result of a KB query, so the UI can render the trace panel. */
+    | 'kb_result'
+    | 'done'
+    | 'error'
+    | 'status'
+    | 'needs_confirm'
+    | 'needs_apply'
+    | 'usage';
   content?: string;
+  /** Background / subagent card update (UI TaskCards). */
+  task?: { id: string; kind: string; label: string; phase: 'running' | 'done' | 'error'; detail?: string };
   toolCall?: Partial<ToolCall>;
   error?: string;
+  /** Present when type === 'needs_confirm' */
+  ticket?: ConfirmTicketInfo;
+  /** Present when type === 'needs_apply' */
+  patch?: PendingPatchInfo;
+    /** Present when type === 'kb_result' — the full KBQueryResult. */
+    kbResult?: unknown;
+    /** Present when type === 'tool_result' — the tool call this output belongs to. */
+    toolCallId?: string;
+    /** Present when type === 'tool_result' — name of the tool that ran. */
+    toolName?: string;
+  /** Present when type === 'usage' */
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    /** Reasoning-token breakdown for models that report it. */
+    reasoning_tokens?: number;
+    /**
+     * Prompt-cache accounting (DeepSeek and others report it).
+     *
+     * Without these the cache is invisible, so a regression that silently
+     * destroys it — e.g. trimming history from the FRONT every turn, which
+     * changes the prefix and drops the hit rate to 0% — shows up only on the
+     * bill. See docs/context-and-caching.md for the measurements.
+     */
+    cache_hit_tokens?: number;
+    cache_miss_tokens?: number;
+  };
 }
 
 export interface LLMProvider {
   name: string;
-  chat(messages: LLMMessage[], tools?: ToolDefinition[], onChunk?: (chunk: StreamChunk) => void): Promise<LLMMessage>;
+  chat(messages: LLMMessage[], tools?: ToolDefinition[], onChunk?: (chunk: StreamChunk) => void, signal?: AbortSignal): Promise<LLMMessage>;
 }
 
 // ─── Sandbox Types ───
@@ -175,4 +259,6 @@ export interface SandboxOptions {
   timeout?: number;
   maxOutputBytes?: number;
   env?: Record<string, string>;
+  /** When true, bypass denyDestructiveByDefault (after confirm ticket). */
+  allowDestructive?: boolean;
 }

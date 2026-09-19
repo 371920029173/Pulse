@@ -1,7 +1,8 @@
 {
   "name": "she-v2",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "license": "Apache-2.0",
   "description": "SHE v2 — Structured Hierarchy Engine: agent-runtime with Group Memory + PulseSeed retrieval",
   "scripts": {
     "build": "pnpm -r build",
@@ -10,13 +11,47 @@
     "dev": "pnpm dev:ui",
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
-    "she": "node packages/she-cli/dist/index.js"
+    "she": "node packages/she-cli/dist/index.js",
+    "dev:desktop": "pnpm --filter @she/desktop start",
+    "desktop": "pnpm --filter @she/desktop start",
+    "eval": "node evals/retrieval/run.mjs",
+    "eval:agent": "node evals/agent/run.mjs",
+    "check:security": "node scripts/security-check.mjs",
+    "check:data": "node scripts/data-safety-check.mjs",
+    "check:subagent": "node scripts/check-subagent.mjs",
+    "check:lsp": "node scripts/lsp-check.mjs",
+    "check:portability": "node scripts/portability-check.mjs",
+    "check:metrics": "node scripts/metrics-check.mjs",
+    "check:schedule": "node scripts/schedule-check.mjs && node scripts/schedule-tools-check.mjs",
+    "check:i18n": "node scripts/i18n-check.mjs",
+    "check:ui": "node scripts/control-style-check.mjs",
+    "eval:verify": "node evals/verification/run.mjs",
+    "check:host": "node scripts/host-guard-check.mjs",
+    "check:docker": "node scripts/docker-check.mjs",
+    "check:release": "node scripts/release-check.mjs",
+    "release": "node scripts/release.mjs",
+    "release:verify": "node scripts/release-install-check.mjs",
+    "check:a11y": "node scripts/a11y-check.mjs",
+    "check:lock": "node scripts/turn-lock-check.mjs",
+    "check:shell": "node scripts/shell-check.mjs",
+    "check:docs": "node scripts/docs-check.mjs",
+    "check:theme": "node scripts/theme-check.mjs",
+    "check:uistruct": "node scripts/ui-structure-check.mjs",
+    "check:dist": "node scripts/dist-check.mjs",
+    "check:logs": "node scripts/log-check.mjs",
+    "check:restart": "node scripts/restart-check.mjs",
+    "check:encoding": "node scripts/encoding-check.mjs",
+    "vendor:fonts": "node scripts/vendor-fonts.mjs",
+    "check:all": "pnpm -r build && pnpm -r test && pnpm eval && pnpm eval:verify && pnpm check:restart && pnpm check:encoding && pnpm check:data && pnpm check:subagent && pnpm check:security && pnpm check:shell && pnpm check:host && pnpm check:lock && pnpm check:theme && pnpm check:uistruct && pnpm check:dist && pnpm check:logs && pnpm check:a11y && pnpm check:docs && pnpm check:portability && pnpm check:metrics && pnpm check:schedule && pnpm check:lsp && pnpm check:i18n && pnpm check:ui && pnpm check:docker",
+    "pack:win": "pnpm build && pnpm --filter @she/desktop dist:win",
+    "dist:desktop": "pnpm --filter @she/desktop dist:win"
   },
   "engines": {
     "node": ">=20"
   },
   "packageManager": "pnpm@9.15.4",
   "devDependencies": {
-    "@types/node": "^22.20.2"
+    "@types/node": "^22.20.2",
+    "typescript-language-server": "^6.0.0"
   }
 }
