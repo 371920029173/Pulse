@@ -121,6 +121,20 @@ export const IconRefresh = (p: IconProps) => (
   </Svg>
 );
 
+/**
+ * Two shapes joining: used for the shared / merged knowledge base.
+ *
+ * A link glyph would suggest a URL, and a single merge arrow would not convey that the point is
+ * two libraries becoming one that several workspaces share.
+ */
+export const IconMerge = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 6h4l4 6 4-6h4" />
+    <path d="M4 18h4l4-6" />
+    <path d="M16 18h4" />
+  </Svg>
+);
+
 export const IconSend = (p: IconProps) => (
   <Svg {...p}><path d="M12 19V5" /><path d="M6 11l6-6 6 6" /></Svg>
 );

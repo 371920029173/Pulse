@@ -1,8 +1,55 @@
 /** Parse Cursor / Claude Code / Codex / raw chat exports into KB chunks. */
+import type { LLMMessage } from '@she/shared';
+
 export interface ContextChunk {
   title: string;
   content: string;
   meta?: Record<string, string>;
+}
+
+/**
+ * Turn parsed chunks back into a conversation.
+ *
+ * The parsers already carry the speaker in `meta.role` — they were written for knowledge ingestion,
+ * so the role was metadata rather than structure. Migration needs the structure, so this reads it
+ * back.
+ *
+ * Two decisions worth stating:
+ *
+ *   1. **An unrecognised role becomes `assistant`, not a drop.** Sources use their own vocabulary
+ *      (`human`, `ai`, `model`, `message`, `item`, …) and the parsers pass it through verbatim. A
+ *      role this function has never seen is still a turn the user wrote or received; discarding it
+ *      would quietly lose part of the conversation, which is the one thing a migration must not do.
+ *
+ *   2. **Consecutive same-role turns are merged.** Some exports split one reply across several
+ *      entries (a tool call and its text, a message and its attachment). Adjacent duplicates read
+ *      as two turns and make the transcript misleading about who said what.
+ *
+ * `maxMessages` keeps the FIRST turns and reports the drop, rather than silently returning a
+ * truncated transcript that looks complete.
+ */
+export function chunksToMessages(
+  chunks: ContextChunk[],
+  maxMessages = 500,
+): { messages: LLMMessage[]; truncated: number } {
+  const messages: LLMMessage[] = [];
+
+  for (const chunk of chunks) {
+    const raw = String(chunk.meta?.role ?? '').trim().toLowerCase();
+    const role: LLMMessage['role'] = raw === 'user' || raw === 'human' ? 'user' : 'assistant';
+    const content = String(chunk.content ?? '').trim();
+    if (!content) continue;
+
+    const prev = messages[messages.length - 1];
+    if (prev && prev.role === role && typeof prev.content === 'string') {
+      prev.content = `${prev.content}\n\n${content}`;
+      continue;
+    }
+    messages.push({ role, content });
+  }
+
+  const truncated = Math.max(0, messages.length - maxMessages);
+  return { messages: truncated ? messages.slice(0, maxMessages) : messages, truncated };
 }
 
 function asText(v: unknown): string {

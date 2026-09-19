@@ -388,6 +388,25 @@
   padding-right: 18px;
 }
 
+/*
+ * "New trace data arrived" marker.
+ *
+ * The panel used to reopen itself whenever a query produced resonance data, which made closing it
+ * pointless. It now stays closed and reports instead: a dot on this handle, cleared when the panel
+ * is opened. Visible without being a takeover, which is what a notification about optional detail
+ * should be.
+ */
+.traceFabDot {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--bg-secondary) 90%, transparent);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .traceFab { transition: none !important; }
 }

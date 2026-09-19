@@ -4,6 +4,7 @@ import { useKB } from './hooks/useKB';
 import { useBackground } from './hooks/useBackground';
 import { useClusterChat } from './hooks/useClusterChat';
 import { fetchJSON } from './lib/api';
+import { isSkillProfile } from './lib/skills';
 import { Chat, type SkillProfileId, type ThinkingLevel } from './components/Chat';
 import { Sidebar, type SessionMeta } from './components/Sidebar';
 import { PulseTracePanel } from './components/PulseTracePanel';
@@ -110,6 +111,8 @@ export function App() {
   const [showTrace, setShowTrace] = useState(true);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  /** Which Settings block to scroll to when it opens (e.g. the shared knowledge base). */
+  const [settingsFocus, setSettingsFocus] = useState<string | null>(null);
   const [showTerminal, setShowTerminal] = useState(true);
   const [filePreview, setFilePreview] = useState<{ path: string; content: string } | null>(null);
   const [draftInsert, setDraftInsert] = useState<string | null>(null);
@@ -158,8 +161,30 @@ export function App() {
   );
   const [skillProfile, setSkillProfile] = useState<SkillProfileId>(() => {
     const v = localStorage.getItem('she.skillProfile');
-    return v === 'dev' || v === 'liberal' || v === 'general' || v === 'custom' ? v : 'dev';
+    return isSkillProfile(v) ? v : 'dev';
   });
+  /*
+   * The server is the source of truth for the ACTIVE skill profile.
+   *
+   * The client kept its own copy in localStorage and never asked, so the two drifted: with
+   * `SHE_SKILL_PROFILE=general` on the server, the settings panel (which reads the server) showed
+   * 通用 while the composer highlighted 开发 — the button was showing a profile the agent was not
+   * using. A control that reports the wrong state is worse than no control.
+   *
+   * Read once on boot, after which the user's clicks drive both sides through `handleSkillProfile`.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const d = await fetchJSON<{ skills?: { profile?: string } }>('/api/settings');
+        if (cancelled || !isSkillProfile(d.skills?.profile)) return;
+        setSkillProfile(d.skills.profile);
+        try { localStorage.setItem('she.skillProfile', d.skills.profile); } catch { /* ignore */ }
+      } catch { /* keep the local value when the server cannot be reached */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(() => {
     const v = localStorage.getItem('she.thinkingLevel');
     return v === 'minimal' || v === 'low' || v === 'medium' || v === 'high' ? v : 'medium';
@@ -434,11 +459,24 @@ export function App() {
     };
   }, []);
 
+  /*
+   * Do not force the trace panel open on new data.
+   *
+   * This used to run `setShowTrace(true)` on every KB result, so closing the panel was futile: the
+   * next `kb_query` (which the agent performs on its own) slid it back open. A panel the user
+   * explicitly closed must stay closed — being overruled is worse than not having the toggle.
+   *
+   * What replaces it: the reopen handle is badged instead, so the arrival of trace data is visible
+   * without taking over the screen. `traceHasNew` is cleared when the panel is opened.
+   */
+  const [traceHasNew, setTraceHasNew] = useState(false);
   useEffect(() => {
-    if (chat.latestKBResult) {
-      setShowTrace(true);
-    }
+    if (chat.latestKBResult) setTraceHasNew(true);
   }, [chat.latestKBResult]);
+
+  useEffect(() => {
+    if (showTrace) setTraceHasNew(false);
+  }, [showTrace]);
 
   const handleGroupClick = useCallback((id: string) => {
     setSelectedGroupId(id);
@@ -742,12 +780,13 @@ export function App() {
     <>
       {showSettings && (
         <Settings
-          onClose={() => setShowSettings(false)}
+          onClose={() => { setShowSettings(false); setSettingsFocus(null); }}
           theme={theme}
           onToggleTheme={() => setTheme((v) => (v === 'dark' ? 'light' : 'dark'))}
           background={bg}
           locale={locale}
           onLocale={handleLocale}
+          focusSection={settingsFocus}
           onOpenTheme={() => { setShowSettings(false); setShowTheme(true); }}
         />
       )}
@@ -835,6 +874,7 @@ export function App() {
                 onExportSession={handleExportSession}
                 onRenameSession={handleRenameSession}
                 onOpenFile={(path, content) => setFilePreview({ path, content })}
+        onOpenKbSharing={() => { setSettingsFocus('kb-share'); setShowSettings(true); }}
                 onInsertText={(text) => setDraftInsert(text)}
               />
             </aside>
@@ -953,15 +993,20 @@ export function App() {
           </>
         )}
 
-        {/* Reopen handle — closing the trace panel previously left no way back. */}
+        {/*
+          Reopen handle. Closing the trace panel previously left no way back, and the panel then
+          reopened itself on the next query — both broken. This is the way back, and it carries a
+          dot when new trace data arrived while it was closed, so nothing is missed silently.
+        */}
         {!focusChat && !showTrace && (
           <button
             type="button"
             className={styles.traceFab}
             onClick={() => setShowTrace(true)}
-            title="打开组结构共振轨迹"
+            title={traceHasNew ? t('组结构轨迹有新数据') : t('打开组结构共振轨迹')}
           >
-            轨迹
+            {t('轨迹')}
+            {traceHasNew ? <span className={styles.traceFabDot} aria-hidden /> : null}
           </button>
         )}
       </div>
@@ -1023,8 +1068,17 @@ export function App() {
       {showSources && (
         <ImportSources
           onClose={() => setShowSources(false)}
-          destination={activeSessionId ? 'chat' : 'kb'}
-          onImported={() => { void chat.loadHistory(); }}
+          destination={activeSessionId ? 'sessions' : 'kb'}
+          onImported={() => {
+          // An import changes BOTH the conversation list and the knowledge base (or just the KB,
+          // depending on the destination). Only the chat history was reloaded, so the sidebar's
+          // knowledge tree stayed on its pre-import empty state — the KB looked empty while
+          // holding thousands of groups, until the user re-entered the workspace or reloaded.
+          void chat.loadHistory();
+          void refreshSessions();
+          void kb.fetchTree();
+          void kb.fetchStats();
+        }}
         />
       )}
       {showImport && <KbImport onClose={() => setShowImport(false)} />}

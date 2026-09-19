@@ -13,11 +13,37 @@ export interface ChatSession {
   updated_at: string;
   messages: LLMMessage[];
   /**
+   * Where a migrated conversation came from.
+   *
+   * Kept so the origin is answerable later: after importing a few hundred conversations from
+   * another tool, "which file was this?" is the first question a user asks, and the answer cannot
+   * be recovered from the transcript itself.
+   */
+  imported_from?: {
+    source: string;
+    /** Absolute path of the ORIGINAL record on disk, before any copying. */
+    originPath: string;
+    /** Workspace-relative copy of the record, when one was kept. */
+    copiedTo?: string;
+    importedAt: string;
+    /** Turns dropped by the import cap, so a short transcript is not mistaken for a whole one. */
+    truncated?: number;
+  };
+  /**
    * Closed sessions are hidden from the working list but kept in history.
    * Distinct from deletion: closing is reversible, deleting is not.
    */
   closed?: boolean;
   closed_at?: string;
+}
+
+/** One conversation to insert via `importMany`. */
+export interface ImportedConversation {
+  title: string;
+  messages: LLMMessage[];
+  createdAt?: string;
+  updatedAt?: string;
+  importedFrom?: ChatSession['imported_from'];
 }
 
 interface SessionStoreFile {
@@ -166,13 +192,17 @@ export class SessionStore {
     const all = this.data.sessions.filter((s) => includeClosed || !s.closed);
     return {
       active_id: this.data.active_id,
-      sessions: all.map(({ id, title, created_at, updated_at, closed, closed_at }) => ({
+      // `imported_from` is carried through so the origin of a migrated conversation survives into
+      // the list — it is the answer to "where did this come from", and dropping it here would make
+      // the field write-only.
+      sessions: all.map(({ id, title, created_at, updated_at, closed, closed_at, imported_from }) => ({
         id,
         title,
         created_at,
         updated_at,
         closed,
         closed_at,
+        imported_from,
       })),
     };
   }
@@ -232,6 +262,55 @@ export class SessionStore {
     this.data.active_id = s.id;
     this.save();
     return s;
+  }
+
+  /**
+   * Insert conversations migrated from another tool.
+   *
+   * Deliberately NOT a loop over `create()`. That method is for a user starting a chat: it makes
+   * the new session ACTIVE and rewrites the whole file. Importing 500 conversations through it
+   * would therefore (a) leave the active session pointing at whichever import finished last —
+   * hijacking whatever the user was reading, (b) rewrite a growing JSON file 500 times, and
+   * (c) stamp every imported conversation with "now", destroying the original dates that are the
+   * only reason the list is usable after a migration.
+   *
+   * This writes once, keeps `active_id` untouched, preserves the original timestamps, and puts the
+   * imported conversations at the top in date order so the list reads naturally.
+   */
+  importMany(items: ImportedConversation[]): ChatSession[] {
+    const created: ChatSession[] = [];
+    for (const item of items) {
+      const messages = Array.isArray(item.messages) ? item.messages : [];
+      const created_at = item.createdAt || nowIso();
+      const s: ChatSession = {
+        id: `sess_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+        title: item.title?.trim() || defaultTitle(messages),
+        created_at,
+        updated_at: item.updatedAt || created_at,
+        messages,
+      };
+      if (item.importedFrom) s.imported_from = item.importedFrom;
+      created.push(s);
+    }
+
+    /*
+     * Newest first — but only when the items actually carry dates.
+     *
+     * With no source timestamps every item defaults to "now", computed per item, so sorting by it
+     * reorders the batch according to accidental sub-millisecond differences. The caller's order is
+     * the meaningful one in that case (it is the order the user selected them in), and a
+     * nondeterministic order is worse than none: it makes a test flaky and makes two identical runs
+     * produce different lists.
+     *
+     * When dates ARE present, sorting is the point — a year of history must not arrive reversed.
+     */
+    const anyDated = items.some((i) => Boolean(i.updatedAt || i.createdAt));
+    if (anyDated) {
+      created.sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
+    }
+    this.data.sessions.unshift(...created);
+    this.save();
+    return created;
   }
 
   update(

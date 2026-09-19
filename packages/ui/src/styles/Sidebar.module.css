@@ -191,6 +191,46 @@
   opacity: 1;
 }
 
+/*
+ * A collapsible section header plus an action button beside it.
+ *
+ * `.collapseHeader` has `width: 100%`, so inside the row it has to become flexible — otherwise it
+ * pushes the action button out of view.
+ */
+.collapseHeaderRow {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 6px;
+}
+
+.collapseHeaderRow .collapseHeader {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+
+.collapseAction {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.collapseAction:hover {
+  background: var(--fill-control);
+  color: var(--text-primary);
+}
+
 .sessionItem {
   transition: background var(--transition), transform var(--transition-fast);
   display: flex;

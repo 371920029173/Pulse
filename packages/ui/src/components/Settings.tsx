@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { fetchJSON } from '../lib/api';
 import { SKILL_PROFILES, isSkillProfile, type SkillProfileId } from '../lib/skills';
 import { LOCALES, t } from '../lib/i18n';
@@ -48,6 +48,14 @@ interface Props {
   };
   /** Opens the custom stylesheet editor. Optional so the panel can be rendered without it. */
   onOpenTheme?: () => void;
+  /**
+   * Which block to bring into view when the panel opens.
+   *
+   * The panel is a single ~3000px form, and the shared-knowledge-base controls sit about a thousand
+   * pixels down it — far enough that a user looking for them concluded the feature did not exist.
+   * Callers that open Settings *for* a specific purpose pass a section id so the panel lands on it.
+   */
+  focusSection?: string | null;
 }
 
 const PRESETS: { id: string; label: string; provider: 'openai' | 'anthropic'; baseUrl: string; model: string; keyHint: string }[] = [
@@ -93,9 +101,31 @@ const PRESETS: { id: string; label: string; provider: 'openai' | 'anthropic'; ba
   },
 ];
 
-export function Settings({ onClose, theme, onToggleTheme, background, locale, onLocale, onOpenTheme }: Props) {
+export function Settings({ onClose, theme, onToggleTheme, background, locale, onLocale, onOpenTheme, focusSection }: Props) {
   // Escape closes this dialog: the backdrop click is a mouse convenience, not a keyboard path.
   useEscapeToClose(onClose);
+
+  /** The shared-knowledge-base block, so a caller can ask for it to be brought into view. */
+  const kbShareRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * Scroll a requested block into view.
+   *
+   * Runs after the panel has laid out. The block itself renders immediately (it is not behind a
+   * loading state), but `center` rather than `start` matters here: the section is a group of inputs
+   * and buttons, and aligning its top edge to the viewport would push the buttons off the bottom of
+   * a panel only ~900px tall.
+   */
+  useEffect(() => {
+    if (focusSection !== 'kb-share') return;
+    const el = kbShareRef.current;
+    if (!el) return;
+    // One frame, so the panel's entry animation has a laid-out position to scroll to.
+    const id = window.requestAnimationFrame(() => {
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [focusSection]);
 
   const [data, setData] = useState<SettingsData | null>(null);
   const [apiKey, setApiKey] = useState('');
@@ -401,7 +431,7 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
               {kbMode === 'env' ? '（由 SHE_KB_PATH 指定，优先于 kb-link）' : ''}
               。保存设置仍会写入路径；要用「贯穿」请用下面的共享操作。
             </p>
-            <div className={styles.field} style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
+            <div id="settings-kb-share" ref={kbShareRef} className={styles.field} style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
               <span style={{ fontSize: 13, fontWeight: 600 }}>{t('多工作区共享知识库')}</span>
               <input
                 value={sharePath}

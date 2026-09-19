@@ -6,8 +6,9 @@ import { FileTree } from './FileTree';
 import { FileOutline } from './FileOutline';
 import {
   IconPlus, IconClose, IconHistory, IconSettings, IconTrash, IconWindows, IconDownload,
-  IconChevronDown, IconChevronRight,
+  IconChevronDown, IconChevronRight, IconMerge,
 } from './Icons';
+import { t } from '../lib/i18n';
 
 export interface SessionMeta {
   id: string;
@@ -26,6 +27,8 @@ interface SidebarProps {
   activeSessionId: string | null;
   onOpenSettings?: () => void;
   onOpenFile?: (path: string, content: string) => void;
+  /** Opens Settings at the shared / merged knowledge base block. */
+  onOpenKbSharing?: () => void;
   /** Insert text into the chat composer (e.g. @symbol:Name). */
   onInsertText?: (text: string) => void;
   onGroupClick: (id: string) => void;
@@ -108,6 +111,7 @@ export function Sidebar({
   onRenameSession,
   onOpenSettings,
   onOpenFile,
+  onOpenKbSharing,
   onInsertText,
 }: SidebarProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -420,20 +424,40 @@ export function Sidebar({
 
       <div className={styles.divider} />
 
-      <button
-        type="button"
-        className={styles.collapseHeader}
-        onClick={() => setShowKb((v) => !v)}
-        title={showKb ? '收起知识库' : '展开知识库'}
-      >
-        <span className={styles.collapseChevron}>{showKb ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}</span>
-        <span>知识库</span>
-      </button>
+      <div className={styles.collapseHeaderRow}>
+        <button
+          type="button"
+          className={styles.collapseHeader}
+          onClick={() => setShowKb((v) => !v)}
+          title={showKb ? t('收起知识库') : t('展开知识库')}
+        >
+          <span className={styles.collapseChevron}>{showKb ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}</span>
+          <span>{t('知识库')}</span>
+        </button>
+        {/*
+          Entry point for the shared / merged knowledge base.
+          That feature existed only inside Settings, about 950px down a 2900px scrolling form, so a
+          user looking for "merge two libraries" in the knowledge base area — the obvious place —
+          found nothing. The controls stay in Settings (they need the path inputs); this is the
+          signpost, and it opens Settings at that block.
+        */}
+        {onOpenKbSharing ? (
+          <button
+            type="button"
+            className={styles.collapseAction}
+            onClick={onOpenKbSharing}
+            title={t('共享 / 合并知识库（多个工作区贯穿同一套知识）')}
+            aria-label={t('共享 / 合并知识库')}
+          >
+            <IconMerge size={13} />
+          </button>
+        ) : null}
+      </div>
       {showKb ? (
         <div className={styles.treeContainer}>
           {tree.length === 0 ? (
             <div className={styles.emptyState}>
-              还没有组。<br />导入文件后会填充知识库。
+              {t('还没有组。')}<br />{t('导入对话记录或知识文件后会填充。')}
             </div>
           ) : (
             tree.map((node) => (

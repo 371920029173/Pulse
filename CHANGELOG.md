@@ -13,6 +13,7 @@ data or money quietly.
 ### Added
 
 
+
 **Code intelligence (LSP).** Four tools (`lsp_diagnostics`, `lsp_definition`,
 `lsp_references`, `lsp_hover`) driven by a real language server — the same compiler
 the user's editor uses. `grep` can say a name appears 40 times; it cannot say which
@@ -150,7 +151,27 @@ from the launcher, not a copy that could drift) against an oversized file, and p
 truncation keeps the newest lines, never splits a multi-byte character, and leaves an undersized
 file alone.
 
+
+**Plugin end-to-end check.** `check:plugins` boots a real server with a stub model and verifies the
+chain a user depends on — not the pieces in isolation: install a plugin through the API, confirm the
+agent's tool list *now offers it*, confirm a call to it actually executes and returns real data
+(the check asserts the summary mentions files that exist in the fixture workspace), uninstall it, and
+confirm the agent no longer receives it **without a restart**. `plugins.test.ts` had ~48 good cases,
+but every one called `PluginManager` directly, so the whole feature could have been inert — tools
+loaded but never merged into the agent, or installs that only took effect after a restart — and
+nothing would have failed. Negative-tested by removing the tool merge, which the check catches.
+
+**Conversation migration, as opposed to attaching files.** Importing an existing Cursor / Claude Code
+/ Codex conversation now creates a **real conversation** in the list, with the turns parsed out of the
+original record, rather than copying a file into `.she/imports/` and appending one message to the
+current chat listing its path. The old behaviour meant importing twenty conversations left the user
+with one chat, no way to open any of the twenty, and nothing resembling their history — it was
+"attach as context" wearing the name "import". The original record is still copied first (the point is
+to preserve the primary source, not to replace it with our parse of it), and the provenance is
+recorded on the session so "where did this come from" stays answerable.
+
 ### Changed
+
 
 
 **Fonts are vendored; the app no longer contacts Google.** `index.html` linked Inter and
@@ -184,6 +205,7 @@ files were also fragile: PowerShell reads a `.ps1` as ANSI without a BOM, so one
 stray non-ASCII byte broke the script's *syntax*.
 
 ### Security
+
 
 
 **A prompt-injected agent could approve its own dangerous operations.** The confirmation gate returns
@@ -244,6 +266,38 @@ with no destructive-command guard. Automation is a conversational stance; permis
 now come only from their own settings, with safe defaults.
 
 ### Fixed
+
+
+**The trace panel reopened itself.** Every knowledge-base result ran `setShowTrace(true)`, so closing
+the panel was futile: the next query — which the agent issues on its own — slid it back open. A panel
+the user explicitly closed must stay closed. The reopen handle now carries a dot when new trace data
+arrived while it was closed, so nothing is missed silently.
+
+**The skill-profile switch showed a profile the agent was not using.** The composer read
+`localStorage` and never asked the server, so with `SHE_SKILL_PROFILE=general` the settings panel
+(which reads the server) showed 通用 while the composer highlighted 开发. The server is the source of
+truth for which profile is *active*, and the client now reads it on boot.
+
+**The knowledge base looked empty after an import.** The import refreshed the chat history but not the
+knowledge tree, so the sidebar kept showing "no groups yet" while the library held thousands — until
+the workspace was re-entered or the page reloaded. `onImported` now refreshes sessions, the tree and
+the stats.
+
+**The shared / merged knowledge base was unreachable in practice.** The controls existed only inside
+Settings, about 950px down a ~2900px scrolling form, so a user looking for "merge two libraries" in
+the knowledge-base area — the obvious place — found nothing. The knowledge-base section header now has
+an action that opens Settings at that block.
+
+**The import dialog asked for a decision twice.** A second, louder "import everything" button sat
+beside the deliberate one, which made selecting first look like the slow path, and bulk-importing
+every conversation on the machine is not a thing to make the easiest click on the screen. "Select all"
+in the toolbar already covers that case in one extra step and shows what is about to be imported.
+
+**A bulk import could reorder itself.** When no source timestamps were present, every item defaulted
+to "now" — computed per item — so sorting by that field reordered the batch according to accidental
+sub-millisecond differences. Sorting now applies only when the items carry real dates, which is what
+it was for.
+
 
 
 **Request bodies had no size limit.** `parseBody` accumulated every chunk, and Node imposes no ceiling,
@@ -559,6 +613,7 @@ read as updating a task whose id was "window".
 ### Testing
 
 
+
 Test count went from ~40 to **631**, plus twenty check scripts wired into `check:all`
 (security, data safety, subagents, LSP, host guard, accessibility, portability, metrics,
 scheduling, i18n coverage, control styling, Docker structure, custom stylesheets, UI structure,
@@ -588,6 +643,7 @@ rises. It caught four strings added during this work (two `aria-label`s), which 
 behaviour that keeps the localised surface from shrinking by accident.
 
 ### Known limitations
+
 
 
 - **macOS and Linux are not verified by running them.** A portability check audits for

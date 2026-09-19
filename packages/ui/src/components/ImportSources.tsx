@@ -28,7 +28,7 @@ interface SourceBlock {
 interface Props {
   onClose: () => void;
   /** Where to send the selected conversations. */
-  destination?: 'chat' | 'kb';
+  destination?: 'sessions' | 'kb';
   /** Called after a successful migration so the chat can reload its history. */
   onImported?: () => void;
 }
@@ -67,11 +67,11 @@ function fmtWhen(iso?: string): string {
  * Scans the machine for where those tools keep their history and lists what is
  * available, rather than asking the user to paste or hunt for files.
  */
-export function ImportSources({ onClose, destination = 'chat', onImported }: Props) {
+export function ImportSources({ onClose, destination = 'sessions', onImported }: Props) {
   // Escape closes this dialog: the backdrop click is a mouse convenience, not a keyboard path.
   useEscapeToClose(onClose);
 
-  const [dest, setDest] = useState<'chat' | 'kb'>(destination);
+  const [dest, setDest] = useState<'sessions' | 'kb'>(destination);
   const [sources, setSources] = useState<SourceBlock[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
@@ -126,15 +126,24 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
         memoriesAdded?: number;
         skipped: string[];
         chars?: number;
+        truncatedConversations?: number;
       }>('/api/import/from-source', {
         method: 'POST',
         body: { ids: [...selected], destination: dest },
       });
-      if (dest === 'chat') {
-        toast(t('已导入 {n} 段对话到 .she/imports/（会话里只挂文件路径）', { n: r.imported }));
+      if (dest === 'sessions') {
+        // Say what actually happened: these are now openable conversations, not file references.
+        const extra = r.truncatedConversations
+          ? t('（{n} 段过长，只保留了前 500 轮）', { n: r.truncatedConversations })
+          : '';
+        toast(t('已移植 {n} 段对话记录{extra}', { n: r.imported, extra }));
+        if (r.skipped?.length) {
+          toast(t('{n} 段无法解析，已跳过：{first}', { n: r.skipped.length, first: r.skipped[0] ?? '' }));
+        }
         onImported?.();
       } else {
         toast(t('已导入 {n} 个对话（{k} 条知识）', { n: r.imported, k: r.memoriesAdded ?? 0 }));
+        onImported?.();
       }
       setSelected(new Set());
     } catch (e) {
@@ -144,37 +153,7 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
     }
   }, [selected, dest, onImported]);
 
-  /** One-click: select every discovered conversation and import them. */
-  const importAll = useCallback(async () => {
-    if (!allItemIds.length) {
-      toast(t('没有可导入的对话'));
-      return;
-    }
-    setImporting(true);
-    setError(null);
-    try {
-      const r = await fetchJSON<{
-        imported: number;
-        memoriesAdded?: number;
-        skipped: string[];
-        chars?: number;
-      }>("/api/import/from-source", {
-        method: "POST",
-        body: { ids: allItemIds, destination: dest },
-      });
-      if (dest === "chat") {
-        toast(t('已全部导入 {n} 段对话到 .she/imports/', { n: r.imported }));
-        onImported?.();
-      } else {
-        toast(t('已全部导入 {n} 段对话（{k} 条知识）', { n: r.imported, k: r.memoriesAdded ?? 0 }));
-      }
-      setSelected(new Set());
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setImporting(false);
-    }
-  }, [allItemIds, dest, onImported]);
+  
 
   return (
     <div className={styles.backdrop} data-surface="backdrop" onClick={onClose}>
@@ -183,7 +162,7 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
           <div>
             <h2 className={styles.title}>{t('导入对话记录')}</h2>
             <p className={styles.sub}>
-              扫描本机的 Cursor / Claude Code / Codex 记录；默认把这些对话作为上下文<b>适配复制到工作区</b>，让智能体接着往下做。
+              扫描本机的 Cursor / Claude Code / Codex 记录；默认<b>移植为对话记录</b>：原件会复制到 <code>.she/imports/</code> 留底，同时生成可直接打开、接着往下聊的对话。
             </p>
           </div>
           <button type="button" className={styles.close} onClick={onClose}>Esc</button>
@@ -273,10 +252,10 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
             <label className={styles.destOpt}>
               <input
                 type="radio"
-                checked={dest === 'chat'}
-                onChange={() => setDest('chat')}
+                checked={dest === 'sessions'}
+                onChange={() => setDest('sessions')}
               />
-              <span>{t('适配复制到工作区')}</span>
+              <span>{t('移植为对话记录')}</span>
             </label>
             <label className={styles.destOpt}>
               <input
@@ -287,6 +266,14 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
               <span>{t('写入知识库')}</span>
             </label>
           </div>
+          {/*
+            One button, on purpose.
+            There was a second, louder "一键全部导入(n)" beside this one. Two primary actions in the
+            same footer made the deliberate path (select, then import) look like the slow way, and
+            bulk-importing every conversation on the machine is not something to make the easiest
+            click on the screen. "全选" in the toolbar already covers the bulk case in one extra
+            step, and it shows what is about to be imported before it happens.
+          */}
           <button
             type="button"
             className={styles.ghost}
@@ -294,15 +281,6 @@ export function ImportSources({ onClose, destination = 'chat', onImported }: Pro
             onClick={() => void doImport()}
           >
             {importing ? t('导入中…') : t('导入选中({n})', { n: selected.size })}
-          </button>
-          <button
-            type="button"
-            className={styles.primary}
-            disabled={importing || allItemIds.length === 0}
-            onClick={() => void importAll()}
-            title={t('扫描结果里全部对话一次导入')}
-          >
-            {importing ? t('导入中…') : t('一键全部导入({n})', { n: allItemIds.length })}
           </button>
         </footer>
       </div>

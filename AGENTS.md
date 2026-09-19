@@ -36,6 +36,7 @@ pnpm check:ui                # control styling: fills, hover, heights, dead CSS
 pnpm check:theme             # custom stylesheet: brick refusal, escape hatch, revert
 pnpm check:uistruct          # UI structure: root-level state, overlays in both branches
 pnpm check:api               # every endpoint the UI calls is actually routed
+pnpm check:plugins           # plugin end to end: install, agent can call it, uninstall takes effect
 pnpm check:dist              # the built bundle contains the wiring the browser needs
 pnpm check:logs              # logs are capped and crash.log is only for crashes
 pnpm check:restart           # hard-kill + reboot: settings, sessions, groups, schedules all survive
@@ -147,7 +148,7 @@ Every check script follows the same shape, and it is worth copying rather than i
    feature. A bulk edit wrote a literal `\n` instead of a newline, merging two comment lines
    — and the merged line began with `//`, so the assignment below it was swallowed into the
    comment. The element was created, never given any CSS, and every saved stylesheet did
-   nothing. All 636 unit tests passed, because they all read source; the browser runs a
+   nothing. All 657 unit tests passed, because they all read source; the browser runs a
    bundle. `check:dist` now greps the built bundle for the wiring that has no server-side
    test, and fails if it is missing or older than the newest source file.
 7. **Strip comments before matching text.** `check:dist` first flagged the Google Fonts link

@@ -24,6 +24,7 @@ import { ScheduleStore, Scheduler, describeNextRun, nextWindowStart, withinWindo
 import type { ScheduledTask, WorkingWindow } from './schedule.js';
 import { Router, HttpError, sendJSON, sendError, sendSSEEvent, startSSE, endSSE, parseBody, readRawBody, corsHeaders } from './router.js';
 import { SessionStore } from './sessions.js';
+import type { ImportedConversation } from './sessions.js';
 import { ClusterStore, runClusterWave, initClusterIdentitySkills, ROLE_PRESETS, generateRoleSkill } from './cluster.js';
 import type { ClusterRole } from './cluster.js';
 import { listMcpServers, probeMcpServer, writeMcpServer, removeMcpServer, setMcpServerEnabled } from './mcp.js';
@@ -32,7 +33,7 @@ import { FeishuBridge, type FeishuConfig } from './feishu.js';
 
 import { listTree, readWorkspaceFile, suggestPaths } from './files.js';
 import { outlinePath, suggestSymbols } from './outline.js';
-import { parseContextExport } from './contextParsers.js';
+import { parseContextExport, chunksToMessages } from './contextParsers.js';
 import { discoverConversations, readConversation, materializeConversation } from './discovery.js';
 import { taskBoard } from './taskBoard.js';
 
@@ -2259,63 +2260,103 @@ router.get('/api/fs/tree', (req, res) => {
     const picked = all.filter((c) => ids.includes(c.id));
     if (!picked.length) throw new HttpError(404, 'No matching conversations');
 
-    const destination = body.destination === 'kb' ? 'kb' : 'chat';
+    /*
+     * Destination values.
+     *
+     * `'sessions'` migrates each conversation into a real conversation in the list.
+     * `'chat'` is accepted as its legacy spelling so a UI bundle built before this change still
+     * imports rather than erroring; it maps to the same behaviour, because the old meaning
+     * (append a list of file paths to the current chat) is what this change exists to remove.
+     */
+    const destination = body.destination === 'kb' ? 'kb' : 'sessions';
 
-    // ── context migration: copy/adapt files, then point the session at them ──
-    if (destination === 'chat') {
-      const sid = sessionIdOf(req, body);
-      const agent = agentFor(req, body);
+    /*
+     * ── conversation migration ──
+     *
+     * Each selected conversation becomes a real conversation in the list, with its turns parsed out
+     * of the original record.
+     *
+     * What this replaced: the endpoint copied files into `.she/imports/` and appended ONE message to
+     * the CURRENT session listing their paths, expecting the model to go and read them. That is
+     * "attach as context". A user importing twenty conversations ended up with one chat, no way to
+     * open any of the twenty, and nothing resembling their history.
+     *
+     * The original record is still copied first — the point is to preserve the primary source, not
+     * to replace it with our parse of it — and the provenance is recorded on the session so "where
+     * did this come from" stays answerable.
+     */
+    if (destination === 'sessions') {
       const workspaceRoot = config.workspace.root;
-      let imported = 0;
+      const toImport: ImportedConversation[] = [];
       const skipped: string[] = [];
       const files: { relPath: string; title: string; source: string; copiedOriginal: boolean; bytes: number }[] = [];
+      let truncatedConversations = 0;
 
       for (const conv of picked) {
+        // Keep the original on disk: a straight copy for file-backed sources, an extracted
+        // SHE-native JSON for database-backed ones (state.vscdb cannot be shipped).
         const mat = materializeConversation(conv, workspaceRoot);
-        if (!mat) {
+
+        // Parse from the original text when the source can produce it, else from the copy.
+        let text = readConversation(conv);
+        if (!text && mat) {
+          try { text = readFileSync(mat.absPath, 'utf8'); } catch { /* unreadable copy */ }
+        }
+        if (!text) {
           skipped.push(conv.title);
           continue;
         }
-        files.push({
-          relPath: mat.relPath,
-          title: mat.title,
-          source: mat.source,
-          copiedOriginal: mat.copiedOriginal,
-          bytes: mat.bytes,
+
+        const chunks = parseContextExport({ source: conv.source, text, filename: conv.path });
+        const { messages, truncated } = chunksToMessages(chunks);
+        if (!messages.length) {
+          // The record existed but held no parseable turns. Reported rather than created empty —
+          // an empty conversation in the list looks like data loss.
+          skipped.push(conv.title);
+          continue;
+        }
+        if (truncated) truncatedConversations++;
+
+        toImport.push({
+          title: conv.title,
+          messages,
+          createdAt: conv.updatedAt,
+          updatedAt: conv.updatedAt,
+          importedFrom: {
+            source: conv.source,
+            originPath: conv.path,
+            ...(mat ? { copiedTo: mat.relPath } : {}),
+            importedAt: new Date().toISOString(),
+            ...(truncated ? { truncated } : {}),
+          },
         });
-        imported++;
+
+        if (mat) {
+          files.push({
+            relPath: mat.relPath,
+            title: mat.title,
+            source: mat.source,
+            copiedOriginal: mat.copiedOriginal,
+            bytes: mat.bytes,
+          });
+        }
       }
 
-      if (!files.length) {
-        throw new HttpError(400, '选中的对话没有可落地的上下文文件');
+      if (!toImport.length) {
+        throw new HttpError(400, '选中的对话没有可解析的回合（原件已保留在 .she/imports/）');
       }
 
-      // Pointer only — the model should read the files, not receive a pasted dump.
-      const listing = files
-        .map((f, i) =>
-          `${i + 1}. @file:${f.relPath}  （${f.source} · ${f.title}${f.copiedOriginal ? ' · 原件复制' : ' · 已适配'} · ${Math.round(f.bytes / 1024)}KB）`,
-        )
-        .join('\n');
-
-      const message =
-        `[已导入外部对话 · 文件方式]\n` +
-        `已将 ${imported} 段对话复制/适配到工作区 .she/imports/。` +
-        `请用读文件工具阅读这些路径，不要要求用户再粘贴全文。\n\n` +
-        listing;
-
-      agent.setHistory([...agent.getHistory(), { role: 'user', content: message }]);
-      persistHistory(sid);
-
+      const created = sessions.importMany(toImport);
       taskBoard.upsert({ id: importTask.id, kind: 'import', label: importTask.label, phase: 'done' });
       sendJSON(res, {
         ok: true,
-        destination: 'chat',
-        mode: 'file-adapt',
-        imported,
+        destination: 'sessions',
+        mode: 'conversation-migration',
+        imported: created.length,
         skipped,
         files,
-        chars: message.length,
-        groupPath: null,
+        truncatedConversations,
+        sessions: created.map((s) => ({ id: s.id, title: s.title, messageCount: s.messages.length })),
       });
       return;
     }

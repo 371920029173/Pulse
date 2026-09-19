@@ -275,6 +275,62 @@ const studio = code(studioRaw);
   );
 }
 
+// ── 7. The three "looks fine, isn't" UI regressions ──
+{
+  /*
+   * Three defects the user found by using the app, none of which any test or check would have
+   * noticed, because each one is about a CONTROL LYING or a VIEW NOT UPDATING rather than about an
+   * exception:
+   *
+   *   1. The trace panel forced itself open on every KB result, so closing it did nothing.
+   *   2. The skill-profile switch read localStorage and never asked the server, so it highlighted a
+   *      profile the agent was not using (server had `general`, the button said `dev`).
+   *   3. Importing refreshed the chat but not the knowledge tree, so the sidebar kept showing
+   *      "no groups yet" while the library held thousands.
+   */
+  const kbEffect = /if \(chat\.latestKBResult\)([\s\S]{0,220}?)\n  \}, \[chat\.latestKBResult\]\)/.exec(app);
+  check('找到了处理 latestKBResult 的 effect', Boolean(kbEffect), '正则没匹配到 —— 结构变了');
+  if (kbEffect) {
+    check(
+      '新轨迹数据不会强行打开面板（用户关掉就该保持关掉）',
+      !/setShowTrace\(true\)/.test(kbEffect[1]),
+      '又出现了在 KB 结果里 setShowTrace(true) —— 关掉后会被自己弹开',
+    );
+  }
+
+  check(
+    '技能档位从服务端读取（否则按钮会显示一个并不生效的档位）',
+    /fetchJSON<\{ skills\?: \{ profile\?: string \} \}>\('\/api\/settings'\)/.test(app),
+    'App.tsx 没有从 /api/settings 同步 skills.profile',
+  );
+
+  const imported = /onImported=\{\(\) => \{([\s\S]{0,600}?)\}\}/.exec(app);
+  check('找到了 onImported 处理函数', Boolean(imported), '正则没匹配到');
+  if (imported) {
+    check(
+      '导入后刷新知识库树（否则侧栏停在"还没有组"）',
+      /kb\.fetchTree\(\)/.test(imported[1]),
+      'onImported 没有调用 kb.fetchTree()',
+    );
+  }
+
+  const importer = read('components/ImportSources.tsx');
+  // Comments are stripped: the explanation of why the bulk button was removed *names* it, and
+  // matching prose would flag the documentation as the defect. (The same trap was hit once before
+  // in this file — see the header.)
+  const importerCode = code(importer);
+  check(
+    '导入框只保留一个动作按钮（不再有"一键全部导入"）',
+    !/一键全部导入/.test(importerCode) && !/importAll/.test(importerCode),
+    '批量导入按钮又出现了',
+  );
+  check(
+    '导入语义是"移植为对话记录"（不是"挂文件路径"）',
+    /移植为对话记录/.test(importerCode) && /'sessions'/.test(importerCode),
+    'ImportSources 的 destination 不是 sessions',
+  );
+}
+
 console.log('');
 for (const r of results) {
   console.log(`  ${r.ok ? '✓' : '✗'} ${r.name}${!r.ok && r.detail ? ` — ${r.detail}` : ''}`);

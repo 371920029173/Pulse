@@ -421,7 +421,7 @@ See `.env.example` and `config.example.yaml` for the full list.
 ## Tests & Checks / 测试与检查
 
 ```bash
-pnpm -r test                  # 单元测试（636 项，6 个包）
+pnpm -r test                  # 单元测试（657 项，6 个包）
 pnpm eval                     # 检索评测（离线，秒级，0 API 成本）
 pnpm eval:agent               # 端到端 agent 评测（调 API）
 pnpm eval:verify              # 自我验证评测：会看错就答错的题（调 API）
@@ -443,6 +443,7 @@ pnpm check:lsp                # 语言服务器接线与正确性
 pnpm check:i18n               # 本地化覆盖率棘轮（不允许倒退）
 pnpm check:ui                 # 控件样式一致性：填充、hover、高度、死代码
 pnpm check:api                # UI 调用的接口在服务端都有路由（防半个功能）
+pnpm check:plugins            # 插件端到端：安装 → 智能体能调 → 卸载即失效
 pnpm check:docker             # 容器镜像结构（无 docker 时的静态核对）
 pnpm check:release            # 发布包头结构（含 AGENTS.md 等顶层文档）
 
@@ -465,7 +466,7 @@ pnpm release:verify           # 解压归档、真正 pnpm install、启动并�
 
 | 检查 | 结果 |
 |---|---|
-| 单元测试（6 个包） | 636 / 636 |
+| 单元测试（6 个包） | 657 / 657 |
 | 检索评测 vs BM25 | 100% vs 73%（+4 用例） |
 | 端到端 agent 任务 | 10 / 10（按通过率判定，门槛 80%） |
 | 自我验证任务 | 5 / 5（同上） |
