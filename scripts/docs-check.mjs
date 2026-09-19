@@ -18,7 +18,7 @@
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -115,6 +115,28 @@ console.log(`\n文档一致性检查（${DOCS.length} 个文件）\n`);
 
 const texts = new Map(DOCS.map((f) => [f, readFileSync(join(ROOT, f), 'utf8')]));
 
+/** Cache for `isGitIgnored`, so the same path is not asked about twice. */
+const ignoreCache = new Map();
+
+/**
+ * Whether git ignores this path.
+ *
+ * Used to tell "a stale reference" (a real defect) apart from "a generated artefact" (expected to be
+ * absent on a fresh checkout). `check-ignore` answers with exit code 0 when the path IS ignored.
+ */
+function isGitIgnored(ref) {
+  if (ignoreCache.has(ref)) return ignoreCache.get(ref);
+  let ignored = false;
+  try {
+    execFileSync('git', ['check-ignore', '-q', ref], { cwd: ROOT, stdio: 'ignore' });
+    ignored = true; // exit 0 means "yes, ignored"
+  } catch {
+    ignored = false; // exit 1 means "not ignored"; other failures also fall through to reporting
+  }
+  ignoreCache.set(ref, ignored);
+  return ignored;
+}
+
 // ─── 1. Referenced paths exist ───
 console.log('=== 文档里引用的文件是否真的存在 ===');
 {
@@ -151,6 +173,19 @@ console.log('=== 文档里引用的文件是否真的存在 ===');
        * `existsSync` already returns true for a directory, so the fallback was never needed.
        */
       if (existsSync(join(ROOT, ref))) continue;
+
+      /*
+       * A path that git IGNORES is not expected to be in a fresh checkout.
+       *
+       * `packages/desktop/runtime/` only exists after the staging step and is gitignored, so a doc
+       * may legitimately mention it — and this check failed on CI for exactly that: the path was
+       * absent on a clean checkout, which is the normal state there, not a stale reference.
+       *
+       * Using git's own ignore rules (rather than a hand-maintained allowlist) means any future
+       * generated directory is handled correctly without anyone remembering to add it.
+       */
+      if (isGitIgnored(ref)) continue;
+
       missing.push(`${file} → ${ref}`);
     }
   }
