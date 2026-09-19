@@ -144,6 +144,27 @@ export function hasUninspectableRedirection(command: string): boolean {
  * misreads the command name would reject a legitimate path — or, worse, match the wrong
  * entry.
  */
+/**
+ * The last path component, treating BOTH `/` and `\` as separators on every platform.
+ *
+ * `path.basename()` is platform-specific: on Linux it does not treat `\` as a separator, so
+ * `basename('C:\\tools\\node.exe')` returns `c:\tools\node.exe` (after the extension strip,
+ * `c:\tools\node`) instead of `node`.
+ *
+ * That matters because this function feeds the COMMAND ALLOWLIST. A misread program name is a
+ * security-relevant misparse: it can refuse a legitimate command, or — worse — match an allowlist
+ * entry against the wrong token. The correct behaviour is to accept either convention regardless of
+ * the host OS, because the command string may have come from a config file, a plugin, a scheduled
+ * task, or a user pasting a path from another machine.
+ *
+ * Found by CI on Linux the first time the full gate ran there — the test asserting a Windows path
+ * resolves to `node` had only ever executed on Windows.
+ */
+function lastPathComponent(p: string): string {
+  const cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+  return cut === -1 ? p : p.slice(cut + 1);
+}
+
 export function firstCommandToken(segment: string): string {
   const text = segment.trim();
   if (!text) return '';
@@ -152,7 +173,7 @@ export function firstCommandToken(segment: string): string {
   const quoted = /^"([^"]+)"|^'([^']+)'/.exec(text);
   if (quoted) {
     const path = quoted[1] ?? quoted[2] ?? '';
-    const base = basename(path.replace(/[\\/]+$/, ''));
+    const base = lastPathComponent(path.replace(/[\\/]+$/, ''));
     return base.toLowerCase().replace(/\.(exe|cmd|bat|com)$/, '');
   }
 
@@ -163,7 +184,7 @@ export function firstCommandToken(segment: string): string {
   const token = parts[i];
   if (!token) return '';
   const unquoted = token.replace(/^["']|["']$/g, '');
-  const base = basename(unquoted.replace(/[\\/]+$/, ''));
+  const base = lastPathComponent(unquoted.replace(/[\\/]+$/, ''));
   return base.toLowerCase().replace(/\.(exe|cmd|bat|com)$/, '');
 }
 
