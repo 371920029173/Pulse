@@ -162,7 +162,41 @@ console.log('=== 文档里引用的文件是否真的存在 ===');
 console.log('\n=== 文档里引用的数字与实际一致 ===');
 {
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
-  const gateSteps = String(pkg.scripts?.['check:all'] ?? '').split(' && ').filter(Boolean).length;
+
+  /*
+   * Count the gate's steps by RESOLVING delegation.
+   *
+   * `check:all` is now `pnpm check:offline && pnpm eval:verify` — two entries — while the real gate
+   * is the 26 commands inside `check:offline`. Counting the literal entries made the expected number
+   * "2", so any doc that stated the true figure was reported as stale, and a doc that stated "2"
+   * would have been accepted. A number nobody can state correctly is worse than no number.
+   *
+   * One level of expansion is enough here, and a cycle is guarded against: the aggregates are
+   * maintained by hand and a self-reference would be a bug worth failing on rather than hiding.
+   */
+  const stepCount = (name, seen = new Set()) => {
+    if (seen.has(name)) throw new Error(`脚本互相引用成环: ${[...seen, name].join(' → ')}`);
+    const value = String(pkg.scripts?.[name] ?? '');
+    if (!value) return 0;
+    seen.add(name);
+    let total = 0;
+    for (const part of value.split(' && ').map((s) => s.trim()).filter(Boolean)) {
+      const ref = /^pnpm ([\w:-]+)$/.exec(part);
+      if (ref && pkg.scripts?.[ref[1]]) total += stepCount(ref[1], new Set(seen));
+      else total += 1;
+    }
+    return total;
+  };
+  /*
+   * Accept either aggregate's resolved size.
+   *
+   * Both numbers are legitimately correct: `check:all` is the full gate (28 commands), `check:offline`
+   * is the subset CI runs (26). Forcing a single figure would make one of the two true statements
+   * unwritable, and a check that forbids correct documentation is a check people work around.
+   */
+  const gateSteps = stepCount('check:all');
+  const offlineSteps = stepCount('check:offline');
+  const allowedSteps = new Set([gateSteps, offlineSteps]);
   const checkScripts = readdirSync(join(ROOT, 'scripts')).filter((f) => f.includes('check') && f.endsWith('.mjs')).length;
 
   /*
@@ -180,9 +214,10 @@ console.log('\n=== 文档里引用的数字与实际一致 ===');
       gateMentions.set(file, Number(m[1]));
     }
   }
-  const wrong = [...gateMentions.entries()].filter(([, n]) => n !== gateSteps);
+  const wrong = [...gateMentions.entries()].filter(([, n]) => !allowedSteps.has(n));
+  const EXPECTED = [...allowedSteps].sort((a, b) => a - b).join(' 或 ');
   check(
-    `没有过时的步数表述（若写了就必须等于 ${gateSteps}）`,
+    `没有过时的步数表述（若写了就必须是 ${EXPECTED}）`,
     wrong.length === 0,
     wrong.map(([f, n]) => `${f} 写的是 ${n}`).join('; '),
   );

@@ -7,9 +7,37 @@ A local coding/assistant agent that uses a **Group Memory knowledge base** with 
 
 ---
 
+## Download / 下载
+
+**[Latest release →](https://github.com/371920029173/Pulse/releases/latest)**
+
+| File | What it is |
+|---|---|
+| `Pulse-<ver>-win-x64.exe` | Windows installer (Start Menu entry, clean uninstall) |
+| `Pulse-Portable-<ver>.exe` | Windows, no installation — run it from anywhere |
+
+> **The installer is not code-signed, so Windows will warn you.** Click **More info** → **Run anyway**
+> in the SmartScreen dialog. Windows 11 is stricter about this than Windows 10, and the browser may
+> also ask you to "Keep" the download. SHA256 checksums are in the release notes.
+
+Node.js is **not** required for the packaged build — the runtime bundles its own.
+
+### Platform status — read this before trusting the line below
+
+| Platform | Status |
+|---|---|
+| Windows 10 | Developed and run daily on it |
+| Linux | **Verified** — CI runs the offline gate on `ubuntu-latest` (all 27 steps) |
+| Windows 11 | Expected to work; **never run.** No version-specific code, and both font stacks already prefer Win11 fonts (`Segoe UI Variable`, `Cascadia Code`) before falling back to the bundled ones |
+| macOS | **Never run.** Portable code and a static audit only |
+
+---
+
 ## Quick Start / 快速开始
 
-Works on Windows, macOS and Linux. One launcher, `scripts/she.mjs`, with thin wrappers so it can be double-clicked or run from a shell.
+Installs and runs on Windows 10, **verified** on Linux, and portable to macOS — see the platform
+table above for what has actually been run versus what is expected to work. One launcher,
+`scripts/she.mjs`, with thin wrappers so it can be double-clicked or run from a shell.
 
 ### One-click / 一键启动
 

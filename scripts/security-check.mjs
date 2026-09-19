@@ -117,8 +117,7 @@ async function boot() {
       ...process.env,
       SHE_ENV_FILE: join(workspace, '.env'),
       SHE_PORT: String(PORT),
-      SHE_WORKSPACE: workspace,
-    },
+      SHE_WORKSPACE: workspace, SHE_APP_DIR: join(workspace, 'appdir'), SHE_STATE_DIR: workspace },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });

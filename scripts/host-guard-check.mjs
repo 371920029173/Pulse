@@ -104,7 +104,7 @@ async function boot(bindHost, allowedHosts) {
 
   child = spawn('node', [SERVER_ENTRY], {
     cwd: SERVER_DIR,
-    env: { ...process.env, SHE_PORT: String(PORT), SHE_ENV_FILE: join(workspace, '.env') },
+    env: { ...process.env, SHE_PORT: String(PORT), SHE_ENV_FILE: join(workspace, '.env'), SHE_WORKSPACE: workspace, SHE_APP_DIR: join(workspace, 'appdir'), SHE_STATE_DIR: workspace },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });

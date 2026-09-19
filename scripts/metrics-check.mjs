@@ -45,7 +45,7 @@ mkdirSync(join(workspace, '.she'), { recursive: true });
 
 const child = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
-  env: { ...process.env, SHE_WORKSPACE: workspace, SHE_PORT: PORT },
+  env: { ...process.env, SHE_WORKSPACE: workspace, SHE_PORT: PORT, SHE_APP_DIR: join(workspace, 'appdir'), SHE_STATE_DIR: workspace },
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });

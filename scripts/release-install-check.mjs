@@ -62,7 +62,7 @@ function run(cmd, args, label) {
       // pnpm is a shim on Windows, so it needs a shell there.
       shell: process.platform === 'win32',
       timeout: 15 * 60_000,
-      env: { ...process.env, CI: '1', SHE_PORT: String(PORT) },
+        env: { ...process.env, CI: '1', SHE_PORT: String(PORT) },
     });
     console.log('ok');
     return { ok: true, out: '' };
@@ -110,15 +110,18 @@ try {
   child = spawn('node', ['packages/server/dist/index.js'], {
     cwd: root,
     // A throwaway workspace so the install test cannot touch real data.
-    env: {
-      ...process.env,
-      SHE_PORT: String(PORT),
-      SHE_WORKSPACE: root,
-      SHE_STATE_DIR: join(root, '.she'),
-      // Point the model somewhere unreachable: this checks the HTTP surface, not
-      // whether a model answers.
-      OPENAI_BASE_URL: process.env.OPENAI_BASE_URL ?? 'http://127.0.0.1:1',
-    },
+      env: {
+        ...process.env,
+        SHE_PORT: String(PORT),
+        SHE_WORKSPACE: root,
+        SHE_STATE_DIR: root,
+        // Pinned for the same reason as the others: an ambient SHE_APP_DIR would point the app
+        // directory (plugins, wallpaper, stylesheet) at someone else's folder during the test.
+        SHE_APP_DIR: join(root, 'appdir'),
+        // Point the model somewhere unreachable: this checks the HTTP surface, not
+        // whether a model answers.
+        OPENAI_BASE_URL: process.env.OPENAI_BASE_URL ?? 'http://127.0.0.1:1',
+      },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
