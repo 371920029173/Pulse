@@ -27,23 +27,62 @@ const ROOT = resolve(HERE, '..');
  * The unit-test total, measured rather than assumed.
  *
  * Runs the suites and sums what the runners themselves report (`# tests N` from `node:test`,
- * `Tests N passed` from vitest). This is the only source that cannot drift from reality, and it is
- * what makes the "quoted count" assertion meaningful instead of a mutual-agreement check that passes
- * on a number nobody verified.
+ * `Tests N passed` from vitest). This is what makes the "quoted count" assertion meaningful instead
+ * of a mutual-agreement check that passes on a number nobody verified.
  *
  * A failing run yields a short/zero total, which fails the assertion — the safe direction.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE RUNNER IS GIVEN A CONTROLLED ENVIRONMENT
+ *
+ * This check reported "实测 459, 文档写 636" on CI, where 459 was exactly the `node:test` subtotal —
+ * the vitest line had not matched. Two separate causes, both about the environment rather than the
+ * docs:
+ *
+ *   1. **Colour.** Colourised output puts escape codes between the label and the number
+ *      (`Tests \x1b[1m\x1b[32m177 passed`), so `Tests\s+177` cannot match. Locally FORCE_COLOR=0, so
+ *      this only ever failed on someone else's machine.
+ *   2. **CI mode changes the reporter.** With `CI=true`, vitest prints a per-file list instead of the
+ *      summary line, and pnpm's captured output dropped from 178KB to 111KB with two packages'
+ *      counts missing entirely. So parsing the aggregate is unreliable in exactly the environment
+ *      this check is most needed in.
+ *
+ * Rather than teach the parser every reporter variant, the child runs with colour disabled and CI
+ * unset, so the output has one known shape wherever this executes. The parent's environment is not
+ * modified — only the child's.
+ *
+ * Escapes are still stripped before matching: belt and braces, and it costs nothing.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 function measureUnitTests() {
+  const env = { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' };
+  delete env.CI;
+
   const out = spawnSync('pnpm', ['-r', 'test'], {
     cwd: ROOT,
     encoding: 'utf8',
     shell: true,
-    maxBuffer: 128 * 1024 * 1024,
+    maxBuffer: 512 * 1024 * 1024,
+    env,
   });
-  const text = `${out.stdout ?? ''}\n${out.stderr ?? ''}`;
+  const raw = `${out.stdout ?? ''}\n${out.stderr ?? ''}`;
+  const text = raw.replace(/\u001b\[[0-9;]*m/g, '').replace(/[ \t]+/g, ' ');
+
   let total = 0;
-  for (const m of text.matchAll(/# tests (\d+)/g)) total += Number(m[1]);
-  for (const m of text.matchAll(/Tests\s+(\d+) passed/g)) total += Number(m[1]);
+  let nodeTestSuites = 0;
+  let vitestSuites = 0;
+
+  for (const m of text.matchAll(/# tests (\d+)/g)) { total += Number(m[1]); nodeTestSuites++; }
+  for (const m of text.matchAll(/Tests (\d+)(?: passed| skipped| failed)?/g)) { total += Number(m[1]); vitestSuites++; }
+
+  /*
+   * Report the composition. When the number is wrong, the first useful question is "which runner was
+   * missed?", and a bare total cannot answer it — the failure mode that made this hard to diagnose.
+   */
+  console.log(`        实测单元测试 ${total} 项（node:test ${nodeTestSuites} 套 + vitest ${vitestSuites} 套）`);
+  if (nodeTestSuites === 0 || vitestSuites === 0) {
+    console.log('        !! 计数不完整 —— 可能是测量本身失败，而不是文档写错了');
+  }
   return total;
 }
 
