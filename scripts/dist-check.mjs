@@ -27,6 +27,7 @@
 import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -127,36 +128,88 @@ for (const [needle, why] of REQUIRED) {
 }
 
 /*
- * Staleness.
+ * ── Staleness ──
  *
- * A different real failure: source edited, build forgotten, and the app serves the old
- * behaviour. Timestamps cannot catch a line being commented out, but they do catch "nobody
- * rebuilt", which is the more common mistake.
+ * The real failure this guards: source edited, build forgotten, and the app serves the old behaviour.
+ *
+ * The first version compared the bundle's mtime against the newest mtime of ANY source file. That is
+ * the obvious approach and it reports false failures: something touched every file in this tree (a
+ * bulk rewrite or a checkout) without changing a byte, so all of them became "newer than the bundle"
+ * and the check went red while the bundle was in fact current. A check that goes red for reasons
+ * unrelated to the code teaches people to ignore it.
+ *
+ * Two signals are used instead, and both are about CONTENT rather than filesystem noise:
+ *
+ *   1. **Uncommitted edits to UI source.** If a dirty file is newer than the bundle, the bundle
+ *      cannot contain it.
+ *   2. **The last commit that touched UI source.** Catches the other order — commit the change,
+ *      forget to rebuild — which no amount of mtime comparison can see once the working tree is
+ *      clean again.
+ *
+ * Falls back to the mtime sweep when git is unavailable, so the check still does something useful
+ * outside a repository.
  */
 {
   const builtAt = statSync(join(ASSETS, jsFile)).mtimeMs;
-  const newest = { file: '', mtime: 0 };
-  const walk = (dir) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const p = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (entry.name === 'node_modules' || entry.name === 'dist') continue;
-        walk(p);
-      } else if (/\.(tsx?|css)$/.test(entry.name)) {
-        const m = statSync(p).mtimeMs;
-        if (m > newest.mtime) {
-          newest.file = p.slice(UI.length + 1);
-          newest.mtime = m;
-        }
-      }
+  const UI_PATH = 'packages/ui';
+  const problems = [];
+
+  const git = (args) => {
+    try {
+      return execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      return null;
     }
   };
-  walk(join(UI, 'src'));
+
+  const status = git(['status', '--porcelain', '--', UI_PATH]);
+  const lastCommit = git(['log', '-1', '--format=%ct', '--', UI_PATH]);
+
+  if (status === null || lastCommit === null) {
+    // Not a git checkout: fall back to the mtime sweep, and say so.
+    const newest = { file: '', mtime: 0 };
+    const walk = (dir) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+          walk(p);
+        } else if (/\.(tsx?|css)$/.test(entry.name)) {
+          const m = statSync(p).mtimeMs;
+          if (m > newest.mtime) { newest.file = p.slice(UI.length + 1); newest.mtime = m; }
+        }
+      }
+    };
+    walk(join(UI, 'src'));
+    if (builtAt < newest.mtime) {
+      problems.push(`产物早于 ${newest.file}（git 不可用，退化为 mtime 比较）`);
+    }
+  } else {
+    // 1. Uncommitted edits.
+    for (const line of status.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const p = line.slice(3).trim();
+      if (!p || p.includes(' -> ')) continue;
+      try {
+        const m = statSync(join(ROOT, p)).mtimeMs;
+        if (m > builtAt) problems.push(`未提交的改动比产物新: ${p}`);
+      } catch { /* deleted file: nothing to compare */ }
+    }
+
+    // 2. Committed but never rebuilt.
+    const commitMs = Number(lastCommit.trim()) * 1000;
+    if (Number.isFinite(commitMs) && commitMs > 0 && builtAt < commitMs) {
+      problems.push(
+        `产物早于最后一次改动 UI 源码的提交（产物 ${new Date(builtAt).toISOString().slice(0, 16)}，`
+        + `提交 ${new Date(commitMs).toISOString().slice(0, 16)}）`,
+      );
+    }
+  }
 
   check(
-    '产物不比源码旧（改完忘了构建会静默沿用旧行为）',
-    builtAt >= newest.mtime,
-    `产物 ${new Date(builtAt).toISOString().slice(11, 19)} 早于 ${newest.file} ${new Date(newest.mtime).toISOString().slice(11, 19)}`,
+    '产物不比 UI 源码旧（改完忘了构建会静默沿用旧行为）',
+    problems.length === 0,
+    problems.slice(0, 4).join('；'),
   );
 }
 

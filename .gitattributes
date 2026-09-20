@@ -1,0 +1,43 @@
+# Line endings, declared rather than left to the developer's git config.
+#
+# There was no .gitattributes and core.autocrlf=true on the machine this was developed on. Two
+# consequences, one of them a latent breakage:
+#
+#   - `she.sh` was LF in the working copy but git considered it modified (it wanted CRLF for a text
+#     file). The moment anything checked it out or restored it, the shebang became `#!/usr/bin/env
+#     bash\r` and the script died with "bad interpreter" on Linux and macOS — on the one platform it
+#     exists for, and the one nobody was testing.
+#   - `SHE.bat` / `SHE-stop.bat` were LF. cmd.exe tolerates that for simple lines but parses labels
+#     and `goto` unreliably, which is a classic source of "the launcher sometimes does nothing".
+#
+# Declaring it here makes the answer the same on every machine, whatever `core.autocrlf` says.
+
+# Default: let git decide, normalising to LF in the repository.
+* text=auto
+
+# Shell scripts must be LF. CRLF breaks the shebang on POSIX.
+*.sh    text eol=lf
+*.bash  text eol=lf
+
+# Windows batch files must be CRLF for reliable parsing.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# PowerShell is tolerant, but CRLF is conventional and keeps .ps1 out of the "modified" noise.
+*.ps1   text eol=crlf
+
+# Binary assets: never normalise these.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.woff2 binary
+*.woff  binary
+*.ttf   binary
+*.exe   binary
+*.dll   binary
+*.sqlite binary
+
+# Snapshots and archives in tests: byte-for-byte, no line-ending rewriting.
+*.snap  binary
