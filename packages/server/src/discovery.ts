@@ -1,7 +1,9 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync, statSync, mkdirSync, copyFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
-import { join, basename, dirname } from 'node:path';
+import { homedir } from 'node:os';
+import { join, basename } from 'node:path';
 import { createRequire } from 'node:module';
+import type { LLMMessage } from '@she/shared';
+import { transcriptToMessages } from './transcript.js';
 
 const require = createRequire(import.meta.url);
 
@@ -344,126 +346,113 @@ export function discoverConversations(): DiscoveryResult {
   return { sources: [discoverCursor(), discoverClaudeCode(), discoverCodex()] };
 }
 
+function cellText(value: unknown): string | null {
+  if (typeof value === 'string') return value;
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) return value.toString('utf8');
+  if (value && typeof value === 'object') return JSON.stringify(value);
+  return null;
+}
+
 /**
- * Read one discovered conversation as plain text suitable for KB ingestion.
- * Returns null when the record cannot be read.
+ * Cursor's real transcript. Bubble rows are keyed by UUID, so reading them in
+ * key order scrambles the conversation. The header list is the order the
+ * product shows; bubbles not listed there fall in by timestamp.
  */
-export function readConversation(conv: DiscoveredConversation): string | null {
-  if (!conv.readable) return null;
+function readCursorRecord(conv: DiscoveredConversation): string | null {
+  const composerId = conv.id.replace(/^cursor:/, '');
+  const heavy = join(cursorGlobalStorage(), 'state.vscdb');
+  if (!existsSync(heavy)) return null;
+  const db = openSqlite(heavy);
+  if (!db) return null;
   try {
-    if (conv.source === 'claude-code' || conv.source === 'codex') {
-      const lines = readFileSync(conv.path, 'utf8').split('\n').filter((l) => l.trim());
-      const out: string[] = [];
-      for (const line of lines) {
-        try {
-          const j = JSON.parse(line) as {
-            type?: string;
-            message?: { role?: string; content?: unknown };
-          };
-          const role = j.message?.role ?? j.type;
-          if (role !== 'user' && role !== 'assistant') continue;
-          const c = j.message?.content;
-          const text = typeof c === 'string'
-            ? c
-            : Array.isArray(c)
-              ? c.map((x: { text?: string }) => x?.text ?? '').join('\n')
-              : '';
-          if (text.trim()) out.push(`## ${role === 'user' ? '用户' : '助手'}\n\n${text}`);
-        } catch { /* skip */ }
-      }
-      return out.join('\n\n') || null;
-    }
-
-    // Cursor: read messages from cursorDiskKV, keyed by composer id.
-    if (conv.source === 'cursor') {
-      const gs = cursorGlobalStorage();
-      const heavy = join(gs, 'state.vscdb');
-      if (!existsSync(heavy)) return null;
-
-      const db = openSqlite(heavy);
-      if (!db) return null;
-      try {
-        const composerId = conv.id.replace(/^cursor:/, '');
-        // GLOB, not LIKE: index-friendly, and this is the hot path when the
-        // user actually imports a conversation.
-        const rows = db
-          .prepare('SELECT key, value FROM cursorDiskKV WHERE key GLOB ? ORDER BY key LIMIT 2000')
-          .all(`bubbleId:${composerId}:*`) as { key: string; value: unknown }[];
-
-        const out: string[] = [];
-        for (const row of rows) {
-          let parsed: unknown;
-          try {
-            parsed = typeof row.value === 'string' ? JSON.parse(row.value) : null;
-          } catch {
-            continue;
-          }
-          const b = parsed as { type?: number | string; text?: string; richText?: string; role?: string };
-          if (!b) continue;
-
-          // Cursor encodes role numerically (1 = user, 2 = assistant).
-          const roleRaw = String(b.type ?? b.role ?? '');
-          const role = roleRaw === '1' || roleRaw === 'user' ? '用户'
-            : roleRaw === '2' || roleRaw === 'assistant' ? '助手'
-              : '';
-
-          let text = typeof b.text === 'string' ? b.text : '';
-          if (!text && typeof b.richText === 'string') {
-            try {
-              const rt = JSON.parse(b.richText) as { content?: { content?: { text?: string }[] }[] };
-              text = (rt.content ?? []).flatMap((p) => (p.content ?? []).map((x) => x.text ?? '')).join('');
-            } catch { /* ignore */ }
-          }
-          if (!role || !text.trim()) continue;
-          out.push(`## ${role}\n\n${text}`);
-        }
-        return out.length ? out.join('\n\n') : null;
-      } catch {
-        return null;
-      } finally {
-        db.close();
+    const dataRow = db
+      .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
+      .get(`composerData:${composerId}`) as { value: unknown } | undefined;
+    let composer: Record<string, unknown> | null = null;
+    if (dataRow) {
+      const raw = cellText(dataRow.value);
+      if (raw) {
+        try { composer = JSON.parse(raw) as Record<string, unknown>; } catch { composer = null; }
       }
     }
+    const headers = (composer?.fullConversationHeadersOnly
+      ?? composer?.conversationHeaders
+      ?? []) as { bubbleId?: string }[];
+    const bubbles: Record<string, unknown> = {};
+    const put = (id: string, value: unknown) => {
+      const text = cellText(value);
+      if (!id || !text) return;
+      try { bubbles[id] = JSON.parse(text); } catch { /* skip a bad row */ }
+    };
 
-    // Generic JSON fallback for anything else.
+    if (Array.isArray(headers) && headers.length) {
+      const stmt = db.prepare('SELECT value FROM cursorDiskKV WHERE key = ?');
+      for (const h of headers) {
+        const id = String(h?.bubbleId || '');
+        if (!id) continue;
+        const row = stmt.get(`bubbleId:${composerId}:${id}`) as { value: unknown } | undefined;
+        if (row) put(id, row.value);
+      }
+    }
+    if (!Object.keys(bubbles).length) {
+      // GLOB, not LIKE: the key index can serve `prefix*`. LIKE cannot.
+      const rows = db
+        .prepare('SELECT key, value FROM cursorDiskKV WHERE key GLOB ? LIMIT 2000')
+        .all(`bubbleId:${composerId}:*`) as { key: string; value: unknown }[];
+      for (const row of rows) {
+        const id = String(row.key).split(':').slice(2).join(':');
+        put(id, row.value);
+      }
+    }
+    if (!Object.keys(bubbles).length) return null;
+    return JSON.stringify({
+      schema: 'she.cursor-record.v1',
+      fullConversationHeadersOnly: Array.isArray(headers) ? headers : [],
+      bubbles,
+    });
+  } catch {
     return null;
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * The conversation as messages, read from the original record.
+ *
+ * File-backed sources are parsed from the file itself — not from a markdown
+ * rendering of it. That rendering was lossy (roles, tool calls, and thinking
+ * all fell out) and it is what the copy is supposed to replace as the thing
+ * you open.
+ */
+export function loadTranscript(
+  conv: DiscoveredConversation,
+): { messages: LLMMessage[]; truncated: number } | null {
+  try {
+    let text: string | null = null;
+    if (conv.source === 'cursor') text = readCursorRecord(conv);
+    else if (conv.readable && existsSync(conv.path)) text = readFileSync(conv.path, 'utf8');
+    if (!text?.trim()) return null;
+    const result = transcriptToMessages(conv.source, text);
+    return result.messages.length ? result : null;
   } catch {
     return null;
   }
 }
 
-/** Pull readable turns out of Cursor's loosely-typed conversation payloads. */
-function extractCursorText(parsed: unknown): string | null {
-  if (!parsed) return null;
-
-  const candidates: unknown[] = [];
-  if (Array.isArray(parsed)) candidates.push(...parsed);
-  else {
-    const o = parsed as { conversation?: unknown[]; messages?: unknown[]; bubbles?: unknown[]; tabs?: unknown[] };
-    if (Array.isArray(o.conversation)) candidates.push(...o.conversation);
-    if (Array.isArray(o.messages)) candidates.push(...o.messages);
-    if (Array.isArray(o.bubbles)) candidates.push(...o.bubbles);
-    if (Array.isArray(o.tabs)) candidates.push(...o.tabs);
-  }
-
-  const out: string[] = [];
-  for (const item of candidates) {
-    const b = item as { type?: string; role?: string; text?: string; richText?: string; content?: unknown };
-    const roleRaw = b.type ?? b.role ?? '';
-    if (roleRaw !== 'user' && roleRaw !== 'assistant' && roleRaw !== 'human' && roleRaw !== 'ai') continue;
-    const role = roleRaw === 'user' || roleRaw === 'human' ? '用户' : '助手';
-
-    let text = typeof b.text === 'string' ? b.text : '';
-    if (!text && typeof b.content === 'string') text = b.content;
-    if (!text && typeof b.richText === 'string') {
-      try {
-        const rt = JSON.parse(b.richText) as { content?: { content?: { text?: string }[] }[] };
-        text = (rt.content ?? []).flatMap((p) => (p.content ?? []).map((x) => x.text ?? '')).join('');
-      } catch { /* ignore */ }
-    }
-    if (text.trim()) out.push(`## ${role}\n\n${text}`);
-  }
-  return out.join('\n\n') || null;
+/**
+ * Read one discovered conversation as plain text suitable for KB ingestion.
+ * Returns null when the record cannot be read.
+ */
+export function readConversation(conv: DiscoveredConversation): string | null {
+  const loaded = loadTranscript(conv);
+  if (!loaded) return null;
+  const parts = loaded.messages.map((m) => {
+    const label = m.role === 'user' ? '用户' : m.role === 'assistant' ? '助手' : m.role === 'tool' ? '工具' : m.role;
+    const thinking = m.reasoning ? `\n\n<thinking>\n${m.reasoning}\n</thinking>` : '';
+    return `## ${label}\n\n${m.content || ''}${thinking}`.trim();
+  });
+  return parts.join('\n\n') || null;
 }
 
 
@@ -511,6 +500,7 @@ export interface MaterializedContext {
 export function materializeConversation(
   conv: DiscoveredConversation,
   workspaceRoot: string,
+  preloaded?: { messages: LLMMessage[] } | null,
 ): MaterializedContext | null {
   const stamp = (conv.updatedAt ?? new Date().toISOString()).slice(0, 10).replace(/-/g, '');
   const dir = join(workspaceRoot, '.she', 'imports', importSourceFolder(conv.source));
@@ -552,10 +542,12 @@ export function materializeConversation(
 
   // Cursor (and anything else DB-backed): extract turns into a SHE-native JSON
   // — we cannot ship state.vscdb (multi-GB) as the "original file".
-  const text = readConversation(conv);
-  if (!text) return null;
+  // The messages are the structured transcript, not a markdown rendering of it.
+  const messages = preloaded?.messages?.length
+    ? preloaded.messages
+    : (loadTranscript(conv)?.messages ?? []);
+  if (!messages.length) return null;
 
-  const messages = parseImportedMarkdownTurns(text);
   const payload = {
     schema: 'she.imported-context.v1',
     source: conv.source,
@@ -601,21 +593,4 @@ function relToWorkspace(workspaceRoot: string, abs: string): string {
     return full.slice(root.length + 1);
   }
   return full;
-}
-
-/** Split the markdown produced by readConversation into role/content turns. */
-function parseImportedMarkdownTurns(text: string): { role: 'user' | 'assistant'; content: string }[] {
-  const parts = text.split(/\n(?=## (?:用户|助手|User|Assistant)\b)/);
-  const out: { role: 'user' | 'assistant'; content: string }[] = [];
-  for (const part of parts) {
-    const m = part.match(/^##\s*(用户|助手|User|Assistant)\s*\n([\s\S]*)$/);
-    if (!m) continue;
-    const role = m[1] === '用户' || m[1] === 'User' ? 'user' : 'assistant';
-    const content = m[2].trim();
-    if (content) out.push({ role, content });
-  }
-  if (!out.length && text.trim()) {
-    out.push({ role: 'user', content: text.trim() });
-  }
-  return out;
 }

@@ -104,13 +104,15 @@ export function listTree(workspaceRoot: string, relPath = '.', depth = 2): FsNod
   return walk(abs, depth);
 }
 
-export function readWorkspaceFile(workspaceRoot: string, relPath: string, maxBytes = 256_000): { path: string; content: string; truncated: boolean } {
+export function readWorkspaceFile(workspaceRoot: string, relPath: string, maxBytes = 0): { path: string; content: string; truncated: boolean } {
   const abs = jailPath(workspaceRoot, relPath);
   if (!existsSync(abs) || !statSync(abs).isFile()) {
     throw new Error(`Not a file: ${relPath}`);
   }
   const buf = readFileSync(abs);
-  const truncated = buf.byteLength > maxBytes;
+  // maxBytes <= 0 means the whole file. A positive value is only for a caller
+  // that asked for a slice.
+  const truncated = maxBytes > 0 && buf.byteLength > maxBytes;
   const slice = truncated ? buf.subarray(0, maxBytes) : buf;
   // skip obvious binaries
   const ext = extname(abs).toLowerCase();

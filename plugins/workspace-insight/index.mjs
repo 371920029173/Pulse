@@ -92,6 +92,9 @@ tools[0].run = async (args, ctx) => {
 
   const totalLines = [...byExt.values()].reduce((n, v) => n + v.lines, 0);
   const out = [];
+  // The path is part of the answer. A summary that does not name its root
+  // cannot be told apart from a scan of the previous workspace.
+  out.push(`工作区 ${ctx.workspaceRoot}`);
   out.push(`工作区概览`);
   out.push(`  源码文件 ${files} 个（跳过 ${skipped} 个目录），共 ${totalLines} 行`);
   out.push(`  目录 ${dirs} 个`);

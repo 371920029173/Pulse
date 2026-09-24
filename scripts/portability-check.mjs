@@ -91,10 +91,28 @@ function clean(f) {
 //
 // Deliberately matches named commands only. A bare `.exe` is usually a file
 // EXTENSION in an allowlist (binary assets, for instance), not an invocation.
+//
+// Two shapes count as a branch, because this codebase uses both:
+//   - the call sits a few lines from the marker (`if (IS_WINDOWS) { ... }`)
+//   - the call follows an early-return guard, which puts the marker at the top of a
+//     function and the call much further down
+//
+// Proximity alone was not enough. Moving a call into a guarded helper (see
+// `spawnCommand` in sandbox/src/shell.ts) pushed the marker past the window and the
+// check reported a branchless call that cannot run off Windows — a false alarm that
+// invites someone to "fix" the check instead of the code.
 console.log('=== Windows 专有调用是否都有分支 ===');
 {
   const windowsOnly = /\b(taskkill|tasklist|cmd\.exe|powershell\.exe|COMSPEC)\b/;
   const branchMarkers = /process\.platform|IS_WINDOWS|IS_MAC|darwin|win32|PATHEXT|findOnPath|\.bin/;
+  /** `if (!IS_WINDOWS) ...` — a guard means everything AFTER it is the Windows path. */
+  const negativeGuard = /\bif\s*\(\s*!\s*IS_WINDOWS\s*\)|process\.platform\s*!==?\s*['"]win32['"]/;
+
+  const indentOf = (line) => (line.match(/^\s*/) ?? [''])[0].length;
+  const PROXIMITY = 12;
+  /** How far above a call a governing guard may sit. A function body, generously. */
+  const GUARD_REACH = 60;
+
   const offenders = [];
 
   for (const f of files) {
@@ -102,8 +120,21 @@ console.log('=== Windows 专有调用是否都有分支 ===');
     src.forEach((line, i) => {
       if (!windowsOnly.test(line)) return;
       // A reasonable window: the branch and the call are often a few lines apart.
-      const window = src.slice(Math.max(0, i - 12), Math.min(src.length, i + 12)).join('\n');
-      if (!branchMarkers.test(window)) {
+      const window = src.slice(Math.max(0, i - PROXIMITY), Math.min(src.length, i + PROXIMITY)).join('\n');
+      if (branchMarkers.test(window)) return;
+
+      /*
+       * Guard shape: a `!IS_WINDOWS` guard above us, at an indentation no deeper than
+       * ours, means our line is inside the branch it opens. The indentation comparison is
+       * what keeps this honest — a guard nested DEEPER than the call cannot be governing
+       * it, so a genuinely branchless call is still reported.
+       */
+      const myIndent = indentOf(line);
+      const guarded = src
+        .slice(Math.max(0, i - GUARD_REACH), i)
+        .some((above) => negativeGuard.test(above) && indentOf(above) <= myIndent);
+
+      if (!guarded) {
         offenders.push(`${rel(f)}:${i + 1}  ${line.trim().slice(0, 100)}`);
       }
     });
@@ -180,10 +211,32 @@ console.log('\n=== 进程终止的分平台处理 ===');
   if (existsSync(shellTs)) {
     const src = read(shellTs);
     check('sandbox 在 POSIX 上用进程组终止', /process\.kill\(-child\.pid/.test(src));
+    // portability-check:allow — this line NAMES the command in an assertion; it is not an
+    // invocation. The rule scans every shipped .mjs, including this one, so it flags its own
+    // test data. The marker is the repo's escape hatch for exactly this case (see also
+    // lsp-check.mjs and security-check.mjs).
     check('sandbox 在 Windows 上用 taskkill', /taskkill/.test(src));
-    // detached on POSIX is what CREATES the process group that makes the
-    // group-kill above work; without it a killed shell leaves children running.
-    check('sandbox 用 detached 建立进程组', /detached:\s*!IS_WINDOWS/.test(src));
+    /*
+     * detached on POSIX is what CREATES the process group that makes the
+     * group-kill above work; without it a killed shell leaves children running.
+     *
+     * The expression moved from `detached: !IS_WINDOWS` to a literal `true` when the
+     * POSIX and Windows spawns were split into `spawnCommand` — the flag now lives inside
+     * an `if (!IS_WINDOWS)` early return. Matching only the old spelling failed a
+     * refactor that preserved the property, so the property is what gets asserted.
+     *
+     * The complement matters too: a detached child on Windows gets its own console and
+     * escapes `taskkill /T`, so the Windows path must NOT set it.
+     */
+    const posixSpawn = /if\s*\(!IS_WINDOWS\)\s*\{[\s\S]*?return\s+spawn\(([\s\S]*?)\n\s*\}\);/.exec(src);
+    const windowsSpawn = /return\s+spawn\('powershell\.exe'[\s\S]*?\n\s*\}\);/.exec(src);
+    check('sandbox 用 detached 建立进程组',
+      posixSpawn
+        ? /detached:\s*true/.test(posixSpawn[1])
+        : /detached:\s*!IS_WINDOWS/.test(src),
+      'POSIX spawn 没有 detached，进程组不会建立，-pid 组杀将失效');
+    check('sandbox 的 Windows 分支不 detach（否则逃出 taskkill /T）',
+      windowsSpawn ? !/detached:/.test(windowsSpawn[0]) : /detached:\s*!IS_WINDOWS/.test(src));
   } else {
     check('sandbox/src/shell.ts 存在', false, shellTs);
   }

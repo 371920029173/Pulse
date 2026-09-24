@@ -14,7 +14,9 @@
   "dependencies": {
     "@she/kb": "workspace:*",
     "@she/sandbox": "workspace:*",
-    "@she/shared": "workspace:*"
+    "@she/shared": "workspace:*",
+    "pyright": "^1.1.414",
+    "typescript-language-server": "^6.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.20.2",

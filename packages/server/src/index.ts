@@ -24,7 +24,7 @@ import { ScheduleStore, Scheduler, describeNextRun, nextWindowStart, withinWindo
 import type { ScheduledTask, WorkingWindow } from './schedule.js';
 import { Router, HttpError, sendJSON, sendError, sendSSEEvent, startSSE, endSSE, parseBody, readRawBody, corsHeaders } from './router.js';
 import { SessionStore } from './sessions.js';
-import type { ImportedConversation } from './sessions.js';
+import type { ChatSession, ImportedConversation } from './sessions.js';
 import { ClusterStore, runClusterWave, initClusterIdentitySkills, ROLE_PRESETS, generateRoleSkill } from './cluster.js';
 import type { ClusterRole } from './cluster.js';
 import { listMcpServers, probeMcpServer, writeMcpServer, removeMcpServer, setMcpServerEnabled } from './mcp.js';
@@ -33,8 +33,10 @@ import { FeishuBridge, type FeishuConfig } from './feishu.js';
 
 import { listTree, readWorkspaceFile, suggestPaths } from './files.js';
 import { outlinePath, suggestSymbols } from './outline.js';
-import { parseContextExport, chunksToMessages } from './contextParsers.js';
-import { discoverConversations, readConversation, materializeConversation } from './discovery.js';
+import { parseContextExport } from './contextParsers.js';
+import { discoverConversations, loadTranscript, materializeConversation } from './discovery.js';
+import { knownProjectRoots, rememberProject } from './projects.js';
+import { addWorktree, listWorktrees, removeWorktree, resetWorktree, transferLocalChanges } from './worktrees.js';
 import { taskBoard } from './taskBoard.js';
 
 const log = createLogger('server');
@@ -405,6 +407,20 @@ function remountKnowledgeBase(dbPath: string): void {
   log.info(`Knowledge base mounted: ${dbPath}`);
 }
 
+/** Knowledge bases for sessions that work in some other directory. */
+const extraEngines = new Map<string, GroupKBEngine>();
+
+function engineFor(dbPath: string): GroupKBEngine {
+  const key = resolve(dbPath);
+  if (resolve(config.kb.dbPath) === key) return engine;
+  const hit = extraEngines.get(key);
+  if (hit) return hit;
+  mkdirSync(dirname(key), { recursive: true });
+  const extra = new GroupKBEngine(new KBStore(key), config.kb);
+  extraEngines.set(key, extra);
+  return extra;
+}
+
 let sessions: SessionStore;
 let cluster: ClusterStore;
 let schedule: ScheduleStore;
@@ -423,6 +439,57 @@ let stateDir: string;
 const agents = new Map<string, Agent>();
 /** Session id treated as "active" when a request does not name one. */
 let activeAgentId: string | null = null;
+/** Parent sessions whose in-flight children should stop blocking and keep running. */
+const detachParents = new Set<string>();
+/** Session stores for projects other than the one currently mounted. */
+const otherStores = new Map<string, SessionStore>();
+
+function projectIndexFile(): string {
+  return join(appDir(), 'projects.json');
+}
+
+function storeFor(dir: string): SessionStore {
+  const key = resolve(dir);
+  if (resolve(sessions.rootDir) === key) return sessions;
+  let hit = otherStores.get(key);
+  if (!hit) {
+    hit = new SessionStore(key);
+    otherStores.set(key, hit);
+  }
+  return hit;
+}
+
+function projectRoots(): string[] {
+  let extra: string[] = [];
+  try {
+    const p = join(stateDir, '.she', 'workspaces.json');
+    if (existsSync(p)) {
+      const j = JSON.parse(readFileSync(p, 'utf8')) as { recent?: string[] };
+      extra = Array.isArray(j.recent) ? j.recent : [];
+    }
+  } catch {
+    extra = [];
+  }
+  return knownProjectRoots(projectIndexFile(), config.workspace.root, extra);
+}
+
+function findSession(id: string): { store: SessionStore; session: ChatSession } | null {
+  const local = sessions.get(id);
+  if (local) return { store: sessions, session: local };
+  for (const root of projectRoots()) {
+    if (resolve(root) === resolve(sessions.rootDir)) continue;
+    const store = storeFor(root);
+    const session = store.get(id);
+    if (session) return { store, session };
+  }
+  return null;
+}
+
+function rootForSession(sessionId?: string | null): string {
+  if (!sessionId) return config.workspace.root;
+  const found = findSession(sessionId);
+  return found?.session.directory ? resolve(found.session.directory) : config.workspace.root;
+}
 
 /**
  * Where installed software lives (wallpaper, plugins) — as opposed to project
@@ -500,45 +567,95 @@ const plugins = new PluginManager({
  * so cost grows multiplicatively. Passing `isSubagent` also strips the tools
  * that assume a human is present (see Agent's constructor).
  */
-function makeSubagentRunner(parentCfg: SheConfig): SubagentRunner {
+function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): SubagentRunner {
   const TIMEOUT_MS = Number(process.env.SHE_SUBAGENT_TIMEOUT_MS) > 0
     ? Number(process.env.SHE_SUBAGENT_TIMEOUT_MS)
     : 180_000;
 
   return {
     async run(req) {
-      const shell = new SandboxShell(parentCfg.workspace.root, parentCfg.sandbox);
-      const tools = createTools(shell, parentCfg.workspace.root, {
+      const directory = parentCfg.workspace.root;
+      const owner = storeFor(directory);
+      const childSession = owner.create(req.description, {
+        directory,
+        parentId: parentSessionId,
+      });
+      const shell = new SandboxShell(directory, parentCfg.sandbox);
+      const tools = createTools(shell, directory, {
         allowAllCommands: parentCfg.sandbox.allowAllCommands,
       });
-      const child = new Agent(parentCfg, engine, tools, null, { isSubagent: true });
+      const child = new Agent(parentCfg, engineFor(parentCfg.kb.dbPath), tools, childSession.id, { isSubagent: true });
+      agents.set(childSession.id, child);
 
-      let timedOut = false;
-      try {
-        const out = await Promise.race([
-          child.chat(req.prompt),
-          new Promise<null>((r) => setTimeout(() => { timedOut = true; r(null); }, TIMEOUT_MS)),
-        ]);
-        if (timedOut) {
-          // Real abort, so a timed-out child stops consuming tokens.
-          try { child.stop(); } catch { /* ignore */ }
-          return { description: req.description, ok: false, result: `子任务超时（${TIMEOUT_MS / 1000}s）` };
+      const job = (async () => {
+        let timedOut = false;
+        try {
+          const out = await Promise.race([
+            child.chat(req.prompt),
+            new Promise<null>((r) => setTimeout(() => { timedOut = true; r(null); }, TIMEOUT_MS)),
+          ]);
+          if (timedOut) {
+            try { child.stop(); } catch { /* ignore */ }
+          }
+          try { owner.update(childSession.id, { messages: child.historyForDisk() }); } catch { /* keep the reply */ }
+          const text = timedOut
+            ? `子任务超时（${TIMEOUT_MS / 1000}s）`
+            : (out?.content ?? '(无输出)');
+          return {
+            description: req.description,
+            ok: !timedOut,
+            result: `${text}\n\n（子会话 ${childSession.id}）`,
+          };
+        } catch (err) {
+          try { owner.update(childSession.id, { messages: child.historyForDisk() }); } catch { /* ignore */ }
+          return {
+            description: req.description,
+            ok: false,
+            result: `子任务失败: ${err instanceof Error ? err.message : String(err)}\n\n（子会话 ${childSession.id}）`,
+          };
         }
-        return { description: req.description, ok: true, result: out?.content ?? '(无输出)' };
-      } catch (err) {
+      })();
+
+      const handOff = () => {
+        owner.markBackground(childSession.id);
+        void job;
         return {
           description: req.description,
-          ok: false,
-          result: `子任务失败: ${err instanceof Error ? err.message : String(err)}`,
+          ok: true,
+          result: `已在后台继续。打开会话「${childSession.title}」（${childSession.id}）可以看它的过程。`,
         };
+      };
+      if (req.background) return handOff();
+
+      const started = Date.now();
+      while (Date.now() - started < TIMEOUT_MS + 2_000) {
+        const finished = await Promise.race([
+          job.then((r) => ({ ready: true as const, r })),
+          new Promise<{ ready: false }>((r) => setTimeout(() => r({ ready: false }), 300)),
+        ]);
+        if (finished.ready) return finished.r;
+        if (detachParents.has(parentSessionId)) return handOff();
       }
+      return handOff();
     },
   };
 }
 
+function configForRoot(root: string): SheConfig {
+  const abs = resolve(root);
+  if (abs === resolve(config.workspace.root)) return config;
+  const kb = resolveWorkspaceKbPath(abs);
+  return {
+    ...config,
+    workspace: { ...config.workspace, root: abs },
+    kb: { ...config.kb, dbPath: kb.dbPath },
+  };
+}
+
 function makeAgent(cfg: SheConfig, sessionId?: string | null): Agent {
-  const shell = new SandboxShell(cfg.workspace.root, cfg.sandbox);
-  const base = createTools(shell, cfg.workspace.root, { allowAllCommands: cfg.sandbox.allowAllCommands });
+  const local = configForRoot(sessionId ? rootForSession(sessionId) : cfg.workspace.root);
+  const shell = new SandboxShell(local.workspace.root, local.sandbox);
+  const base = createTools(shell, local.workspace.root, { allowAllCommands: local.sandbox.allowAllCommands });
 
   /*
    * Merge plugin-provided tools into the toolset the agent sees.
@@ -559,12 +676,12 @@ function makeAgent(cfg: SheConfig, sessionId?: string | null): Agent {
     definitions: [...base.definitions, ...plugins.definitions()],
     execute: (name: string, args: Record<string, unknown>): Promise<string> => {
       if (base.definitions.some((d) => d.name === name)) return base.execute(name, args);
-      return plugins.execute(name, args);
+      return plugins.execute(name, args, local.workspace.root);
     },
   };
 
-  const agent = new Agent(cfg, engine, merged, sessionId ?? null, {
-    subagentRunner: makeSubagentRunner(cfg),
+  const agent = new Agent(local, engineFor(local.kb.dbPath), merged, sessionId ?? null, {
+    subagentRunner: sessionId ? makeSubagentRunner(local, sessionId) : undefined,
       onTaskEvent: (e) => { taskBoard.upsert(e); },
     // Scheduling tools come from the server's store, so the agent and the
     // scheduler always act on the same tasks. Children cannot use them: the tool
@@ -631,7 +748,7 @@ function workingWindow(): WorkingWindow | null {
 async function runScheduledTask(task: ScheduledTask): Promise<void> {
   let sid = task.sessionId;
   if (!sid || !sessions.get(sid)) {
-    const created = sessions.create(task.name);
+    const created = sessions.create(task.name, { directory: resolve(config.workspace.root) });
     sid = created.id;
     // Remember it, so the next run appends to the same conversation instead of
     // scattering output across a new session every time.
@@ -766,6 +883,12 @@ async function applyWorkingWindow(w: { start: string; end: string; days?: number
  */
 function rebuildAgents(): void {
   for (const [sid, old] of agents) {
+    // A running turn holds this object. Replacing it does not stop the turn,
+    // but disposing it kills the language server under the tools it is using.
+    if (old.isRunning()) {
+      old.setThinkingLevel(config.llm.thinkingLevel || 'medium');
+      continue;
+    }
     void old.dispose().catch((err: Error) => log.warn(`释放旧 agent 失败: ${err.message}`));
     const fresh = makeAgent(config, sid);
     fresh.setHistory(old.getHistory());
@@ -815,7 +938,7 @@ function agentFor(
     if (opts?.createIfMissing === false) {
       return makeAgent(config);
     }
-    const created = sessions.create();
+    const created = sessions.create(undefined, { directory: resolve(config.workspace.root) });
     id = created.id;
   }
   if (activeAgentId !== id) activeAgentId = id;
@@ -823,7 +946,7 @@ function agentFor(
   let a = agents.get(id);
   if (!a) {
     a = makeAgent(config, id);
-    const stored = sessions.get(id);
+    const stored = findSession(id)?.session ?? sessions.get(id);
     if (stored?.messages?.length) a.setHistory(stored.messages);
     agents.set(id, a);
   }
@@ -837,8 +960,11 @@ function persistHistory(id?: string): void {
   const a = agents.get(sid);
   if (!a) return;
   try {
-    if (sessions.get(sid)) sessions.update(sid, { messages: a.getHistory() });
-    else sessions.syncActive(a.getHistory());
+    const disk = a.historyForDisk();
+    const found = findSession(sid);
+    if (found) found.store.update(sid, { messages: disk });
+    else if (sessions.get(sid)) sessions.update(sid, { messages: disk });
+    else sessions.syncActive(disk);
   } catch (err) {
     log.warn(`Failed to persist chat history for ${sid}: ${(err as Error).message}`);
   }
@@ -872,6 +998,66 @@ function dropAgent(id: string): void {
   if (old) void old.dispose().catch((err: Error) => log.warn(`释放 agent 失败: ${err.message}`));
   agents.delete(id);
   if (activeAgentId === id) activeAgentId = null;
+}
+
+/**
+ * Point the process at another project without killing sessions that are
+ * already pinned to their own directory or still running.
+ *
+ * A full dispose made "open the other project's chat" abort every parallel
+ * turn. Pinned sessions keep the agent that was built for their directory.
+ */
+function mountWorkspace(root: string, sessionId?: string): ChatSession {
+  persistHistory();
+  const next = resolve(root);
+  const prev = resolve(config.workspace.root);
+  if (prev !== next) {
+    const prevKb = config.kb.dbPath;
+    config.workspace.root = next;
+    config.kb.dbPath = resolveWorkspaceKbPath(next).dbPath;
+    if (resolve(prevKb) !== resolve(config.kb.dbPath)) remountKnowledgeBase(config.kb.dbPath);
+    const nextState = resolveStateDir(config);
+    if (nextState !== stateDir) {
+      otherStores.set(resolve(sessions.rootDir), sessions);
+      stateDir = nextState;
+      sessions = new SessionStore(stateDir);
+      otherStores.delete(resolve(sessions.rootDir));
+      cluster = new ClusterStore(stateDir);
+      for (const [id, agent] of [...agents]) {
+        if (agent.isRunning()) continue;
+        const pinned = findSession(id)?.session.directory;
+        if (pinned) continue;
+        dropAgent(id);
+      }
+      log.info(`Switched state dir to ${stateDir} (${sessions.list().sessions.length} chats)`);
+    }
+    try { rememberProject(projectIndexFile(), next); } catch (err) {
+      log.warn(`记录项目目录失败: ${(err as Error).message}`);
+    }
+    try { updateEnvFile(ENV_PATH, { SHE_WORKSPACE: next }); } catch { /* non-fatal */ }
+  }
+
+  let chosen: ChatSession | null = null;
+  if (sessionId) {
+    const found = findSession(sessionId);
+    if (found && resolve(found.session.directory || found.store.rootDir) === resolve(sessions.rootDir)) {
+      chosen = found.store.setActive(sessionId);
+    } else if (found) {
+      chosen = found.session;
+    }
+  }
+  if (!chosen) chosen = pickStartupSession();
+  if (!chosen.directory && sessions.get(chosen.id)) {
+    const dir = resolve(sessions.rootDir);
+    chosen = sessions.update(chosen.id, { directory: dir });
+  }
+  activeAgentId = chosen.id;
+  if (!agents.get(chosen.id)) {
+    const a = makeAgent(config, chosen.id);
+    if (chosen.messages?.length) a.setHistory(chosen.messages);
+    agents.set(chosen.id, a);
+  }
+  return chosen;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -985,7 +1171,7 @@ function expandMentions(message: string, workspaceRoot: string): string {
   out = out.replace(fileRe, (_m, p1: string) => {
     const rel = String(p1).replace(/^["']|["']$/g, '');
     try {
-      const { path: rp, content, truncated } = readWorkspaceFile(workspaceRoot, rel, 80_000);
+      const { path: rp, content, truncated } = readWorkspaceFile(workspaceRoot, rel);
       blocks.push(`<attached_file path="${rp}"${truncated ? ' truncated="true"' : ''}>\n${content}\n</attached_file>`);
       return `@file:${rp}`;
     } catch (err) {
@@ -1221,8 +1407,14 @@ function registerRoutes(router: Router): void {
       // delta across it rather than the running total.
       const usageBefore = agent.getTokenUsage();
       try {
+        let lastPersist = 0;
         const reply = await agent.chat(message, (chunk: StreamChunk) => {
           sendSSEEvent(res, chunk);
+          const now = Date.now();
+          if (now - lastPersist > 2000) {
+            lastPersist = now;
+            try { persistHistory(sid); } catch { /* the final persist still runs */ }
+          }
         });
         recordTurnMetrics(agent, turnStart, usageBefore, true);
         sendSSEEvent(res, { type: 'done', content: reply.content });
@@ -1288,8 +1480,9 @@ function registerRoutes(router: Router): void {
     const agent = agentFor(req, body);
     const messages = Array.isArray(body.messages) ? body.messages : [];
     agent.setHistory(messages);
-    try { if (sessions.get(sid)) sessions.update(sid, { messages }); } catch { /* ignore */ }
-    sendJSON(res, { ok: true, messages: messages.length });
+    const healed = agent.getHistory();
+    try { if (sessions.get(sid)) sessions.update(sid, { messages: healed }); } catch { /* ignore */ }
+    sendJSON(res, { ok: true, messages: healed.length });
   });
 
   /**
@@ -1518,6 +1711,9 @@ function registerRoutes(router: Router): void {
     }
     writeSkillProfile(config.workspace.root, body.profile);
     config.skills.profile = body.profile;
+    // The prompt is baked when the agent is constructed. Writing the file
+    // alone left the live conversation on the previous profile.
+    rebuildAgents();
     sendJSON(res, { ok: true, profile: body.profile });
   });
 
@@ -1569,8 +1765,21 @@ router.put('/api/settings', async (req, res) => {
       config.workspace.root = resolve(body.workspaceRoot);
       setEnv('SHE_WORKSPACE', config.workspace.root);
     }
-    if (typeof body.temperature === 'number') config.llm.temperature = body.temperature;
-    if (typeof body.maxTokens === 'number') config.llm.maxTokens = body.maxTokens;
+    /*
+     * Persisted, not just applied in memory.
+     *
+     * These two were the only settings in this handler that skipped `setEnv`, so the change
+     * survived until the next restart and then reverted with no error anywhere. `check:restart`
+     * asserts both directions; keeping them in `.env` is what makes that pass.
+     */
+    if (typeof body.temperature === 'number') {
+      config.llm.temperature = body.temperature;
+      setEnv('SHE_LLM_TEMPERATURE', String(body.temperature));
+    }
+    if (typeof body.maxTokens === 'number') {
+      config.llm.maxTokens = body.maxTokens;
+      setEnv('SHE_LLM_MAX_TOKENS', String(body.maxTokens));
+    }
     if (typeof body.allowAllCommands === 'boolean') {
       config.sandbox.allowAllCommands = body.allowAllCommands;
       config.sandbox.denyDestructiveByDefault = !body.allowAllCommands;
@@ -1667,13 +1876,21 @@ router.put('/api/settings', async (req, res) => {
         disposeAllAgents();
       }
 
-    // Hot-reload every live agent against the new config, preserving each
-    // session's own conversation. Rebuilding only the "active" agent would
-    // silently drop the other windows' transcripts.
-    for (const [sid, old] of agents) {
-      const rebuilt = makeAgent(config, sid);
-      rebuilt.setHistory(old.getHistory());
-      agents.set(sid, rebuilt);
+    // A thinking-level change must not rebuild agents. The slider fires this
+    // endpoint, and a rebuild disposed the language server under a live turn —
+    // which is why moving the slider (or anything else that saved settings)
+    // stopped the reply, and why the UI felt stuck until the slider moved.
+    const structuralChange = Boolean(
+      body.provider || body.model || body.baseUrl || body.apiKey || body.workspaceRoot
+      || body.skillProfile || typeof body.automationMode === 'boolean'
+      || typeof body.allowAllCommands === 'boolean' || typeof body.kbDbPath === 'string'
+      || body.fallbackBaseUrl || body.fallbackApiKey || body.fallbackModel || body.fallbackProvider
+      || typeof body.temperature === 'number' || typeof body.maxTokens === 'number',
+    );
+    if (!structuralChange) {
+      for (const agent of agents.values()) agent.setThinkingLevel(config.llm.thinkingLevel || 'medium');
+    } else {
+      rebuildAgents();
     }
     persistHistory();
 
@@ -2273,8 +2490,9 @@ router.get('/api/fs/tree', (req, res) => {
     /*
      * ── conversation migration ──
      *
-     * Each selected conversation becomes a real conversation in the list, with its turns parsed out
-     * of the original record.
+     * Each selected conversation becomes a real conversation in the list, with its turns parsed
+     * out of the original record (Claude/Codex JSONL, or Cursor's composer headers — not a
+     * markdown rendering, which dropped the speaker, the tool calls, and the thinking).
      *
      * What this replaced: the endpoint copied files into `.she/imports/` and appended ONE message to
      * the CURRENT session listing their paths, expecting the model to go and read them. That is
@@ -2293,28 +2511,21 @@ router.get('/api/fs/tree', (req, res) => {
       let truncatedConversations = 0;
 
       for (const conv of picked) {
+        // Parse the original record. File sources are read as themselves; Cursor
+        // is read in composer order from state.vscdb (that file is not copied).
+        const loaded = loadTranscript(conv);
+
         // Keep the original on disk: a straight copy for file-backed sources, an extracted
         // SHE-native JSON for database-backed ones (state.vscdb cannot be shipped).
-        const mat = materializeConversation(conv, workspaceRoot);
+        const mat = materializeConversation(conv, workspaceRoot, loaded);
 
-        // Parse from the original text when the source can produce it, else from the copy.
-        let text = readConversation(conv);
-        if (!text && mat) {
-          try { text = readFileSync(mat.absPath, 'utf8'); } catch { /* unreadable copy */ }
-        }
-        if (!text) {
-          skipped.push(conv.title);
-          continue;
-        }
-
-        const chunks = parseContextExport({ source: conv.source, text, filename: conv.path });
-        const { messages, truncated } = chunksToMessages(chunks);
-        if (!messages.length) {
+        if (!loaded?.messages.length) {
           // The record existed but held no parseable turns. Reported rather than created empty —
           // an empty conversation in the list looks like data loss.
           skipped.push(conv.title);
           continue;
         }
+        const { messages, truncated } = loaded;
         if (truncated) truncatedConversations++;
 
         toImport.push({
@@ -2371,8 +2582,8 @@ router.get('/api/fs/tree', (req, res) => {
     const skipped: string[] = [];
 
     for (const conv of picked) {
-      const text = readConversation(conv);
-      if (!text) {
+      const loaded = loadTranscript(conv);
+      if (!loaded?.messages.length) {
         skipped.push(conv.title);
         continue;
       }
@@ -2384,12 +2595,13 @@ router.get('/api/fs/tree', (req, res) => {
       let dayGroup = store.getAllGroups().find((g) => g.name === day && g.parentGroupId === srcGroup!.id);
       if (!dayGroup) dayGroup = engine.createGroup(day, srcGroup.id);
 
-      const chunks = parseContextExport({ source: conv.source, text, filename: conv.title });
-      for (const c of chunks) {
-        // Title carries the origin so a node stays traceable in the tree.
-        engine.addMemoryMaintained(dayGroup.id, 'text', `${c.title}  ·  ${conv.source}`, c.content);
+      loaded.messages.forEach((m, i) => {
+        const body = [m.content, m.reasoning ? `思维链:\n${m.reasoning}` : ''].filter(Boolean).join('\n\n').trim();
+        if (!body) return;
+        // Title carries the speaker and the origin so a node stays traceable.
+        engine.addMemoryMaintained(dayGroup.id, 'text', `${m.role}-${i + 1}  ·  ${conv.source}`, body);
         memories++;
-      }
+      });
       imported++;
     }
 
@@ -2949,56 +3161,20 @@ router.get('/api/fs/tree', (req, res) => {
   });
 
   router.post('/api/workspaces/switch', async (req, res) => {
-    const body = await parseBody<{ root?: string }>(req);
+    const body = await parseBody<{ root?: string; sessionId?: string }>(req);
     const raw = String(body.root ?? '').trim();
     if (!raw) throw new HttpError(400, 'Missing root');
     const root = resolve(raw);
     if (!existsSync(root)) throw new HttpError(404, `路径不存在: ${root}`);
-
-    persistHistory();
     const prevWorkspace = config.workspace.root;
-    const prevKb = config.kb.dbPath;
-
-    config.workspace.root = root;
-    // Per-workspace kb-link (or env override) ? shared DBs stay mounted across roots.
-    {
-      const resolved = resolveWorkspaceKbPath(root);
-      config.kb.dbPath = resolved.dbPath;
-    }
-    if (resolve(prevKb) !== resolve(config.kb.dbPath)) {
-      remountKnowledgeBase(config.kb.dbPath);
-    }
-
-    // Switch to the new workspace's OWN state.
-    //
-    // Deliberately no migration here: each workspace keeps its own chats, so
-    // the session rail shows only this project's conversations. (Copying them
-    // across is what made the list look un-isolated.)
-    const nextState = resolveStateDir(config);
-      if (nextState !== stateDir) {
-        stateDir = nextState;
-        sessions = new SessionStore(stateDir);
-        cluster = new ClusterStore(stateDir);
-        // Disposes as well as drops: each agent owns a language server process.
-        disposeAllAgents();
-        log.info(`Switched state dir to ${stateDir} (${sessions.list().sessions.length} chats)`);
-      }
-
-    const active = pickStartupSession();
-    activeAgentId = active.id;
-    const a = makeAgent(config, active.id);
-    if (active.messages?.length) a.setHistory(active.messages);
-    agents.set(active.id, a);
-
+    const active = mountWorkspace(root, body.sessionId);
     rememberWorkspace(root);
-    updateEnvFile(ENV_PATH, { SHE_WORKSPACE: root });
-
     log.info(`Workspace switched: ${prevWorkspace} -> ${root}`);
     sendJSON(res, {
       ok: true,
-      root,
+      root: config.workspace.root,
       kbDbPath: config.kb.dbPath,
-      kbMode: resolveWorkspaceKbPath(root).mode,
+      kbMode: resolveWorkspaceKbPath(config.workspace.root).mode,
       restartRequired: false,
       activeSessionId: active.id,
     });
@@ -3006,9 +3182,25 @@ router.get('/api/fs/tree', (req, res) => {
 
   router.get('/api/sessions', (req, res) => {
     // `?all=1` returns closed sessions too, which the history view needs.
+    // `?scope=all` also includes sessions that live in other known projects.
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     const includeClosed = url.searchParams.get('all') === '1';
-    sendJSON(res, sessions.list(includeClosed));
+    if (url.searchParams.get('scope') !== 'all') {
+      sendJSON(res, sessions.list(includeClosed));
+      return;
+    }
+    const mine = sessions.list(includeClosed);
+    const seen = new Set(mine.sessions.map((s) => s.id));
+    const extra = [];
+    for (const root of projectRoots()) {
+      if (resolve(root) === resolve(sessions.rootDir)) continue;
+      for (const s of storeFor(root).list(includeClosed).sessions) {
+        if (seen.has(s.id)) continue;
+        seen.add(s.id);
+        extra.push({ ...s, directory: s.directory || root });
+      }
+    }
+    sendJSON(res, { active_id: mine.active_id, sessions: [...mine.sessions, ...extra] });
   });
 
   /** Closed sessions only (history view). */
@@ -3021,7 +3213,9 @@ router.get('/api/fs/tree', (req, res) => {
 
   /** Close a session: hidden from the working list, still in history. */
   router.post('/api/sessions/:id/close', (req, res, params) => {
-    const s = sessions.close(params.id);
+    const found = findSession(params.id);
+    if (!found) throw new HttpError(404, `Session not found: ${params.id}`);
+    const s = found.store.close(params.id);
     if (!s) throw new HttpError(404, `Session not found: ${params.id}`);
     dropAgent(params.id);
     sendJSON(res, { ok: true, active_id: sessions.list().active_id });
@@ -3029,60 +3223,80 @@ router.get('/api/fs/tree', (req, res) => {
 
   /** Bring a closed session back. */
   router.post('/api/sessions/:id/reopen', (req, res, params) => {
-    const s = sessions.reopen(params.id);
+    const found = findSession(params.id);
+    if (!found) throw new HttpError(404, `Session not found: ${params.id}`);
+    const s = found.store.reopen(params.id);
     if (!s) throw new HttpError(404, `Session not found: ${params.id}`);
     activeAgentId = s.id;
-    const a = makeAgent(config, s.id);
-    if (s.messages?.length) a.setHistory(s.messages);
-    agents.set(s.id, a);
+    if (!agents.get(s.id)) {
+      const a = makeAgent(config, s.id);
+      if (s.messages?.length) a.setHistory(s.messages);
+      agents.set(s.id, a);
+    }
     sendJSON(res, s);
   });
 
   router.post('/api/sessions', async (req, res) => {
-    const body = await parseBody<{ title?: string }>(req);
-    // Save the currently active session's transcript before switching away.
+    const body = await parseBody<{ title?: string; directory?: string; parent_id?: string }>(req);
     persistHistory();
-    const s = sessions.create(body.title);
-    activeAgentId = s.id;
-    agents.set(s.id, makeAgent(config, s.id));
+    const directory = resolve(body.directory?.trim() || config.workspace.root);
+    if (!existsSync(directory)) throw new HttpError(404, `路径不存在: ${directory}`);
+    const owner = storeFor(directory);
+    const s = owner.create(body.title, { directory, parentId: body.parent_id });
+    try { rememberProject(projectIndexFile(), directory); } catch { /* non-fatal */ }
+    if (resolve(directory) === resolve(config.workspace.root)) {
+      activeAgentId = s.id;
+      agents.set(s.id, makeAgent(config, s.id));
+    }
     sendJSON(res, s, 201);
   });
 
   router.get('/api/sessions/:id', (_req, res, params) => {
-    const s = sessions.get(params.id);
-    if (!s) throw new HttpError(404, `Session not found: ${params.id}`);
-    sendJSON(res, s);
+    const found = findSession(params.id);
+    if (!found) throw new HttpError(404, `Session not found: ${params.id}`);
+    sendJSON(res, found.session);
   });
 
   router.put('/api/sessions/:id', async (req, res, params) => {
     const body = await parseBody<{ title?: string; messages?: import('@she/shared').LLMMessage[] }>(req);
-    const s = sessions.update(params.id, body);
+    const found = findSession(params.id);
+    if (!found) throw new HttpError(404, `Session not found: ${params.id}`);
+    const s = found.store.update(params.id, body);
     if (Array.isArray(body.messages)) {
-      // Replacing stored history invalidates the cached agent for that session.
       const live = agents.get(s.id);
-      if (live) live.setHistory(s.messages);
-      else dropAgent(s.id);
+      if (live?.isRunning()) {
+        // The turn is writing this transcript. Replacing it from disk would drop the live tail.
+      } else if (live) {
+        live.setHistory(s.messages);
+      } else {
+        dropAgent(s.id);
+      }
     }
     sendJSON(res, s);
   });
 
   router.delete('/api/sessions/:id', (_req, res, params) => {
-    const wasActive = sessions.list().active_id === params.id;
-    sessions.remove(params.id);
+    const found = findSession(params.id);
+    if (!found) throw new HttpError(404, `Session not found: ${params.id}`);
+    if (agents.get(params.id)?.isRunning()) {
+      throw new HttpError(409, '这一轮还在进行。先停下，再删除会话。');
+    }
+    const wasActive = found.store.list().active_id === params.id;
+    found.store.remove(params.id);
     dropAgent(params.id);
-    if (wasActive) {
+    if (wasActive && found.store === sessions) {
       const next = sessions.getActive();
       if (next) {
         activeAgentId = next.id;
         const a = agentFor({ headers: {}, url: '/' } as never, { session_id: next.id });
-        a.setHistory(next.messages ?? []);
+        if (!a.isRunning()) a.setHistory(next.messages ?? []);
       }
     }
     sendJSON(res, { ok: true, active_id: sessions.list().active_id });
   });
 
   router.get('/api/sessions/:id/export', (_req, res, params) => {
-    const s = sessions.get(params.id);
+    const s = findSession(params.id)?.session;
     if (!s) throw new HttpError(404, `Session not found: ${params.id}`);
     const lines: string[] = [`# ${s.title}`, '', `session: ${s.id}`, `updated: ${s.updated_at}`, ''];
     for (const m of s.messages || []) {
@@ -3142,13 +3356,118 @@ router.get('/api/fs/tree', (req, res) => {
   });
 
   router.post('/api/sessions/:id/activate', (_req, res, params) => {
+    const found = findSession(params.id);
+    if (!found) throw new HttpError(404, `Session not found: ${params.id}`);
+    const dir = resolve(found.session.directory || found.store.rootDir);
+    if (dir !== resolve(config.workspace.root)) {
+      const active = mountWorkspace(dir, params.id);
+      sendJSON(res, active);
+      return;
+    }
     persistHistory();
     const s = sessions.setActive(params.id);
     if (!s) throw new HttpError(404, `Session not found: ${params.id}`);
     activeAgentId = s.id;
     const a = agentFor({ headers: {}, url: '/' } as never, { session_id: s.id });
-    a.setHistory(s.messages);
+    if (!a.isRunning()) a.setHistory(s.messages);
     sendJSON(res, s);
+  });
+
+  router.get('/api/sessions/:id/children', (_req, res, params) => {
+    const found = findSession(params.id);
+    if (!found) throw new HttpError(404, `Session not found: ${params.id}`);
+    const children = found.store.childrenOf(params.id).map((s) => ({
+      id: s.id,
+      title: s.title,
+      directory: s.directory,
+      background: s.background,
+      updated_at: s.updated_at,
+    }));
+    sendJSON(res, { children });
+  });
+
+  /** Stop waiting on this session's children. They keep running. */
+  router.post('/api/sessions/:id/detach', (_req, res, params) => {
+    const found = findSession(params.id);
+    if (!found) throw new HttpError(404, `Session not found: ${params.id}`);
+    detachParents.add(params.id);
+    setTimeout(() => detachParents.delete(params.id), 2000).unref?.();
+    const children = found.store.childrenOf(params.id);
+    for (const child of children) found.store.markBackground(child.id);
+    sendJSON(res, { ok: true, children: children.map((c) => c.id) });
+  });
+
+  router.post('/api/sessions/:id/move', async (req, res, params) => {
+    const body = await parseBody<{ directory?: string; move_changes?: boolean }>(req);
+    const dest = resolve(String(body.directory ?? '').trim());
+    if (!dest || !existsSync(dest)) throw new HttpError(404, '目标目录不存在');
+    const found = findSession(params.id);
+    if (!found) throw new HttpError(404, `Session not found: ${params.id}`);
+    if (agents.get(params.id)?.isRunning()) {
+      throw new HttpError(409, '这一轮还在进行。先停下，再把会话搬到别的项目。');
+    }
+    const from = resolve(found.session.directory || found.store.rootDir);
+    let note = '';
+    if (body.move_changes && from !== dest) note = transferLocalChanges(from, dest);
+    const taken = found.store.extract(params.id);
+    if (!taken) throw new HttpError(404, `Session not found: ${params.id}`);
+    taken.directory = dest;
+    const saved = storeFor(dest).adopt(taken);
+    dropAgent(params.id);
+    try { rememberProject(projectIndexFile(), dest); } catch { /* non-fatal */ }
+    sendJSON(res, { session: saved, note });
+  });
+
+  router.get('/api/worktrees', (req, res) => {
+    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    const repo = resolve(url.searchParams.get('repo') || config.workspace.root);
+    try {
+      sendJSON(res, { repo, worktrees: listWorktrees(repo) });
+    } catch (err) {
+      throw new HttpError(400, (err as Error).message);
+    }
+  });
+
+  router.post('/api/worktrees', async (req, res) => {
+    const body = await parseBody<{ name?: string; repo?: string }>(req);
+    const repo = resolve(body.repo?.trim() || config.workspace.root);
+    try {
+      const info = addWorktree(repo, body.name?.trim() || `w${Date.now().toString(36)}`);
+      const session = storeFor(info.path).create(body.name?.trim() || basename(info.path), { directory: info.path });
+      try {
+        rememberProject(projectIndexFile(), repo);
+        rememberProject(projectIndexFile(), info.path);
+      } catch { /* non-fatal */ }
+      sendJSON(res, { worktree: info, session }, 201);
+    } catch (err) {
+      throw new HttpError(400, (err as Error).message);
+    }
+  });
+
+  router.post('/api/worktrees/reset', async (req, res) => {
+    const body = await parseBody<{ path?: string; repo?: string }>(req);
+    const repo = resolve(body.repo?.trim() || config.workspace.root);
+    const path = resolve(String(body.path ?? '').trim());
+    if (!path) throw new HttpError(400, '缺少 path');
+    try {
+      resetWorktree(repo, path);
+      sendJSON(res, { ok: true, path });
+    } catch (err) {
+      throw new HttpError(400, (err as Error).message);
+    }
+  });
+
+  router.delete('/api/worktrees', async (req, res) => {
+    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    const repo = resolve(url.searchParams.get('repo') || config.workspace.root);
+    const path = resolve(url.searchParams.get('path') || '');
+    if (!path) throw new HttpError(400, '缺少 path');
+    try {
+      removeWorktree(repo, path);
+      sendJSON(res, { ok: true });
+    } catch (err) {
+      throw new HttpError(400, (err as Error).message);
+    }
   });
 
   router.get('/api/kb/groups', (_req, res) => {
@@ -3452,13 +3771,35 @@ router.get('/api/fs/tree', (req, res) => {
    * kind 'cluster' so the sidebar can list them alongside chats.
    */
   router.get('/api/conversations', (_req, res) => {
-    const chats = sessions.list().sessions.map((s) => ({
-      id: s.id,
-      kind: 'chat' as const,
-      title: s.title,
-      created_at: s.created_at,
-      updated_at: s.updated_at,
-    }));
+    const seen = new Set<string>();
+    const chats: Array<{
+      id: string;
+      kind: 'chat';
+      title: string;
+      created_at: string;
+      updated_at: string;
+      directory?: string;
+      parent_id?: string;
+      background?: boolean;
+      running?: boolean;
+    }> = [];
+    for (const root of projectRoots()) {
+      for (const s of storeFor(root).list().sessions) {
+        if (seen.has(s.id)) continue;
+        seen.add(s.id);
+        chats.push({
+          id: s.id,
+          kind: 'chat',
+          title: s.title,
+          created_at: s.created_at,
+          updated_at: s.updated_at,
+          directory: s.directory || root,
+          parent_id: s.parent_id,
+          background: s.background,
+          running: agents.get(s.id)?.isRunning() ?? false,
+        });
+      }
+    }
     const groups = cluster.list().map((r) => ({
       id: r.id,
       kind: 'cluster' as const,
@@ -3506,7 +3847,7 @@ router.get('/api/fs/tree', (req, res) => {
       key,
       name,
       title: String(body.title ?? '').trim() || name,
-      count: Math.max(1, Math.min(9, Number(body.count) || 1)),
+      count: Math.max(1, Math.floor(Number(body.count) || 1)),
       skill: String(body.skill ?? '').trim(),
       phase: (body.phase === 'lead' || body.phase === 'work' || body.phase === 'review') ? body.phase : 'work',
       hue: Number(body.hue) || Math.floor(Math.random() * 360),
@@ -3627,7 +3968,7 @@ router.get('/api/fs/tree', (req, res) => {
       dayGroup.id,
       'text',
       `${title} (${room.id})`,
-      transcript.slice(0, 100_000),
+      transcript,
     );
     sendJSON(res, {
       ok: true,
@@ -3697,7 +4038,7 @@ function pickStartupSession() {
     const chosen = sessions.setActive(withMessages[0].id);
     if (chosen) return chosen;
   }
-  return stored ?? sessions.create();
+  return stored ?? sessions.create(undefined, { directory: resolve(config.workspace.root) });
 }
 
 export async function startServer(overrideConfig?: SheConfig): Promise<ReturnType<typeof createServer>> {  // Resolve config against the install root so the server finds the same

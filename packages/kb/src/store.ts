@@ -258,7 +258,10 @@ export class KBStore {
 
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
-    this.db.pragma('journal_mode = WAL');
+    // DELETE, not WAL: the bytes live in kb.sqlite itself. WAL leaves the real
+    // rows in a sidecar, so a copy or a look at the main file sees an empty base.
+    this.db.pragma('journal_mode = DELETE');
+    this.db.pragma('synchronous = FULL');
     this.db.pragma('foreign_keys = ON');
     this.migrate();
   }

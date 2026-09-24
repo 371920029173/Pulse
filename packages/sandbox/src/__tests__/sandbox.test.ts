@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { SandboxShell, DESTRUCTIVE_PATTERNS } from '../shell.js';
+import { existsSync } from 'node:fs';
+import { SandboxShell, DESTRUCTIVE_PATTERNS, decodeConsoleOutput, workspaceEscapeReason } from '../shell.js';
 import { createTools } from '../tools.js';
 
 let tempDir: string;
@@ -20,6 +21,23 @@ before(async () => {
 
 after(async () => {
   await rm(tempDir, { recursive: true, force: true });
+});
+
+describe('控制台编码', () => {
+  it('GBK 字节按中文还原，合法 UTF-8 保持原样', () => {
+    const gbk = Buffer.from([0xd6, 0xd0, 0xce, 0xc4]); // 中文
+    if (process.platform === 'win32') {
+      assert.equal(decodeConsoleOutput(gbk), '中文');
+    }
+    assert.equal(decodeConsoleOutput(Buffer.from('ok-标记', 'utf8')), 'ok-标记');
+  });
+
+  it('中文文件名不会在 dir 里变成乱码', async () => {
+    if (process.platform !== 'win32') return;
+    await writeFile(join(tempDir, '中文名.txt'), '你好');
+    const result = await shell.exec('dir /b');
+    assert.match(result.stdout, /中文名\.txt/, `实际: ${result.stdout}`);
+  });
 });
 
 describe('SandboxShell', () => {
@@ -65,6 +83,24 @@ describe('SandboxShell', () => {
   it('should capture stderr', async () => {
     const result = await shell.exec('echo err >&2');
     assert.equal(result.stderr.trim(), 'err');
+  });
+
+  it('should deny shell paths that leave the workspace', async () => {
+    const outside = join(tempDir, '..', 'escape_test.txt');
+    const result = await shell.exec('echo test > ../escape_test.txt');
+    assert.equal(result.denied, true);
+    assert.match(result.stderr, /工作区外/);
+    assert.equal(existsSync(outside), false);
+    assert.match(workspaceEscapeReason('cd C:\\', tempDir) ?? '', /工作区外/);
+    assert.match(workspaceEscapeReason('node -e "require(\'fs\').writeFileSync(\'../x\',\'a\')"', tempDir) ?? '', /工作区外/);
+  });
+
+  it('should keep quoted arrows from becoming redirections', async () => {
+    const junk = join(tempDir, '!ids.includes(u))');
+    const result = await shell.exec('node -e "console.log([1].filter(u => !u).length)"');
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(result.stdout.trim(), '0');
+    assert.equal(existsSync(junk), false);
   });
 
   it('should deny destructive commands by default', async () => {

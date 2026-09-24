@@ -180,7 +180,7 @@ function loadBatches(workspaceRoot: string): IngestBatch[] {
 function saveBatches(workspaceRoot: string, batches: IngestBatch[]): void {
   const dir = join(workspaceRoot, '.she');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(stagingPath(workspaceRoot), JSON.stringify(batches.slice(-10), null, 2), 'utf8');
+  writeFileSync(stagingPath(workspaceRoot), JSON.stringify(batches, null, 2), 'utf8');
 }
 
 function listFiles(target: string): string[] {
@@ -189,8 +189,7 @@ function listFiles(target: string): string[] {
   if (st.isFile()) return [target];
 
   const out: string[] = [];
-  const walk = (dir: string, depth: number) => {
-    if (depth > 4) return;
+  const walk = (dir: string) => {
     let entries: string[];
     try {
       entries = readdirSync(dir);
@@ -206,11 +205,11 @@ function listFiles(target: string): string[] {
       } catch {
         continue;
       }
-      if (isDir) walk(full, depth + 1);
+      if (isDir) walk(full);
       else if (SUPPORTED_EXT.has(extname(full).toLowerCase())) out.push(full);
     }
   };
-  walk(target, 0);
+  walk(target);
   return out;
 }
 
@@ -348,7 +347,7 @@ export function createIngestTools(
         type: 'object',
         properties: {
           batch_id: { type: 'string', description: 'Optional batch id; omit for the latest batch' },
-          limit: { type: 'number', description: 'Max items to show (default 40)' },
+          limit: { type: 'number', description: 'Ignored. Every pending item is listed.' },
         },
       },
     },
@@ -358,11 +357,10 @@ export function createIngestTools(
       const wanted = String(a.batch_id ?? '').trim();
       const batch = wanted ? batches.find((b) => b.id === wanted) : batches[batches.length - 1];
       if (!batch) return `未找到 batch ${wanted}`;
-      const limit = Math.max(1, Math.min(200, Number(a.limit) || 40));
       const pending = batch.items.filter((i) => i.status === 'pending');
 
       const groups = store.getAllGroups();
-      const groupList = groups.slice(0, 60).map((g) => g.name).join(', ');
+      const groupList = groups.map((g) => g.name).join(', ');
 
       return [
         `batch ${batch.id}（来源 ${batch.sourcePath}）`,
@@ -372,8 +370,7 @@ export function createIngestTools(
         groupList || '(还没有组)',
         '',
         '待归位条目：',
-        pending.slice(0, limit).map((i) => `  ${i.id}  ${i.title}  (${i.text.length} 字)`).join('\n') || '(无)',
-        pending.length > limit ? `  … 其余 ${pending.length - limit} 条` : '',
+        pending.map((i) => `  ${i.id}  ${i.title}  (${i.text.length} 字)`).join('\n') || '(无)',
       ].filter(Boolean).join('\n');
     },
   );
@@ -414,7 +411,7 @@ export function createIngestTools(
       let group = store.getAllGroups().find((g) => g.name === groupName);
       if (!group) {
         if (a.createIfMissing !== true) {
-          const existing = store.getAllGroups().map((g) => g.name).slice(0, 40).join(', ');
+          const existing = store.getAllGroups().map((g) => g.name).join(', ');
           return `Error: 组 "${groupName}" 不存在。现有组：${existing}。若确实需要新建，请传 createIfMissing=true。`;
         }
         const segments = groupName.split('/').filter(Boolean);

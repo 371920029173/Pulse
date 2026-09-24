@@ -708,6 +708,8 @@ html[data-bg="video"] main {
    wallpaper — very obvious in light theme. */
 html[data-bg="image"] [data-surface="bubble"],
 html[data-bg="video"] [data-surface="bubble"],
+html[data-bg="image"] [data-surface="prose"],
+html[data-bg="video"] [data-surface="prose"],
 html[data-bg="image"] [data-surface="input"],
 html[data-bg="video"] [data-surface="input"],
 html[data-bg="image"] [data-surface="mention"],
@@ -720,7 +722,8 @@ html[data-bg="image"] [data-surface="modal"],
 html[data-bg="video"] [data-surface="modal"],
 html[data-bg="image"] [data-surface="backdrop"],
 html[data-bg="video"] [data-surface="backdrop"] {
-  background-color: color-mix(in srgb, var(--bg-secondary) 80%, transparent) !important;
+  background-color: color-mix(in srgb, var(--bg-secondary) 94%, transparent) !important;
+  text-shadow: 0 1px 1px rgb(0 0 0 / 0.35);
   backdrop-filter: blur(16px) saturate(140%);
   -webkit-backdrop-filter: blur(16px) saturate(140%);
   border-color: color-mix(in srgb, var(--border) 70%, transparent) !important;
@@ -739,6 +742,8 @@ html[data-bg="video"] [data-surface="reasoning"] {
 /* ---- Light theme readability over bright photos ---- */
 html[data-bg="image"][data-theme="light"] [data-surface="bubble"],
 html[data-bg="video"][data-theme="light"] [data-surface="bubble"],
+html[data-bg="image"][data-theme="light"] [data-surface="prose"],
+html[data-bg="video"][data-theme="light"] [data-surface="prose"],
 html[data-bg="image"][data-theme="light"] [data-surface="panel"],
 html[data-bg="video"][data-theme="light"] [data-surface="panel"],
 html[data-bg="image"][data-theme="light"] [data-surface="card"],

@@ -1,5 +1,6 @@
 /** Parse Cursor / Claude Code / Codex / raw chat exports into KB chunks. */
 import type { LLMMessage } from '@she/shared';
+import { transcriptToMessages } from './transcript.js';
 
 export interface ContextChunk {
   title: string;
@@ -30,7 +31,7 @@ export interface ContextChunk {
  */
 export function chunksToMessages(
   chunks: ContextChunk[],
-  maxMessages = 500,
+  maxMessages = Number.POSITIVE_INFINITY,
 ): { messages: LLMMessage[]; truncated: number } {
   const messages: LLMMessage[] = [];
 
@@ -82,119 +83,45 @@ function pushMsg(chunks: ContextChunk[], role: string, content: string, idx: num
   if (!body) return;
   chunks.push({
     title: `${role}-${idx}`,
-    content: body.slice(0, 20_000),
+    content: body,
     meta: { source, role },
   });
 }
 
+function messagesToChunks(messages: LLMMessage[], source: string): ContextChunk[] {
+  const chunks: ContextChunk[] = [];
+  messages.forEach((m, i) => {
+    const visible = (m.content || '').trim();
+    const reasoning = (m.reasoning || '').trim();
+    const body = [visible, reasoning ? `思维链:\n${reasoning}` : ''].filter(Boolean).join('\n\n');
+    if (!body) return;
+    chunks.push({
+      title: `${m.role}-${i + 1}`,
+      content: body,
+      meta: {
+        source,
+        role: m.role,
+        ...(reasoning ? { reasoning } : {}),
+        ...(m.reasoningOrigin ? { reasoningOrigin: m.reasoningOrigin } : {}),
+      },
+    });
+  });
+  return chunks;
+}
+
 /** Cursor composer / chat JSON (bubbles, messages, conversation) */
 export function parseCursor(text: string): ContextChunk[] {
-  const chunks: ContextChunk[] = [];
-  const trimmed = text.trim();
-  try {
-    const parsed = JSON.parse(trimmed);
-    const bubbles =
-      parsed?.composer?.bubbles ||
-      parsed?.bubbles ||
-      parsed?.conversation?.messages ||
-      parsed?.messages ||
-      parsed?.tabs?.[0]?.bubbles ||
-      (Array.isArray(parsed) ? parsed : null);
-
-    if (Array.isArray(bubbles)) {
-      bubbles.forEach((b: any, i: number) => {
-        const role = String(b.type || b.role || b.sender || b.author || 'message')
-          .replace(/^TYPE_/, '')
-          .toLowerCase();
-        const content = asText(b.text ?? b.content ?? b.message ?? b.rawText);
-        pushMsg(chunks, role || 'message', content, i + 1, 'cursor');
-      });
-      if (chunks.length) return chunks;
-    }
-  } catch {
-    /* markdown / plaintext fallthrough */
-  }
-
-  // Cursor markdown export: ### User / ### Assistant
-  const mdParts = trimmed.split(/\n(?=#{1,3}\s*(User|Assistant|Human|AI|System)\b)/i);
-  if (mdParts.length > 1) {
-    mdParts.forEach((block, i) => {
-      const lines = block.trim().split('\n');
-      const head = lines[0]?.replace(/^#+\s*/, '') || `block-${i + 1}`;
-      pushMsg(chunks, head.split(/\s/)[0], lines.slice(1).join('\n') || block, i + 1, 'cursor');
-    });
-    if (chunks.length) return chunks;
-  }
-  return [];
+  return messagesToChunks(transcriptToMessages('cursor', text).messages, 'cursor');
 }
 
 /** Claude Code / Claude.ai export */
 export function parseClaudeCode(text: string): ContextChunk[] {
-  const chunks: ContextChunk[] = [];
-  const trimmed = text.trim();
-  try {
-    const parsed = JSON.parse(trimmed);
-    const msgs =
-      parsed?.chat_messages ||
-      parsed?.messages ||
-      parsed?.conversations?.[0]?.messages ||
-      (Array.isArray(parsed) ? parsed : null);
-    if (Array.isArray(msgs)) {
-      msgs.forEach((m: any, i: number) => {
-        const role = String(m.sender || m.role || m.author || 'message').toLowerCase();
-        const content = asText(m.text ?? m.content ?? m.message);
-        pushMsg(chunks, role, content, i + 1, 'claude-code');
-      });
-      if (chunks.length) return chunks;
-    }
-  } catch {
-    /* fallthrough */
-  }
-
-  // Human:/Assistant: turns
-  const turns = trimmed.split(/\n(?=(?:Human|Assistant|User|Claude)\s*:)/i);
-  if (turns.length > 1) {
-    turns.forEach((t, i) => {
-      const m = /^(Human|Assistant|User|Claude)\s*:\s*([\s\S]*)$/i.exec(t.trim());
-      if (m) pushMsg(chunks, m[1], m[2], i + 1, 'claude-code');
-      else pushMsg(chunks, 'message', t, i + 1, 'claude-code');
-    });
-    if (chunks.length) return chunks;
-  }
-  return [];
+  return messagesToChunks(transcriptToMessages('claude-code', text).messages, 'claude-code');
 }
 
 /** OpenAI Codex / ChatGPT export-ish */
 export function parseCodex(text: string): ContextChunk[] {
-  const chunks: ContextChunk[] = [];
-  const trimmed = text.trim();
-  try {
-    const parsed = JSON.parse(trimmed);
-    // ChatGPT export: mapping[id].message
-    if (parsed?.mapping && typeof parsed.mapping === 'object') {
-      const nodes = Object.values(parsed.mapping as Record<string, any>)
-        .filter((n) => n?.message)
-        .sort((a, b) => (a.message?.create_time || 0) - (b.message?.create_time || 0));
-      nodes.forEach((n: any, i: number) => {
-        const role = String(n.message?.author?.role || n.message?.role || 'message');
-        const parts = n.message?.content?.parts || n.message?.content;
-        pushMsg(chunks, role, asText(parts), i + 1, 'codex');
-      });
-      if (chunks.length) return chunks;
-    }
-    const items = parsed?.items || parsed?.messages || parsed?.events || (Array.isArray(parsed) ? parsed : null);
-    if (Array.isArray(items)) {
-      items.forEach((it: any, i: number) => {
-        const role = String(it.role || it.type || it.author || 'item');
-        const content = asText(it.content ?? it.text ?? it.message ?? it.output_text);
-        pushMsg(chunks, role, content, i + 1, 'codex');
-      });
-      if (chunks.length) return chunks;
-    }
-  } catch {
-    /* fallthrough */
-  }
-  return [];
+  return messagesToChunks(transcriptToMessages('codex', text).messages, 'codex');
 }
 
 function parseGeneric(text: string, filename: string, source: string): ContextChunk[] {
@@ -224,7 +151,7 @@ function parseGeneric(text: string, filename: string, source: string): ContextCh
     const b = block.trim();
     if (!b) return;
     const titleLine = b.split('\n')[0].replace(/^#+\s*/, '').slice(0, 80) || `${filename}-${i + 1}`;
-    chunks.push({ title: titleLine, content: b.slice(0, 20_000), meta: { source } });
+    chunks.push({ title: titleLine, content: b, meta: { source } });
   });
   return chunks;
 }
@@ -238,11 +165,9 @@ export function parseContextExport(opts: {
   const text = opts.text || '';
   const filename = opts.filename || 'paste.txt';
 
-  let chunks: ContextChunk[] = [];
-  if (source === 'cursor') chunks = parseCursor(text);
-  else if (source === 'claude-code' || source === 'claude') chunks = parseClaudeCode(text);
-  else if (source === 'codex' || source === 'chatgpt') chunks = parseCodex(text);
-
+  // One parser for every source. The old per-source JSON parsers could not read
+  // JSONL, and the markdown they were handed had already thrown the speaker away.
+  let chunks = messagesToChunks(transcriptToMessages(source, text).messages, source);
   if (!chunks.length) chunks = parseGeneric(text, filename, source);
-  return chunks.slice(0, 2000);
+  return chunks;
 }

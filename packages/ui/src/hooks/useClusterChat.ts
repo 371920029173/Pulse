@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchJSON, streamSSE } from '../lib/api';
+import { t } from '../lib/i18n';
 import type { ChatMessage } from './useChat';
 
 interface ClusterMessage {
@@ -41,6 +42,12 @@ export interface ClusterChatState {
 
 const SYSTEM_ROLES = new Set(['user', 'system']);
 
+function hueOf(name: string): number {
+  let h = 0;
+  for (const c of name) h = (h * 33 + c.charCodeAt(0)) % 360;
+  return h;
+}
+
 /**
  * Drive a work group like a normal conversation.
  *
@@ -64,12 +71,13 @@ export function useClusterChat(roomId: string | null) {
     return (room.messages ?? [])
       .filter((m) => !(m.role === 'system' && !m.content.trim()))
       .map((m) => {
-        if (m.role === 'user') return { role: 'user', content: m.content };
-        if (m.role === 'system') return { role: 'system', content: m.content };
-        // An agent turn: render with the member name so speakers are distinct.
+        if (m.role === 'user') return { role: 'user' as const, content: m.content };
+        if (m.role === 'system') return { role: 'system' as const, content: m.content };
+        const member = room.members.find((x) => x.id === m.role || x.name === m.name);
         return {
-          role: 'assistant',
-          content: `**${m.name}**\n\n${m.content}`,
+          role: 'assistant' as const,
+          content: m.content,
+          speaker: { name: m.name, hue: member?.hue ?? hueOf(m.name) },
         };
       });
   }, []);
@@ -96,6 +104,9 @@ export function useClusterChat(roomId: string | null) {
     }
   }, [toChat]);
 
+  const roomRef = useRef<ClusterRoom | null>(null);
+  roomRef.current = room;
+
   useEffect(() => {
     if (!roomId) {
       // Bump the token so an in-flight load for the previous room cannot land.
@@ -114,6 +125,14 @@ export function useClusterChat(roomId: string | null) {
     setActiveMembers([]);
     void load(roomId);
   }, [roomId, load]);
+
+  // A wave keeps running after this view leaves. Poll the room so coming back
+  // shows who has spoken, instead of a transcript frozen at the moment of the switch.
+  useEffect(() => {
+    if (!roomId || isLoading || room?.status !== 'running') return;
+    const timer = setInterval(() => { void load(roomId); }, 2000);
+    return () => clearInterval(timer);
+  }, [roomId, isLoading, room?.status, load]);
 
   /** Send a message to the group and let the agents work on it. */
   const send = useCallback(
@@ -175,18 +194,37 @@ export function useClusterChat(roomId: string | null) {
               setDoneMembers((prev) => (prev.includes(chunk.member!) ? prev : [...prev, chunk.member!]));
             }
 
-            if (chunk.type === 'text' && chunk.content) {
+            if ((chunk.type === 'text' || chunk.type === 'reasoning') && chunk.content) {
               const mid = chunk.member;
+              const piece = chunk.content;
+              const known = roomRef.current?.members.find((m) => m.id === mid);
+              const speaker = {
+                name: chunk.name || known?.name || t('成员'),
+                hue: known?.hue ?? hueOf(chunk.name || known?.name || mid),
+              };
               setMessages((prev) => {
                 const updated = [...prev];
                 const idx = liveIndex.get(mid);
                 if (idx === undefined) {
-                  updated.push({ role: 'assistant', content: chunk.content!, isStreaming: true });
+                  updated.push({
+                    role: 'assistant',
+                    content: chunk.type === 'text' ? piece : '',
+                    reasoning: chunk.type === 'reasoning' ? piece : undefined,
+                    speaker,
+                    isStreaming: true,
+                  });
                   liveIndex.set(mid, updated.length - 1);
+                } else if (chunk.type === 'reasoning') {
+                  updated[idx] = {
+                    ...updated[idx],
+                    speaker,
+                    reasoning: (updated[idx].reasoning ?? '') + piece,
+                  };
                 } else {
                   updated[idx] = {
                     ...updated[idx],
-                    content: (updated[idx].content ?? '') + chunk.content,
+                    speaker,
+                    content: (updated[idx].content ?? '') + piece,
                   };
                 }
                 return updated;
@@ -203,6 +241,7 @@ export function useClusterChat(roomId: string | null) {
           },
         },
         controller.signal,
+        { idleTimeoutMs: 0 },
       );
     },
     [roomId, isLoading, toChat],

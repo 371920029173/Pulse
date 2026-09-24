@@ -30,7 +30,7 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
         type: 'object',
         properties: {
           query: { type: 'string', description: 'The query text to search for' },
-          budget: { type: 'number', description: 'Max nodes to scan (default: 100)' },
+          budget: { type: 'number', description: 'Optional. Omit to scan without a result cap.' },
         },
         required: ['query'],
       },
@@ -51,12 +51,7 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
       lines.push(`Found ${result.nodes.length} nodes across ${result.groupsVisited.length} groups (${result.queryTimeMs.toFixed(1)}ms, ${result.totalNodesScanned} scanned)`);
       lines.push('');
 
-      // Keep the payload small: every extra token here is re-sent on each
-      // tool-loop iteration, which is how a one-word greeting burned ~20k.
-      const MAX_NODES = 6;
-      const PREVIEW = 180;
-
-      for (let i = 0; i < result.nodes.length && i < MAX_NODES; i++) {
+      for (let i = 0; i < result.nodes.length; i++) {
         const node = result.nodes[i];
         const trace = result.traces[i];
         const score = trace?.finalScore !== undefined
@@ -66,12 +61,8 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
         if (trace?.groupPath.length) {
           lines.push(`    group: ${trace.groupPath.join(' | ')}`);
         }
-        const preview = node.content.slice(0, PREVIEW).replace(/\n/g, ' ');
-        lines.push(`    ${preview}${node.content.length > PREVIEW ? '…' : ''}`);
+        lines.push(`    ${node.content}`);
         lines.push(`    [Node: ${node.id}]`);
-      }
-      if (result.nodes.length > MAX_NODES) {
-        lines.push(`… ${result.nodes.length - MAX_NODES} more omitted; refine the query if needed.`);
       }
 
       return lines.join('\n');

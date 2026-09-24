@@ -22,6 +22,7 @@ import type { ScheduleBridge, WindowView } from './schedule-tools.js';
 import { createIngestTools } from './ingest-tools.js';
 import { createMemoTools } from './memo-tools.js';
 import { createSubagentTools, type SubagentRunner } from './subagent-tools.js';
+import { repairApiMessages } from './protocol.js';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
@@ -342,19 +343,67 @@ export class Agent {
   interject(text: string): void {
     const t = String(text ?? '').trim();
     if (!t) return;
+    /*
+     * A running turn must not write this into history yet.
+     *
+     * The old code appended it immediately. If the model had just emitted tool
+     * calls and the results were not stored yet, the user line landed BETWEEN
+     * the call and its results. The next request is then illegal (a tool call
+     * with no adjacent result), and draining the same text into the request
+     * array duplicated it.
+     *
+     * Queue it. It is written once, at a point where the tool group is closed.
+     * With no turn running there is nowhere to queue for, so it goes straight
+     * into the transcript.
+     */
+    if (!this.turnActive) {
+      this.history.push({ role: 'user', content: `[用户补充] ${t}` });
+      return;
+    }
     this.pendingInterjections.push(t);
-    this.history.push({ role: 'user', content: `[用户补充] ${t}` });
   }
 
-  /** Move queued interjections into the live request array. */
+  /** Move queued interjections into history and the live request, once. */
   private drainInterjections(messages: LLMMessage[], onChunk?: (chunk: StreamChunk) => void): void {
     if (this.pendingInterjections.length === 0) return;
+    // A tool call that does not yet have its results cannot have a user
+    // message pushed after it. Wait for the for-loop to finish.
+    if (this.hasOpenToolCalls()) return;
     const pending = this.pendingInterjections.splice(0, this.pendingInterjections.length);
     for (const text of pending) {
-      // history already holds this message; only the request array needs it.
-      messages.push({ role: 'user', content: `[用户补充] ${text}` });
+      const msg: LLMMessage = { role: 'user', content: `[用户补充] ${text}` };
+      this.history.push(msg);
+      messages.push(msg);
       onChunk?.({ type: 'status', content: `已追加补充信息：${text.slice(0, 80)}` });
     }
+  }
+
+  /** Keep supplements that arrived after the last model call. */
+  private flushInterjections(): void {
+    if (this.pendingInterjections.length === 0) return;
+    if (this.hasOpenToolCalls()) return;
+    const pending = this.pendingInterjections.splice(0, this.pendingInterjections.length);
+    for (const text of pending) {
+      this.history.push({ role: 'user', content: `[用户补充] ${text}` });
+    }
+  }
+
+  /** True when an assistant tool call is still waiting for its results. */
+  private hasOpenToolCalls(): boolean {
+    for (let i = 0; i < this.history.length; i++) {
+      const m = this.history[i];
+      if (m.role !== 'assistant' || !m.tool_calls?.length) continue;
+      const need = new Set(m.tool_calls.map((t) => t.id));
+      let j = i + 1;
+      while (j < this.history.length && this.history[j].role === 'tool') {
+        const id = this.history[j].tool_call_id;
+        if (id) need.delete(id);
+        j++;
+      }
+      if (need.size > 0) return true;
+      i = j - 1;
+    }
+    return false;
   }
 
   private async runLoop(
@@ -363,16 +412,14 @@ export class Agent {
   ): Promise<LLMMessage> {
     let iterations = 0;
     /**
-     * Runaway guard only.
+     * No product quota on how long a turn may work.
      *
-     * Deliberately NOT a budget: an earlier version capped prompt tokens per
-     * turn, which silently cut work off mid-task. The only thing this prevents
-     * is a genuinely non-terminating loop. Raise it with SHE_MAX_TOOL_ROUNDS if
-     * a task legitimately needs more.
+     * An earlier cap stopped real tasks mid-way. The loop ends when the model
+     * stops, the user aborts, or the same call is stuck. SHE_MAX_TOOL_ROUNDS is
+     * only for evals that want a bound.
      */
-    const maxIterations = Number(process.env.SHE_MAX_TOOL_ROUNDS) > 0
-      ? Number(process.env.SHE_MAX_TOOL_ROUNDS)
-      : 1000;
+    const rawCap = Number(process.env.SHE_MAX_TOOL_ROUNDS);
+    const maxIterations = Number.isFinite(rawCap) && rawCap > 0 ? Math.floor(rawCap) : Number.POSITIVE_INFINITY;
     let turnPromptTokens = 0;
     const signal = this.aborter?.signal;
 
@@ -410,6 +457,8 @@ export class Agent {
 
     while (iterations < maxIterations) {
       if (signal?.aborted) {
+        this.history = repairApiMessages(this.history);
+        this.flushInterjections();
         const stopped: LLMMessage = { role: 'assistant', content: '（已中断）' };
         onChunk?.({ type: 'status', content: '已中断当前执行' });
         this.history.push(stopped);
@@ -438,21 +487,32 @@ export class Agent {
         response = await this.provider.chat(messages, this.allToolDefs, track, signal);
       } catch (err) {
         if (signal?.aborted) {
+          this.history = repairApiMessages(this.history);
+          this.flushInterjections();
           const stopped: LLMMessage = { role: 'assistant', content: '（已中断）' };
           onChunk?.({ type: 'status', content: '已中断当前执行' });
           this.history.push(stopped);
           return stopped;
         }
-        if (!this.fallbackProvider) throw err;
-        const msg = err instanceof Error ? err.message : String(err);
-        track({ type: 'status', content: `primary LLM failed (${msg}); trying fallback…` });
-        response = await this.fallbackProvider.chat(messages, this.allToolDefs, track, signal);
+        if (this.fallbackProvider) {
+          const msg = err instanceof Error ? err.message : String(err);
+          track({ type: 'status', content: `主接口失败（${msg}），改备用接口…` });
+          try {
+            response = await this.fallbackProvider.chat(messages, this.allToolDefs, track, signal);
+          } catch (fallbackErr) {
+            return this.failTurn(fallbackErr, onChunk);
+          }
+        } else {
+          return this.failTurn(err, onChunk);
+        }
       }
 
+      response = this.usableToolCalls(response);
       this.history.push(response);
       messages.push(response);
 
       if (!response.tool_calls?.length) {
+        this.flushInterjections();
         return response;
       }
 
@@ -501,13 +561,14 @@ export class Agent {
             let toolFailed = false;
             try {
               result = await executor(args);
+              if (typeof result !== 'string') result = JSON.stringify(result ?? '');
               // Tools report failure as text, so a thrown error is not the only
               // signal — a tool that always returns "Error: ..." would otherwise
               // look perfectly healthy.
-              if (typeof result !== 'string' || /^Error:/i.test(result)) toolFailed = true;
+              if (/^Error:/i.test(result)) toolFailed = true;
             } catch (err) {
               toolFailed = true;
-              throw err;
+              result = `Error: ${err instanceof Error ? err.message : String(err)}`;
             } finally {
               // In a `finally` so a throwing tool is still counted.
               this.toolObserver?.(name, Date.now() - toolStart, toolFailed);
@@ -577,7 +638,7 @@ export class Agent {
 
         const toolMsg: LLMMessage = {
           role: 'tool',
-          content: result,
+          content: typeof result === 'string' ? result : JSON.stringify(result ?? ''),
           tool_call_id: tc.id,
         };
         this.history.push(toolMsg);
@@ -596,7 +657,7 @@ export class Agent {
          * differently is not flagged, and one that finally succeeds resets nothing —
          * it simply never reaches the limit, because the result changed.
          */
-        const signature = `${name}:${tc.function.arguments}:${result.slice(0, 500)}`;
+        const signature = `${name}:${tc.function.arguments}:${String(result).slice(0, 500)}`;
         const seen = callSignatures.get(signature);
         if (seen) {
           seen.count++;
@@ -661,6 +722,7 @@ export class Agent {
                 + '这通常意味着有东西没变——例如文件没写进去、命令一直报同一个错、'
                 + '或需要的依赖不存在。请说明你期望的结果，或直接告诉我错误原因，我换个方向试。',
             };
+            this.flushInterjections();
             this.history.push(stalled);
             return stalled;
           }
@@ -676,134 +738,24 @@ export class Agent {
         `（已达到本轮工具调用上限 ${maxIterations} 轮，为避免失控循环而停止。）\n\n` +
         '这不是知识库次数限制——如果任务没做完，直接说「继续」即可接着做。',
     };
+    this.flushInterjections();
     this.history.push(fallback);
     return fallback;
   }
 
   /**
-   * Compaction of old history — designed around prompt caching.
+   * The request is the system prompt plus the whole session.
    *
-   * The previous approach trimmed from the FRONT on every turn once a size
-   * budget was exceeded. Prompt caching is PREFIX-based, so a changing front
-   * means the request diverges immediately after the system prompt and the
-   * cache hit rate collapses to 0% for the rest of the conversation. Measured
-   * on DeepSeek: appending kept 74% of a 7.3k prompt cached, while
-   * front-trimming the same content kept 0% (docs/context-and-caching.md).
-   *
-   * This replaces a *span* of old history with a digest that is:
-   *   - **frozen** once produced — never regenerated for the same span
-   *   - **append-only** — a later compaction extends the previous digest rather
-   *     than rewriting it, so the leading bytes stay identical
-   *
-   * The result is that only the first compaction (and the rare re-digest when
-   * the digest itself outgrows its cap) costs a cache miss; every other turn is
-   * a plain append and keeps hitting.
-   *
-   * `history` itself is never modified: compaction is purely how a request is
-   * assembled, so the stored transcript and the UI are unaffected.
+   * Earlier builds replaced everything past ~120k characters with an 8k digest
+   * and kept only ~30k of the tail. The transcript on disk still grew, but the
+   * model stopped seeing it — the session length was stuck. The full history
+   * is sent. Appending leaves the prefix unchanged, which is what prompt
+   * caching needs.
    */
-  private compacted: { upTo: number; digest: string } | null = null;
-
-  /** Condense one message into a single short line, deterministically. */
-  private static condenseLine(m: LLMMessage): string {
-    const role = m.role === 'tool' ? `tool${m.name ? `:${m.name}` : ''}` : m.role;
-    let text = typeof m.content === 'string' ? m.content : '';
-    // Reasoning is display-only and never sent to the model, so it must not
-    // leak into the digest either.
-    if (m.tool_calls?.length) {
-      text += ` [调用 ${m.tool_calls.map((c) => c.function?.name).filter(Boolean).join(', ')}]`;
-    }
-    const flat = text.replace(/\s+/g, ' ').trim();
-    const cap = m.role === 'tool' ? 120 : 240;
-    return flat.length > cap ? `${role}: ${flat.slice(0, cap)}…` : `${role}: ${flat}`;
-  }
-
-  /** Deterministic condensation of a span. Same input always yields same output. */
-  private static condense(span: LLMMessage[]): string {
-    return span.map((m) => Agent.condenseLine(m)).join('\n');
-  }
-
-  /**
-   * Compact if the history has outgrown the trigger.
-   *
-   * Compacts a LARGE span down to a small tail in one step rather than nudging
-   * the boundary every turn: each compaction is a cache miss, so they should be
-   * rare, and the boundary must not drift.
-   */
-  private maybeCompact(): void {
-    const h = this.history;
-    const size = (m: LLMMessage): number => {
-      let n = typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content ?? '').length;
-      if (m.tool_calls) n += JSON.stringify(m.tool_calls).length;
-      return n + 32;
+  private messagesForRequest(): { messages: LLMMessage[] } {
+    return {
+      messages: [{ role: 'system', content: this.systemPrompt }, ...this.history],
     };
-
-    const COMPACT_TRIGGER = 120_000; // ≈ 35k tokens
-    const COMPACT_KEEP = 30_000;     // keep roughly this much of the recent tail
-    const DIGEST_MAX = 8_000;        // ≈ 2.5k tokens
-
-    let total = 0;
-    for (const m of h) total += size(m);
-    if (total <= COMPACT_TRIGGER) return;
-
-    // Keep the newest messages that fit, so recent continuity survives.
-    let kept = 0;
-    let cut = h.length;
-    for (let i = h.length - 1; i >= 0; i--) {
-      const n = size(h[i]);
-      if (kept + n > COMPACT_KEEP && cut < h.length) break;
-      kept += n;
-      cut = i;
-    }
-    // Never orphan a tool result: OpenAI-compatible APIs reject one whose
-    // originating assistant message is gone.
-    while (cut < h.length && h[cut].role === 'tool') cut++;
-
-    const from = this.compacted?.upTo ?? 0;
-    if (cut <= from) return; // nothing new to fold in
-
-    const span = h.slice(from, cut);
-    const prev = this.compacted?.digest ?? '';
-
-    // Extend, don't rewrite: the previous digest stays byte-identical, which is
-    // what keeps the cached prefix valid.
-    let digest = prev ? `${prev}\n${Agent.condense(span)}` : Agent.condense(span);
-
-    if (digest.length > DIGEST_MAX) {
-      // The digest itself outgrew its cap. Re-condense it once — this is the only
-      // path that rewrites the prefix, and it is deliberately rare.
-      const folded = Agent.condense(digest.split('\n').map((line) => ({
-        role: 'user' as const,
-        content: line,
-      })));
-      digest = folded.slice(0, DIGEST_MAX);
-    }
-
-    this.compacted = { upTo: cut, digest };
-    log.info(`Compacted ${span.length} earlier message(s) into ${digest.length} chars (cache-stable digest)`);
-  }
-
-  /**
-   * Build the message array for a request.
-   *
-   * `history` is untouched; this is where compaction is applied.
-   */
-  private messagesForRequest(): { messages: LLMMessage[]; compactedCount: number } {
-    this.maybeCompact();
-    const c = this.compacted;
-    const tail = c ? this.history.slice(c.upTo) : this.history;
-    const messages: LLMMessage[] = [{ role: 'system', content: this.systemPrompt }];
-    if (c) {
-      messages.push({
-        role: 'system',
-        content:
-          `（以下是对更早 ${c.upTo} 条对话的压缩记录，按顺序保留要点。`
-          + '原始消息仍在本地历史里；需要细节时可以查询知识库或让用户补充。）\n\n'
-          + c.digest,
-      });
-    }
-    messages.push(...tail);
-    return { messages, compactedCount: c?.upTo ?? 0 };
   }
 
   async chat(
@@ -832,17 +784,7 @@ export class Agent {
 
     this.history.push({ role: 'user', content: userMessage });
 
-    /*
-     * Compaction replaces the old front-trimming window. It keeps the request
-     * prefix stable so prompt caching survives — see `maybeCompact`.
-     */
-    const { messages, compactedCount } = this.messagesForRequest();
-    if (compactedCount > 0) {
-      onChunk?.({
-        type: 'status',
-        content: `已把更早的 ${compactedCount} 条对话压缩成要点（保留在本地历史里，缓存不受影响）`,
-      });
-    }
+    const { messages } = this.messagesForRequest();
 
     this.toolEventSink = onChunk ?? null;
     try {
@@ -858,6 +800,9 @@ export class Agent {
         return summary;
       }
       return reply;
+    } catch (err) {
+      if (err instanceof TurnInProgressError) throw err;
+      return this.failTurn(err, onChunk);
     } finally {
       this.toolEventSink = null;
     }
@@ -945,15 +890,24 @@ export class Agent {
     if (!pending || pending.ticket.ticket_id !== ticketId) {
       throw new Error('no matching pending confirm ticket');
     }
-    this.toolEventSink = onChunk ?? null;
-    try {
-      return await this.confirmToolInner(pending, ticketId, onChunk);
-    } finally {
-      this.toolEventSink = null;
-    }
+    // Hold the turn for the confirmed action AND the continuation. The action
+    // used to run with no lock and no abort controller, so a chat turn could
+    // interleave into the same history, and Stop did nothing until the model
+    // loop started.
+    return this.withTurn(async () => {
+      this.toolEventSink = onChunk ?? null;
+      try {
+        return await this.confirmToolBody(pending, ticketId, onChunk);
+      } catch (err) {
+        if (err instanceof TurnInProgressError) throw err;
+        return this.failTurn(err, onChunk);
+      } finally {
+        this.toolEventSink = null;
+      }
+    });
   }
 
-  private async confirmToolInner(
+  private async confirmToolBody(
     pending: { ticket: ConfirmTicketInfo; toolCallId: string; name: string; args: Record<string, unknown> },
     ticketId: string,
     onChunk?: (chunk: StreamChunk) => void,
@@ -967,7 +921,13 @@ export class Agent {
       args._stage = true;
     }
     log.info(`Confirming tool: ${pending.name} ticket=${ticketId}`);
-    const result = await executor(args);
+    let result: string;
+    try {
+      const raw = await executor(args);
+      result = typeof raw === 'string' ? raw : JSON.stringify(raw ?? '');
+    } catch (err) {
+      result = `Error: ${err instanceof Error ? err.message : String(err)}`;
+    }
     this.lastPending = null;
 
     if (typeof result === 'string' && result.includes('"needs_apply"')) {
@@ -989,13 +949,16 @@ export class Agent {
       content: result,
       tool_call_id: pending.toolCallId,
     };
+    let replaced = false;
     for (let i = this.history.length - 1; i >= 0; i--) {
       const m = this.history[i];
       if (m.role === 'tool' && m.tool_call_id === pending.toolCallId) {
         this.history[i] = toolMsg;
+        replaced = true;
         break;
       }
     }
+    if (!replaced) this.history.push(toolMsg);
 
     onChunk?.({ type: 'status', content: `confirmed ${pending.name}` });
 
@@ -1004,7 +967,8 @@ export class Agent {
       { role: 'system', content: this.systemPrompt },
       ...this.history,
     ];
-    const reply = await this.runExclusive(messages, onChunk);
+    // Already inside withTurn. runExclusive would see the lock and refuse.
+    const reply = await this.runLoop(messages, onChunk);
     const staged = this.getPendingPatches();
     if (staged.length) {
       const summary = {
@@ -1107,10 +1071,64 @@ export class Agent {
     return [...this.history];
   }
 
+  /**
+   * Transcript safe to write to disk.
+   *
+   * The live history can end on a tool call whose result has not been pushed
+   * yet — persisting that is how a crash made every later request 400. The
+   * copy folds unfinished calls into text. The in-memory turn is left alone.
+   */
+  historyForDisk(): LLMMessage[] {
+    return repairApiMessages(this.history);
+  }
+
   setHistory(messages: LLMMessage[]): void {
-    this.history = [...messages];
+    // A stored transcript can already be the broken shape. Heal it on the way
+    // in, or the first request after a restart repeats the same 400.
+    this.history = repairApiMessages(messages);
     this.lastPending = null;
     this.lastPatch = null;
+  }
+
+  /**
+   * Drop tool calls the endpoint would reject.
+   *
+   * A call with no id or no name cannot be paired with a result. Sending it
+   * makes the next request fail, and every request after that fails the same
+   * way. The call is noted in the text instead.
+   */
+  private usableToolCalls(response: LLMMessage): LLMMessage {
+    if (!response.tool_calls?.length) return response;
+    const valid = response.tool_calls.filter((tc) => tc.id && tc.function?.name);
+    if (valid.length === response.tool_calls.length) return response;
+    const dropped = response.tool_calls.length - valid.length;
+    const note = `（忽略了 ${dropped} 个缺少名称或 id 的工具调用）`;
+    const content = `${response.content || ''}${response.content ? '\n' : ''}${note}`;
+    if (!valid.length) {
+      const { tool_calls: _drop, ...rest } = response;
+      return { ...rest, content };
+    }
+    return { ...response, content, tool_calls: valid };
+  }
+
+  /**
+   * End a turn that failed without leaving the transcript unsendable.
+   *
+   * An exception used to escape with the user message (or a tool call) as the
+   * last row. The next message then sent that broken tail and failed the same
+   * way, so one error retired the conversation.
+   */
+  private failTurn(err: unknown, onChunk?: (chunk: StreamChunk) => void): LLMMessage {
+    this.history = repairApiMessages(this.history);
+    this.flushInterjections();
+    const detail = err instanceof Error ? err.message : String(err);
+    const text = `（这一轮没有完成：${detail}）\n\n可以直接再说一次，或回复「继续」。`;
+    const msg: LLMMessage = { role: 'assistant', content: text };
+    this.history.push(msg);
+    onChunk?.({ type: 'text', content: text });
+    onChunk?.({ type: 'status', content: '这一轮失败，但对话可以继续' });
+    log.warn(`turn failed, transcript kept usable: ${detail}`);
+    return msg;
   }
 
   
@@ -1191,6 +1209,23 @@ export class Agent {
    * Language servers are real child processes with their own memory footprint,
    * so they must not outlive the agent that started them.
    */
+  /**
+   * Change reasoning depth on the live provider.
+   *
+   * Rebuilding the agent to apply a slider move disposed the language server
+   * mid-turn and aborted the work. The next model call picks this up; the
+   * current HTTP request is left alone.
+   */
+  setThinkingLevel(level: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'): void {
+    this.config.llm.thinkingLevel = level;
+    const apply = (p: LLMProvider | null) => {
+      const fn = (p as { setThinkingLevel?: (l: typeof level) => void } | null)?.setThinkingLevel;
+      fn?.call(p, level);
+    };
+    apply(this.provider);
+    apply(this.fallbackProvider);
+  }
+
   async dispose(): Promise<void> {
     await this.lsp?.dispose();
     this.lsp = null;

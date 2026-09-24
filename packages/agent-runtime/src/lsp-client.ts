@@ -100,6 +100,7 @@ export const KNOWN_SERVERS: ServerSpec[] = [
     languages: ['python'],
     command: 'pyright-langserver',
     args: ['--stdio'],
+    moduleEntry: 'pyright/langserver.index.js',
     projectMarkers: ['pyproject.toml', 'setup.py', 'requirements.txt'],
   },
   {
@@ -596,8 +597,15 @@ function nodeModulesRoots(workspaceRoot: string): string[] {
     if (parent === dir) break;
     dir = parent;
   }
-  // Also beside this package, so a bundled install works.
-  roots.push(fileURLToPath(new URL('../node_modules', import.meta.url)));
+  // Beside this package and its parents, so a bundled or hoisted install works
+  // even when the user's workspace has no node_modules of its own.
+  let here = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 6; i++) {
+    roots.push(join(here, 'node_modules'));
+    const parent = dirname(here);
+    if (parent === here) break;
+    here = parent;
+  }
   return roots;
 }
 
@@ -606,7 +614,16 @@ function findOnPath(command: string): string | null {
   const exts = process.platform === 'win32'
     ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';')
     : [''];
-  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+  const dirs = (process.env.PATH ?? '').split(delimiter);
+  if (process.platform === 'win32') {
+    const pf = process.env.ProgramFiles;
+    const pf86 = process.env['ProgramFiles(x86)'];
+    const local = process.env.LOCALAPPDATA;
+    if (pf) dirs.push(join(pf, 'LLVM', 'bin'));
+    if (pf86) dirs.push(join(pf86, 'LLVM', 'bin'));
+    if (local) dirs.push(join(local, 'Programs', 'LLVM', 'bin'));
+  }
+  for (const dir of dirs) {
     if (!dir) continue;
     for (const ext of exts) {
       const candidate = join(dir, command + ext);

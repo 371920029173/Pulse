@@ -2,8 +2,9 @@
  * Plan store: durable, per-session progress tracking.
  *
  * The plan is what the agent uses to keep its own long-horizon work straight, so
- * the invariants that matter here are scoping (plans must not leak between
- * conversations) and durability (a plan must survive a restart) — plus the
+ * the invariants that matter here are that a plan survives a restart and stays
+ * visible to every conversation (a long task must not vanish when the chat
+ * changes) — plus the
  * auto-advance behaviour, which is easy to break silently.
  */
 import { describe, it, beforeEach, afterEach } from 'node:test';
@@ -39,14 +40,18 @@ describe('PlanStore', () => {
     assert.equal(found!.title, '持久化');
   });
 
-  it('scopes plans to their conversation', () => {
+  it('lists plans from every conversation', () => {
     const storeA = new PlanStore(dir, 'sess-A');
     const storeB = new PlanStore(dir, 'sess-B');
-    storeA.create('属于 A', ['x']);
-    storeB.create('属于 B', ['y']);
-    assert.equal(storeA.list().length, 1);
-    assert.equal(storeA.list()[0].title, '属于 A');
-    assert.equal(storeB.list()[0].title, '属于 B');
+    const a = storeA.create('属于 A', ['x']);
+    const b = storeB.create('属于 B', ['y']);
+    const titles = storeA.list().map((p) => p.title).sort();
+    assert.deepEqual(titles, ['属于 A', '属于 B']);
+    assert.equal(storeB.get(a.id)?.title, '属于 A');
+    assert.equal(storeA.active()?.id, a.id, '优先继续本会话自己的未完成计划');
+    assert.equal(storeB.active()?.id, b.id);
+    const updated = storeA.updateStep(b.id, b.steps[0].id, 'done');
+    assert.equal(updated?.status, 'done', '别的会话留下的计划也要能接着改');
   });
 
   it('an unbound store sees every plan', () => {

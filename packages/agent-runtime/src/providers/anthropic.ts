@@ -1,4 +1,5 @@
 ﻿import type { LLMProvider, LLMMessage, ToolDefinition, ToolCall, StreamChunk } from '@she/shared';
+import { repairApiMessages } from '../protocol.js';
 
 interface AnthropicContentBlock {
   type: 'text' | 'tool_use';
@@ -32,7 +33,7 @@ export class AnthropicProvider implements LLMProvider {
     let system = '';
     const anthropicMessages: Array<{ role: string; content: string | AnthropicContentBlock[] }> = [];
 
-    for (const msg of messages) {
+    for (const msg of repairApiMessages(messages)) {
       if (msg.role === 'system') {
         system += (system ? '\n\n' : '') + msg.content;
         continue;
@@ -50,22 +51,32 @@ export class AnthropicProvider implements LLMProvider {
         const content: AnthropicContentBlock[] = [];
         if (msg.content) content.push({ type: 'text', text: msg.content });
         for (const tc of msg.tool_calls) {
+          let input: Record<string, unknown> = {};
+          try {
+            const parsed = JSON.parse(tc.function.arguments || '{}') as unknown;
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+              input = parsed as Record<string, unknown>;
+            }
+          } catch {
+            input = { _raw: tc.function.arguments || '' };
+          }
           content.push({
             type: 'tool_use',
             id: tc.id,
             name: tc.function.name,
-            input: JSON.parse(tc.function.arguments),
+            input,
           });
         }
         anthropicMessages.push({ role: 'assistant', content });
         continue;
       }
-      anthropicMessages.push({ role: msg.role, content: msg.content });
+      const text = msg.content?.trim() ? msg.content : '…';
+      anthropicMessages.push({ role: msg.role, content: text });
     }
 
     const body: Record<string, unknown> = {
       model: this.model,
-      max_tokens: this.maxTokens,
+      max_tokens: this.maxTokens > 0 ? this.maxTokens : 131072,
       temperature: this.temperature,
       messages: anthropicMessages,
       stream: !!onChunk,
@@ -79,16 +90,7 @@ export class AnthropicProvider implements LLMProvider {
       }));
     }
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': this.apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify(body),
-      signal,
-    });
+    const response = await this.fetchAnthropic(body, signal);
 
     if (!response.ok) {
       const errText = await response.text();
@@ -99,6 +101,34 @@ export class AnthropicProvider implements LLMProvider {
       return this.handleStream(response, onChunk);
     }
     return this.handleNonStream(response);
+  }
+
+  /** Retry a dropped connection or a busy endpoint. A 4xx other than 429 is final. */
+  private async fetchAnthropic(body: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
+    const init: RequestInit = {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': this.apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(body),
+      signal,
+    };
+    let last: Error | null = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const response = await fetch('https://api.anthropic.com/v1/messages', init);
+        const retry = response.status === 429 || response.status >= 500;
+        if (!retry || attempt === 3) return response;
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        last = err instanceof Error ? err : new Error(String(err));
+        if (attempt === 3) throw last;
+      }
+      await new Promise((r) => setTimeout(r, 400 * attempt));
+    }
+    throw last ?? new Error('Anthropic request failed');
   }
 
   private async handleNonStream(response: Response): Promise<LLMMessage> {
@@ -144,7 +174,9 @@ export class AnthropicProvider implements LLMProvider {
     let currentToolId = '';
     let currentToolName = '';
     let currentToolArgs = '';
+    let broke = false;
 
+    try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -202,6 +234,22 @@ export class AnthropicProvider implements LLMProvider {
         }
       }
     }
+    } catch (err) {
+      broke = true;
+      try { await reader.cancel(); } catch { /* already closed */ }
+      const reason = err instanceof Error ? err.message : String(err);
+      if (/abort/i.test(reason)) throw err;
+      if (!contentAccum && toolCalls.length === 0) {
+        throw new Error(`流式响应中断（尚未收到内容）: ${reason}`);
+      }
+      onChunk({
+        type: 'status',
+        content: '响应中断，已保留收到的内容。回复「继续」可以接着往下写。',
+      });
+    }
+
+    // An unfinished tool call has no complete arguments. Do not run it.
+    if (broke) currentToolId = '';
 
     const result: LLMMessage = { role: 'assistant', content: contentAccum };
     if (toolCalls.length > 0) result.tool_calls = toolCalls;

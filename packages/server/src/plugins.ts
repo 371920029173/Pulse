@@ -141,7 +141,7 @@ export class PluginManager {
    */
   private cached: {
     definitions: ToolDefinition[];
-    routes: Map<string, { plugin: string; tool: PluginToolExport; ctx: PluginContext }>;
+    routes: Map<string, { plugin: string; tool: PluginToolExport; permissions: string[] }>;
   } = { definitions: [], routes: new Map() };
 
   constructor(deps: PluginManagerDeps) {
@@ -454,26 +454,33 @@ tools[0].run = async (args, ctx) => {
     return { ok: true };
   }
 
-  /** Build the context handed to a plugin's tools. */
-  private contextFor(name: string, permissions: string[]): PluginContext {
-    const root = this.deps.workspaceRoot();
+  /**
+   * Build the context handed to a plugin's tools.
+   *
+   * The workspace root is read when the tool RUNS, not when the plugin was
+   * loaded. Caching the string here is what made `ws_overview` keep scanning
+   * the previous project after the user switched workspaces: file tools followed
+   * the new root, and this context did not.
+   */
+  private contextFor(name: string, permissions: string[], workspaceRoot?: string): PluginContext {
+    const root = () => workspaceRoot || this.deps.workspaceRoot();
     const log = (m: string) => this.deps.log(`[plugin:${name}] ${m}`);
 
     return {
-      workspaceRoot: root,
+      get workspaceRoot() { return root(); },
       log,
       readFile: (relPath, maxBytes = 256_000) => {
-        const abs = jailPath(root, relPath);
+        const abs = jailPath(root(), relPath);
         const buf = readFileSync(abs);
         return (buf.byteLength > maxBytes ? buf.subarray(0, maxBytes) : buf).toString('utf8');
       },
       writeFile: (relPath, content) => {
-        const abs = jailPath(root, relPath);
+        const abs = jailPath(root(), relPath);
         mkdirSync(dirname(abs), { recursive: true });
         writeFileSync(abs, content, 'utf8');
       },
       listDir: (relPath = '.') => {
-        const abs = jailPath(root, relPath);
+        const abs = jailPath(root(), relPath);
         if (!existsSync(abs)) return [];
         return readdirSync(abs, { withFileTypes: true }).map((e) => ({
           name: e.name,
@@ -487,7 +494,7 @@ tools[0].run = async (args, ctx) => {
           resolvePromise({ code: -1, stdout: '', stderr: '插件未声明 shell 权限（请在 manifest 的 permissions 里加上 "shell"）' });
           return;
         }
-        const child = spawn(command, { cwd: root, shell: true, windowsHide: true });
+        const child = spawn(command, { cwd: root(), shell: true, windowsHide: true });
         let stdout = '';
         let stderr = '';
         const timer = setTimeout(() => { try { child.kill(); } catch { /* ignore */ } }, opts?.timeoutMs ?? 30_000);
@@ -542,11 +549,14 @@ tools[0].run = async (args, ctx) => {
   }
 
   /** Route one call to its plugin. */
-  async execute(name: string, args: Record<string, unknown>): Promise<string> {
+  async execute(name: string, args: Record<string, unknown>, workspaceRoot?: string): Promise<string> {
     const route = this.cached.routes.get(name);
     if (!route) return `Error: plugin tool "${name}" is not available`;
     try {
-      const out = await route.tool.run(args, route.ctx);
+      // The session's own directory wins over the process workspace, so two
+      // projects running at once do not share one plugin root.
+      const ctx = this.contextFor(route.plugin, route.permissions, workspaceRoot);
+      const out = await route.tool.run(args, ctx);
       return typeof out === 'string' ? out : JSON.stringify(out);
     } catch (e) {
       return `Error in plugin ${route.plugin}: ${(e as Error).message}`;
@@ -561,7 +571,7 @@ tools[0].run = async (args, ctx) => {
    */
   async refresh(): Promise<ToolDefinition[]> {
     const definitions: ToolDefinition[] = [];
-    const routes = new Map<string, { plugin: string; tool: PluginToolExport; ctx: PluginContext }>();
+    const routes = new Map<string, { plugin: string; tool: PluginToolExport; permissions: string[] }>();
 
     for (const p of this.scan()) {
       if (!p.manifest || p.manifest.enabled === false) continue;
@@ -571,7 +581,7 @@ tools[0].run = async (args, ctx) => {
       const mod = await this.loadModule(name, abs);
       if (!mod?.tools?.length) continue;
 
-      const ctx = this.contextFor(name, p.manifest.permissions ?? []);
+      const permissions = p.manifest.permissions ?? [];
       for (const tool of mod.tools) {
         if (!tool?.name || typeof tool.run !== 'function') continue;
         // A plugin cannot silently shadow a built-in or another plugin's tool:
@@ -585,7 +595,7 @@ tools[0].run = async (args, ctx) => {
           description: tool.description ?? '',
           parameters: tool.parameters ?? { type: 'object', properties: {} },
         });
-        routes.set(tool.name, { plugin: name, tool, ctx });
+        routes.set(tool.name, { plugin: name, tool, permissions });
       }
     }
 

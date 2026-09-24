@@ -133,10 +133,21 @@ export interface LLMMessage {
   tool_call_id?: string;
   tool_calls?: ToolCall[];
   /**
-   * Chain-of-thought emitted by reasoning models (DeepSeek `reasoning_content`,
-   * Anthropic thinking blocks, OpenAI o-series). Never sent back to the API.
+   * Chain-of-thought.
+   *
+   * Shown in the transcript either way. What gets sent to the endpoint depends
+   * on where it came from:
+   *
+   * - `imported` (Cursor / Claude Code / Codex): display only. It must not be
+   *   written into `reasoning_content`. That field is DeepSeek-class protocol;
+   *   a foreign chain is rejected, or worse, treated as this model's own thought.
+   * - `native` (or omitted — a chain this agent just received): echoed back
+   *   only on an assistant message that still has `tool_calls`. Thinking-mode
+   *   DeepSeek returns 400 if that field is missing mid tool-loop, and does not
+   *   want it on a finished turn.
    */
   reasoning?: string;
+  reasoningOrigin?: 'native' | 'imported';
 }
 
 export interface ToolCall {

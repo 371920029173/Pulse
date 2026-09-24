@@ -305,7 +305,10 @@ async function ensureBackend() {
             SHE_PORT: process.env.SHE_PORT || '5577',
             SHE_HOST: '127.0.0.1',
             SHE_WORKSPACE: workspace,
-            SHE_KB_PATH: process.env.SHE_KB_PATH || path.join(ud, 'kb.sqlite'),
+            // Do not invent a global SHE_KB_PATH. An unset path stores the
+            // knowledge base in this workspace's .she/kb.sqlite. A global file
+            // made every project look empty and mixed their notes together.
+            ...(process.env.SHE_KB_PATH ? { SHE_KB_PATH: process.env.SHE_KB_PATH } : {}),
             SHE_NATIVE_PICKER: '1',
           },
           isHealthy: async () => {

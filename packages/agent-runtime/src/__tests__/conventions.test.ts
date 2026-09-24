@@ -105,19 +105,22 @@ describe('约定文件：合并而非只取一个', () => {
     assert.doesNotMatch(prompt(), /### AGENTS\.md/, '空文件不该产生一个空段落');
   });
 
-  it('超大内容被截断，不会挤爆上下文', () => {
-    put(root, 'AGENTS.md', 'A'.repeat(60_000));
+  it('约定文件全文进入提示词', () => {
+    const body = 'A'.repeat(60_000);
+    put(root, 'AGENTS.md', body);
     const p = prompt();
-    // Well under the raw size: the total budget applies across all files.
-    assert.ok(p.length < 40_000, `提示词过长: ${p.length}`);
-    assert.match(p, /已截断/, '截断时应当说明');
+    assert.ok(p.includes(body), '约定被截断了');
+    assert.doesNotMatch(p, /已截断/);
   });
 
-  it('多个超大文件合起来也不超预算', () => {
+  it('多个约定文件都完整保留', () => {
     put(root, 'AGENTS.md', 'A'.repeat(40_000));
     put(root, 'CLAUDE.md', 'B'.repeat(40_000));
     put(root, '.cursorrules', 'C'.repeat(40_000));
-    assert.ok(prompt().length < 40_000, `预算没有统一生效: ${prompt().length}`);
+    const p = prompt();
+    assert.ok(p.includes('A'.repeat(40_000)));
+    assert.ok(p.includes('B'.repeat(40_000)));
+    assert.ok(p.includes('C'.repeat(40_000)));
   });
 });
 

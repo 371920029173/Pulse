@@ -13,7 +13,7 @@
  */
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SessionStore } from '../sessions.js';
@@ -166,5 +166,46 @@ describe('importMany', () => {
     const parsed = JSON.parse(after) as { sessions: unknown[] };
     assert.equal(parsed.sessions.length, 50);
     assert.ok(after.length > before);
+  });
+});
+
+describe('目录与父会话', () => {
+  it('记下目录和父会话，搬走后仍是同一条', () => {
+    const src = new SessionStore(dir);
+    const child = src.create('子任务', { directory: dir, parentId: 'sess_parent' });
+    assert.equal(child.directory, dir);
+    assert.equal(child.parent_id, 'sess_parent');
+    assert.equal(src.childrenOf('sess_parent').length, 1);
+    const watching = src.create('我正在看的');
+    assert.equal(src.list().active_id, watching.id);
+    src.create('另一个子任务', { directory: dir, parentId: 'sess_parent' });
+    assert.equal(src.list().active_id, watching.id, '子会话不应抢走当前对话');
+    const destDir = mkdtempSync(join(tmpdir(), 'she-dest-'));
+    const taken = src.extract(child.id);
+    assert.ok(taken);
+    taken!.directory = destDir;
+    const dest = new SessionStore(destDir);
+    dest.adopt(taken!);
+    assert.equal(src.get(child.id), undefined);
+    assert.equal(dest.get(child.id)?.directory, destDir);
+    rmSync(destDir, { recursive: true, force: true });
+  });
+
+  it('没有目录的旧会话在读入时钉在所在项目', () => {
+    mkdirSync(join(dir, '.she'), { recursive: true });
+    const file = join(dir, '.she', 'sessions.json');
+    writeFileSync(file, JSON.stringify({
+      schema_version: 'she-sessions/0.2',
+      active_id: 'sess_old',
+      sessions: [{
+        id: 'sess_old',
+        title: '旧的',
+        created_at: '2020-01-01T00:00:00.000Z',
+        updated_at: '2020-01-01T00:00:00.000Z',
+        messages: [],
+      }],
+    }));
+    const store = new SessionStore(dir);
+    assert.equal(store.get('sess_old')?.directory, dir);
   });
 });

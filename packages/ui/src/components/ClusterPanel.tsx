@@ -336,7 +336,7 @@ export function ClusterPanel({
                             <span className={styles.countVal}>{r.count}</span>
                             <button
                               type="button"
-                              disabled={r.count >= 9}
+                              disabled={false}
                               onClick={() => void saveRoles(room.roles.map((x) => (x.key === r.key ? { ...x, count: x.count + 1 } : x)))}
                             >+</button>
                           </div>

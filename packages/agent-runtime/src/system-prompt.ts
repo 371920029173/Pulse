@@ -33,8 +33,6 @@ const CONVENTION_FILES: Array<{ path: string; label: string }> = [
   { path: join('.github', 'copilot-instructions.md'), label: '.github/copilot-instructions.md' },
 ];
 
-/** Total budget for all convention text, in characters. */
-const CONVENTIONS_BUDGET = 10_000;
 
 /**
  * Directories to look in, nearest first.
@@ -77,11 +75,9 @@ function conventionDirs(workspaceRoot: string): string[] {
 function loadProjectRules(workspaceRoot: string): { text: string; sources: string[] } {
   const parts: string[] = [];
   const sources: string[] = [];
-  let used = 0;
 
   for (const dir of conventionDirs(workspaceRoot)) {
     for (const file of CONVENTION_FILES) {
-      if (used >= CONVENTIONS_BUDGET) break;
       const full = join(dir, file.path);
       // A file may be found more than once when walking up; the nearest one wins.
       if (sources.filter((s) => s.endsWith(file.label)).length > 0) continue;
@@ -90,12 +86,9 @@ function loadProjectRules(workspaceRoot: string): { text: string; sources: strin
         const text = readFileSync(full, 'utf8').trim();
         if (!text) continue;
 
-        const remaining = CONVENTIONS_BUDGET - used;
-        const slice = text.slice(0, remaining);
-        used += slice.length;
         // Heading names the file, so when two disagree the model can say which said what
-        // rather than silently blending them.
-        parts.push(`### ${file.label}${slice.length < text.length ? '（已截断）' : ''}\n\n${slice}`);
+        // rather than silently blending them. The whole file is included.
+        parts.push(`### ${file.label}\n\n${text}`);
         sources.push(full);
       } catch {
         /* an unreadable conventions file must not stop the agent from starting */
@@ -159,27 +152,19 @@ function bundledSkillsRoot(): string {
   }
 }
 
-function loadMarkdownFiles(files: string[], budget: number): { text: string; remaining: number } {
+function loadMarkdownFiles(files: string[]): string {
   const parts: string[] = [];
-  let left = budget;
   for (const file of files) {
     try {
       const text = readFileSync(file, 'utf8').trim();
       if (!text) continue;
       const name = file.split(/[/\\]/).pop() || file;
-      const chunk = '### ' + name + '\n' + text;
-      if (chunk.length > left) {
-        parts.push(chunk.slice(0, Math.max(0, left)) + '\n…');
-        left = 0;
-        break;
-      }
-      parts.push(chunk);
-      left -= chunk.length;
+      parts.push('### ' + name + '\n' + text);
     } catch {
       /* ignore */
     }
   }
-  return { text: parts.join('\n\n'), remaining: left };
+  return parts.join('\n\n');
 }
 
 /**
@@ -214,7 +199,7 @@ function loadProjectSkills(workspaceRoot: string, profile: SkillProfileType): st
     seen.add(base);
     ordered.push(f);
   }
-  return loadMarkdownFiles(ordered, 10_000).text;
+  return loadMarkdownFiles(ordered);
 }
 
 export function getSystemPrompt(workspaceRoot: string, profile?: SkillProfileType, automationMode = true): string {
@@ -280,7 +265,17 @@ export function getSystemPrompt(workspaceRoot: string, profile?: SkillProfileTyp
   return `You are SHE v2 (Structured Hierarchy Engine), a local coding agent with a Group Memory knowledge base.
 
 ## Active skill profile
-${active} (dev = software/machine work, liberal = writing/research, custom = user skills folder)
+${active} (dev = software/machine work, liberal = writing/research, general = everyday tasks, custom = user skills folder)
+
+## Long-range plans (every profile)
+Plans live in the workspace file \`.she/plans.json\`, not inside one chat. \`plan_list\` returns every plan, including ones opened in another conversation. Switching chats does not retire them.
+
+- At the start of multi-step work, call \`plan_list\`. Continue an open plan only when the user's current message is about that work. A leftover plan is not a standing order.
+- \`plan_create\` before non-trivial work. \`plan_update\` as each step actually finishes — not when you intend to do it.
+- dev: every implementation step ends with a check (\`lsp_diagnostics\` or actually running the code) before it is marked done.
+- liberal: steps are research or writing stages, and each one names the artifact it produces.
+- general: keep the plan short and concrete; still persist it.
+- custom: follow the skill files, and still persist the plan so the next chat can see it.
 
 ## Your Knowledge Base
 You have access to a Group Memory KB that uses PulseSeed structural resonance retrieval — NOT embeddings or vector search. When you query the KB, results come with activation traces showing exactly which groups, edges, and hops led to each result.

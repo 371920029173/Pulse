@@ -115,7 +115,13 @@ if (hasTs) {
     }))?.output ?? '');
     const lines = out.split('\n').filter((l) => l && l !== '没有结果');
     check('references 找到多处', lines.length >= 2, out);
-    check('references 含类声明本身', lines.some((l) => /lsp-tools\.ts:33/.test(l)), out);
+    /*
+     * The declaration must be among its own references. The line is taken from `locate`
+     * rather than written as a literal: pinning `lsp-tools.ts:33` meant any edit above the
+     * class turned this red, which says nothing about whether references work.
+     */
+    check('references 含类声明本身',
+      lines.some((l) => new RegExp(`lsp-tools\\.ts:${p.line}:`).test(l)), out);
   }
 
   // diagnostics on a deliberately broken file

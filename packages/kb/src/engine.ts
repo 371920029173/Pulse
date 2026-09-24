@@ -491,6 +491,12 @@ export class GroupKBEngine {
     kind: EdgeKind,
     options?: { evidence?: string; falsifiers?: string[]; weight?: number },
   ): Edge {
+    if (!this.store.getMemory(sourceId)) {
+      throw new Error(`kb_link: 源节点不存在 (${sourceId})`);
+    }
+    if (!this.store.getMemory(targetId)) {
+      throw new Error(`kb_link: 目标节点不存在 (${targetId})`);
+    }
     if (kind === 'causal_candidate') {
       return this.addCausalCandidateEdge(
         sourceId, targetId,
@@ -649,12 +655,12 @@ export class GroupKBEngine {
 
       const titles = dormantMems.map(m => m.title).join(', ');
       const contentSummary = dormantMems
-        .map(m => `[${m.title}]: ${m.content.slice(0, 200)}`)
+        .map(m => `[${m.title}]: ${m.content}`)
         .join('\n---\n');
 
       const summary = this.store.createMemory({
         kind: 'text',
-        title: `[compressed] ${titles.slice(0, 100)}`,
+        title: `[compressed] ${titles}`,
         content: contentSummary,
         metadata: {
           compressed: true,
@@ -809,11 +815,22 @@ export class GroupKBEngine {
         for (const g of this.store.getAllGroups()) {
           const name = g.name.toLowerCase();
           const path = groupPath(g.id);
-          // Exact name / exact path / path-suffix match. Deliberately strict:
-          // a loose "includes" would treat any shared word as a group anchor.
+          // Path segments, including hyphenated words (`agent-usability` →
+          // agent, usability). A query of one of those words is how people
+          // look up a group; requiring the full path returned nothing.
+          const segments = new Set<string>();
+          for (const part of path.split('/')) {
+            if (part.length >= 2) segments.add(part);
+            for (const bit of part.split(/[-_.]+/)) {
+              if (bit.length >= 3) segments.add(bit);
+            }
+          }
+          const qTokens = q.split(/[\s,/]+/).flatMap((t) => t.split(/[-_.]+/)).filter((t) => t.length >= 3);
+          const tokenHit = qTokens.some((t) => segments.has(t));
           const isAnchor = q === name || q === path
             || q.endsWith('/' + name) || path.endsWith('/' + q)
-            || q.includes(path);
+            || q.includes(path)
+            || tokenHit;
           if (!isAnchor) continue;
           for (const mem of this.store.getMemoriesByGroup(g.id)) groupAnchors.push(mem);
         }

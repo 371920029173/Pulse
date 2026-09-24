@@ -46,6 +46,9 @@ const PROVIDERS = {
 
 const isWindows = process.platform === 'win32';
 
+/** The tunnel this process started, so it can be stopped without hunting PIDs. */
+let tunnelChild = null;
+
 /** `where`/`which` for the given binary; returns true when present. */
 async function hasBinary(ctx, name) {
   const found = await ctx.exec(isWindows ? `where ${name}` : `command -v ${name}`, { timeoutMs: 8000 });
@@ -75,6 +78,12 @@ export const tools = [
       },
       required: ['provider'],
     },
+  },
+  {
+    name: 'tunnel_stop',
+    description:
+      'Stop the tunnel this plugin started. Call this when the URL is no longer needed so the control plane is not left exposed.',
+    parameters: { type: 'object', properties: {} },
   },
 ];
 
@@ -128,7 +137,11 @@ tools[1].run = async (args, ctx) => {
        * arrives. This is the one place the plugin reaches past `ctx`, and it is
        * why the manifest declares the `shell` permission.
        */
-      const child = spawn(cmd, { cwd: ctx.workspaceRoot, shell: true, windowsHide: true });
+      if (tunnelChild && !tunnelChild.killed) {
+        try { tunnelChild.kill(); } catch { /* replaced below */ }
+      }
+      const child = spawn(key, p.args(port), { cwd: ctx.workspaceRoot, shell: false, windowsHide: true });
+      tunnelChild = child;
       const scan = (buf) => {
         const text = String(buf);
         const m = text.match(p.urlPattern);
@@ -165,5 +178,22 @@ tools[1].run = async (args, ctx) => {
     '  1. 优先用 tailscale —— 只有你自己的设备能连',
     '  2. 临时用完就停掉隧道',
     '  3. 不要把地址发到群里或公开的地方',
+    '  4. 用完调用 tunnel_stop',
   ].join('\n');
+};
+
+tools[2].run = async () => {
+  const child = tunnelChild;
+  tunnelChild = null;
+  if (!child || child.killed) return '当前没有由本插件启动的隧道。';
+  try {
+    if (process.platform === 'win32' && child.pid) {
+      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
+    } else {
+      child.kill();
+    }
+  } catch (err) {
+    return `停止失败: ${err.message}`;
+  }
+  return '隧道已停止。公网地址随之失效。';
 };

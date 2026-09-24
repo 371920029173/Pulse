@@ -208,7 +208,9 @@ const DEFAULTS: SheConfig = {
     model: 'deepseek-flash',
     baseUrl: 'https://api.deepseek.com',
     apiKey: '',
-    maxTokens: 4096,
+    // 0 means no product cap. A fixed 4096 counted against DeepSeek thinking
+    // and cut the chain off before an answer existed.
+    maxTokens: 0,
     temperature: 0.3,
     thinkingLevel: 'medium',
     fallback: {
@@ -233,7 +235,7 @@ const DEFAULTS: SheConfig = {
     dbPath: '',
     maxChildrenBeforeSplit: 12,
     dormancyThresholdDays: 30,
-    activationBudget: 100,
+    activationBudget: 1_000_000,
     boostOnAccess: 1.5,
     pulseSeed: {
       initialEnergy: 1.0,
@@ -245,7 +247,8 @@ const DEFAULTS: SheConfig = {
     sandbox: {
       shell: 'auto',
       timeout: 30000,
-      maxOutputBytes: 524288,
+      // 0 means do not truncate command output.
+      maxOutputBytes: 0,
       denyDestructiveByDefault: true,
       allowAllCommands: false,
       // Empty = no allowlist. See `SandboxShell.isCommandAllowed` for why it is opt-in.
@@ -419,29 +422,42 @@ export function loadConfig(workspaceRoot?: string): SheConfig {
   if (env.SHE_KB_PATH) config.kb.dbPath = env.SHE_KB_PATH;  if (env.SHE_AUTOMATION_MODE === '0' || env.SHE_AUTOMATION_MODE === 'false') config.automationMode = false;
   if (env.SHE_AUTOMATION_MODE === '1' || env.SHE_AUTOMATION_MODE === 'true') config.automationMode = true;
 
-  // Automation mode and command permissions are ORTHOGONAL and must stay that way.
-  //
-  // Automation mode is a conversational stance: "keep going instead of asking
-  // after every step". It used to also force `allowAllCommands = true` and
-  // `denyDestructiveByDefault = false`, which meant a fresh clone silently ran
-  // with no destructive-command guard at all — a bad default to ship in an
-  // open-source project where the agent has the user's real files.
-  //
-  // Permissions now come only from their own env vars, with safe defaults:
-  // dangerous tools need a confirmation ticket, and known-destructive patterns
-  // are blocked outright. Users who want the fully-open behavior opt in
-  // explicitly with SHE_ALLOW_ALL_COMMANDS=true.
-  if (config.automationMode) {
-    config.sandbox.allowAllCommands = false;
-    config.sandbox.denyDestructiveByDefault = true;
-  } else if (env.SHE_ALLOW_ALL_COMMANDS === undefined) {
-    // Automation off means "ask first": don't inherit blanket allow-all.
-    config.sandbox.allowAllCommands = false;
-    config.sandbox.denyDestructiveByDefault = true;
+  // Automation means the agent keeps working. Forcing a confirm on every
+  // command makes that mode stop after the first shell call, which is manual
+  // mode under another name. An explicit SHE_ALLOW_ALL_COMMANDS still wins.
+  if (env.SHE_ALLOW_ALL_COMMANDS === undefined) {
+    if (config.automationMode) {
+      config.sandbox.allowAllCommands = true;
+      config.sandbox.denyDestructiveByDefault = false;
+    } else {
+      config.sandbox.allowAllCommands = false;
+      config.sandbox.denyDestructiveByDefault = true;
+    }
   }
   if (env.SHE_THINKING_LEVEL && THINKING_LEVELS.includes(env.SHE_THINKING_LEVEL as never)) {
     config.llm.thinkingLevel = env.SHE_THINKING_LEVEL as typeof config.llm.thinkingLevel;
   }
+
+  /*
+   * Sampling limits.
+   *
+   * These are persisted by the Settings route, and this is the other half of that pair: without
+   * reading them back, the write was in-memory only and every restart silently restored the
+   * default. A user who moved the slider saw it work and then quietly lose the setting —
+   * `check:restart` is what caught it.
+   *
+   * Parsed rather than truth-checked because 0 is meaningful (`maxTokens: 0` means "no product
+   * cap", see DEFAULTS), so `parseInt(x) || fallback` would discard a legitimate value.
+   */
+  const readNonNegative = (raw: string | undefined): number | undefined => {
+    if (raw === undefined || raw.trim() === '') return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : undefined;
+  };
+  const maxTokens = readNonNegative(env.SHE_LLM_MAX_TOKENS);
+  if (maxTokens !== undefined) config.llm.maxTokens = Math.trunc(maxTokens);
+  const temperature = readNonNegative(env.SHE_LLM_TEMPERATURE);
+  if (temperature !== undefined) config.llm.temperature = temperature;
 
   /*
    * Scheduled-work window.

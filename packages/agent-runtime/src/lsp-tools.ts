@@ -8,6 +8,7 @@
  */
 import { readFileSync, statSync } from 'node:fs';
 import { existsSync, readdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { isAbsolute, join, relative } from 'node:path';
 import {
   KNOWN_SERVERS, LspServer, languageOf, resolveServer, servableLanguages,
@@ -138,6 +139,46 @@ function toPosition(line: number, column: number) {
   return { line: Math.max(0, line - 1), character: Math.max(0, column - 1) };
 }
 
+/**
+ * Syntax check when no language server is installed for this file.
+ *
+ * The workspace is mostly JS, Python and C. A missing `typescript-language-server`
+ * used to make `lsp_diagnostics` a hard failure, so the agent could not verify
+ * an edit at all. This does not provide types or references — it only catches
+ * syntax errors — and it says so.
+ */
+function syntaxFallback(abs: string): string | null {
+  const dot = abs.lastIndexOf('.');
+  const ext = dot >= 0 ? abs.slice(dot).toLowerCase() : '';
+  const run = (cmd: string, args: string[]) => spawnSync(cmd, args, {
+    encoding: 'utf8',
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+    timeout: 20_000,
+  });
+  if (['.js', '.mjs', '.cjs'].includes(ext)) {
+    const r = run(process.execPath, ['--check', abs]);
+    if (r.error) return null;
+    if (r.status === 0) return '语法检查通过（node --check）。没有该语言的语言服务器，所以没有类型和引用信息。';
+    return `语法错误（node --check）:\n${(r.stderr || r.stdout || '').trim()}`;
+  }
+  if (ext === '.py') {
+    const r = run('python', ['-m', 'py_compile', abs]);
+    if (r.error) return null;
+    if (r.status === 0) return '语法检查通过（python -m py_compile）。没有该语言的语言服务器，所以没有类型和引用信息。';
+    return `语法错误（py_compile）:\n${(r.stderr || r.stdout || '').trim()}`;
+  }
+  if (['.c', '.h', '.cc', '.cpp', '.hpp'].includes(ext)) {
+    for (const cc of ['clang', 'gcc', 'cl']) {
+      const args = cc === 'cl' ? ['/Zs', '/nologo', abs] : ['-fsyntax-only', abs];
+      const r = run(cc, args);
+      if (r.error) continue;
+      if (r.status === 0) return `语法检查通过（${cc}）。没有 clangd，所以没有跳转定义和引用。`;
+      return `语法错误（${cc}）:\n${(r.stderr || r.stdout || '').trim()}`;
+    }
+  }
+  return null;
+}
+
 function unsupportedMessage(manager: LspManager, filePath: string): string {
   const lang = languageOf(filePath) ?? '未知';
   const known = [...manager.supported].join(', ') || '无';
@@ -232,10 +273,7 @@ const POSITION_PARAMS = {
 export function makeLspTools(workspaceRoot: string, manager: LspManager): ToolDefinition[] {
   // Only advertise what can actually run. A tool that always fails wastes a
   // round-trip and teaches the model to distrust the tool list.
-  const hasTypeScript = [...manager.supported].some((l) =>
-    ['typescript', 'typescriptreact', 'javascript', 'javascriptreact'].includes(l));
   const anyServer = manager.supported.size > 0;
-  if (!anyServer) return [];
 
   const tools: ToolDefinition[] = [
     {
@@ -271,6 +309,7 @@ export function makeLspTools(workspaceRoot: string, manager: LspManager): ToolDe
     },
   ];
 
+  if (!anyServer) return [tools[0]];
   return tools;
 }
 
@@ -290,6 +329,10 @@ export async function executeLspTool(
   if (!resolved.ok) return textResult(`${name} 失败: ${resolved.error}`, false);
 
   if (!manager.canServe(resolved.abs)) {
+    if (name === 'lsp_diagnostics') {
+      const fallback = syntaxFallback(resolved.abs);
+      if (fallback) return textResult(fallback, !fallback.startsWith('语法错误'));
+    }
     return textResult(`${name} 失败: ${unsupportedMessage(manager, resolved.abs)}`, false);
   }
 

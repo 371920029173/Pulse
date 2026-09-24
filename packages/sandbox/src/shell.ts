@@ -2,6 +2,7 @@ import { resolve, normalize, relative, sep, dirname, basename, join } from 'node
 import { realpathSync } from 'node:fs';
 import { platform } from 'node:os';
 import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import type { SheConfig, SandboxResult, SandboxOptions } from '@she/shared';
 
 export const DESTRUCTIVE_PATTERNS: RegExp[] = [
@@ -24,6 +25,28 @@ export const DESTRUCTIVE_PATTERNS: RegExp[] = [
 ];
 
 const IS_WINDOWS = platform() === 'win32';
+
+/**
+ * Decode a console buffer.
+ *
+ * On a Chinese Windows install `cmd.exe` writes CP936 (GBK). Reading those
+ * bytes as UTF-8 turns `中文` and `dir` labels into `���`. UTF-8 output (Node,
+ * Python, Git) is left alone: a GBK page misread as UTF-8 is full of U+FFFD,
+ * a real UTF-8 page is not.
+ */
+export function decodeConsoleOutput(buf: Buffer): string {
+  if (!buf.length) return '';
+  const asUtf8 = buf.toString('utf8');
+  if (!IS_WINDOWS) return asUtf8;
+  const bad = asUtf8.split('\uFFFD').length - 1;
+  if (bad === 0) return asUtf8;
+  if (bad / Math.max(asUtf8.length, 1) < 0.02) return asUtf8;
+  try {
+    return new TextDecoder('gbk').decode(buf);
+  } catch {
+    return asUtf8;
+  }
+}
 
 /**
  * Scan a command line for the syntax an allowlist has to reason about.
@@ -212,6 +235,166 @@ export function hasCommandSubstitution(command: string): boolean {
  * Rejects: `..` traversal, absolute paths that resolve outside, drive-relative paths, and symlinks
  * INSIDE the jail that point outside it (which the textual checks cannot see).
  */
+function unquoteToken(raw: string): string {
+  const t = raw.trim();
+  if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
+    return t.slice(1, -1);
+  }
+  return t;
+}
+
+/** cmd.exe devices. Redirecting here does not create a file. */
+function isConsoleDevice(target: string): boolean {
+  return /^(nul|con|prn|aux|com[1-9]|lpt[1-9])$/i.test(target);
+}
+
+/**
+ * Split a command the way cmd.exe does: `\` is a path separator, not an escape.
+ * Quotes still hide separators and redirections.
+ */
+function splitCmdSegments(command: string): string[] {
+  const segments: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | null = null;
+  const SEPARATORS = new Set(['\n', '&', '|', ';']);
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; current += ch; continue; }
+    if (SEPARATORS.has(ch)) {
+      const trimmed = current.trim();
+      if (trimmed) segments.push(trimmed);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  const tail = current.trim();
+  if (tail) segments.push(tail);
+  return segments;
+}
+
+/** Unquoted redirection targets (`>` `>>` `<`). `>&` (fd dup) is not a path. */
+function redirectTargets(segment: string): string[] {
+  const out: string[] = [];
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (ch !== '>' && ch !== '<') continue;
+    if (ch === '>' && segment[i + 1] === '&') continue;
+    let j = i + 1;
+    while (j < segment.length && segment[j] === '>') j++;
+    while (j < segment.length && /\s/.test(segment[j])) j++;
+    const rest = segment.slice(j);
+    const m = /^("[^"]*"|'[^']*'|\S+)/.exec(rest);
+    if (m) out.push(unquoteToken(m[1]));
+  }
+  return out;
+}
+
+function cmdTokens(segment: string): string[] {
+  const tokens: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i];
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; current += ch; continue; }
+    if (ch === '>' || ch === '<') {
+      if (current.trim()) tokens.push(current.trim());
+      current = '';
+      // Skip the operator and its target; those are checked as redirects.
+      let j = i + 1;
+      while (j < segment.length && (segment[j] === '>' || segment[j] === '&' || /\s/.test(segment[j]))) j++;
+      const rest = segment.slice(j);
+      const m = /^("[^"]*"|'[^']*'|\S+)/.exec(rest);
+      i = m ? j + m[1].length - 1 : j;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current.trim()) tokens.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) tokens.push(current.trim());
+  return tokens;
+}
+
+function looksLikePath(token: string): boolean {
+  if (!token || token.startsWith('-')) return false;
+  if (token === '..' || token.includes('..\\') || token.includes('../')) return true;
+  if (/^[a-zA-Z]:[\\/]/.test(token)) return true;
+  if (token.startsWith('\\\\')) return true;
+  // `/b` `/s` are cmd switches. A real path has another separator (`/etc/passwd`).
+  if (token.startsWith('/') && !token.startsWith('//')) {
+    return token.slice(1).includes('/') || token.slice(1).includes('\\');
+  }
+  return false;
+}
+
+function staysInWorkspace(workspaceRoot: string, target: string): boolean {
+  if (!target || isConsoleDevice(target)) return true;
+  try {
+    resolveInsideWorkspace(workspaceRoot, target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Refuse shell commands that would read or write outside the workspace.
+ *
+ * `fs_*` already jails paths. The shell did not: `echo x > ..\file` and `cd C:\`
+ * both ran. Quoted `>` (as in `=>` inside a node -e string) is not a redirect.
+ */
+export function workspaceEscapeReason(command: string, workspaceRoot: string): string | null {
+  // `../` inside quotes is invisible to the redirect scanner, and it is how
+  // `node -e "...writeFileSync('../x')"` leaves the workspace. `a..b` (a git
+  // range) has no slash and is left alone.
+  if (command.includes('../') || command.includes('..\\')) {
+    return '路径在工作区外: 命令包含 ../';
+  }
+  for (const seg of splitCmdSegments(command)) {
+    const cd = /^(?:cd|chdir|pushd)\s+(?:\/d\s+)?(\S+)/i.exec(seg.trim());
+    if (cd) {
+      const target = unquoteToken(cd[1]);
+      if (!staysInWorkspace(workspaceRoot, target)) {
+        return `cd 目标在工作区外: ${target}`;
+      }
+    }
+    for (const target of redirectTargets(seg)) {
+      if (!staysInWorkspace(workspaceRoot, target)) {
+        return `重定向目标在工作区外: ${target}`;
+      }
+    }
+    const tokens = cmdTokens(seg);
+    for (let i = 1; i < tokens.length; i++) {
+      const tok = unquoteToken(tokens[i]);
+      if (!looksLikePath(tok)) continue;
+      if (!staysInWorkspace(workspaceRoot, tok)) {
+        return `路径在工作区外: ${tok}`;
+      }
+    }
+  }
+  return null;
+}
+
 export function resolveInsideWorkspace(workspaceRoot: string, requestedPath: string): string {
   const root = resolve(workspaceRoot);
   const resolvedPath = resolve(root, requestedPath);
@@ -259,6 +442,52 @@ export function resolveInsideWorkspace(workspaceRoot: string, requestedPath: str
   return resolvedPath;
 }
 
+/**
+ * Run a command without handing it to Node's Windows quoting.
+ *
+ * `spawn(command, { shell: true })` builds `cmd /d /s /c "..."` and cmd strips
+ * one layer of quotes. `node -e "a => b"` then sees a bare `>` and silently
+ * creates a file. A UTF-16 batch file is not honoured by this cmd either: the
+ * BOM is executed as a command name.
+ *
+ * PowerShell `-EncodedCommand` is UTF-16 and never goes through that parser.
+ * The here-string is handed to `cmd /c` as one argument, so quotes stay quotes,
+ * and `chcp 65001` makes the console code page UTF-8 for the output.
+ */
+function spawnCommand(
+  command: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  _workspaceRoot: string,
+): ChildProcess {
+  if (!IS_WINDOWS) {
+    return spawn(command, {
+      shell: true,
+      cwd,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+      windowsHide: true,
+    });
+  }
+  const body = command.replace(/'@/g, "'@'");
+  const ps = [
+    "$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+    'chcp 65001 > $null',
+    "cmd.exe /d /c @'",
+    body,
+    "'@",
+    'exit $LASTEXITCODE',
+  ].join('\n');
+  const encoded = Buffer.from(ps, 'utf16le').toString('base64');
+  return spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
+    cwd,
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+}
+
 export class SandboxShell {
   private workspaceRoot: string;
   private config: SheConfig['sandbox'];
@@ -268,7 +497,7 @@ export class SandboxShell {
     this.config = {
       shell: config?.shell ?? 'auto',
       timeout: config?.timeout ?? 30_000,
-      maxOutputBytes: config?.maxOutputBytes ?? 524_288,
+      maxOutputBytes: config?.maxOutputBytes ?? 0,
       denyDestructiveByDefault: config?.denyDestructiveByDefault ?? true,
       allowAllCommands: config?.allowAllCommands ?? false,
       // Empty means "no allowlist": the denylist is then the only command control, which
@@ -427,6 +656,18 @@ export class SandboxShell {
       cwd = this.workspaceRoot;
     }
 
+    const escape = workspaceEscapeReason(command, this.workspaceRoot);
+    if (escape) {
+      return {
+        denied: true,
+        exitCode: -1,
+        stdout: '',
+        stderr: `DENIED: ${escape}`,
+        timedOut: false,
+        durationMs: 0,
+      };
+    }
+
     const start = Date.now();
 
     return new Promise<SandboxResult>((resolvePromise) => {
@@ -474,26 +715,27 @@ export class SandboxShell {
        */
       const powershellBin = IS_WINDOWS ? 'powershell.exe' : 'pwsh';
 
+      const childEnv = {
+        ...process.env,
+        ...options?.env,
+        // Python otherwise inherits the GBK console and throws UnicodeEncodeError
+        // on the first non-ASCII print (¥, 中文).
+        PYTHONIOENCODING: process.env.PYTHONIOENCODING || 'utf-8',
+        PYTHONUTF8: process.env.PYTHONUTF8 || '1',
+      };
       const child = usePowerShell
         ? spawn(powershellBin, ['-NoProfile', '-NonInteractive', '-Command', command], {
             cwd,
-            env: { ...process.env, ...options?.env },
+            env: childEnv,
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
           })
-        : spawn(command, {
-            // `shell: true` with no separate args: Node chooses the platform shell and
-            // does the quoting. Passing the command as argv[0] is how this form is used.
-            shell: true,
-            cwd,
-            env: { ...process.env, ...options?.env },
-            stdio: ['ignore', 'pipe', 'pipe'],
-            detached: !IS_WINDOWS,
-            windowsHide: true,
-          });
+        : spawnCommand(command, cwd, childEnv, this.workspaceRoot);
 
-      let stdout = '';
-      let stderr = '';
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
       let stdoutTruncated = false;
       let stderrTruncated = false;
       let timedOut = false;
@@ -517,31 +759,34 @@ export class SandboxShell {
         }
       }, timeout);
 
-      child.stdout.on('data', (chunk: Buffer) => {
+      const capOutput = maxOutput > 0;
+      child.stdout!.on('data', (chunk: Buffer) => {
         if (stdoutTruncated) return;
-        stdout += chunk.toString();
-        if (stdout.length > maxOutput) {
-          stdout = stdout.slice(0, maxOutput) + '\n[output truncated]';
-          stdoutTruncated = true;
-        }
+        stdoutChunks.push(chunk);
+        stdoutBytes += chunk.length;
+        if (capOutput && stdoutBytes > maxOutput) stdoutTruncated = true;
       });
 
-      child.stderr.on('data', (chunk: Buffer) => {
+      child.stderr!.on('data', (chunk: Buffer) => {
         if (stderrTruncated) return;
-        stderr += chunk.toString();
-        if (stderr.length > maxOutput) {
-          stderr = stderr.slice(0, maxOutput) + '\n[output truncated]';
-          stderrTruncated = true;
-        }
+        stderrChunks.push(chunk);
+        stderrBytes += chunk.length;
+        if (capOutput && stderrBytes > maxOutput) stderrTruncated = true;
       });
+
+      const take = (chunks: Buffer[], truncated: boolean) => {
+        let text = decodeConsoleOutput(Buffer.concat(chunks));
+        if (truncated) text = text.slice(0, maxOutput) + '\n[output truncated]';
+        return text;
+      };
 
       child.on('close', (code) => {
         clearTimeout(timer);
         const durationMs = Date.now() - start;
         resolvePromise({
           exitCode: timedOut ? 124 : (code ?? 1),
-          stdout,
-          stderr,
+          stdout: take(stdoutChunks, stdoutTruncated),
+          stderr: take(stderrChunks, stderrTruncated),
           timedOut,
           durationMs,
         });
@@ -552,8 +797,8 @@ export class SandboxShell {
         const durationMs = Date.now() - start;
         resolvePromise({
           exitCode: 1,
-          stdout,
-          stderr: stderr || err.message,
+          stdout: take(stdoutChunks, stdoutTruncated),
+          stderr: take(stderrChunks, stderrTruncated) || err.message,
           timedOut: false,
           durationMs,
         });

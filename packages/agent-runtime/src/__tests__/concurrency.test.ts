@@ -217,6 +217,66 @@ describe('同一会话的并发', () => {
     assert.match(String(next.content), /再来一次/, '工具报错后应当还能继续对话');
   });
 
+  it('接口报错后留下可继续的对话，而不是半截历史', async () => {
+    const failing: LLMProvider = {
+      name: 'fail',
+      async chat() {
+        throw new Error('OpenAI API error 400: content or tool_calls must be set');
+      },
+    };
+    const { tools } = makeTools();
+    const agent = makeAgent(failing, tools);
+    const reply = await agent.chat('你好');
+    assert.match(String(reply.content), /这一轮没有完成/);
+    assert.equal(agent.isRunning(), false);
+    const disk = agent.historyForDisk();
+    const last = disk[disk.length - 1];
+    assert.equal(last.role, 'assistant');
+    assert.ok(last.content?.trim());
+    (agent as unknown as { provider: LLMProvider }).provider = new EchoProvider();
+    const next = await agent.chat('再试');
+    assert.match(String(next.content), /再试/);
+  });
+
+  it('补充消息不会插进尚未结束的工具调用中间', async () => {
+    let agent!: Agent;
+    const tools = {
+      definitions: [
+        { name: 'slow', description: 'slow', parameters: { type: 'object', properties: {}, required: [] } },
+      ] as ToolDefinition[],
+      execute: async () => {
+        agent.interject('先看这个');
+        return 'tool-done';
+      },
+    };
+    agent = makeAgent(new ToolProvider('slow'), tools);
+    await agent.chat('跑一下');
+    const history = agent.getHistory();
+    const callAt = history.findIndex((m) => m.role === 'assistant' && m.tool_calls?.length);
+    const toolAt = history.findIndex((m) => m.role === 'tool');
+    const noteAt = history.findIndex((m) => m.role === 'user' && String(m.content).includes('先看这个'));
+    assert.ok(callAt >= 0 && toolAt > callAt, '工具结果应该紧跟调用');
+    assert.equal(history[callAt + 1].role, 'tool');
+    assert.ok(noteAt > toolAt, '补充应该排在工具结果之后');
+    assert.equal(history.filter((m) => String(m.content).includes('先看这个')).length, 1);
+  });
+
+  it('读回半截工具调用时会补成可发送的历史', async () => {
+    const { tools } = makeTools();
+    const agent = makeAgent(new EchoProvider(), tools);
+    agent.setHistory([
+      { role: 'user', content: '跑一下' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'shell', arguments: '{}' } }],
+      },
+    ]);
+    const stored = agent.historyForDisk();
+    assert.equal(stored[1].tool_calls, undefined);
+    assert.match(stored[1].content, /shell/);
+  });
+
   it('isRunning 在 chat 的工具执行期间为 true', async () => {
     /*
      * Renamed: this test used to be called "isRunning 覆盖补丁应用路径", but it only ever ran

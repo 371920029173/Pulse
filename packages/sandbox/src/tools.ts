@@ -21,13 +21,17 @@ const IS_WINDOWS = platform() === 'win32';
  *
  * The guarantee this provides is narrow and complete: the returned value contains only digits, so
  * interpolating it into a command cannot introduce syntax.
+ *
+ * The upper bound is part of the same promise, not a nicety: the schema advertises "max 100", and a
+ * value of 999999 asks git to buffer a whole repository's history into memory. Clamping rather than
+ * rejecting keeps a slightly-wrong call useful.
  */
+const MAX_COMMIT_COUNT = 100;
+
 function normalizeCommitCount(value: unknown): number {
   const n = typeof value === 'number' ? value : Number.parseInt(String(value ?? ''), 10);
-  if (!Number.isFinite(n)) return 10;
-  // Clamp rather than reject: a nonsense count should not fail the tool call, and the upper bound
-  // also keeps one call from producing an enormous output.
-  return Math.min(100, Math.max(1, Math.trunc(n)));
+  if (!Number.isFinite(n) || n < 1) return 10;
+  return Math.min(Math.trunc(n), MAX_COMMIT_COUNT);
 }
 
 export interface ToolSet {
@@ -242,7 +246,6 @@ export function createTools(shell: SandboxShell, workspaceRoot: string, opts?: {
           for (let i = 0; i < lines.length; i++) {
             if (re.test(lines[i]!)) {
               matches.push(`${relative(root, full)}:${i + 1}:${lines[i]}`);
-              if (matches.length >= 200) return;
             }
           }
         }
@@ -260,9 +263,6 @@ export function createTools(shell: SandboxShell, workspaceRoot: string, opts?: {
       }
 
       if (matches.length === 0) return 'No matches found';
-      if (matches.length > 200) {
-        return matches.slice(0, 200).join('\n') + `\n... (truncated)`;
-      }
       return matches.join('\n');
     },
   );
@@ -528,7 +528,7 @@ export function createTools(shell: SandboxShell, workspaceRoot: string, opts?: {
           body: JSON.stringify({ path: filePath, prompt }),
         });
         const body = await resp.text();
-        return JSON.stringify({ ok: resp.ok, status: resp.status, path: args.path, body: body.slice(0, 50_000) });
+        return JSON.stringify({ ok: resp.ok, status: resp.status, path: args.path, body });
       } catch (e: any) {
         return JSON.stringify({ ok: false, error: e?.message || String(e), path: args.path });
       }

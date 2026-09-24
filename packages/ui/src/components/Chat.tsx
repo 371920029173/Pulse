@@ -387,7 +387,7 @@ function ToolCallCard({
           {written ? (
             <div className={styles.toolCallSection}>
               <div className={styles.toolCallSectionLabel}>写入 {written.path}</div>
-              <pre className={styles.toolCallCode}>{written.content.length > 8000 ? written.content.slice(0, 8000) + '\n… (已截断)' : written.content}</pre>
+              <pre className={styles.toolCallCode}>{written.content}</pre>
             </div>
           ) : null}
           <div className={styles.toolCallSection}>
@@ -400,7 +400,7 @@ function ToolCallCard({
             <div className={styles.toolCallSection}>
               <div className={styles.toolCallSectionLabel}>返回</div>
               <pre className={styles.toolCallPre}>
-                {result.length > 8000 ? result.slice(0, 8000) + '\n… (已截断)' : result}
+                {result}
               </pre>
             </div>
           ) : null}
@@ -504,15 +504,13 @@ async function copyText(text: string) {
 /**
  * The model's chain of thought.
  *
- * Deliberately has NO inner scroll box: it is either collapsed to one line, or
- * expanded inline in the page flow. The previous fixed 608px inner scroll area
- * meant a long chain was rendered but visually cut off — you had to scroll
- * *inside* a block that was itself inside the scrolling transcript — which read
- * as "the reasoning is there but I can't see it".
+ * Open by default, and the full text is in the page — not a 70-character
+ * preview. A reload used to start collapsed, so a chain of several thousand
+ * characters showed up as one faint line and read as "the thinking was not
+ * displayed". There is no inner height cap: the transcript already scrolls.
  */
 function ReasoningBlock({ text, streaming }: { text: string; streaming?: boolean }) {
-  // While the model is still thinking we keep it open so you can watch it.
-  const [open, setOpen] = useState(Boolean(streaming));
+  const [open, setOpen] = useState(true);
   /**
    * Once the reader opens or closes this block by hand, that choice wins.
    *
@@ -529,7 +527,7 @@ function ReasoningBlock({ text, streaming }: { text: string; streaming?: boolean
   }, [streaming]);
 
   const chars = text.length;
-  const firstLine = (text.split('\n').find((l) => l.trim()) ?? '').trim().slice(0, 70);
+  const firstLine = (text.split('\n').find((l) => l.trim()) ?? '').trim();
 
   return (
     <div className={styles.reasoning} data-surface="reasoning">
@@ -541,7 +539,7 @@ function ReasoningBlock({ text, streaming }: { text: string; streaming?: boolean
       >
         <span className={styles.reasoningChevron}>{open ? '▾' : '▸'}</span>
         <span className={styles.reasoningLabel}>
-          {streaming && !userToggled.current ? '思考中…' : '思考过程'}
+          {streaming && !userToggled.current ? t('思考中…') : t('思维链')}
         </span>
         {!open && firstLine ? (
           <span className={styles.reasoningPreview}>{firstLine}…</span>
@@ -574,7 +572,7 @@ function ToolResultCard({ name, content }: { name?: string; content: string }) {
         <span className={styles.toolResultMeta}>{content.length} 字</span>
       </button>
       {open && (
-        <pre className={styles.toolResultBody}>{content.length > 8000 ? content.slice(0, 8000) + '\n… (已截断)' : content}</pre>
+        <pre className={styles.toolResultBody}>{content}</pre>
       )}
     </div>
   );
@@ -676,9 +674,19 @@ const MessageBubble = memo(function MessageBubble({
     );
   }
   const isUser = msg.role === 'user';
-  const body = msg.content || (msg.isStreaming ? '' : '（空回复）');
+  // A turn that is only a chain is not an empty reply. Showing "（空回复）"
+  // under a collapsed header is what made the chain look missing.
+  const body = msg.content || (msg.isStreaming || msg.reasoning ? '' : '（空回复）');
   return (
     <>
+    {!isUser && msg.speaker ? (
+      <div className={styles.speakerRow}>
+        <span className={styles.speakerAvatar} style={{ background: `hsl(${msg.speaker.hue} 68% 52%)` }}>
+          {msg.speaker.name.slice(0, 1)}
+        </span>
+        <span className={styles.speakerName}>{msg.speaker.name}</span>
+      </div>
+    ) : null}
     {!isUser && msg.reasoning ? (
       <ReasoningBlock text={msg.reasoning} streaming={msg.isStreaming && !msg.content} />
     ) : null}
@@ -719,10 +727,10 @@ const MessageBubble = memo(function MessageBubble({
           ) : null}
         </div>
       </div>
-    ) : (
+    ) : (body || msg.isStreaming) ? (
       <div className={`${styles.messageRow} ${styles.messageRowAssistant} ${styles.proseRow}`}>
-        <div className={styles.prose}>
-          <Markdown text={msg.content || body} />
+        <div className={styles.prose} data-surface="prose">
+          <Markdown text={body} />
           {msg.isStreaming && <span className={styles.streamingDot} />}
         </div>
         {!msg.isStreaming && msg.content ? (
@@ -746,7 +754,7 @@ const MessageBubble = memo(function MessageBubble({
           </button>
         ) : null}
       </div>
-    )}
+    ) : null}
     </>
   );
 });
@@ -803,31 +811,6 @@ export function Chat({
   const [hits, setHits] = useState<SuggestHit[]>([]);
   const [hitIndex, setHitIndex] = useState(0);
   const [mentionOpen, setMentionOpen] = useState(false);
-  /**
-   * How many of the newest messages to render.
-   *
-   * A long agent session can hold hundreds of messages, each with a collapsible
-   * tool card and a reasoning block — one real session reached 88 bubbles and
-   * 816 tool elements, all mounted at once, which made the tab crawl. Render the
-   * tail and let the user pull in more on demand.
-   *
-   * Deliberately message-count based rather than pixel-height virtualisation:
-   * bubbles resize as reasoning/diffs expand, and a wrong offset there would
-   * jump the scroll position. A simple window cannot do that.
-   */
-  const MESSAGE_WINDOW = 40;
-  /**
-   * How many messages are mounted.
-   *
-   * Starts at the most recent page and only grows when the reader scrolls up —
-   * nothing is trimmed server-side, so this is purely about how much DOM exists
-   * at once. Reasoning chains and diffs can be thousands of pixels each, so
-   * mounting the whole transcript would be wasteful; mounting only what is
-   * reachable is not.
-   */
-  const [visibleCount, setVisibleCount] = useState(MESSAGE_WINDOW);
-  /** Guards against re-entrant "load more" while a render is pending. */
-  const loadingMoreRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   /**
@@ -855,28 +838,6 @@ export function Chat({
   }, [draftInsert, onDraftConsumed]);
 
   /**
-   * Reset the window when the conversation changes.
-   *
-   * Switching from a 300-message session to a 3-message one should not leave
-   * `visibleCount` at 300 (harmless) nor carry a stale "load earlier" state.
-   * Keyed on the length dropping sharply so streaming (which grows the tail)
-   * does not reset it.
-   */
-  useEffect(() => {
-    setVisibleCount((c) => (messages.length < c ? MESSAGE_WINDOW : c));
-  }, [messages.length]);
-
-  const hiddenCount = Math.max(0, messages.length - visibleCount);
-  const visibleMessages = useMemo(
-    () => (hiddenCount > 0 ? messages.slice(hiddenCount) : messages),
-    [messages, hiddenCount],
-  );
-
-  const showEarlier = useCallback(() => {
-    setVisibleCount((c) => c + MESSAGE_WINDOW * 2);
-  }, []);
-
-  /**
    * tool_call_id -> result text.
    *
    * Tool results arrive as their own messages, so without this pairing the
@@ -899,11 +860,11 @@ export function Chat({
    */
   const renderedCallIds = useMemo(() => {
     const s = new Set<string>();
-    for (const msg of visibleMessages) {
+    for (const msg of messages) {
       for (const tc of msg.toolCalls ?? []) if (tc.id) s.add(tc.id);
     }
     return s;
-  }, [visibleMessages]);
+  }, [messages]);
 
   /** Follow the transcript only when the reader is already at the bottom. */
   useEffect(() => {
@@ -914,23 +875,6 @@ export function Chat({
       const near = gap < 80;
       stickToBottomRef.current = near;
       setAtBottom(near);
-
-      /*
-       * Grow the mounted window as the reader approaches the top, and keep the
-       * scroll position anchored so pulling in older messages does not jump the
-       * viewport. This is the "render what you look at" behaviour: the DOM only
-       * holds what is reachable, without dropping any data.
-       */
-      if (el.scrollTop < 320 && !loadingMoreRef.current) {
-        loadingMoreRef.current = true;
-        const before = el.scrollHeight;
-        setVisibleCount((c) => c + MESSAGE_WINDOW * 2);
-        requestAnimationFrame(() => {
-          const el2 = messagesRef.current;
-          if (el2) el2.scrollTop += el2.scrollHeight - before;
-          loadingMoreRef.current = false;
-        });
-      }
     };
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
@@ -1234,23 +1178,11 @@ export function Chat({
           </div>
         ) : (
           <>
-            {hiddenCount > 0 ? (
-              <button
-                type="button"
-                className={styles.loadEarlier}
-                onClick={showEarlier}
-                title="更早的消息默认不渲染，避免长会话卡顿"
-              >
-                ↑ 加载更早的 {Math.min(MESSAGE_WINDOW * 2, hiddenCount)} 条
-                <span className={styles.loadEarlierMeta}>（共 {messages.length} 条，已显示 {visibleCount} 条）</span>
-              </button>
-            ) : null}
-            {visibleMessages.map((msg, i) => (
-              // `index` must be the position in the FULL list — rewind targets it.
+            {messages.map((msg, i) => (
               <MessageBubble
-                key={hiddenCount + i}
+                key={i}
                 msg={msg}
-                index={hiddenCount + i}
+                index={i}
                 onRewind={onRewindTo}
                 toolResults={toolResults}
                 renderedCallIds={renderedCallIds}
@@ -1416,13 +1348,27 @@ export function Chat({
                 step={0.01}
                 value={thinkRaw}
                 onChange={(e) => {
-                  const raw = Number(e.target.value);
-                  setThinkRaw(raw);
+                  // Dragging reports fractional values. Committing each one
+                  // saved settings and rebuilt agents, which killed the turn
+                  // and left the composer looking stuck until the thumb moved.
+                  setThinkRaw(Number(e.target.value));
+                }}
+                onPointerUp={(e) => {
+                  const raw = Number((e.target as HTMLInputElement).value);
                   const idx = Math.round(raw);
                   const lv = THINK_LEVELS[idx];
+                  setThinkRaw(idx);
+                  if (lv && lv.id !== thinkingLevel) onThinkingLevel?.(lv.id);
+                  (e.target as HTMLInputElement).blur();
+                }}
+                onKeyUp={(e) => {
+                  if (!e.key.startsWith('Arrow')) return;
+                  const raw = Number((e.target as HTMLInputElement).value);
+                  const idx = Math.round(raw);
+                  const lv = THINK_LEVELS[idx];
+                  setThinkRaw(idx);
                   if (lv && lv.id !== thinkingLevel) onThinkingLevel?.(lv.id);
                 }}
-                onPointerUp={() => setThinkRaw(Math.max(0, THINK_LEVELS.findIndex((lv) => lv.id === thinkingLevel)))}
                 aria-label="推理深度"
               />
               <div className={styles.thinkTicks}>

@@ -19,6 +19,13 @@ export interface SessionMeta {
   kind?: 'chat' | 'cluster';
   memberCount?: number;
   status?: string;
+  /** Project directory this chat works in. */
+  directory?: string;
+  /** Set when another conversation started this one. */
+  parent_id?: string;
+  background?: boolean;
+  /** True while this conversation still has a turn in flight. */
+  running?: boolean;
 }
 
 interface SidebarProps {
@@ -263,7 +270,8 @@ export function Sidebar({
                 />
               ) : (
                 <>
-                  {s.kind === 'cluster' ? <span className={styles.groupBadge}>群</span> : null}
+                  {s.kind === 'cluster' ? <span className={styles.groupBadge}>{t('群')}</span> : null}
+                  {s.parent_id ? <span className={styles.groupBadge}>{t('子')}</span> : null}
                   <span
                     style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                     onDoubleClick={(e) => {
@@ -272,9 +280,20 @@ export function Sidebar({
                       setEditingId(s.id);
                       setEditingTitle(s.title);
                     }}
-                    title={s.kind === 'cluster' ? `工作群 · ${s.memberCount ?? 0} 名成员` : '双击重命名'}
+                    title={
+                      s.kind === 'cluster'
+                        ? t('工作群 · {n} 名成员', { n: s.memberCount ?? 0 })
+                        : [s.directory, s.parent_id ? t('由 {id} 发起', { id: s.parent_id }) : '', t('双击重命名')].filter(Boolean).join('\n')
+                    }
                   >
                     {s.title}
+                    {s.kind !== 'cluster' && s.directory ? (
+                      <span style={{ opacity: 0.55, marginLeft: 6, fontSize: 10 }}>
+                        {s.directory.split(/[/\\]/).filter(Boolean).slice(-1)[0]}
+                        {s.running ? t(' · 进行中') : ''}
+                        {s.background ? t(' · 后台') : ''}
+                      </span>
+                    ) : null}
                   </span>
                 </>
               )}

@@ -233,7 +233,6 @@ export function outlinePath(workspaceRoot: string, rel: string): { symbols: Code
   } catch {
     return { symbols: [], engine: 'heuristic' };
   }
-  if (content.length > 1_500_000) content = content.slice(0, 1_500_000);
   const relNorm = rel.replace(/\\/g, '/');
   return {
     symbols: outlineFile(abs, relNorm, content),
@@ -245,11 +244,8 @@ export function outlinePath(workspaceRoot: string, rel: string): { symbols: Code
 export function suggestSymbols(workspaceRoot: string, query: string, limit = 30): CodeSymbol[] {
   const q = (query || '').trim().toLowerCase();
   const hits: CodeSymbol[] = [];
-  const maxFiles = 400;
-  let filesSeen = 0;
-
   function walk(dir: string) {
-    if (hits.length >= limit || filesSeen >= maxFiles) return;
+    if (hits.length >= limit) return;
     let ents: string[] = [];
     try {
       ents = readdirSync(dir);
@@ -257,7 +253,7 @@ export function suggestSymbols(workspaceRoot: string, query: string, limit = 30)
       return;
     }
     for (const name of ents) {
-      if (hits.length >= limit || filesSeen >= maxFiles) return;
+      if (hits.length >= limit) return;
       if (SKIP.has(name) || name.startsWith('.')) continue;
       const abs = join(dir, name);
       let st;
@@ -271,8 +267,6 @@ export function suggestSymbols(workspaceRoot: string, query: string, limit = 30)
         continue;
       }
       if (!CODE_EXT.has(extname(name).toLowerCase())) continue;
-      if (st.size > 800_000) continue;
-      filesSeen++;
       let content = '';
       try {
         content = readFileSync(abs, 'utf8');

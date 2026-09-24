@@ -187,7 +187,8 @@ export function App() {
   }, []);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(() => {
     const v = localStorage.getItem('she.thinkingLevel');
-    return v === 'minimal' || v === 'low' || v === 'medium' || v === 'high' ? v : 'medium';
+    const all: ThinkingLevel[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+    return all.includes(v as ThinkingLevel) ? (v as ThinkingLevel) : 'medium';
   });
 
   const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -523,23 +524,17 @@ export function App() {
     setClusterRoomId(null);
     if (id === activeSessionId) return;
     chat.detachStream();
-    const s = await fetchJSON<{ id: string }>(`/api/sessions/${id}/activate`, {
+    const s = await fetchJSON<{ id: string; directory?: string }>(`/api/sessions/${id}/activate`, {
       method: 'POST',
       body: {},
     });
     setActiveSessionId(s.id);
-    /*
-     * Pass the id EXPLICITLY.
-     *
-     * `loadHistory()` with no argument reads `sidRef.current`, which is assigned during render — so
-     * immediately after `setActiveSessionId` it still held the PREVIOUS session and the fetch asked
-     * for the wrong conversation. The `[activeSessionId]` effect then fetched the right one, and the
-     * two responses raced: a slow first response could overwrite the new transcript with the old
-     * conversation, showing the wrong chat under the right title.
-     */
     await chat.loadHistory(s.id);
     await refreshSessions();
-  }, [activeSessionId, chat, refreshSessions, sessions]);
+    // The session may live in another project. Refresh the tree so the files
+    // on screen are the ones this conversation can actually edit.
+    if (s.directory) await kb.fetchTree();
+  }, [activeSessionId, chat, refreshSessions, sessions, kb]);
 
   const handleRenameSession = useCallback(async (id: string, title: string) => {
     await fetchJSON(`/api/sessions/${id}`, { method: 'PUT', body: { title } });
@@ -676,6 +671,35 @@ export function App() {
 
   const paletteCommands: CommandItem[] = [
     { id: 'new', title: '新建会话', group: '会话', hint: 'N', run: () => { void handleNewSession(); } },
+    {
+      id: 'worktree',
+      title: t('新建并行工作副本'),
+      group: t('会话'),
+      run: () => {
+        const name = window.prompt(t('副本名称。会在仓库旁边建一个独立目录，和当前文件互不覆盖。'), '');
+        if (!name?.trim()) return;
+        void (async () => {
+          try {
+            const created = await fetchJSON<{ session: { id: string } }>('/api/worktrees', {
+              method: 'POST',
+              body: { name: name.trim() },
+            });
+            const opened = await fetchJSON<{ id: string; directory?: string }>(
+              `/api/sessions/${created.session.id}/activate`,
+              { method: 'POST', body: {} },
+            );
+            setClusterRoomId(null);
+            setActiveSessionId(opened.id);
+            await chat.loadHistory(opened.id);
+            await refreshSessions();
+            await kb.fetchTree();
+            toast(t('已打开并行副本'));
+          } catch (e) {
+            toast(t('未能创建并行副本：{msg}', { msg: (e as Error).message }));
+          }
+        })();
+      },
+    },
     { id: 'skill-dev', title: '技能档位：开发', group: '技能', run: () => { void handleSkillProfile('dev'); } },
     { id: 'skill-lib', title: '技能档位：创作', group: '技能', run: () => { void handleSkillProfile('liberal'); } },
     { id: 'skill-gen', title: '技能档位：通用', group: '技能', run: () => { void handleSkillProfile('general'); } },
@@ -1105,7 +1129,7 @@ export function App() {
                 <button
                   type="button"
                   onClick={() => {
-                    setDraftInsert('`' + filePreview.path + '`\n```\n' + (filePreview.content.length > 4000 ? filePreview.content.slice(0, 4000) + '\n…' : filePreview.content) + '\n```');
+                    setDraftInsert('`' + filePreview.path + '`\n```\n' + filePreview.content + '\n```');
                     setFilePreview(null);
                   }}
                 >插入到对话</button>

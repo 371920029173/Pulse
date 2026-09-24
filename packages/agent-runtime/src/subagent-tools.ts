@@ -18,6 +18,11 @@ export interface SubagentRequest {
   description: string;
   /** Self-contained instructions. The child cannot see the parent's history. */
   prompt: string;
+  /**
+   * Return as soon as the child has a session, and let it keep running.
+   * The parent is not blocked, and the child transcript stays on that session.
+   */
+  background?: boolean;
 }
 
 export interface SubagentResult {
@@ -39,13 +44,6 @@ export interface SubagentRunner {
 }
 
 export interface SubagentToolOptions {
-  /**
-   * Hard cap on subtasks per call.
-   *
-   * Each child re-sends the entire system prompt, so a large fan-out is
-   * expensive in a way that is invisible from the tool call itself.
-   */
-  maxPerCall?: number;
   /** Called as each subtask starts/finishes, so the UI can show progress. */
   onProgress?: (event: { phase: 'start' | 'done'; description: string; ok?: boolean }) => void;
 }
@@ -56,8 +54,6 @@ export interface SubagentToolSet {
 }
 
 export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolOptions): SubagentToolSet {
-  const maxPerCall = opts?.maxPerCall ?? 4;
-
   const definition: ToolDefinition = {
     name: 'task_spawn',
     description: [
@@ -74,7 +70,7 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
       properties: {
         tasks: {
           type: 'array',
-          description: `Subtasks to run. At most ${maxPerCall} per call.`,
+          description: 'Subtasks to run. Every item in the list runs; none are dropped for length.',
           items: {
             type: 'object',
             properties: {
@@ -84,6 +80,12 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
                 description:
                   'Complete, self-contained instructions. Include the goal, what to inspect, ' +
                   'and exactly what to report back. The child has no access to this conversation.',
+              },
+              background: {
+                type: 'boolean',
+                description:
+                  'True: start the child and return immediately. It keeps running as its own session ' +
+                  '(listed under this conversation) instead of blocking this turn.',
               },
             },
             required: ['description', 'prompt'],
@@ -102,21 +104,17 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
         return {
           description: String(o.description ?? '').trim() || '(未命名子任务)',
           prompt: String(o.prompt ?? '').trim(),
+          background: o.background === true,
         };
       })
       .filter((t) => t.prompt);
 
     if (tasks.length === 0) return 'Error: no usable tasks (each needs a non-empty prompt)';
 
-    const capped = tasks.slice(0, maxPerCall);
-    const note = tasks.length > capped.length
-      ? `\n(注意：一次最多 ${maxPerCall} 个，已忽略其余 ${tasks.length - capped.length} 个)`
-      : '';
-
     // Run concurrently: independent subtasks are exactly the case where waiting
     // in sequence wastes wall-clock time.
     const results = await Promise.all(
-      capped.map(async (t) => {
+      tasks.map(async (t) => {
         opts?.onProgress?.({ phase: 'start', description: t.description });
         try {
           const r = await runner.run(t);
@@ -130,13 +128,10 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
       }),
     );
 
-    const lines: string[] = [`完成 ${results.length} 个子任务${note}`, ''];
+    const lines: string[] = [`完成 ${results.length} 个子任务`, ''];
     for (const r of results) {
       lines.push(`### [${r.ok ? '完成' : '失败'}] ${r.description}`);
-      // Cap the summary so a verbose child cannot flood the parent's context —
-      // that would defeat the purpose of delegating in the first place.
-      const body = r.result.trim();
-      lines.push(body.length > 4000 ? body.slice(0, 4000) + '\n…（已截断）' : body);
+      lines.push(r.result.trim());
       lines.push('');
     }
     lines.push('以上是子智能体返回的摘要。原始过程没有进入本对话；如需细节请再指派。');

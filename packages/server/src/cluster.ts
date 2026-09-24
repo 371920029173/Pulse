@@ -153,7 +153,7 @@ function loadSkillFile(workspaceRoot: string, key: string): string | null {
     try {
       if (existsSync(p)) {
         const t = readFileSync(p, 'utf8').trim();
-        if (t) return t.slice(0, 8000);
+        if (t) return t;
       }
     } catch {
       /* ignore */
@@ -174,7 +174,7 @@ export function buildDefaultRoles(workspaceRoot: string): ClusterRole[] {
 export function expandMembers(roles: ClusterRole[]): ClusterMember[] {
   const members: ClusterMember[] = [];
   for (const role of roles) {
-    const count = Math.max(0, Math.min(9, Math.floor(role.count)));
+    const count = Math.max(0, Math.floor(role.count));
     for (let i = 0; i < count; i++) {
       members.push({
         id: count === 1 ? role.key : `${role.key}#${i + 1}`,
@@ -252,7 +252,7 @@ export class ClusterStore {
   }
 
   list(): ClusterRoom[] {
-    return this.data.rooms.map((r) => ({ ...r, messages: r.messages.slice(-200) }));
+    return this.data.rooms.map((r) => ({ ...r }));
   }
 
   get(id: string): ClusterRoom | undefined {
@@ -319,7 +319,7 @@ export class ClusterStore {
     if (!room) return null;
     room.roles = roles.map((r) => ({
       ...r,
-      count: Math.max(0, Math.min(9, Math.floor(Number(r.count) || 0))),
+      count: Math.max(0, Math.floor(Number(r.count) || 0)),
     }));
     this.applyRoles(room, workspaceRoot);
     room.updated_at = nowIso();
@@ -410,15 +410,14 @@ function createProvider(config: SheConfig): LLMProvider {
     config.llm.apiKey,
     config.llm.baseUrl,
     config.llm.model,
-    Math.min(config.llm.maxTokens, 2048),
+    config.llm.maxTokens,
     config.llm.temperature,
     level,
   );
 }
 
-function transcriptFor(room: ClusterRoom, limit = 24): string {
+function transcriptFor(room: ClusterRoom): string {
   return room.messages
-    .slice(-limit)
     .map((m) => `[${m.name}] ${m.content}`)
     .join('\n\n');
 }
@@ -431,18 +430,26 @@ async function memberSpeak(opts: {
   phase: string;
   parallelGroup?: string;
   store: ClusterStore;
-  onEvent?: (ev: StreamChunk & { member?: string; phase?: string }) => void;
+  onEvent?: (ev: StreamChunk & { member?: string; phase?: string; name?: string }) => void;
 }): Promise<ClusterMessage> {
   const { config, room, member, userGoal, phase, parallelGroup, store, onEvent } = opts;
   const provider = createProvider(config);
+  const roster = room.members
+    .map((m) => `- ${m.name}（${m.title}，阶段 ${m.phase}）${m.id === member.id ? ' ← 这是你' : ''}`)
+    .join('\n');
   const system = `你在 SHE 自动化讨论群里发言。
-角色：${member.name}（${member.title}）
+你是：${member.name}（${member.title}）
 阶段：${phase}
+
+## 团队名册
+下面这些人才是这个群里的成员。点名、交接、分工只能用这些名字。不要发明名单上没有的人，也不要假装自己是别人。
+${roster || '（当前没有其他成员）'}
+
 规则：
 - 用中文，简洁，面向协作。
-- 只做自己职责内的事；需要别人做的事点名角色。
+- 只做自己职责内的事；需要别人做的事，点名册上的名字。
 - 不要假装已经执行了未发生的命令。
-- 可以引用群里前人发言。
+- 可以引用群里前人发言。并行时你们同时写，看不到彼此这一轮还没写完的内容。
 
 ## 角色 skill
 ${member.skill}`;
@@ -465,9 +472,9 @@ ${transcriptFor(room)}
   let text = '';
   try {
     const reply = await provider.chat(messages, undefined, (chunk) => {
-      if (chunk.type === 'text' && chunk.content) {
-        text += chunk.content;
-        onEvent?.({ ...chunk, member: member.id, phase });
+      if ((chunk.type === 'text' || chunk.type === 'reasoning') && chunk.content) {
+        if (chunk.type === 'text') text += chunk.content;
+        onEvent?.({ ...chunk, member: member.id, name: member.name, phase });
       }
     });
     if (!text && reply.content) text = reply.content;
@@ -478,13 +485,13 @@ ${transcriptFor(room)}
       onEvent?.({ type: 'status', content: `${member.name} 主接口失败，改备用…`, member: member.id, phase });
       const fbProvider =
         (fb.provider || 'openai') === 'anthropic'
-          ? new AnthropicProvider(fb.apiKey || config.llm.apiKey, fb.model || config.llm.model, 2048, 0.3)
+          ? new AnthropicProvider(fb.apiKey || config.llm.apiKey, fb.model || config.llm.model, config.llm.maxTokens, config.llm.temperature)
           : new OpenAIProvider(
               fb.apiKey || config.llm.apiKey,
               fb.baseUrl || config.llm.baseUrl,
               fb.model || config.llm.model,
-              2048,
-              0.3,
+              config.llm.maxTokens,
+              config.llm.temperature,
               config.llm.thinkingLevel || 'medium',
             );
       const reply = await fbProvider.chat(messages);
@@ -507,10 +514,10 @@ ${transcriptFor(room)}
 
 /**
  * One automated wave, driven by the room's role configuration:
- *   lead phase  → sequential (领导拆解)
- *   work phase  → parallel (后勤 / 文案 / 研发 …)
- *   review phase→ sequential (审查)
- *   lead phase  → sequential again (领导汇总)
+ *   lead        → one speaker splits the work
+ *   work        → every worker at once
+ *   review      → every reviewer at once
+ *   lead        → one speaker summarises after both waves
  *
  * Roles with count 0 are simply absent from `room.members`, so the wave adapts
  * to whatever the user configured.
@@ -520,7 +527,7 @@ export async function runClusterWave(opts: {
   store: ClusterStore;
   roomId: string;
   goal: string;
-  onEvent?: (ev: StreamChunk & { member?: string; phase?: string }) => void;
+  onEvent?: (ev: StreamChunk & { member?: string; phase?: string; name?: string }) => void;
 }): Promise<ClusterRoom> {
   const room = opts.store.get(opts.roomId);
   if (!room) throw new Error('room not found');
@@ -544,16 +551,32 @@ export async function runClusterWave(opts: {
     phaseLabel: string,
     parallelGroup?: string,
   ) => {
-    await memberSpeak({
-      config: opts.config,
-      room: snapshot(),
-      member,
-      userGoal: opts.goal,
-      phase: phaseLabel,
-      parallelGroup,
-      store: opts.store,
-      onEvent: opts.onEvent,
-    });
+    try {
+      await memberSpeak({
+        config: opts.config,
+        room: snapshot(),
+        member,
+        userGoal: opts.goal,
+        phase: phaseLabel,
+        parallelGroup,
+        store: opts.store,
+        onEvent: opts.onEvent,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      opts.store.append(opts.roomId, {
+        role: member.id,
+        name: member.name,
+        content: `（发言失败：${msg}）`,
+        parallel_group: parallelGroup,
+      });
+      opts.onEvent?.({
+        type: 'status',
+        content: `${member.name} 失败：${msg}`,
+        member: member.id,
+        phase: phaseLabel,
+      } as any);
+    }
   };
 
   try {
@@ -564,40 +587,57 @@ export async function runClusterWave(opts: {
       await speak(lead, '拆解与分工');
     }
 
-    // ── 2. work phase, in parallel ──
-    const workers = membersOf('work');
-    if (workers.length) {
+    // Snapshot once per wave so parallel speakers share a context and do not
+    // wait on each other's replies. Lead split and the final summary stay
+    // single-speaker because they have to read what the wave just said.
+    const runParallel = async (members: ClusterMember[], phaseLabel: string) => {
+      if (!members.length) return;
       const parallelId = randomUUID().slice(0, 8);
-      const names = workers.map((m) => m.name).join(' / ');
       opts.onEvent?.({
         type: 'status',
-        content: `并行波次：${names}`,
-        phase: '并行产出',
+        content: `并行：${members.map((m) => m.name).join(' / ')}`,
+        phase: phaseLabel,
       } as any);
-
-      // Snapshot the transcript once so parallel speakers see the same context
-      // instead of racing each other's writes.
       const snap = snapshot();
-      await Promise.all(
-        workers.map((m) =>
+      const settled = await Promise.allSettled(
+        members.map((m) =>
           memberSpeak({
             config: opts.config,
             room: snap,
             member: m,
             userGoal: opts.goal,
-            phase: '并行产出',
+            phase: phaseLabel,
             parallelGroup: parallelId,
             store: opts.store,
             onEvent: opts.onEvent,
           }),
         ),
       );
-    }
+      // One speaker throwing used to reject the whole wave, so the other
+      // members' finished work never reached review. Record the failure and
+      // let the rest of the room continue.
+      for (let i = 0; i < settled.length; i++) {
+        const item = settled[i];
+        if (item.status !== 'rejected') continue;
+        const member = members[i];
+        const msg = item.reason instanceof Error ? item.reason.message : String(item.reason);
+        opts.store.append(opts.roomId, {
+          role: member.id,
+          name: member.name,
+          content: `（发言失败：${msg}）`,
+          parallel_group: parallelId,
+        });
+        opts.onEvent?.({
+          type: 'status',
+          content: `${member.name} 失败：${msg}`,
+          member: member.id,
+          phase: phaseLabel,
+        } as any);
+      }
+    };
 
-    // ── 3. review phase ──
-    for (const m of membersOf('review')) {
-      await speak(m, '审查');
-    }
+    await runParallel(membersOf('work'), '并行产出');
+    await runParallel(membersOf('review'), '并行审查');
 
     // ── 4. lead phase closes out (a second lead member, or the same one) ──
     const summarizer = leads[1] ?? lead;

@@ -1,5 +1,6 @@
 import type { LLMProvider, LLMMessage, ToolDefinition, ToolCall, StreamChunk } from '@she/shared';
 import { createLogger } from '@she/shared';
+import { repairApiMessages } from '../protocol.js';
 
 const log = createLogger('openai');
 
@@ -80,6 +81,11 @@ interface OpenAIRequestMessage {
     type: 'function';
     function: { name: string; arguments: string };
   }>;
+  /**
+   * DeepSeek thinking-mode protocol. Present only on an assistant message that
+   * still has tool_calls, and only for endpoints that require it.
+   */
+  reasoning_content?: string;
 }
 
 export class OpenAIProvider implements LLMProvider {
@@ -106,6 +112,11 @@ export class OpenAIProvider implements LLMProvider {
     this.maxTokens = maxTokens;
     this.temperature = temperature;
     this.thinkingLevel = thinkingLevel;
+  }
+
+  /** Next request uses this depth. Does not interrupt a request already in flight. */
+  setThinkingLevel(level: OpenAIProvider['thinkingLevel']): void {
+    this.thinkingLevel = level;
   }
 
   private tempForThinking(): number {
@@ -171,6 +182,28 @@ export class OpenAIProvider implements LLMProvider {
   }
 
   /**
+   * Does this endpoint speak DeepSeek's `reasoning_content` protocol?
+   *
+   * Thinking-mode DeepSeek (and the compatible family: QwQ, Qwen, GLM, Kimi,
+   * R1) returns 400 on the next tool round unless the assistant message that
+   * issued the tool_calls carries `reasoning_content` back. A finished turn
+   * must NOT carry it: prior-round chain-of-thought is not part of the context,
+   * and some builds reject it there.
+   *
+   * o-series / GPT-5 use a different channel. Echoing this field at them is not
+   * their protocol. Override with SHE_REASONING_ECHO=on|off when detection is
+   * wrong; a 400 that names the field as unknown also turns it off.
+   */
+  private echoesReasoningContent(): boolean {
+    const override = process.env.SHE_REASONING_ECHO;
+    if (override === 'on') return true;
+    if (override === 'off') return false;
+    const m = this.model.toLowerCase();
+    if (/^(o[134]\b|gpt-5)/.test(m)) return false;
+    return /deepseek|qwq|qwen|glm|kimi|reasoner|\br1\b|thinking/.test(m);
+  }
+
+  /**
    * Apply the thinking level to the request.
    *
    * Thinking depth is expressed through `reasoning_effort` — NOT temperature.
@@ -215,7 +248,7 @@ export class OpenAIProvider implements LLMProvider {
     onChunk?: (chunk: StreamChunk) => void,
     signal?: AbortSignal,
   ): Promise<LLMMessage> {
-    const openaiMessages = messages.map(m => this.toOpenAIMessage(m));
+    const openaiMessages = repairApiMessages(messages).map(m => this.toOpenAIMessage(m));
     const openaiTools = tools?.length ? tools.map(t => this.toOpenAITool(t)) : undefined;
     /*
      * Streaming is also governed by config, not only by whether the caller wants
@@ -229,7 +262,10 @@ export class OpenAIProvider implements LLMProvider {
     const body: Record<string, unknown> = {
       model: this.model,
       messages: openaiMessages,
-      max_tokens: this.maxTokens,
+      // 0 means "no cap we invented". Still send a high ceiling: several
+      // endpoints otherwise default max_tokens to 4096, and thinking tokens
+      // are counted against it, so the chain is cut off with no answer.
+      max_tokens: this.maxTokens > 0 ? this.maxTokens : 131072,
       temperature: this.temperature,
       stream,
     };
@@ -242,16 +278,65 @@ export class OpenAIProvider implements LLMProvider {
 
     let response = await this.post(body, signal);
 
-    // Some OpenAI-compatible gateways reject `reasoning_effort` outright rather
-    // than ignoring it. Rather than failing the turn, drop the field and retry
-    // once, then remember that this endpoint does not take it.
-    if (response.status === 400 && 'reasoning_effort' in body) {
+    // A 400 that names a thinking-protocol field is often "this endpoint doesn't
+    // speak that dialect" or "you forgot to echo reasoning_content". Both are
+    // recoverable once. A 400 about anything else is the caller's problem.
+    if (response.status === 400) {
       const detail = await response.clone().text().catch(() => '');
-      if (/reasoning_effort/i.test(detail)) {
+      let retry = false;
+      if ('reasoning_effort' in body && /reasoning_effort/i.test(detail)) {
         process.env.SHE_REASONING_EFFORT = 'off';
         delete body.reasoning_effort;
-        response = await this.post(body, signal);
+        retry = true;
       }
+      if (/max_tokens/i.test(detail)) {
+        const mentioned = [...detail.matchAll(/\d{3,}/g)]
+          .map((m) => Number(m[0]))
+          .filter((n) => Number.isFinite(n) && n >= 256 && n < Number(body.max_tokens));
+        if (mentioned.length) {
+          body.max_tokens = Math.max(...mentioned);
+          retry = true;
+        }
+      }
+      if (/reasoning_content/i.test(detail)) {
+        const mustEcho = /must be passed|must be provided|required|missing/i.test(detail);
+        const rejected = /unknown|unexpected|unrecognized|not support|unsupported|extra/i.test(detail);
+        const messages = body.messages as OpenAIRequestMessage[];
+        if (mustEcho && !rejected) {
+          let patched = false;
+          for (const m of messages) {
+            if (m.role === 'assistant' && m.tool_calls?.length && m.reasoning_content == null) {
+              m.reasoning_content = '';
+              patched = true;
+            }
+          }
+          if (patched) retry = true;
+        } else if (rejected && !mustEcho) {
+          for (const m of messages) delete m.reasoning_content;
+          process.env.SHE_REASONING_ECHO = 'off';
+          retry = true;
+        }
+      }
+      if (/content or tool_calls must be set/i.test(detail)) {
+        const wire = body.messages as OpenAIRequestMessage[];
+        let patched = false;
+        for (const m of wire) {
+          if (m.role !== 'assistant') continue;
+          const calls = (m.tool_calls ?? []).filter((tc) => tc?.id && tc.function?.name);
+          const hasText = typeof m.content === 'string' && m.content.trim().length > 0;
+          if (calls.length !== (m.tool_calls?.length ?? 0)) {
+            if (calls.length) m.tool_calls = calls;
+            else delete m.tool_calls;
+            patched = true;
+          }
+          if (!hasText && !(m.tool_calls?.length)) {
+            m.content = '…';
+            patched = true;
+          }
+        }
+        if (patched) retry = true;
+      }
+      if (retry) response = await this.post(body, signal);
     }
 
     if (!response.ok) {
@@ -434,6 +519,7 @@ export class OpenAIProvider implements LLMProvider {
     };
     if (reasoning) {
       result.reasoning = reasoning;
+      result.reasoningOrigin = 'native';
       onChunk?.({ type: 'reasoning', content: reasoning });
     }
 
@@ -682,7 +768,10 @@ export class OpenAIProvider implements LLMProvider {
       role: 'assistant',
       content: contentAccum,
     };
-    if (reasoningAccum) result.reasoning = reasoningAccum;
+    if (reasoningAccum) {
+      result.reasoning = reasoningAccum;
+      result.reasoningOrigin = 'native';
+    }
 
     if (toolCallAccum.size > 0) {
       result.tool_calls = Array.from(toolCallAccum.values()).map(tc => ({
@@ -696,14 +785,39 @@ export class OpenAIProvider implements LLMProvider {
   }
 
   private toOpenAIMessage(msg: LLMMessage): OpenAIRequestMessage {
+    let text = typeof msg.content === 'string' ? msg.content : '';
+    /*
+     * An assistant turn with neither text nor tool calls is rejected:
+     * "Invalid assistant message: content or tool_calls must be set".
+     *
+     * That is a reasoning-only turn (native or imported), or a turn that was
+     * persisted before any text arrived. The chain cannot go in
+     * `reasoning_content` unless this same message also has tool_calls —
+     * that field is the model's own protocol. Put the chain in the body so
+     * the turn stays a real message. A turn with nothing at all still needs
+     * one character, or the next request 400s.
+     */
+    if (msg.role === 'assistant' && !text.trim() && !msg.tool_calls?.length) {
+      text = msg.reasoning?.trim() || '…';
+    }
+
     const result: OpenAIRequestMessage = {
       role: msg.role,
-      content: msg.content || null,
+      // Tool results must be a string. `null` is how assistant turns say
+      // "the content is the tool call", and it is not valid on role=tool.
+      content: msg.role === 'tool' ? text : (text.length ? text : null),
     };
     if (msg.name) result.name = msg.name;
     if (msg.tool_call_id) result.tool_call_id = msg.tool_call_id;
     if (msg.tool_calls?.length) {
       result.tool_calls = msg.tool_calls;
+    }
+
+    if (msg.role === 'assistant' && msg.tool_calls?.length && this.echoesReasoningContent()) {
+      // Foreign chains stay on the transcript for the UI. An empty string is
+      // enough to satisfy "must be passed back" without pretending the thought
+      // was this model's.
+      result.reasoning_content = msg.reasoningOrigin === 'imported' ? '' : (msg.reasoning ?? '');
     }
     return result;
   }

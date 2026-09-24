@@ -46,6 +46,8 @@ export interface ChatMessage {
   isStreaming?: boolean;
   /** Set while reasoning is still streaming and content has not started. */
   isThinking?: boolean;
+  /** Work-group speaker. Absent in a 1:1 chat. */
+  speaker?: { name: string; hue: number };
 }
 
 export interface StreamChunk {
@@ -88,7 +90,7 @@ export interface KBQueryResultData {
 interface ServerHistoryMessage {
   role: string;
   content?: string | null;
-  /** Persisted chain-of-thought (display-only, never replayed to the API). */
+  /** Persisted chain-of-thought. The UI only displays it; the provider decides what is echoed. */
   reasoning?: string | null;
   tool_calls?: { id?: string; type?: string; function?: { name?: string; arguments?: string } }[];
   tool_call_id?: string;
@@ -174,6 +176,8 @@ export function useChat(sessionId?: string | null) {
   }
 
   const abortRef = useRef<AbortController | null>(null);
+  const followRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const armFollowRef = useRef<(sid: string) => void>(() => {});
   /** Pausing only holds back rendering — the stream keeps running underneath. */
   const [isPaused, setIsPaused] = useState(false);
   const pausedRef = useRef(false);
@@ -437,9 +441,11 @@ export function useChat(sessionId?: string | null) {
       setIsLoading(false);
       setIsPaused(false);
       window.dispatchEvent(new CustomEvent('she:stream-failed', { detail: { message: err.message } }));
-      // Best-effort: ask server to abort any in-flight turn / mark tasks.
-      void fetchJSON(withSid('/api/chat/stop'), { method: 'POST', body: {} }).catch(() => undefined);
-      void fetchJSON('/api/tasks/mark-stale', { method: 'POST', body: { reason: err.message } }).catch(() => undefined);
+      // The view dropped. The turn belongs to that conversation and keeps
+      // running; coming back shows the result. Stopping here is what made
+      // switching chats — or a quiet stretch of thinking — kill the work.
+      if (abortRef.current?.signal.aborted) abortRef.current = null;
+      armFollowRef.current(sidRef.current);
     },
     onDone: () => {
       setIsLoading(false);
@@ -473,6 +479,7 @@ export function useChat(sessionId?: string | null) {
       { message: text, stream: true, session_id: sidRef.current },
       attachStreamHandlers(acc, toolCalls, currentToolCallRef),
       controller.signal,
+      { idleTimeoutMs: 0 },
     );
   }, [isLoading, attachStreamHandlers]);
 
@@ -579,6 +586,8 @@ export function useChat(sessionId?: string | null) {
       withSid('/api/chat/history', explicitSessionId),
     );
     setMessages(normalizeHistory(data.messages ?? []));
+    const sid = explicitSessionId || sidRef.current;
+    if (sid) armFollowRef.current(sid);
   }, []);
 
 
@@ -649,6 +658,7 @@ export function useChat(sessionId?: string | null) {
   }, [isLoading, pendingPatches.length]);
 
   const stopStreaming = useCallback(() => {
+    if (followRef.current) { clearInterval(followRef.current); followRef.current = null; }
     abortRef.current?.abort();
     abortRef.current = null;
     setIsLoading(false);
@@ -764,6 +774,7 @@ export function useChat(sessionId?: string | null) {
 
   /** Clear local transcript only (no server call) — for switching to a fresh session. */
   const resetLocal = useCallback(() => {
+    if (followRef.current) { clearInterval(followRef.current); followRef.current = null; }
     abortRef.current?.abort();
     abortRef.current = null;
     setIsLoading(false);
@@ -789,6 +800,7 @@ export function useChat(sessionId?: string | null) {
    * instead of having thrown the work away.
    */
   const detachStream = useCallback(() => {
+    if (followRef.current) { clearInterval(followRef.current); followRef.current = null; }
     abortRef.current?.abort();
     abortRef.current = null;
     setIsLoading(false);
@@ -797,6 +809,54 @@ export function useChat(sessionId?: string | null) {
     setPendingPatch(null);
     setPendingPatches([]);
   }, []);
+
+  /**
+   * Keep showing a turn that is still running on the server.
+   *
+   * Switching chats aborts only this view. The agent keeps working. When the
+   * user comes back, poll until the turn finishes and then load the result.
+   * A local stream (abortRef set) is the live view — don't overwrite it.
+   */
+  const armFollow = useCallback((sid: string) => {
+    if (followRef.current) { clearInterval(followRef.current); followRef.current = null; }
+    if (!sid || abortRef.current) return;
+    const pull = async () => {
+      if (sidRef.current !== sid) return;
+      const data = await fetchJSON<{ messages: ServerHistoryMessage[] }>(
+        withSid('/api/chat/history', sid),
+      );
+      if (sidRef.current === sid) setMessages(normalizeHistory(data.messages ?? []));
+    };
+    void (async () => {
+      try {
+        const st = await fetchJSON<{ running: boolean }>(withSid('/api/chat/running', sid));
+        if (sidRef.current !== sid || !st.running || abortRef.current) return;
+        setIsLoading(true);
+        await pull();
+        followRef.current = setInterval(() => {
+          void (async () => {
+            if (sidRef.current !== sid) {
+              if (followRef.current) { clearInterval(followRef.current); followRef.current = null; }
+              return;
+            }
+            try {
+              const again = await fetchJSON<{ running: boolean }>(withSid('/api/chat/running', sid));
+              if (sidRef.current !== sid) return;
+              if (!again.running) {
+                if (followRef.current) { clearInterval(followRef.current); followRef.current = null; }
+                await pull();
+                setIsLoading(false);
+                return;
+              }
+              setIsLoading(true);
+              await pull();
+            } catch { /* keep the interval */ }
+          })();
+        }, 2000);
+      } catch { /* server unreachable; the transcript we already loaded stands */ }
+    })();
+  }, []);
+  armFollowRef.current = armFollow;
 
   return {
     messages,

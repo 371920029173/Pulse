@@ -643,4 +643,17 @@ describe('GroupKBEngine', () => {
     // direct circular parenting.
     assert.throws(() => engine.addChildGroup(c.id, a.id), /cycle/);
   });
+
+  it('should find a group by one word of its path', () => {
+    const root = engine.createGroup('audit');
+    const mid = engine.createGroup('agent-usability', root.id);
+    const leaf = engine.createGroup('2026-09-22', mid.id);
+    engine.addMemory(leaf.id, 'text', 'finding', 'shell sandbox escapes');
+    const result = engine.query('usability');
+    assert.ok(result.nodes.some((n) => n.title === 'finding'));
+  });
+
+  it('should refuse an edge between missing nodes', () => {
+    assert.throws(() => engine.addTypedEdge('bogus-id-1', 'bogus-id-2', 'weak'), /不存在/);
+  });
 });

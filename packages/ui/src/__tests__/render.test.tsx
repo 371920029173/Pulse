@@ -77,15 +77,14 @@ describe('Chat 消息渲染', () => {
     expect(screen.getByText(/助手回复标记XYZ/)).toBeTruthy();
   });
 
-  it('多轮消息全部渲染（不因虚拟化丢失可见内容）', () => {
-    const messages = Array.from({ length: 6 }, (_, i) =>
+  it('长会话从第一条到最后一条都在页面上', () => {
+    const messages = Array.from({ length: 50 }, (_, i) =>
       msg({ role: i % 2 ? 'assistant' : 'user', content: `回合标记${i}` }));
     const { container } = render(<Chat {...chatProps({ messages })} />);
     const text = container.textContent ?? '';
-    // Near the bottom of the transcript everything should be present; the window
-    // exists to bound work on very long histories, not to hide the recent turns.
-    expect(text).toContain('回合标记5');
-    expect(text).toContain('回合标记4');
+    expect(text).toContain('回合标记0');
+    expect(text).toContain('回合标记49');
+    expect(text).not.toContain('加载更早');
   });
 
   it('错误消息要显示出来，而不是静默吞掉', () => {
@@ -95,13 +94,15 @@ describe('Chat 消息渲染', () => {
     expect(screen.getByText(/连接失败测试用错误/)).toBeTruthy();
   });
 
-  it('流式中的思考内容有承载区域', () => {
+  it('思维链全文在页面上，不因长度被收成一行', () => {
+    const chain = '第一行思维链标记AAA\n' + '后续很长的推理'.repeat(40);
     const { container } = render(<Chat {...chatProps({
-      messages: [msg({ role: 'assistant', content: '', reasoning: '正在推理标记QQQ' })],
+      messages: [msg({ role: 'assistant', content: '', reasoning: chain })],
     })} />);
-    // Reasoning may be collapsed by default, but it must be in the DOM so it can
-    // be expanded — the bug report was that it could not be opened at all.
-    expect(container.innerHTML).toContain('正在推理标记QQQ');
+    const text = container.textContent ?? '';
+    expect(text).toContain('第一行思维链标记AAA');
+    expect(text).toContain('后续很长的推理'.repeat(40));
+    expect(text).not.toContain('空回复');
   });
 });
 

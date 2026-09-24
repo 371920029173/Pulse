@@ -160,9 +160,11 @@ Every check script follows the same shape, and it is worth copying rather than i
    feature. A bulk edit wrote a literal `\n` instead of a newline, merging two comment lines
    — and the merged line began with `//`, so the assignment below it was swallowed into the
    comment. The element was created, never given any CSS, and every saved stylesheet did
-   nothing. All 657 unit tests passed, because they all read source; the browser runs a
+   nothing. Every unit test passed, because they all read source; the browser runs a
    bundle. `check:dist` now greps the built bundle for the wiring that has no server-side
    test, and fails if it is missing or older than the newest source file.
+   (The count is deliberately not quoted here: it changes with the suite, and a stale number
+   in prose is worse than none. `check:docs` validates the totals that *are* quoted.)
 7. **Strip comments before matching text.** `check:dist` first flagged the Google Fonts link
    it was written to prevent — because `index.html` *explains* that link in a comment. A
    check that fails on the prose describing the rule is a check someone deletes.

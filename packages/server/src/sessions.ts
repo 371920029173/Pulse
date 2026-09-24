@@ -35,6 +35,18 @@ export interface ChatSession {
    */
   closed?: boolean;
   closed_at?: string;
+  /**
+   * Directory this conversation works in.
+   *
+   * Absent on older sessions: those keep following the process workspace, which
+   * is what they always did. New sessions stamp the directory so a later
+   * workspace switch does not drag them onto another project.
+   */
+  directory?: string;
+  /** Set when this conversation was started by another one. */
+  parent_id?: string;
+  /** A child that should keep running after the parent stops waiting. */
+  background?: boolean;
 }
 
 /** One conversation to insert via `importMany`. */
@@ -103,6 +115,8 @@ function defaultTitle(messages: LLMMessage[]): string {
 
 export class SessionStore {
   private path: string;
+  /** Project directory this file belongs to (`<root>/.she/sessions.json`). */
+  readonly rootDir: string;
   private data: SessionStoreFile;
   /** Set when the previous file could not be used and was moved aside. */
   private recovery: { backup: string; reason: string } | null = null;
@@ -112,6 +126,7 @@ export class SessionStore {
   constructor(baseDir: string) {
     const dir = join(baseDir, '.she');
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    this.rootDir = baseDir;
     this.path = join(dir, 'sessions.json');
     this.data = { schema_version: SCHEMA, active_id: null, sessions: [] };
     this.load();
@@ -164,6 +179,19 @@ export class SessionStore {
       this.save();
     }
     if (!existsSync(this.path)) this.save();
+    this.pinMissingDirectories();
+  }
+
+  /** Older chats had no directory and followed whichever project was open. */
+  private pinMissingDirectories(): void {
+    let changed = false;
+    for (const s of this.data.sessions) {
+      if (!s.directory) {
+        s.directory = this.rootDir;
+        changed = true;
+      }
+    }
+    if (changed) this.save();
   }
 
   /** The recovery notice from load, if the last file was unusable. */
@@ -195,7 +223,7 @@ export class SessionStore {
       // `imported_from` is carried through so the origin of a migrated conversation survives into
       // the list — it is the answer to "where did this come from", and dropping it here would make
       // the field write-only.
-      sessions: all.map(({ id, title, created_at, updated_at, closed, closed_at, imported_from }) => ({
+      sessions: all.map(({ id, title, created_at, updated_at, closed, closed_at, imported_from, directory, parent_id, background }) => ({
         id,
         title,
         created_at,
@@ -203,6 +231,9 @@ export class SessionStore {
         closed,
         closed_at,
         imported_from,
+        directory,
+        parent_id,
+        background,
       })),
     };
   }
@@ -250,18 +281,56 @@ export class SessionStore {
     return this.data.sessions.find((s) => s.id === id);
   }
 
-  create(title?: string): ChatSession {
+  create(title?: string, opts?: { directory?: string; parentId?: string }): ChatSession {
     const s: ChatSession = {
       id: `sess_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
       title: title?.trim() || 'New chat',
       created_at: nowIso(),
       updated_at: nowIso(),
       messages: [],
+      directory: opts?.directory || this.rootDir,
     };
+    if (opts?.parentId) s.parent_id = opts.parentId;
     this.data.sessions.unshift(s);
-    this.data.active_id = s.id;
+    // A child must not steal whichever conversation the user is reading.
+    if (!opts?.parentId) this.data.active_id = s.id;
     this.save();
     return s;
+  }
+
+  /** Sessions started by `parentId`, including ones already sent to the background. */
+  childrenOf(parentId: string): ChatSession[] {
+    return this.data.sessions.filter((s) => s.parent_id === parentId);
+  }
+
+  markBackground(id: string): ChatSession | null {
+    const s = this.get(id);
+    if (!s) return null;
+    s.background = true;
+    s.updated_at = nowIso();
+    this.save();
+    return s;
+  }
+
+  /**
+   * Remove a session and return it, for a move onto another project.
+   * The caller inserts it into the destination store.
+   */
+  extract(id: string): ChatSession | null {
+    const s = this.get(id);
+    if (!s) return null;
+    const copy: ChatSession = { ...s, messages: [...s.messages] };
+    this.remove(id);
+    return copy;
+  }
+
+  /** Insert a session that already has an id (the other half of `extract`). */
+  adopt(session: ChatSession): ChatSession {
+    if (this.get(session.id)) throw new Error(`session already exists: ${session.id}`);
+    this.data.sessions.unshift(session);
+    this.data.active_id = session.id;
+    this.save();
+    return session;
   }
 
   /**
@@ -315,11 +384,12 @@ export class SessionStore {
 
   update(
     id: string,
-    patch: { title?: string; messages?: LLMMessage[] },
+    patch: { title?: string; messages?: LLMMessage[]; directory?: string },
   ): ChatSession {
     const s = this.get(id);
     if (!s) throw new Error(`session not found: ${id}`);
     if (typeof patch.title === 'string' && patch.title.trim()) s.title = patch.title.trim();
+    if (typeof patch.directory === 'string' && patch.directory.trim()) s.directory = patch.directory;
     if (Array.isArray(patch.messages)) {
       s.messages = patch.messages;
       if (!patch.title) s.title = defaultTitle(s.messages);

@@ -453,5 +453,25 @@ describe('bundled plugins are valid', () => {
     const out = await pm.execute('ws_overview', {});
     assert.match(out, /源码文件/, `实际: ${out.slice(0, 200)}`);
     assert.ok(out.includes('.ts'), '应报告 .ts 统计');
+    assert.ok(out.includes(workspace), `概览应写明扫的是哪个目录，实际: ${out.slice(0, 300)}`);
+  });
+
+  it('切换工作区后 ws_overview 扫新目录，而不是加载时的那个', async () => {
+    pm.installFromCatalog('workspace-insight');
+    await pm.refresh();
+    writeFileSync(join(workspace, 'only-a.ts'), 'export const a = 1;\n', 'utf8');
+    const first = await pm.execute('ws_overview', {});
+    assert.match(first, /\.ts/);
+    assert.doesNotMatch(first, /\.py/);
+
+    const other = join(root, 'other-ws');
+    mkdirSync(other);
+    writeFileSync(join(other, 'only-b.py'), 'x = 1\n', 'utf8');
+    workspace = other;
+
+    const second = await pm.execute('ws_overview', {});
+    assert.ok(second.includes(other), `应扫切换后的目录，实际: ${second.slice(0, 300)}`);
+    assert.match(second, /\.py/);
+    assert.doesNotMatch(second, /only-a\.ts/);
   });
 });

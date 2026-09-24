@@ -123,21 +123,40 @@ export function sendError(res: ServerResponse, message: string, status = 500): v
 }
 
 export function startSSE(res: ServerResponse): void {
+  res.socket?.setNoDelay(true);
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    // Proxies otherwise hold the stream until it ends, so parallel speakers
+    // appear one after another instead of together.
+    'X-Accel-Buffering': 'no',
     ...corsHeaders(),
   });
+  res.flushHeaders();
 }
 
 export function sendSSEEvent(res: ServerResponse, data: unknown): void {
-  res.write(`data: ${JSON.stringify(data)}\n\n`);
+  // Switching chats aborts the browser fetch. A throw here used to abort the
+  // agent loop, so leaving a conversation killed the work.
+  if (res.writableEnded || res.destroyed || res.socket?.destroyed) return;
+  try {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+    const flush = (res as ServerResponse & { flush?: () => void }).flush;
+    if (typeof flush === 'function') flush.call(res);
+  } catch {
+    /* client left; the turn keeps running and will be persisted */
+  }
 }
 
 export function endSSE(res: ServerResponse): void {
-  res.write('data: [DONE]\n\n');
-  res.end();
+  if (res.writableEnded || res.destroyed) return;
+  try {
+    res.write('data: [DONE]\n\n');
+    res.end();
+  } catch {
+    /* client already gone */
+  }
 }
 
 /**

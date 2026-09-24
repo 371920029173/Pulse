@@ -129,10 +129,12 @@ beforeEach(() => {
   requestCount = 0;
   seenBodies.length = 0;
   fallback = { kind: 'ok', content: 'default' };
+  delete process.env.SHE_REASONING_ECHO;
+  delete process.env.SHE_REASONING_EFFORT;
 });
 
-function provider() {
-  return new OpenAIProvider('test-key', base, 'test-model', 100, 0);
+function provider(model = 'test-model') {
+  return new OpenAIProvider('test-key', base, model, 100, 0);
 }
 
 describe('瞬时故障重试', () => {
@@ -442,5 +444,127 @@ describe('流式响应中断', () => {
     } finally {
       delete process.env.SHE_LLM_STREAM;
     }
+  });
+});
+
+describe('DeepSeek 思维链协议', () => {
+  const toolCall = {
+    id: 'c1',
+    type: 'function' as const,
+    function: { name: 'shell', arguments: '{}' },
+  };
+
+  function sentMessages(index = -1): Array<Record<string, unknown>> {
+    const raw = index < 0 ? seenBodies.at(-1) : seenBodies[index];
+    return JSON.parse(raw ?? '{}').messages;
+  }
+
+  it('带工具调用的原生思维链要回传，已完成的回合不回传', async () => {
+    queue.push({ kind: 'ok', content: 'ok' });
+    await provider('deepseek-reasoner').chat([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'calling', reasoning: 'native-think', tool_calls: [toolCall] },
+      { role: 'tool', content: 'result', tool_call_id: 'c1' },
+      { role: 'assistant', content: 'done', reasoning: 'finished-think' },
+    ]);
+    const messages = sentMessages();
+    const calling = messages.find((m) => m.content === 'calling');
+    const done = messages.find((m) => m.content === 'done');
+    assert.equal(calling?.reasoning_content, 'native-think');
+    assert.equal(done?.reasoning_content, undefined, '已完成回合的思维链不是上下文的一部分');
+  });
+
+  it('移植来的思维链不占用 reasoning_content', async () => {
+    queue.push({ kind: 'ok', content: 'ok' });
+    await provider('deepseek-reasoner').chat([
+      { role: 'user', content: 'hi' },
+      {
+        role: 'assistant',
+        content: 'imported answer',
+        reasoning: 'foreign-think',
+        reasoningOrigin: 'imported',
+      },
+      {
+        role: 'assistant',
+        content: 'imported call',
+        reasoning: 'foreign-tool-think',
+        reasoningOrigin: 'imported',
+        tool_calls: [toolCall],
+      },
+      { role: 'tool', content: 'result', tool_call_id: 'c1' },
+      { role: 'assistant', content: '', reasoning: 'only-chain', reasoningOrigin: 'imported' },
+    ]);
+    const messages = sentMessages();
+    const answer = messages.find((m) => m.content === 'imported answer');
+    const call = messages.find((m) => m.content === 'imported call');
+    const only = messages.find((m) => m.content === 'only-chain');
+    assert.equal(answer?.reasoning_content, undefined);
+    assert.equal(call?.reasoning_content, '', '工具轮次要有这个字段，但内容不能是别的产品的思维链');
+    assert.notEqual(call?.reasoning_content, 'foreign-tool-think');
+    assert.equal(only?.reasoning_content, undefined, '只有思维链的回合改走正文，不走协议字段');
+  });
+
+  it('只有思维链、没有正文的助手消息不会被送成空消息', async () => {
+    queue.push({ kind: 'ok', content: 'ok' });
+    await provider('deepseek-reasoner').chat([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: '', reasoning: 'native-only', reasoningOrigin: 'native' },
+      { role: 'assistant', content: '   ' },
+    ]);
+    const messages = sentMessages().filter((m) => m.role === 'assistant');
+    assert.equal(messages[0]?.content, 'native-only');
+    assert.equal(messages[1]?.content, '…');
+    for (const m of messages) {
+      const hasBody = typeof m.content === 'string' && String(m.content).trim().length > 0;
+      const hasCalls = Array.isArray(m.tool_calls) && m.tool_calls.length > 0;
+      assert.ok(hasBody || hasCalls, '助手消息必须有正文或工具调用');
+    }
+  });
+
+  it('非推理模型不发送 reasoning_content', async () => {
+    queue.push({ kind: 'ok', content: 'ok' });
+    await provider('test-model').chat([
+      { role: 'assistant', content: 'calling', reasoning: 'native-think', tool_calls: [toolCall] },
+      { role: 'tool', content: 'result', tool_call_id: 'c1' },
+      { role: 'user', content: 'hi' },
+    ]);
+    const messages = sentMessages();
+    assert.equal(messages.some((m) => 'reasoning_content' in m), false);
+  });
+
+  it('端点要求回传 reasoning_content 时补上空字段再重试', async () => {
+    queue.push(
+      { kind: 'status', code: 400, body: '{"error":{"message":"The reasoning_content in the thinking mode must be passed back to the API."}}' },
+      { kind: 'ok', content: 'continued' },
+    );
+    const reply = await provider('test-model').chat([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'calling', tool_calls: [toolCall] },
+      { role: 'tool', content: 'result', tool_call_id: 'c1' },
+      { role: 'assistant', content: 'done', reasoning: 'finished-think' },
+    ]);
+    assert.equal(reply.content, 'continued');
+    assert.equal(requestCount, 2);
+    const first = sentMessages(0).find((m) => m.tool_calls);
+    const second = sentMessages(1);
+    assert.equal(first?.reasoning_content, undefined);
+    assert.equal(second.find((m) => m.tool_calls)?.reasoning_content, '');
+    assert.equal(second.find((m) => m.content === 'done')?.reasoning_content, undefined);
+  });
+
+  it('端点不认识 reasoning_content 时去掉再重试', async () => {
+    queue.push(
+      { kind: 'status', code: 400, body: '{"error":{"message":"Unknown parameter: reasoning_content"}}' },
+      { kind: 'ok', content: 'ok' },
+    );
+    const reply = await provider('deepseek-reasoner').chat([
+      { role: 'assistant', content: 'calling', reasoning: 'native-think', tool_calls: [toolCall] },
+      { role: 'tool', content: 'result', tool_call_id: 'c1' },
+      { role: 'user', content: 'hi' },
+    ]);
+    assert.equal(reply.content, 'ok');
+    assert.equal(sentMessages(0).find((m) => m.tool_calls)?.reasoning_content, 'native-think');
+    assert.equal(sentMessages(1).some((m) => 'reasoning_content' in m), false);
+    assert.equal(process.env.SHE_REASONING_ECHO, 'off');
   });
 });

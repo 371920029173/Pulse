@@ -64,10 +64,16 @@ export class PlanStore {
     }
   }
 
-  /** Plans belonging to the bound conversation (or all when unbound). */
-  private scoped(all: Plan[]): Plan[] {
-    if (!this.sessionId) return all;
-    return all.filter((p) => p.sessionId === this.sessionId);
+  /**
+   * Plans are workspace state, not chat state.
+   *
+   * Filtering to the current session hid every open plan from a previous
+   * conversation, so a long task "forgot" itself the moment the user opened
+   * another chat. Reads see the whole file. New plans are still stamped with
+   * the conversation that created them.
+   */
+  private find(all: Plan[], id: string): Plan | undefined {
+    return all.find((p) => p.id === id || p.id.startsWith(id));
   }
 
   private save(plans: Plan[]): void {
@@ -77,16 +83,23 @@ export class PlanStore {
   }
 
   list(): Plan[] {
-    return this.scoped(this.load()).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+    return this.load().sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
   }
 
   get(id: string): Plan | undefined {
-    return this.scoped(this.load()).find((p) => p.id === id || p.id.startsWith(id));
+    return this.find(this.load(), id);
   }
 
-  /** The most recently updated plan that is still open. */
+  /**
+   * The open plan to keep working on.
+   *
+   * Prefer one this conversation created. If it has none, an open plan from
+   * any conversation is still visible — that is the point of a workspace plan.
+   */
   active(): Plan | undefined {
-    return this.list().find((p) => p.status === 'open');
+    const all = this.list();
+    const mine = this.sessionId ? all.filter((p) => p.sessionId === this.sessionId) : all;
+    return mine.find((p) => p.status === 'open') ?? all.find((p) => p.status === 'open');
   }
 
   create(title: string, steps: string[], goal?: string): Plan {
@@ -122,7 +135,7 @@ export class PlanStore {
     note?: string,
   ): Plan | undefined {
     const plans = this.load();
-    const plan = this.scoped(plans).find((p) => p.id === planId || p.id.startsWith(planId));
+    const plan = this.find(plans, planId);
     if (!plan) return undefined;
     const step = plan.steps.find((s) => s.id === stepId);
     if (!step) return undefined;
@@ -155,7 +168,7 @@ export class PlanStore {
 
   addSteps(planId: string, titles: string[]): Plan | undefined {
     const plans = this.load();
-    const plan = this.scoped(plans).find((p) => p.id === planId || p.id.startsWith(planId));
+    const plan = this.find(plans, planId);
     if (!plan) return undefined;
     const now = new Date().toISOString();
     const base = plan.steps.length;
@@ -177,7 +190,7 @@ export class PlanStore {
 
   setStatus(planId: string, status: Plan['status']): Plan | undefined {
     const plans = this.load();
-    const plan = this.scoped(plans).find((p) => p.id === planId || p.id.startsWith(planId));
+    const plan = this.find(plans, planId);
     if (!plan) return undefined;
     plan.status = status;
     plan.updatedAt = new Date().toISOString();
@@ -199,6 +212,7 @@ export function renderPlan(plan: Plan): string {
   const lines = [
     `Plan ${plan.id} — ${plan.title}  (${done}/${plan.steps.length} 完成, 状态 ${plan.status})`,
   ];
+  if (plan.sessionId) lines.push(`来自会话: ${plan.sessionId}`);
   if (plan.goal) lines.push(`目标: ${plan.goal}`);
   for (const s of plan.steps) {
     lines.push(`  ${STATUS_MARK[s.status]} ${s.id} ${s.title}${s.note ? `  — ${s.note}` : ''}`);
@@ -304,13 +318,13 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
   reg(
     {
       name: 'plan_list',
-      description: 'List plans with their step statuses. Check this at the start of long work to resume where you left off.',
+      description: 'List every plan in this workspace, including plans opened in other conversations. Check this at the start of long work so a task is not forgotten when the chat changes.',
       parameters: { type: 'object', properties: {} },
     },
     async () => {
       const all = plans.list();
       if (!all.length) return 'No plans yet.';
-      return all.slice(0, 5).map(renderPlan).join('\n\n');
+      return all.map(renderPlan).join('\n\n');
     },
   );
 

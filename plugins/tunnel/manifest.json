@@ -23,6 +23,11 @@
         },
         "required": ["provider"]
       }
+    },
+    {
+      "name": "tunnel_stop",
+      "description": "Stop the tunnel this plugin started so the public URL stops working.",
+      "parameters": { "type": "object", "properties": {} }
     }
   ],
   "commands": [

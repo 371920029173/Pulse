@@ -305,7 +305,6 @@
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
-  max-height: 200px;
   overflow-y: auto;
 }
 
@@ -560,6 +559,11 @@
   color: var(--text-primary);
   max-width: 100%;
   min-width: 0;
+  /* A backing so body text stays readable on a busy wallpaper. */
+  background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
+  border-radius: 14px;
+  padding: 10px 14px;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.28);
 }
 
 .prose > :first-child { margin-top: 0; }
@@ -1077,20 +1081,26 @@
    * shrink to ~400px and the reasoning box ended up ~348px wide — unreadable
    * for the long, code-heavy chains these models produce. Reasoning is
    * reference material, so it should not be narrower than the prose.
+   *
+   * `flex-shrink: 0` matters because this block is a direct child of the
+   * scrolling column. A shrinkable flex item plus `overflow: hidden` collapses
+   * a long chain to a sliver, which is indistinguishable from it not rendering.
    */
+  flex: 0 0 auto;
+  width: 100%;
   max-width: 100%;
+  align-self: stretch;
   border-left: 2px solid var(--accent, #6c7cff);
   background: color-mix(in srgb, var(--bg-secondary) 70%, transparent);
   border-radius: 8px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .reasoningHeader {
   display: flex;
   align-items: center;
   gap: 8px;
-  /* `flex: 1`, not `width: 100%`: it now shares a row with the expand control. */
-  flex: 1 1 auto;
+  width: 100%;
   min-width: 0;
   padding: 6px 10px;
   background: transparent;
@@ -1144,6 +1154,9 @@
   line-height: 1.55;
   color: var(--text-secondary);
   opacity: 0.9;
+  /* No max-height. A cap here is what made a long chain look truncated. */
+  max-height: none;
+  overflow: visible;
 }
 
 .headerHint { font-size: 12px; opacity: 0.6; }
@@ -1393,8 +1406,7 @@
 .toolResultBody {
   margin: 0;
   padding: 0 12px 10px;
-  max-height: 340px;
-  overflow: auto;
+  overflow: visible;
   white-space: pre-wrap;
   word-break: break-word;
   font-family: var(--font-mono);
@@ -1639,10 +1651,10 @@
   gap: 6px;
   padding: 3px 9px 3px 4px;
   border-radius: 999px;
-  border: none;
-  background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
   font-size: 11.5px;
-  opacity: 0.6;
+  opacity: 1;
   transition:
     opacity 240ms var(--ease-out),
     border-color 240ms var(--ease-out),
@@ -1662,7 +1674,35 @@
   flex-shrink: 0;
 }
 
-.peerName { color: var(--text-primary); }
+.peerName { color: var(--text-primary); font-weight: 600; }
+
+.speakerRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 4px 2px;
+}
+
+.speakerAvatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  flex: 0 0 auto;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.35);
+}
+
+.speakerName {
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--text-primary);
+  text-shadow: 0 1px 2px rgb(0 0 0 / 0.45);
+}
 
 .peerActive {
   opacity: 1;

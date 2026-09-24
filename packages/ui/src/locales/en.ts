@@ -116,6 +116,8 @@ registerDictionary('en', {
   '推理深度': 'Reasoning depth',
   '收起 {verb} 的详情': 'Collapse {verb} details',
   '展开 {verb} 的详情': 'Expand {verb} details',
+  '思维链': 'Reasoning',
+  '思考中…': 'Thinking…',
 
   // ── 设置 ──
   '设置': 'Settings',
@@ -203,4 +205,20 @@ registerDictionary('en', {
   '样式没有解析出任何规则，可能语法有误。': 'The stylesheet produced no rules — there may be a syntax error.',
   '已停用自定义样式（?theme=off）。样式文件仍然保留。': 'Custom stylesheet disabled (?theme=off). The file is kept.',
   '只支持图片或视频文件': 'Only image or video files are supported',
+
+  // ── 会话列表 / 并行工作副本 ──
+  '会话': 'Conversations',
+  '群': 'Group',
+  '子': 'Sub',
+  '成员': 'Member',
+  '由 {id} 发起': 'Started by {id}',
+  '工作群 · {n} 名成员': 'Group · {n} members',
+  '双击重命名': 'Double-click to rename',
+  ' · 进行中': ' · running',
+  ' · 后台': ' · background',
+  '新建并行工作副本': 'New parallel working copy',
+  '副本名称。会在仓库旁边建一个独立目录，和当前文件互不覆盖。':
+    'Copy name. Creates a separate directory next to the repository, so it cannot overwrite the current files.',
+  '已打开并行副本': 'Opened the parallel copy',
+  '未能创建并行副本：{msg}': 'Could not create the parallel copy: {msg}',
 });
