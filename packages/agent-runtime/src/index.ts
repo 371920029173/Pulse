@@ -6,6 +6,23 @@ export { createKBTools } from './kb-tools.js';
 export { readSkillProfile, writeSkillProfile, type SkillProfile } from './system-prompt.js';
 export { PlanStore, renderPlan, createPlanTools } from './plan-tools.js';
 export type { Plan, PlanStep, StepStatus } from './plan-tools.js';
+export {
+  analyzeRequest,
+  buildRecord,
+  renderRecord,
+  PreflightStore,
+  createPreflightTools,
+} from './preflight.js';
+export type {
+  PreflightRecord,
+  PreflightEvidence,
+  PreflightContext,
+  PreflightInput,
+  Prerequisite,
+  PrerequisiteKind,
+  Constraint,
+  ConstraintSource,
+} from './preflight.js';
 export { createIngestTools, chunkFileContent } from './ingest-tools.js';
 export type { IngestItem, IngestBatch } from './ingest-tools.js';
 export { MemoStore, createMemoTools } from './memo-tools.js';

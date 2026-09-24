@@ -11,11 +11,12 @@ import { createLogger, resolveModel, resolveSubagentModel, describeModel } from 
 import type { GroupKBEngine } from '@she/kb';
 import { OpenAIProvider } from './providers/openai.js';
 import { AnthropicProvider } from './providers/anthropic.js';
-import { getSystemPrompt } from './system-prompt.js';
+import { getSystemPrompt, readSkillProfile } from './system-prompt.js';
 import type { ToolSet } from '@she/sandbox';
 import { PendingPatchStore, CheckpointStore, resolveInsideWorkspace } from '@she/sandbox';
 import { createKBTools } from './kb-tools.js';
 import { createPlanTools } from './plan-tools.js';
+import { createPreflightTools } from './preflight.js';
 import { LspManager, makeLspTools, executeLspTool } from './lsp-tools.js';
 import { makeScheduleTools, executeScheduleTool } from './schedule-tools.js';
 import type { ScheduleBridge, WindowView } from './schedule-tools.js';
@@ -103,6 +104,18 @@ export class Agent {
   /** Optional sink for TaskCards (server-owned board). */
   private onTaskEvent: ((e: { id: string; kind: string; label: string; phase: 'running' | 'done' | 'error'; detail?: string }) => void) | null = null;
   private taskIdByLabel = new Map<string, string>();
+  /**
+   * The user message that opened the current turn.
+   *
+   * Kept so `preflight_record` can analyse what was ACTUALLY said rather than what the
+   * model says was said — a tool argument is the model's paraphrase, and the deterministic
+   * half of the analysis exists precisely to not depend on that.
+   *
+   * Set by `chat()` only, not by `interject()`: an appended note is extra context, not a
+   * new request, and re-analysing on every interjection would report drift that is not
+   * there.
+   */
+  private lastUserRequest = '';
   /** Aborts the in-flight turn (LLM request + tool loop). */
   private aborter: AbortController | null = null;
   /**
@@ -249,6 +262,27 @@ export class Agent {
       this.executors.set(def.name, (args) => planTools.execute(def.name, args));
     }
 
+    /*
+     * Pre-flight intent analysis. Registered next to the plan tools because they are used
+     * together — analyse the request, then write the plan that implements it.
+     *
+     * `listTools` reads `allToolDefs` lazily. At construction time the list is only half
+     * built, so a snapshot taken here would under-report what this agent has and invent
+     * missing prerequisites for tools that are in fact registered a few lines below.
+     */
+    const preflightTools = createPreflightTools(config.workspace.root, {
+      sessionId: this.sessionId,
+      getRequest: () => this.lastUserRequest,
+      listTools: () => this.allToolDefs.map((d) => d.name),
+      skillProfile: () => readSkillProfile(config.workspace.root),
+      automationMode: () => config.automationMode !== false,
+      activePlanGoal: () => planTools.store.active()?.goal,
+    });
+    for (const def of preflightTools.definitions) {
+      this.allToolDefs.push(def);
+      this.executors.set(def.name, (args) => preflightTools.execute(def.name, args));
+    }
+
     // Code intelligence. Only registered when a language server is actually
     // installed for this workspace's languages — advertising a tool that always
     // fails wastes a round-trip and teaches the model to distrust the tool list.
@@ -317,13 +351,15 @@ export class Agent {
      *   ask_user   — nobody can answer; the subtask would stall until timeout
      *   task_spawn — recursion (the runner is already absent, this is belt-and-braces)
      *   plan_*     — the parent owns the plan; a child editing it would clobber it
+     *   preflight_*— the analysis describes the PARENT's request, not the subtask, so a
+     *                child running it would file a record about someone else's goal
      *   memo_*     — shared scratchpad, same reasoning
      *   report_*   — long-lived artifacts belong to the parent's turn
      *   kb_ingest_*— staging files is a side effect the parent should decide on
      *   schedule_* — a child must not be able to schedule the parent's future work
      */
     if (this.isSubagent) {
-      const denied = /^(ask_user|task_spawn|plan_|memo_|report_|kb_ingest_|schedule_)/;
+      const denied = /^(ask_user|task_spawn|plan_|preflight_|memo_|report_|kb_ingest_|schedule_)/;
       this.allToolDefs = this.allToolDefs.filter((d) => {
         const blocked = denied.test(d.name);
         if (blocked) this.executors.delete(d.name);
@@ -783,6 +819,8 @@ export class Agent {
     }
 
     this.history.push({ role: 'user', content: userMessage });
+    // Recorded before the loop starts so a tool called during it sees this request.
+    this.lastUserRequest = userMessage;
 
     const { messages } = this.messagesForRequest();
 

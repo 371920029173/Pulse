@@ -27,9 +27,9 @@
     "check:ui": "node scripts/control-style-check.mjs",
     "eval:verify": "node evals/verification/run.mjs",
     "check:host": "node scripts/host-guard-check.mjs",
-        "check:plugins": "node scripts/plugins-check.mjs",
-        "check:packaged": "node scripts/packaged-smoke.mjs",
-        "check:api": "node scripts/api-wiring-check.mjs",
+    "check:plugins": "node scripts/plugins-check.mjs",
+    "check:packaged": "node scripts/packaged-smoke.mjs",
+    "check:api": "node scripts/api-wiring-check.mjs",
     "check:docker": "node scripts/docker-check.mjs",
     "check:release": "node scripts/release-check.mjs",
     "release": "node scripts/release.mjs",
@@ -45,10 +45,11 @@
     "check:restart": "node scripts/restart-check.mjs",
     "check:encoding": "node scripts/encoding-check.mjs",
     "vendor:fonts": "node scripts/vendor-fonts.mjs",
-        "check:offline": "pnpm -r build && pnpm -r test && pnpm eval && pnpm check:restart && pnpm check:encoding && pnpm check:data && pnpm check:subagent && pnpm check:security && pnpm check:shell && pnpm check:host && pnpm check:lock && pnpm check:theme && pnpm check:uistruct && pnpm check:dist && pnpm check:logs && pnpm check:a11y && pnpm check:docs && pnpm check:portability && pnpm check:metrics && pnpm check:schedule && pnpm check:lsp && pnpm check:i18n && pnpm check:ui && pnpm check:docker && pnpm check:api && pnpm check:plugins",
-        "check:all": "pnpm check:offline && pnpm eval:verify",
+    "check:offline": "pnpm -r build && pnpm -r test && pnpm eval && pnpm check:restart && pnpm check:encoding && pnpm check:data && pnpm check:subagent && pnpm check:preflight && pnpm check:security && pnpm check:shell && pnpm check:host && pnpm check:lock && pnpm check:theme && pnpm check:uistruct && pnpm check:dist && pnpm check:logs && pnpm check:a11y && pnpm check:docs && pnpm check:portability && pnpm check:metrics && pnpm check:schedule && pnpm check:lsp && pnpm check:i18n && pnpm check:ui && pnpm check:docker && pnpm check:api && pnpm check:plugins",
+    "check:all": "pnpm check:offline && pnpm eval:verify",
     "pack:win": "pnpm build && pnpm --filter @she/desktop dist:win && pnpm check:packaged",
-    "dist:desktop": "pnpm --filter @she/desktop dist:win"
+    "dist:desktop": "pnpm --filter @she/desktop dist:win",
+    "check:preflight": "node scripts/preflight-check.mjs"
   },
   "engines": {
     "node": ">=20"

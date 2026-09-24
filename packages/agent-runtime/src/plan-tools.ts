@@ -230,7 +230,7 @@ export function renderPlan(plan: Plan): string {
  *   - report_write: turn findings into a shareable artifact
  *   - ask_user: explicitly request clarification instead of guessing
  */
-export function createPlanTools(workspaceRoot: string, sessionId?: string | null): KBToolSetLike {
+export function createPlanTools(workspaceRoot: string, sessionId?: string | null): KBToolSetLike & { store: PlanStore } {
   const plans = new PlanStore(workspaceRoot, sessionId);
   const toolMap = new Map<string, { def: ToolDefinition; fn: (a: Record<string, unknown>) => Promise<string> }>();
 
@@ -443,5 +443,5 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
     }
   };
 
-  return { definitions, execute };
+  return { definitions, execute, store: plans };
 }

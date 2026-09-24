@@ -76,14 +76,36 @@ function measureUnitTests() {
   for (const m of text.matchAll(/Tests (\d+)(?: passed| skipped| failed)?/g)) { total += Number(m[1]); vitestSuites++; }
 
   /*
+   * How many packages SHOULD have reported. A partial count is the dangerous case: it is
+   * larger than zero, so it reads as a real measurement, and the failure surfaces as "the
+   * docs quote a stale number" when the docs are right and the measurement is not. Observed
+   * once for real — a run reported 514 instead of 716, exactly the server package missing,
+   * and the check blamed the documentation.
+   *
+   * Counting the packages that declare a `test` script is the only fact available here that
+   * the parsed output cannot fake, so it is what the count is checked against.
+   */
+  const expectedSuites = readdirSync(join(ROOT, 'packages'), { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .filter((d) => {
+      const pkg = join(ROOT, 'packages', d.name, 'package.json');
+      if (!existsSync(pkg)) return false;
+      try { return Boolean(JSON.parse(readFileSync(pkg, 'utf8')).scripts?.test); } catch { return false; }
+    })
+    .length;
+
+  const suites = nodeTestSuites + vitestSuites;
+  const complete = expectedSuites > 0 && suites === expectedSuites;
+
+  /*
    * Report the composition. When the number is wrong, the first useful question is "which runner was
    * missed?", and a bare total cannot answer it — the failure mode that made this hard to diagnose.
    */
-  console.log(`        实测单元测试 ${total} 项（node:test ${nodeTestSuites} 套 + vitest ${vitestSuites} 套）`);
-  if (nodeTestSuites === 0 || vitestSuites === 0) {
+  console.log(`        实测单元测试 ${total} 项（node:test ${nodeTestSuites} 套 + vitest ${vitestSuites} 套，应有 ${expectedSuites} 套）`);
+  if (!complete) {
     console.log('        !! 计数不完整 —— 可能是测量本身失败，而不是文档写错了');
   }
-  return total;
+  return { total, complete, suites, expectedSuites };
 }
 
 let failures = 0;
@@ -276,7 +298,8 @@ console.log('\n=== 文档里引用的数字与实际一致 ===');
    * it disagree with the runner, which would produce false failures and teach people to ignore the
    * check. If the run fails, totals come back short and this fails loudly, which is the safe direction.
    */
-  const realTotal = measureUnitTests();
+  const measured = measureUnitTests();
+  const realTotal = measured.total;
   const testCounts = new Set();
   for (const [file, text] of texts) {
     for (const m of text.matchAll(/(\d+)\s*(?:项|个测试|tests)/g)) {
@@ -285,6 +308,16 @@ console.log('\n=== 文档里引用的数字与实际一致 ===');
     }
   }
   const quoted = [...new Set([...testCounts].map((s) => Number(s.split(':')[1])))];
+  /*
+   * Asserted BEFORE the comparison, because a partial measurement would otherwise be
+   * reported as the documentation being stale. That happened: a run counted 514 instead of
+   * 716 — one package short — and the message pointed at the docs.
+   */
+  check(
+    `测试总数是从全部套件测出来的（${measured.suites}/${measured.expectedSuites} 套）`,
+    measured.complete,
+    `少测到包，${realTotal} 这个数字不可信：这是测量失败，不是文档写错。重跑一次再判断`,
+  );
   check(
     `文档里的单元测试总数是真实的（实测 ${realTotal}，文档写 ${quoted.join(' / ') || '未引用'}）`,
     realTotal > 0 && quoted.every((n) => n === realTotal),

@@ -49,6 +49,7 @@ pnpm check:theme             # custom stylesheet: brick refusal, escape hatch, r
 pnpm check:uistruct          # UI structure: root-level state, overlays in both branches
 pnpm check:api               # every endpoint the UI calls is actually routed
 pnpm check:plugins           # plugin end to end: install, agent can call it, uninstall takes effect
+pnpm check:preflight         # pre-flight intent analysis: missing refs, no scheduler, confidence ceiling
 pnpm check:dist              # the built bundle contains the wiring the browser needs
 pnpm check:logs              # logs are capped and crash.log is only for crashes
 pnpm check:restart           # hard-kill + reboot: settings, sessions, groups, schedules all survive

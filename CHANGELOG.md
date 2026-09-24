@@ -66,6 +66,22 @@ model — the easiest cost saving available, since they do not need the reasonin
 `${VAR}` in the config expands from the environment, so the file can be committed
 without secrets.
 
+**Pre-flight intent analysis, before the work instead of after it.** Non-trivial tasks now
+call `preflight_record` first, which writes down four things that routinely disagree: what the
+user literally asked for, the constraints nobody stated, the goal they actually want, and what
+must be asked before starting. The deliberate part is that the analysis is **split in two**. A
+deterministic half — no model call, free, runs in the gate — reads the request for `@file:` /
+`@folder:` / `@symbol:` references, time expressions and destructive wording, and checks each
+against the workspace and the tool list this agent was actually given. It reports each as a
+prerequisite marked ✓ / ✗ / !, and the `✗` cases are the ones that used to surface halfway
+through a plan: a file the user pointed at that does not exist, a path outside the sandbox,
+"remind me tomorrow" in a session with no scheduling tool, a symbol reference with no language
+server. Because only the checked facts can be trusted, `preflight_record`'s stated confidence is
+**clamped** to what they support and the clamp is reported rather than applied quietly. Records
+land in `.she/preflight/`, one file per analysis, so a decision can be audited afterwards
+instead of taken on trust. `pnpm check:preflight` covers it — offline, no port, no stub, since
+the deterministic half makes no model call by design.
+
 **Runaway-loop detection, with one recovery attempt.** A loop that is *stuck* — same
 tool, same arguments, same result — is detected after three rounds. The model is then
 told once that its approach is producing nothing and asked to try something different;
