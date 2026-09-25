@@ -23,7 +23,7 @@ import {
 import { ScheduleStore, Scheduler, describeNextRun, nextWindowStart, withinWindow } from './schedule.js';
 import type { ScheduledTask, WorkingWindow } from './schedule.js';
 import { Router, HttpError, sendJSON, sendError, sendSSEEvent, startSSE, endSSE, parseBody, readRawBody, corsHeaders } from './router.js';
-import { SessionStore } from './sessions.js';
+import { SessionStore, chooseStartupSession } from './sessions.js';
 import type { ChatSession, ImportedConversation } from './sessions.js';
 import { ClusterStore, runClusterWave, initClusterIdentitySkills, ROLE_PRESETS, generateRoleSkill } from './cluster.js';
 import type { ClusterRole } from './cluster.js';
@@ -748,7 +748,16 @@ function workingWindow(): WorkingWindow | null {
 async function runScheduledTask(task: ScheduledTask): Promise<void> {
   let sid = task.sessionId;
   if (!sid || !sessions.get(sid)) {
-    const created = sessions.create(task.name, { directory: resolve(config.workspace.root) });
+    /*
+     * `background` because this session exists to hold a job's output, not to be the
+     * conversation the user opens. Without it the run stole `active_id` on every fire, and
+     * because the run then left messages here, the startup pick preferred this job log over
+     * the user's own chat on the next boot.
+     */
+    const created = sessions.create(task.name, {
+      directory: resolve(config.workspace.root),
+      background: true,
+    });
     sid = created.id;
     // Remember it, so the next run appends to the same conversation instead of
     // scattering output across a new session every time.
@@ -4021,22 +4030,23 @@ router.get('/api/fs/tree', (req, res) => {
 /**
  * Choose which chat session to open on boot.
  *
- * A stored `active_id` may point at an empty "New chat", which makes a healthy
- * history look lost after a restart. Prefer the stored active session when it
- * has messages, else the most recently updated session that does, else create.
+ * The rule itself lives in `chooseStartupSession` so it can be unit-tested; this only
+ * applies it to the live store (reading the sessions and writing back the pick).
  */
 function pickStartupSession() {
   const stored = sessions.getActive();
-  if (stored && (stored.messages?.length ?? 0) > 0) return stored;
-
-  const withMessages = sessions.list().sessions
+  // Hydrated so the rule can see `messages` and `background`; `list()` strips both.
+  const all = sessions.list()
+    .sessions
     .map((meta) => sessions.get(meta.id))
-    .filter((s): s is NonNullable<typeof s> => Boolean(s) && (s!.messages?.length ?? 0) > 0)
-    .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+    .filter((s): s is ChatSession => Boolean(s));
 
-  if (withMessages.length) {
-    const chosen = sessions.setActive(withMessages[0].id);
-    if (chosen) return chosen;
+  const chosen = chooseStartupSession(stored, all);
+  if (chosen) {
+    // Only write when the pick differs, so a plain boot does not rewrite the file.
+    if (stored?.id === chosen.id) return chosen;
+    const activated = sessions.setActive(chosen.id);
+    if (activated) return activated;
   }
   return stored ?? sessions.create(undefined, { directory: resolve(config.workspace.root) });
 }

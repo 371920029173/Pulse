@@ -45,7 +45,14 @@ export interface ChatSession {
   directory?: string;
   /** Set when this conversation was started by another one. */
   parent_id?: string;
-  /** A child that should keep running after the parent stops waiting. */
+  /**
+   * This session runs on its own; it is not the conversation the user is watching.
+   *
+   * Two things set it: a child handed off to keep running after the parent stopped waiting, and
+   * a session the agent created for itself (a scheduled run). The distinction that matters to
+   * the rest of the code is ownership — a background session must never become the active one,
+   * and the startup pick treats it as second choice.
+   */
   background?: boolean;
 }
 
@@ -111,6 +118,39 @@ function defaultTitle(messages: LLMMessage[]): string {
     return t.length > 42 ? t.slice(0, 42) + '…' : t || 'New chat';
   }
   return 'New chat';
+}
+
+/**
+ * Which session the user should land in on boot.
+ *
+ * Pure, and exported, so the RULE can be tested without starting a server. It used to be
+ * inline in the server entry, which is why a real defect in it was only ever visible as an
+ * intermittent end-to-end failure: `node:test` cannot reach a module-private function, so the
+ * interesting part had no direct test at all.
+ *
+ * The rule, in order:
+ *   1. The stored active session, if it has messages — the user's own last conversation.
+ *   2. Otherwise the most recently updated session that has messages, so an empty "New chat"
+ *      created afterwards (by a stray tab, a test, or an abandoned click) cannot make a healthy
+ *      history look deleted. This is the original reason this function exists.
+ *   3. Preferring a session the user owns over one the agent created for itself. A scheduled
+ *      run writes its transcript into its own session, and being the most recent it would
+ *      otherwise win the boot — replacing the user's chat with a job log. Background sessions
+ *      are second, not excluded: opening a job log still beats opening nothing.
+ *   4. Failing all of that, whatever was stored (possibly nothing, for the caller to replace).
+ */
+export function chooseStartupSession(
+  active: ChatSession | null,
+  all: ChatSession[],
+): ChatSession | null {
+  if (active && (active.messages?.length ?? 0) > 0) return active;
+
+  const withMessages = all
+    .filter((s) => (s.messages?.length ?? 0) > 0)
+    .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+
+  const own = withMessages.filter((s) => !s.background);
+  return own[0] ?? withMessages[0] ?? active ?? null;
 }
 
 export class SessionStore {
@@ -281,7 +321,7 @@ export class SessionStore {
     return this.data.sessions.find((s) => s.id === id);
   }
 
-  create(title?: string, opts?: { directory?: string; parentId?: string }): ChatSession {
+  create(title?: string, opts?: { directory?: string; parentId?: string; background?: boolean }): ChatSession {
     const s: ChatSession = {
       id: `sess_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
       title: title?.trim() || 'New chat',
@@ -291,9 +331,20 @@ export class SessionStore {
       directory: opts?.directory || this.rootDir,
     };
     if (opts?.parentId) s.parent_id = opts.parentId;
+    if (opts?.background) s.background = true;
     this.data.sessions.unshift(s);
-    // A child must not steal whichever conversation the user is reading.
-    if (!opts?.parentId) this.data.active_id = s.id;
+    /*
+     * A child must not steal whichever conversation the user is reading — and neither must a
+     * session the AGENT created for itself.
+     *
+     * This used to be guarded only by `parentId`, so a scheduled run (which passes a name and
+     * no parent) took over `active_id` every time it fired. The visible effect arrived a boot
+     * later: the run leaves messages in its own session, `pickStartupSession` prefers the most
+     * recently updated session that has any, and the user's conversation is replaced by a job
+     * log. Passing `background: true` says the session is a side effect of other work rather
+     * than something to open.
+     */
+    if (!opts?.parentId && !opts?.background) this.data.active_id = s.id;
     this.save();
     return s;
   }

@@ -82,6 +82,23 @@ land in `.she/preflight/`, one file per analysis, so a decision can be audited a
 instead of taken on trust. `pnpm check:preflight` covers it — offline, no port, no stub, since
 the deterministic half makes no model call by design.
 
+**Tool results are classified, and every failure says what to do next.** The loop used to look
+only for `^Error:` in a tool's output, which hid two failures that matter. A non-zero exit code
+was counted as **success** — `shell` renders `exit code: 1` as ordinary text — and `No matches
+found` read as **data**, when the honest answer is "nothing"; that gap is exactly the pressure
+that leads a model to fill it in. `packages/agent-runtime/src/tool-result.ts` now reads every
+result into one of eleven kinds — wrong arguments, refused by the sandbox, tool not available,
+target missing, state precondition unmet, empty result, endpoint unreachable, timed out, rate
+limited, non-zero exit, unrecognised — and attaches the one thing that can work next. `retryable`
+is part of that verdict, so a call that cannot succeed differently is no longer retried: a
+timeout is worth resending with a smaller request, a wrong argument is not worth resending at
+all. Waiting for a human (the confirm gate, a staged patch) is a **state** and deliberately not a
+failure, and the classifier only reads shell status as a whole shape, so a command that merely
+*prints* `exit code: 1` or `(timed out)` is not mistaken for one that failed. `pnpm
+check:toolresult` drives the real tools and a real agent turn, and additionally extracts every
+`Error:` message from the source tree and asserts each one classifies — so a tool whose error
+text changes under the classifier fails the gate instead of silently degrading to "unknown".
+
 **Runaway-loop detection, with one recovery attempt.** A loop that is *stuck* — same
 tool, same arguments, same result — is detected after three rounds. The model is then
 told once that its approach is producing nothing and asked to try something different;
@@ -283,6 +300,18 @@ now come only from their own settings, with safe defaults.
 
 ### Fixed
 
+
+**A scheduled run replaced the user's conversation on the next restart.** A run created its own
+session — named after the task, with no parent — and `SessionStore.create` handed `active_id` to
+whatever session it had just made. That guard existed for subagents (`parentId`) but a task passes
+neither, so every fire moved the user onto the job's session. The damage showed up a boot later:
+the run leaves messages in that session, `pickStartupSession` prefers the most recently updated
+session that has any, and the conversation the user was reading was replaced by a job log. A
+scheduled session is now created with `background: true`, which both keeps it from taking
+`active_id` and puts it second in the startup pick. The rule itself moved out of the server entry
+into `chooseStartupSession`, where it can be tested directly — inline, the only symptom was an
+intermittent end-to-end failure that depended on whether the scheduler happened to fire inside the
+check's window.
 
 **The trace panel reopened itself.** Every knowledge-base result ran `setShowTrace(true)`, so closing
 the panel was futile: the next query — which the agent issues on its own — slid it back open. A panel

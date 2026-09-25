@@ -17,6 +17,7 @@ import { PendingPatchStore, CheckpointStore, resolveInsideWorkspace } from '@she
 import { createKBTools } from './kb-tools.js';
 import { createPlanTools } from './plan-tools.js';
 import { createPreflightTools } from './preflight.js';
+import { classifyToolResult, annotateToolResult, isToolFailure, type ToolResultVerdict } from './tool-result.js';
 import { LspManager, makeLspTools, executeLspTool } from './lsp-tools.js';
 import { makeScheduleTools, executeScheduleTool } from './schedule-tools.js';
 import type { ScheduleBridge, WindowView } from './schedule-tools.js';
@@ -557,8 +558,25 @@ export class Agent {
         const executor = this.executors.get(name);
 
         let result: string;
+        /*
+         * The classification, carried from the executor to the two places that need it: the
+         * failure counter (`toolObserver`) and the annotation the model reads. Null when the
+         * tool was never found, which has no executor and so no call to classify — the
+         * `unknown tool` string produced below is classified directly instead.
+         */
+        let verdict: ToolResultVerdict | null = null;
+        /*
+         * Declared out here so BOTH branches can set it.
+         *
+         * It used to live inside the `else`, which is exactly why a call to a tool this agent
+         * does not have was never counted: there is no executor to run, so the branch that
+         * owned the counter never executed.
+         */
+        let toolFailed = false;
         if (!executor) {
           result = `Error: unknown tool "${name}"`;
+          verdict = classifyToolResult(name, result);
+          toolFailed = isToolFailure(verdict);
         } else {
           try {
             const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
@@ -594,17 +612,28 @@ export class Agent {
             }
             log.info(`Executing tool: ${name}`);
             const toolStart = Date.now();
-            let toolFailed = false;
             try {
               result = await executor(args);
               if (typeof result !== 'string') result = JSON.stringify(result ?? '');
-              // Tools report failure as text, so a thrown error is not the only
-              // signal — a tool that always returns "Error: ..." would otherwise
-              // look perfectly healthy.
-              if (/^Error:/i.test(result)) toolFailed = true;
+              /*
+               * Classify rather than sniff for `^Error:`.
+               *
+               * The prefix test missed a non-zero exit code entirely (`shell` renders it as
+               * `exit code: 1`, and that counted as a healthy call) and could not tell an
+               * argument mistake from a refused action from a dead endpoint — three things
+               * that need three different next moves.
+               *
+               * The verdict is attached BEFORE the confirm-gate handling below, so the
+               * metrics count the real outcome, but the annotation is added AFTER it: the
+               * redacted `needs_confirm` payload is a state, not a failure, and rewriting it
+               * would corrupt the JSON the gate depends on.
+               */
+              verdict = classifyToolResult(name, result);
+              toolFailed = isToolFailure(verdict);
             } catch (err) {
               toolFailed = true;
               result = `Error: ${err instanceof Error ? err.message : String(err)}`;
+              verdict = classifyToolResult(name, result);
             } finally {
               // In a `finally` so a throwing tool is still counted.
               this.toolObserver?.(name, Date.now() - toolStart, toolFailed);
@@ -669,8 +698,23 @@ export class Agent {
             }
           } catch (err: unknown) {
             result = `Error: ${err instanceof Error ? err.message : String(err)}`;
+            verdict = classifyToolResult(name, result);
           }
         }
+
+        /*
+         * Tell the model what to DO, not just that something broke.
+         *
+         * Applied here rather than inside the executor's `try`, because by now the
+         * confirm-gate redaction has finished and the `needs_confirm` / `needs_apply`
+         * payloads are a state rather than a failure — annotating them would mean either
+         * corrupting the JSON or counting a working gate as an error.
+         *
+         * Applied to `result` (not to `toolMsg.content` alone) so history, the live
+         * `tool_result` chunk and the next request all show the same thing. They are the
+         * same transcript, and a reload must not render a different one than streaming did.
+         */
+        if (verdict) result = annotateToolResult(result, verdict);
 
         const toolMsg: LLMMessage = {
           role: 'tool',
@@ -960,12 +1004,19 @@ export class Agent {
     }
     log.info(`Confirming tool: ${pending.name} ticket=${ticketId}`);
     let result: string;
+    let verdict: ToolResultVerdict;
     try {
       const raw = await executor(args);
       result = typeof raw === 'string' ? raw : JSON.stringify(raw ?? '');
     } catch (err) {
       result = `Error: ${err instanceof Error ? err.message : String(err)}`;
     }
+    /*
+     * Classified on the confirmed path too, and for the same reason as the main loop: a
+     * command that was approved and then failed is exactly when the model most needs to be
+     * told why, and a non-zero exit code here was previously indistinguishable from success.
+     */
+    verdict = classifyToolResult(pending.name, result);
     this.lastPending = null;
 
     if (typeof result === 'string' && result.includes('"needs_apply"')) {
@@ -981,6 +1032,9 @@ export class Agent {
         }
       } catch { /* ignore */ }
     }
+
+    // Same annotation as the main loop, applied after the stager has read the raw JSON.
+    result = annotateToolResult(result, verdict);
 
     const toolMsg: LLMMessage = {
       role: 'tool',

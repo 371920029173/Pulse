@@ -321,8 +321,16 @@ await boot('第二次启动');
    */
   const act = json(await raw('/api/sessions'));
   const active = act?.active_id ?? act?.activeId;
+  // The full list is in the detail because the interesting failure is "active points at a
+  // session that is neither of these two", and the two ids alone do not say which one it is.
+  // (`messages` is stripped from this payload, so the background flag and the timestamp are
+  // what identify a candidate here, not a count.)
+  const dump = (act?.sessions ?? [])
+    .map((s) => `${s.id}${s.background ? '(后台)' : ''}@${s.updated_at}`)
+    .join(' ');
   check('会话：重启后激活的是有内容的那条（否则看起来像历史丢了）',
-    !active || active === created.session, `active=${active}`);
+    !active || active === created.session,
+    `active=${active} 有内容=${created.session} 空会话=${created.emptySession} 全部=${dump}`);
 }
 
 // Work group.
@@ -352,6 +360,26 @@ await boot('第二次启动');
   check('工作时间段的星期保留',
     Boolean(win) && JSON.stringify(win.days) === JSON.stringify([1, 2, 3, 4, 5]),
     JSON.stringify(win?.days));
+
+  /*
+   * A run of this task must not have taken the conversation.
+   *
+   * Whether the scheduler fires inside this check's window is timing-dependent, so the session
+   * may or may not exist — but if it does, it is a job log, not the user's chat: it must be
+   * marked `background` and it must not be `active_id`. The assertion above ("the one that
+   * opens is the one with content") catches the end effect; this pins the mechanism, so the
+   * check fails for the right reason even when the scheduler happens not to fire.
+   */
+  const sessionsAfter = json(await raw('/api/sessions'));
+  const job = (sessionsAfter?.sessions ?? []).find((s) => s.title === '重启验证任务');
+  if (job) {
+    check('定时任务的会话标成后台', job.background === true, JSON.stringify(job.background));
+    check('定时任务的会话不是当前对话',
+      (sessionsAfter?.active_id ?? sessionsAfter?.activeId) !== job.id,
+      `active=${sessionsAfter?.active_id} job=${job.id}`);
+  } else {
+    check('定时任务这一刻没有产生会话（也就无从抢走当前对话）', true, '');
+  }
 }
 
 // Memo. The list is `{ entries: [...] }`.
@@ -457,7 +485,17 @@ await boot('第三次启动（状态文件已损坏）');
 }
 
 await kill();
-try { rmSync(workspace, { recursive: true, force: true }); } catch { /* ignore */ }
+/*
+ * Keep the workspace when something failed, so the state file can be inspected.
+ *
+ * A failing restart check is a claim about what is ON DISK; without the file there is nothing
+ * to look at but the symptom. The path is printed so it can be opened directly.
+ */
+if (results.every((r) => r.ok)) {
+  try { rmSync(workspace, { recursive: true, force: true }); } catch { /* ignore */ }
+} else {
+  console.log(`\n  （有失败，保留工作区以便排查：${workspace}）`);
+}
 
 console.log('');
 for (const r of results) {

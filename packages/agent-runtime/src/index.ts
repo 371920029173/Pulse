@@ -23,6 +23,12 @@ export type {
   Constraint,
   ConstraintSource,
 } from './preflight.js';
+export {
+  classifyToolResult,
+  annotateToolResult,
+  isToolFailure,
+} from './tool-result.js';
+export type { ToolFailureKind, ToolResultVerdict } from './tool-result.js';
 export { createIngestTools, chunkFileContent } from './ingest-tools.js';
 export type { IngestItem, IngestBatch } from './ingest-tools.js';
 export { MemoStore, createMemoTools } from './memo-tools.js';

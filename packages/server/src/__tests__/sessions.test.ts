@@ -16,7 +16,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { SessionStore } from '../sessions.js';
+import { SessionStore, chooseStartupSession } from '../sessions.js';
+import type { ChatSession } from '../sessions.js';
 import type { LLMMessage } from '@she/shared';
 
 let dir: string;
@@ -207,5 +208,73 @@ describe('目录与父会话', () => {
     }));
     const store = new SessionStore(dir);
     assert.equal(store.get('sess_old')?.directory, dir);
+  });
+
+  /*
+   * A scheduled run names its session after the task, with no parent — so the `parentId` guard
+   * that keeps a subtask from stealing the active pointer did not cover it, and every fire
+   * moved the user onto the job's own conversation.
+   */
+  it('后台会话不抢走当前对话', () => {
+    const store = new SessionStore(dir);
+    const watching = store.create('我正在看的');
+    const job = store.create('每晚巡检', { directory: dir, background: true });
+    assert.equal(store.list().active_id, watching.id, '定时任务的会话不应抢走当前对话');
+    assert.equal(job.background, true, '要标成后台，界面才知道它不是用户的对话');
+    assert.equal(store.get(watching.id)?.background, undefined);
+  });
+});
+
+describe('chooseStartupSession', () => {
+  const sess = (
+    id: string,
+    updatedAt: string,
+    messages: number,
+    extra: Partial<ChatSession> = {},
+  ): ChatSession => ({
+    id,
+    title: id,
+    created_at: updatedAt,
+    updated_at: updatedAt,
+    messages: Array.from({ length: messages }, (_, i) => ({ role: 'user' as const, content: `m${i}` })),
+    ...extra,
+  });
+
+  it('当前会话有消息时就用它', () => {
+    const active = sess('a', '2026-01-01T00:00:00.000Z', 2);
+    const other = sess('b', '2026-01-02T00:00:00.000Z', 5);
+    assert.equal(chooseStartupSession(active, [active, other])?.id, 'a');
+  });
+
+  it('当前会话是空的时候，挑最近有消息的那条（否则历史看起来丢了）', () => {
+    const stored = sess('empty', '2026-01-03T00:00:00.000Z', 0);
+    const old = sess('old', '2026-01-01T00:00:00.000Z', 4);
+    const recent = sess('recent', '2026-01-02T00:00:00.000Z', 1);
+    assert.equal(chooseStartupSession(stored, [stored, old, recent])?.id, 'recent');
+  });
+
+  /*
+   * The regression. A scheduled run is the most recently updated session AND has messages, so
+   * both earlier rules land on it unless ownership is considered — the user's chat is replaced
+   * by a job log on the next boot.
+   */
+  it('后台会话比用户的对话更新，也不能赢下开机选择', () => {
+    const stored = sess('empty', '2026-01-01T00:00:00.000Z', 0);
+    const mine = sess('mine', '2026-01-02T00:00:00.000Z', 2);
+    const job = sess('job', '2026-01-03T00:00:00.000Z', 3, { background: true });
+    assert.equal(chooseStartupSession(stored, [stored, mine, job])?.id, 'mine');
+  });
+
+  it('只有后台会话有消息时，用它也比开一个空白会话好', () => {
+    const stored = sess('empty', '2026-01-03T00:00:00.000Z', 0);
+    const job = sess('job', '2026-01-02T00:00:00.000Z', 3, { background: true });
+    assert.equal(chooseStartupSession(stored, [stored, job])?.id, 'job');
+  });
+
+  it('都没有消息时退回当前会话，没有当前会话就是没有', () => {
+    const stored = sess('empty', '2026-01-03T00:00:00.000Z', 0);
+    assert.equal(chooseStartupSession(stored, [stored])?.id, 'empty');
+    assert.equal(chooseStartupSession(null, [stored]), null);
+    assert.equal(chooseStartupSession(null, []), null);
   });
 });

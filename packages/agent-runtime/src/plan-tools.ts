@@ -282,7 +282,12 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
       const stepId = String(a.step_id ?? '');
       const status = String(a.status ?? '') as StepStatus;
       if (!['pending', 'active', 'done', 'blocked', 'dropped'].includes(status)) {
-        return 'Error: invalid status';
+        /*
+         * Names the valid values. The previous message (`invalid status`) told the model only
+         * that it was wrong, which leaves it guessing at the vocabulary — and the classifier
+         * cannot tell an argument mistake from a broken tool without the reason in the text.
+         */
+        return `Error: status 不合法（必须是 pending / active / done / blocked / dropped 之一），收到 "${status}"`;
       }
       // Allow "active plan" shorthand.
       const targetId = planId || plans.active()?.id || '';
