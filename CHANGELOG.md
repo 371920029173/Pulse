@@ -169,6 +169,30 @@ look complete. The artifact always carries the plan's remaining steps at the mom
 so the reader does not have to go and look. `pnpm check:delivery` drives the real tool, reads the
 artifact back from the path the tool reported, and asks the plan whether the claim holds.
 
+**An append-only audit trail, so "what did it actually do?" has an answer afterwards.** Every
+other store in `.she/` is working state: tickets are a live cache, sessions are rewritten whole,
+plans are edited in place. That makes them the wrong place to ask what happened, because the
+answer is only worth anything if the record cannot have been edited since — a store that can be
+quietly rewritten records what the current code wants it to say. `.she/audit.log` is one JSON
+object per line and one append per record, nothing rewrites an existing line, and three junctions
+write to it: the request (`/api/chat`), every tool call (the agent's own tool observer, so it sees
+confirmed actions too), and every human approval. Ordering is a strictly increasing `seq` rather
+than a timestamp, because timestamps tie at millisecond resolution and wall clocks move — and the
+case that broke it was subtle: rolling the log appends its own `rotation` record, so picking the
+number before the roll made that record and the one that triggered it claim the same value. Past a
+size cap the file rolls to `audit-<stamp>-<seq>.log`, and a drop forced by the cap is itself
+recorded — history that vanishes without a trace is the failure the trail exists to prevent. A
+line killed mid-write is skipped when reading and **counted**, and the count is returned by `GET
+/api/audit`, because quietly returning fewer records is indistinguishable from a quiet day. Long
+messages are truncated with the original length kept alongside, so a cut record still says it was
+cut. Approvals are checked against the ticket that is actually pending before they are written: the
+record's one job is that "a human approved this" is true, so a forged or stale `ticket_id` is
+refused with a 409 instead of being logged as an approval and then failing mid-stream. The endpoint
+is read-only — no route writes, edits or clears a record — and the panel (Ctrl+K → 打开审计记录)
+says so, since every other panel edits the thing it shows. `pnpm check:audit` asserts append-only
+byte-wise, walks `seq` across a restart and across a rotation, reads the trail back over HTTP from
+a real server, and confirms that a rejected request and a forged ticket leave nothing behind.
+
 **Prometheus-style process metrics** at `GET /api/metrics`: turns, latency (avg and
 p95), token breakdown, tool usage and failures, and the **prompt-cache hit rate**. The
 last one matters most — a cache regression is invisible until it appears on a bill.

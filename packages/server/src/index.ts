@@ -31,6 +31,8 @@ import { listMcpServers, probeMcpServer, writeMcpServer, removeMcpServer, setMcp
 import { PluginManager, KNOWN_PERMISSIONS, type PluginManifest } from './plugins.js';
 import { FeishuBridge, type FeishuConfig } from './feishu.js';
 
+import { AuditLog } from './audit.js';
+import type { AuditRecord, AuditKind } from './audit.js';
 import { listTree, readWorkspaceFile, suggestPaths } from './files.js';
 import { outlinePath, suggestSymbols } from './outline.js';
 import { parseContextExport } from './contextParsers.js';
@@ -691,8 +693,50 @@ function makeAgent(cfg: SheConfig, sessionId?: string | null): Agent {
   });
   // Report tool usage centrally so /api/metrics can show which tools are used and
   // which silently fail. Attached here because every agent goes through makeAgent.
-  agent.setToolObserver((name, ms, failed) => metrics.recordTool(name, ms, failed));
+  agent.setToolObserver((name, ms, failed) => {
+    metrics.recordTool(name, ms, failed);
+    /*
+     * Every tool call, including the ones inside a confirmed action — the observer is on the
+     * agent, so it sees the same calls whatever path started them. This is the "tools" third of
+     * the audit trail; `request` and `confirm` are recorded at their own entry points.
+     */
+    auditSafe({ kind: 'tool', session_id: sessionId ?? undefined, tool: name, ms, ok: !failed });
+  });
   return agent;
+}
+
+/**
+ * The audit log for the workspace the server is running against.
+ *
+ * Created once and re-pointed when the workspace root changes, for the same reason the KB engine
+ * is: the trail belongs to the project, and a trail that followed the process instead would mix
+ * two projects' history into one file.
+ */
+let audit: AuditLog | null = null;
+let auditRoot = '';
+function auditLog(): AuditLog {
+  const root = resolve(config.workspace.root);
+  if (!audit || auditRoot !== root) {
+    audit = new AuditLog(root);
+    auditRoot = root;
+  }
+  return audit;
+}
+
+/**
+ * Write an audit record, never at the cost of the work being audited.
+ *
+ * Same stance as the metrics path: a full disk or a permissions problem in `.she/` must not turn
+ * a working turn into a failed one. It is not silent — the warning goes to the log, and
+ * `GET /api/audit` reports the file list and unparseable-line count, so a trail that stopped
+ * being written is visible rather than inferred.
+ */
+function auditSafe(rec: Omit<AuditRecord, 'ts' | 'seq'>): void {
+  try {
+    auditLog().append(rec);
+  } catch (err) {
+    log.warn(`审计写入失败（${rec.kind}）：${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /**
@@ -1387,6 +1431,15 @@ function registerRoutes(router: Router): void {
     const sid = sessionIdOf(req, body);
 
     /*
+     * The request third of the audit trail: what was asked, in which conversation.
+     *
+     * Recorded here rather than in the agent so it covers every route into a turn and stays a
+     * property of the server. Long messages are truncated by `AuditLog`, which keeps the real
+     * length alongside, so a cut record is still measurable.
+     */
+    auditSafe({ kind: 'request', session_id: sid, message });
+
+    /*
      * Refuse a second turn on a conversation that is already running.
      *
      * Checked here rather than relying on the agent's own guard, because the streaming
@@ -1561,6 +1614,38 @@ function registerRoutes(router: Router): void {
     if (!body.ticket_id) throw new HttpError(400, 'Missing required field: ticket_id');
     const agent = agentFor(req, body);
     const sid = sessionIdOf(req, body);
+
+    /*
+     * The confirm third of the audit trail.
+     *
+     * This is the line a human approval is reconstructed from: which ticket, in which
+     * conversation, and that it was approved. Recorded BEFORE the tool runs, so an approval that
+     * then fails is still on the record as an approval.
+     *
+     * The ticket is verified FIRST, and that ordering is the point. `confirmTool` throws on a
+     * mismatched id before doing anything, so writing the record first meant a forged or stale
+     * `ticket_id` produced a record saying a human approved a tool that no human was ever asked
+     * about. The trail's one job is that "someone approved this" is true, so a ticket that does
+     * not match the one actually pending is refused outright rather than logged as an approval.
+     * A clean 409 also beats the old behaviour of an error delivered mid-SSE-stream.
+     */
+    const pendingConfirm = agent.getPendingConfirm();
+    if (!pendingConfirm || pendingConfirm.ticket_id !== body.ticket_id) {
+      throw new HttpError(
+        409,
+        pendingConfirm
+          ? '这张工单已经过期，或者不是当前在等的工单。刷新后重新确认。'
+          : '现在没有等你确认的操作。',
+      );
+    }
+    auditSafe({
+      kind: 'confirm',
+      session_id: sid,
+      ticket_id: body.ticket_id,
+      approved: true,
+      tool: pendingConfirm.tool,
+      note: pendingConfirm.summary,
+    });
 
     if (body.stream !== false) {
       startSSE(res);
@@ -3569,6 +3654,37 @@ router.get('/api/fs/tree', (req, res) => {
   });
 
   // The agent's ask_user tool surfaces a question here.
+  /*
+   * The audit trail.
+   *
+   * Read-only by design: there is no endpoint that writes, edits or clears a record, because a
+   * trail a client can modify answers a different question than the one it is kept for. `total`
+   * counts what is on disk rather than what was returned, so a truncated response is visible.
+   */
+  router.get('/api/audit', (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const limitRaw = Number(url.searchParams.get('limit'));
+    const kind = url.searchParams.get('kind');
+    const sessionId = url.searchParams.get('session_id');
+    if (kind && !['request', 'tool', 'confirm', 'rotation'].includes(kind)) {
+      throw new HttpError(400, `invalid kind: ${kind}`);
+    }
+    const log = auditLog();
+    const result = log.read({
+      limit: Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 200,
+      kind: (kind as AuditKind | null) ?? undefined,
+      sessionId: sessionId ?? undefined,
+    });
+    sendJSON(res, {
+      root: auditRoot,
+      files: result.files,
+      // Unparseable lines are reported rather than skipped quietly: a damaged trail must not look
+      // like a quiet day.
+      skipped_lines: result.skipped,
+      records: result.records,
+    });
+  });
+
   router.get('/api/ask/pending', (_req, res) => {
     const p = pendingQuestionPath();
     if (!existsSync(p)) {

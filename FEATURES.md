@@ -20,6 +20,7 @@ Desktop window: **done** — Electron shell in `@she/desktop`, launched by `pnpm
 | KB browse + PulseSeed trace | done | |
 | Structural KB retrieve (no RAG) | done | |
 | Doctor / health | done | CLI + `/api/health` |
+| Append-only audit trail | done | `.she/audit.log` + `GET /api/audit` + read-only panel (Ctrl+K → 打开审计记录) |
 
 ## Packaging
 | Deliverable | Status |
