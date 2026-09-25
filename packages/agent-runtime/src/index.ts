@@ -29,6 +29,15 @@ export {
   isToolFailure,
 } from './tool-result.js';
 export type { ToolFailureKind, ToolResultVerdict } from './tool-result.js';
+export {
+  ErrorBook,
+  createErrorbookTools,
+  isWorthRemembering,
+  renderErrorbook,
+  formatErrorEntry,
+  ERRORBOOK_ROOT,
+} from './errorbook.js';
+export type { ErrorbookKind, ErrorEntry, FailureReport, ErrorbookEngineLike } from './errorbook.js';
 export { createIngestTools, chunkFileContent } from './ingest-tools.js';
 export type { IngestItem, IngestBatch } from './ingest-tools.js';
 export { MemoStore, createMemoTools } from './memo-tools.js';

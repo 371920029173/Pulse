@@ -105,6 +105,30 @@ told once that its approach is producing nothing and asked to try something diff
 only if it repeats again does the run stop, with an explanation. The round limit alone
 only ever caught loops that never end.
 
+**An error book, so a mistake is paid for once.** A classified failure reached the model for one
+turn and was then thrown away: the transcript is a linear log read top-to-bottom, and it is not a
+place you can ask "has `grep` burned me before?". Failures are now written into the knowledge
+base — the durable, retrievable store that already exists — under `errors/<tool>`. Two
+occurrences of the same mistake are one node with a count rather than two nodes, because
+recurrence is the signal that an entry is worth reading and a duplicate per occurrence would bury
+it under its own repeats; a repeat also counts as a *vote* that the entry matters, so the node is
+promoted in retrieval. The book records only what the agent got **wrong**: bad arguments, a
+refused action, a tool that is not there, a missing path, a failed command, and a stuck loop.
+`timeout`, `service` and `rate_limited` are weather, not lessons and are deliberately skipped;
+`empty` is skipped because a search that matched nothing **answered the question**. Entries are
+`tool_outcome`, never `fact` — an observation about this machine is not a truth about the world —
+and nothing is written into a fact group, so the book cannot start answering questions about the
+world with "this once timed out". Two failures in one turn are linked with `co_occurrence` and
+nothing stronger: "observed together" is a fact, "A caused B" is a claim this cannot support.
+Writes come from the agent loop, where the evidence is; the model gets a read-only
+`errorbook_lookup`, because a tool that let it write its own notes would fill the book with
+plausible lessons nobody ever observed. `preflight_record` consults the book before the work
+starts and puts what it found in the analysis, ahead of the prerequisites. `pnpm
+check:errorbook` drives real tools, a real agent turn (including a stuck loop) and a real SQLite
+store, and reads the rows back — it caught the query filter silently returning nothing, because
+it matched the retrieval trace against `errors/` while the engine renders that path as
+`errors → shell`.
+
 **Prometheus-style process metrics** at `GET /api/metrics`: turns, latency (avg and
 p95), token breakdown, tool usage and failures, and the **prompt-cache hit rate**. The
 last one matters most — a cache regression is invisible until it appears on a bill.

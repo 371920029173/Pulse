@@ -112,6 +112,14 @@ export interface PreflightRecord {
   /** What they are trying to achieve — which is not always the same sentence. */
   actual_goal: string;
   clarification_needed: string[];
+  /**
+   * Mistakes already recorded for work like this, one line each.
+   *
+   * Stored on the record rather than only shown to the model, because the record is the thing
+   * that can be read afterwards: an analysis that consulted the error book and did not write
+   * down what it found cannot be told apart from one that never looked.
+   */
+  known_errors: string[];
   confidence: number;
   /** Whether the model asked for a confidence higher than the checked facts allow. */
   confidenceClamped: boolean;
@@ -438,6 +446,7 @@ export interface PreflightInput {
 export function buildRecord(
   evidence: PreflightEvidence,
   input: PreflightInput,
+  knownErrors: string[] = [],
 ): PreflightRecord {
   const stated = String(input.stated_intent ?? '').trim();
   const goal = String(input.actual_goal ?? '').trim();
@@ -469,6 +478,7 @@ export function buildRecord(
     prerequisites: evidence.prerequisites,
     actual_goal: goal,
     clarification_needed: questions,
+    known_errors: knownErrors,
     confidence: clamped ? evidence.confidenceCeiling : claimed,
     confidenceClamped: clamped,
     evidence,
@@ -512,6 +522,16 @@ export function renderRecord(r: PreflightRecord): string {
 
   if (r.evidence.timeExpressions.length) {
     lines.push(`识别到的时间表达: ${r.evidence.timeExpressions.join('、')}`);
+  }
+
+  if (r.known_errors.length) {
+    /*
+     * Rendered before the prerequisites, because it can change what the plan should even be:
+     * "you have hit this wall before" is a reason to choose a different approach, whereas a
+     * missing prerequisite is a reason to fetch one.
+     */
+    lines.push('错题本里相关的记录（这是本工作区真实发生过的，不是你推断的）:');
+    for (const e of r.known_errors) lines.push(`  ${e}`);
   }
 
   if (r.prerequisites.length) {
@@ -642,6 +662,17 @@ export interface PreflightToolDeps {
   skillProfile?: () => string | undefined;
   automationMode?: () => boolean;
   activePlanGoal?: () => string | undefined;
+  /**
+   * Mistakes already recorded for work like this, one line each.
+   *
+   * A function rather than a value so the lookup happens when the tool is called, not when the
+   * agent is built — the book changes as the turn runs, and a snapshot taken at construction
+   * would answer with what was known before the conversation started.
+   *
+   * Optional because the book is a KB feature: without a knowledge base there is nothing to
+   * look in, and pre-flight must still work.
+   */
+  knownErrors?: (query: string) => string[];
 }
 
 export interface PreflightToolSet {
@@ -658,6 +689,23 @@ export function createPreflightTools(
   const toolMap = new Map<string, { def: ToolDefinition; fn: (a: Record<string, unknown>) => Promise<string> }>();
   const reg = (def: ToolDefinition, fn: (a: Record<string, unknown>) => Promise<string>) =>
     toolMap.set(def.name, { def, fn });
+
+  /**
+   * Ask the error book what it knows about this request.
+   *
+   * Bounded to a few lines and a few entries: this is a warning, not a report, and a long list
+   * of past failures at the top of the analysis would push the actual request down the page.
+   * A lookup that throws (no knowledge base, a locked database) is treated as an empty book —
+   * pre-flight is the step that must not fail.
+   */
+  const knownErrorsFor = (query: string): string[] => {
+    if (!deps.knownErrors) return [];
+    try {
+      return deps.knownErrors(query).slice(0, 3);
+    } catch {
+      return [];
+    }
+  };
 
   reg(
     {
@@ -724,6 +772,7 @@ export function createPreflightTools(
             : [],
           confidence: typeof a.confidence === 'number' ? a.confidence : undefined,
         },
+        knownErrorsFor(request),
       );
 
       store.save(record);

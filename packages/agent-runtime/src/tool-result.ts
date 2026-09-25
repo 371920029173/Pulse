@@ -226,8 +226,8 @@ const RULES: Rule[] = [
   },
   {
     kind: 'invalid_args',
-    re: /required|必填|不能为空|缺少|不合法|非法|必须是|no usable tasks|createIfMissing/i,
-    from: 'plan-tools.ts / memo-tools.ts / kb-tools.ts argument checks',
+    re: /required|必填|不能为空|缺少|必须给|至少要给|不合法|非法|必须是|no usable tasks|createIfMissing/i,
+    from: 'plan-tools.ts / memo-tools.ts / kb-tools.ts / errorbook.ts argument checks',
   },
   {
     kind: 'not_found',

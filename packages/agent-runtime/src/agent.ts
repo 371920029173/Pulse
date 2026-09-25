@@ -17,6 +17,8 @@ import { PendingPatchStore, CheckpointStore, resolveInsideWorkspace } from '@she
 import { createKBTools } from './kb-tools.js';
 import { createPlanTools } from './plan-tools.js';
 import { createPreflightTools } from './preflight.js';
+import { ErrorBook, createErrorbookTools, isWorthRemembering, formatErrorEntry } from './errorbook.js';
+import type { ErrorbookEngineLike, ErrorbookStoreLike, ErrorbookKind } from './errorbook.js';
 import { classifyToolResult, annotateToolResult, isToolFailure, type ToolResultVerdict } from './tool-result.js';
 import { LspManager, makeLspTools, executeLspTool } from './lsp-tools.js';
 import { makeScheduleTools, executeScheduleTool } from './schedule-tools.js';
@@ -64,6 +66,8 @@ export class Agent {
   private allToolDefs: ToolDefinition[] = [];
   /** Code intelligence; null when no language server is installed. */
   private lsp: LspManager | null = null;
+  /** What has gone wrong in this workspace before; written by the loop, read by the model. */
+  private errorBook: ErrorBook;
   /**
    * Notified after every tool call with its name, duration, and whether it failed.
    *
@@ -224,6 +228,23 @@ export class Agent {
     this.systemPrompt = getSystemPrompt(config.workspace.root, undefined, config.automationMode !== false);
     this.patches = new PendingPatchStore(config.workspace.root);
     this.checkpoints = new CheckpointStore(config.workspace.root);
+    /*
+     * The error book.
+     *
+     * One instance per agent, all writing to the same KB — so a mistake recorded in one
+     * conversation is readable in the next, which is the only version of this that is worth
+     * building.
+     *
+     * It needs two halves of the KB: the engine (group maintenance, typed edges, retrieval) and
+     * the store (the rows behind both). `store` is a private member of the engine, so it is
+     * reached here through one structural cast and reused below — the same trick `kb-tools.ts`
+     * uses, which keeps this factory decoupled from the kb package's class hierarchy.
+     */
+    const kbStore = (kbEngine as unknown as { store: ErrorbookStoreLike }).store;
+    this.errorBook = new ErrorBook(
+      kbEngine as unknown as ErrorbookEngineLike,
+      kbStore,
+    );
 
     for (const def of sandboxTools.definitions) {
       this.allToolDefs.push(def);
@@ -278,10 +299,21 @@ export class Agent {
       skillProfile: () => readSkillProfile(config.workspace.root),
       automationMode: () => config.automationMode !== false,
       activePlanGoal: () => planTools.store.active()?.goal,
+      knownErrors: (query) => this.errorBook
+        .lookup({ query, limit: 3 })
+        .map((e) => formatErrorEntry(e)),
     });
     for (const def of preflightTools.definitions) {
       this.allToolDefs.push(def);
       this.executors.set(def.name, (args) => preflightTools.execute(def.name, args));
+    }
+
+    // The read side of the error book: what has gone wrong here before. Registered next to
+    // pre-flight because that is when it is useful — before the work, not after.
+    const errorbookTools = createErrorbookTools(this.errorBook);
+    for (const def of errorbookTools.definitions) {
+      this.allToolDefs.push(def);
+      this.executors.set(def.name, (args) => errorbookTools.execute(def.name, args));
     }
 
     // Code intelligence. Only registered when a language server is actually
@@ -297,13 +329,10 @@ export class Agent {
     }
 
     // Knowledge ingestion: stage files, then file each item into the tree.
-    // `store` is a private member of the engine; reach it the same way the KB
-    // tools do, keeping this factory decoupled from the kb package types.
-    const kbStore = (kbEngine as unknown as { store: Parameters<typeof createIngestTools>[2] }).store;
     const ingestTools = createIngestTools(
       config.workspace.root,
       kbEngine as unknown as Parameters<typeof createIngestTools>[1],
-      kbStore,
+      kbStore as unknown as Parameters<typeof createIngestTools>[2],
     );
     for (const def of ingestTools.definitions) {
       this.allToolDefs.push(def);
@@ -714,7 +743,31 @@ export class Agent {
          * `tool_result` chunk and the next request all show the same thing. They are the
          * same transcript, and a reload must not render a different one than streaming did.
          */
+        /*
+         * Write it down before the remedy is appended.
+         *
+         * The annotation is for the model's next request; the book wants the tool's own words,
+         * because the remedy is stored as its own field and a signature that included it would
+         * treat one failure as two the first time the wording changed.
+         */
+        const rawOutput = typeof result === 'string' ? result : JSON.stringify(result ?? '');
         if (verdict) result = annotateToolResult(result, verdict);
+
+        /*
+         * The annotation gets this turn past the failure; this is what makes it survivable past
+         * the SESSION. A transcript is read linearly by a model with a token budget, so "has
+         * `grep` burned me before?" is not a question it can ask the history — but it can ask
+         * the book.
+         */
+        if (verdict && isWorthRemembering(verdict.kind)) {
+          this.recordMistake({
+            tool: name,
+            kind: verdict.kind,
+            call: tc.function.arguments,
+            detail: rawOutput,
+            remedy: verdict.remedy,
+          });
+        }
 
         const toolMsg: LLMMessage = {
           role: 'tool',
@@ -791,6 +844,18 @@ export class Agent {
             onChunk?.({ type: 'status', content: `重复调用未改善，已停止：${detail}` });
 
             /*
+             * This one is not a tool failure — every call may have "succeeded". It is the
+             * approach failing, which is exactly the kind of lesson worth keeping: the next
+             * session that reaches for the same call should know it already went nowhere.
+             */
+            this.recordMistake({
+              tool: name,
+              kind: 'stuck_loop',
+              call: tc.function.arguments,
+              detail,
+            });
+
+            /*
              * Say what happened AND what to do. An agent that silently stops looks
              * broken; one that explains a stuck loop is understood, and the user can
              * point it at the actual problem (a missing dependency, a wrong path).
@@ -821,6 +886,27 @@ export class Agent {
     this.flushInterjections();
     this.history.push(fallback);
     return fallback;
+  }
+
+  /**
+   * Write a failure into the error book without letting bookkeeping break the turn.
+   *
+   * The book is a durable store the user can lose access to for reasons that have nothing to do
+   * with this turn (a locked database, a full disk, a KB being re-indexed). None of those should
+   * turn a tool call that already returned into a crashed conversation.
+   */
+  private recordMistake(report: {
+    tool: string;
+    kind: ErrorbookKind;
+    call?: string;
+    detail: string;
+    remedy?: string | null;
+  }): void {
+    try {
+      this.errorBook.record({ ...report, sessionId: this.sessionId });
+    } catch (err) {
+      log.warn(`错题本写入失败（工具 ${report.tool}）：${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
@@ -1017,6 +1103,17 @@ export class Agent {
      * told why, and a non-zero exit code here was previously indistinguishable from success.
      */
     verdict = classifyToolResult(pending.name, result);
+    // Recorded like any other failure: a command the user approved and that then failed is
+    // among the most worth remembering.
+    if (isWorthRemembering(verdict.kind)) {
+      this.recordMistake({
+        tool: pending.name,
+        kind: verdict.kind,
+        call: JSON.stringify(pending.args),
+        detail: result,
+        remedy: verdict.remedy,
+      });
+    }
     this.lastPending = null;
 
     if (typeof result === 'string' && result.includes('"needs_apply"')) {
