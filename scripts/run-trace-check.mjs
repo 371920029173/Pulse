@@ -479,9 +479,9 @@ console.log('\n8. 接线与只读界面');
     /confirmToolBody[\s\S]{0,6000}?runRecorder\?\.tool\(/.test(agentSrc), null);
   check('失败的轮次把原因写进轨迹（不是只在对话里说一声）',
     /private failTurn[\s\S]{0,3000}?runRecorder\?\.error\(/.test(agentSrc), null);
-  check('被中断 / 卡死循环 / 到上限都记下理由（三种都不是"失败"）',
+  check('被中断 / 卡死循环 / 到上限 / 预算停止都记下理由（四种都不是"失败"）',
     /reason: 'aborted'/.test(agentSrc) && /reason: 'stuck_loop'/.test(agentSrc)
-      && /reason: 'max_iterations'/.test(agentSrc), null);
+      && /reason: 'max_iterations'/.test(agentSrc) && /reason: 'budget'/.test(agentSrc), null);
   check('停在等人工的轮次不会被当成"跑完了"关掉',
     /private closeRunIfDone[\s\S]{0,200}?runIsPaused\(\)[\s\S]{0,120}?runHeld\(\)/.test(agentSrc)
       && /withTurn[\s\S]{0,4000}?this\.closeRunIfDone\(\)/.test(agentSrc), null);

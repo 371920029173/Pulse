@@ -20,6 +20,16 @@ import { createPreflightTools, PreflightStore } from './preflight.js';
 import { ErrorBook, createErrorbookTools, isWorthRemembering, formatErrorEntry } from './errorbook.js';
 import type { ErrorbookEngineLike, ErrorbookStoreLike, ErrorbookKind } from './errorbook.js';
 import { classifyToolResult, annotateToolResult, isToolFailure, type ToolResultVerdict } from './tool-result.js';
+import {
+  DEFAULT_BUDGET,
+  budgetStop,
+  parseBudgetLimits,
+  renderBudgetStop,
+  type BudgetLimits,
+  type BudgetStop,
+  type BudgetUsage,
+} from './budget.js';
+import { isReadOnlyTool, queryKey, readsToPrefetch, inWaves } from './read-batch.js';
 import { LspManager, makeLspTools, executeLspTool } from './lsp-tools.js';
 import { makeScheduleTools, executeScheduleTool } from './schedule-tools.js';
 import type { ScheduleBridge, WindowView } from './schedule-tools.js';
@@ -608,6 +618,36 @@ export class Agent {
     const signal = this.aborter?.signal;
 
     /*
+     * ─── Turn budget (opt-in) ───
+     *
+     * Read per turn, not per process, so a ceiling edited in `she.config.yaml` applies to the
+     * next turn instead of the next restart. With the default config `budgetStop` returns null
+     * on every input, so none of the checks below can change what this loop does.
+     */
+    const budget = this.budgetLimits();
+    const turnStartedAt = Date.now();
+    /** Consumption for THIS turn: `iterations` is already per-turn, but tokens and tool calls were not. */
+    let turnTokens = 0;
+    let turnToolCalls = 0;
+    const usageNow = (over: Partial<BudgetUsage> = {}): BudgetUsage => ({
+      rounds: iterations,
+      toolCalls: turnToolCalls,
+      tokens: turnTokens,
+      elapsedSeconds: (Date.now() - turnStartedAt) / 1000,
+      ...over,
+    });
+
+    /*
+     * ─── Read-only reuse (Batch I) ───
+     *
+     * Scoped to the turn and thrown away with it. Cleared whenever a call that can change
+     * something runs, because a cached read is only the same answer while nothing has changed;
+     * the residual gap is an edit made outside SHE during the turn, which no cache inside the
+     * process can see.
+     */
+    const readCache = new Map<string, string>();
+
+    /*
      * Repeated-call detection.
      *
      * `maxIterations` only catches a loop that never ends. The failure mode that
@@ -653,6 +693,16 @@ export class Agent {
         this.runRecorder?.step('已中断当前执行');
         return stopped;
       }
+      /*
+       * Before paying for another round: has the turn already used up its budget?
+       *
+       * Checked here rather than after the response because this is the last moment at which
+       * stopping is free. `rounds` is the number of COMPLETED rounds, so a ceiling of 1 means
+       * one model call and then stop.
+       */
+      const roundStop = budgetStop(budget, usageNow());
+      if (roundStop) return this.endTurnForBudget(roundStop, onChunk);
+
       iterations++;
       log.debug(`Tool loop iteration ${iterations}`);
 
@@ -668,6 +718,14 @@ export class Agent {
           this.tokenUsage.cache_hit_tokens += chunk.usage.cache_hit_tokens || 0;
           this.tokenUsage.cache_miss_tokens += chunk.usage.cache_miss_tokens || 0;
           turnPromptTokens += chunk.usage.prompt_tokens || 0;
+          /*
+           * Per-turn total, for the budget ceiling. `total_tokens` is preferred but not trusted
+           * to be present: a provider that reports only the parts would otherwise make the token
+           * ceiling look permanently unreached — a limit that never fires is worse than none,
+           * because the user believes it is protecting them.
+           */
+          turnTokens += chunk.usage.total_tokens
+            || ((chunk.usage.prompt_tokens || 0) + (chunk.usage.completion_tokens || 0));
         }
         /*
          * The agent's narration, recorded here because this is the one funnel every model-produced
@@ -719,7 +777,76 @@ export class Agent {
         return response;
       }
 
-      for (const tc of response.tool_calls) {
+      /*
+       * Spend is only knowable once the provider has answered, so this check lands between the
+       * response and the work it asked for: stopping here saves every tool call in the message.
+       *
+       * `rounds: 0` because the round axis was already tested at the top of this iteration —
+       * passing the real value would let it fire twice and report the round ceiling for what is
+       * actually a token overrun.
+       */
+      const spendStop = budgetStop(budget, usageNow({ rounds: 0 }));
+      if (spendStop) {
+        this.closeUnrunCalls(response.tool_calls, 0, spendStop, messages, onChunk);
+        return this.endTurnForBudget(spendStop, onChunk);
+      }
+
+      /*
+       * ─── Start the read-only calls early ───
+       *
+       * `readsToPrefetch` returns only the LEADING run of read-only calls, and only those not
+       * already answered this turn, so a read that follows a write in the same message is never
+       * started against the pre-write contents. The promises are awaited below, in the original
+       * order, by the untouched serial path — this pass only removes the waiting, it does not
+       * reorder anything.
+       */
+      const prefetched = new Map<number, { text: string; ms: number }>();
+      const reads = readsToPrefetch(
+        response.tool_calls.map((tc) => ({ name: tc.function.name, rawArgs: tc.function.arguments })),
+        (key) => readCache.has(key),
+      );
+      if (reads.length > 1) {
+        for (const wave of inWaves(reads)) {
+          await Promise.all(wave.map(async (ref) => {
+            const executor = this.executors.get(ref.name);
+            if (!executor) return;
+            const startedAt = Date.now();
+            try {
+              const args = JSON.parse(ref.rawArgs || '{}') as Record<string, unknown>;
+              /*
+               * `_`-prefixed keys are the agent's own adjustments, not what the model asked for,
+               * and the confirm ticket must never reach an executor. Dropped here the same way the
+               * serial path does it, so a prefetched call and a serial one receive the same
+               * arguments.
+               */
+              for (const key of Object.keys(args)) if (key.startsWith('_')) delete args[key];
+              const text = await executor(args);
+              prefetched.set(ref.index, {
+                text: typeof text === 'string' ? text : JSON.stringify(text ?? ''),
+                ms: Date.now() - startedAt,
+              });
+            } catch (err) {
+              /*
+               * A throw is captured as the `Error:` string the executor path would have produced,
+               * rather than rethrown: the serial loop below classifies and annotates it exactly as
+               * it would have, so a prefetched failure and a serial one are indistinguishable —
+               * which is the property that makes this safe to add at all.
+               */
+              prefetched.set(ref.index, {
+                text: `Error: ${err instanceof Error ? err.message : String(err)}`,
+                ms: Date.now() - startedAt,
+              });
+            }
+          }));
+        }
+        onChunk?.({
+          type: 'status',
+          content: `本轮 ${reads.length} 个只读调用并行执行`,
+        });
+      }
+
+      for (let callIndex = 0; callIndex < response.tool_calls.length; callIndex++) {
+        const tc = response.tool_calls[callIndex];
         const name = tc.function.name;
         const executor = this.executors.get(name);
 
@@ -743,6 +870,35 @@ export class Agent {
          * owned the counter never executed.
          */
         let toolFailed = false;
+        /*
+         * The identity of this call if it is a pure read, so its result can be remembered for the
+         * rest of the turn. Null for everything else, which is what makes "only reads are cached"
+         * a property of one variable rather than of every branch below.
+         */
+        let reuseKey: string | null = null;
+        /*
+         * A ceiling reached in the middle of a message stops before the next call.
+         *
+         * `rounds: 0, tokens: 0` because both were tested at their own checkpoints; between two
+         * tool calls only the call count and the clock can have moved.
+         *
+         * The remaining calls in this message are answered with an explicit "not run" result
+         * rather than being dropped: an assistant message that lists tool calls and leaves some
+         * of them unanswered is not a legal request, so the transcript would be unusable — and
+         * the model would have no way to learn that its own budget is what stopped it.
+         */
+        const callStop = budgetStop(budget, usageNow({ rounds: 0, tokens: 0 }));
+        if (callStop) {
+          this.closeUnrunCalls(response.tool_calls, callIndex, callStop, messages, onChunk);
+          return this.endTurnForBudget(callStop, onChunk);
+        }
+        turnToolCalls += 1;
+        /*
+         * A call that is not a read may change what the reads were reading, so everything cached
+         * this turn is dropped before it runs. Conservative on purpose: the cost of a needless
+         * re-read is one call, and the cost of a stale hit is a wrong answer that looks right.
+         */
+        if (!isReadOnlyTool(name)) readCache.clear();
         if (!executor) {
           result = `Error: unknown tool "${name}"`;
           verdict = classifyToolResult(name, result);
@@ -780,11 +936,41 @@ export class Agent {
             if (name === 'fs_write' && !this.config.sandbox.allowAllCommands) {
               args._stage = true;
             }
-            log.info(`Executing tool: ${name}`);
+            /*
+             * Three sources for the result, in order of preference:
+             *
+             *   1. an identical read already answered this turn — free;
+             *   2. a read this pass started early — the waiting is already over;
+             *   3. running it here — the original path, and the only one a read that follows a
+             *      write in the same message can take.
+             *
+             * `early` cannot be stale relative to a write in this message: `readsToPrefetch` only
+             * starts the leading run of reads, so no mutation precedes any prefetched call.
+             */
+            reuseKey = isReadOnlyTool(name) ? queryKey(name, tc.function.arguments) : null;
+            const remembered = reuseKey ? readCache.get(reuseKey) : undefined;
+            const early = prefetched.get(callIndex);
+
+            log.info(remembered !== undefined ? `Reusing tool result: ${name}` : `Executing tool: ${name}`);
             const toolStart = Date.now();
+            /*
+             * Duration is taken from where the work actually started. A prefetched call began
+             * before this loop reached it, so timing it from here would report the wait as the
+             * tool's cost — the trace would show a 400ms read that took 12ms and the number would
+             * be believed.
+             */
+            let toolMs: number | null = null;
             try {
-              result = await executor(args);
-              if (typeof result !== 'string') result = JSON.stringify(result ?? '');
+              if (remembered !== undefined) {
+                result = remembered;
+                toolMs = 0;
+              } else if (early) {
+                result = early.text;
+                toolMs = early.ms;
+              } else {
+                result = await executor(args);
+                if (typeof result !== 'string') result = JSON.stringify(result ?? '');
+              }
               /*
                * Classify rather than sniff for `^Error:`.
                *
@@ -806,7 +992,8 @@ export class Agent {
               verdict = classifyToolResult(name, result);
             } finally {
               // In a `finally` so a throwing tool is still counted.
-              this.toolObserver?.(name, Date.now() - toolStart, toolFailed);
+              const ms = toolMs ?? (Date.now() - toolStart);
+              this.toolObserver?.(name, ms, toolFailed);
               /*
                * And into the run trace, from the same scope.
                *
@@ -820,11 +1007,26 @@ export class Agent {
                 name,
                 args: tc.function.arguments,
                 result: typeof result === 'string' ? result : JSON.stringify(result ?? ''),
-                ms: Date.now() - toolStart,
+                ms,
                 ok: !toolFailed,
                 failure: verdict?.kind,
               });
               if (toolEvent) this.runEvents.push(toolEvent);
+            }
+            /*
+             * Remember a read that worked, so the rest of the turn does not pay for it again.
+             *
+             * Successes only. A failed read is exactly the case where repeating the identical
+             * call is what `retryable` says may help, and serving it from a cache would make that
+             * retry impossible — the one situation where reuse would cause the failure to
+             * persist rather than merely waste a call.
+             */
+            if (reuseKey && !toolFailed) readCache.set(reuseKey, result);
+            if (remembered !== undefined) {
+              onChunk?.({
+                type: 'status',
+                content: `复用「${name}」本轮已取得的相同结果（参数一致，期间没有调用改过东西）`,
+              });
             }
             /*
              * ─────────────────────────────────────────────────────────────────────────
@@ -969,10 +1171,21 @@ export class Agent {
          * it simply never reaches the limit, because the result changed.
          */
         const signature = `${name}:${tc.function.arguments}:${String(result).slice(0, 500)}`;
+        /*
+         * A transient failure gets one more identical attempt before this counts as stuck.
+         *
+         * `retryable` exists to answer exactly this question — "could repeating the identical
+         * call help?" — and for a timeout or a 429 the answer is yes (see `tool-result.ts`).
+         * Treating those as a stuck loop spent the detector's authority on the one case where
+         * repeating is correct, and the nudge told the model to change an approach that was
+         * fine. The reprieve is exactly one attempt, so a service that never comes back still
+         * stops rather than hammering.
+         */
+        const stallLimit = repeatLimit + (verdict?.retryable ? 1 : 0);
         const seen = callSignatures.get(signature);
         if (seen) {
           seen.count++;
-          if (seen.count >= repeatLimit) {
+          if (seen.count >= stallLimit) {
             const detail = `「${name}」用同样的参数连续调用 ${seen.count} 次，返回的内容完全一致。`;
             log.warn(`Detected a stuck tool loop: ${detail}`);
 
@@ -999,9 +1212,18 @@ export class Agent {
                 role: 'user',
                 content:
                   `[系统提示] ${detail}\n\n`
-                  + '这说明当前方法没有产生任何变化，再调一次也是一样的结果。\n'
-                  + '请先判断原因（文件是否真的写进去了？路径对吗？是不是缺依赖或权限不足？），'
-                  + '然后用**不同的方式**再试一次。如果确实无法继续，直接告诉用户你卡在哪、需要什么。',
+                  + (verdict?.retryable
+                    /*
+                     * A transient failure is the one case where the advice above would be wrong.
+                     * The extra attempt `stallLimit` allowed has already been spent, so what the
+                     * model needs to hear is "stop retrying", not "your approach is broken".
+                     */
+                    ? '这是可重试的失败（超时 / 限流 / 服务不可达），已经额外给过一次原样重试的机会，'
+                      + '结果仍然一样。说明对方现在确实不可用：不要再重试，把请求改小或换一条路，'
+                      + '必要时如实说明现状。\n'
+                    : '这说明当前方法没有产生任何变化，再调一次也是一样的结果。\n'
+                      + '请先判断原因（文件是否真的写进去了？路径对吗？是不是缺依赖或权限不足？），'
+                      + '然后用**不同的方式**再试一次。如果确实无法继续，直接告诉用户你卡在哪、需要什么。\n'),
               };
               /*
                * Added to the REQUEST only, never to `history`.
@@ -1015,7 +1237,7 @@ export class Agent {
               // Allow this call to be retried after the nudge, but remember that we
               // have already used our one chance.
               callSignatures.delete(signature);
-              callSignatures.set(signature, { count: repeatLimit - 1, result });
+              callSignatures.set(signature, { count: stallLimit - 1, result });
               continue;
             }
 
@@ -1072,6 +1294,73 @@ export class Agent {
     // reader can tell "it finished" from "it was cut off and can be resumed".
     this.runFailure = { reason: 'max_iterations', text: `达到工具调用上限 ${maxIterations} 轮` };
     return fallback;
+  }
+
+  /**
+   * The turn budget, read at the start of every turn.
+   *
+   * Read per turn rather than cached on the instance so an edit to `she.config.yaml` (or to the
+   * settings that feed it) applies to the next turn instead of the next restart — a ceiling the
+   * user raised because it was cutting work short should not need a reboot to take effect.
+   *
+   * `DEFAULT_BUDGET` is disabled, and a config object that predates this switch (or a test's
+   * partial stub) simply has no `budget` block, so the fallback is not a special case: it is the
+   * same value a fresh install gets.
+   */
+  private budgetLimits(): BudgetLimits {
+    const raw = (this.config as { budget?: unknown } | undefined)?.budget;
+    return parseBudgetLimits(raw, DEFAULT_BUDGET);
+  }
+
+  /**
+   * End the turn because a ceiling was reached — not because anything failed.
+   *
+   * Kept separate from `failTurn`: a budget stop must not be recorded as an error, must not
+   * trigger the error book, and must leave a transcript the next turn can be appended to. The
+   * reason goes on the closing trace event so an interrupted-looking run is legible as "it
+   * stopped where you told it to".
+   */
+  private endTurnForBudget(stop: BudgetStop, onChunk?: (chunk: StreamChunk) => void): LLMMessage {
+    const text = renderBudgetStop(stop);
+    onChunk?.({ type: 'status', content: `已按预算停止：${stop.kind} 用到 ${stop.used}（上限 ${stop.limit}）` });
+    this.flushInterjections();
+    const msg: LLMMessage = { role: 'assistant', content: text };
+    this.history.push(msg);
+    this.runFailure = { reason: 'budget', text: `${stop.kind}: ${stop.used}/${stop.limit}` };
+    this.runRecorder?.step(`预算停止：${stop.kind} ${stop.used}/${stop.limit}`);
+    return msg;
+  }
+
+  /**
+   * Answer the tool calls that a budget stop prevented from running.
+   *
+   * An assistant message that lists tool calls and leaves any of them without a result is not a
+   * legal request, so simply returning would leave a transcript the next turn cannot be appended
+   * to — the ceiling would break the conversation instead of pausing it. Each skipped call gets an
+   * explicit result naming the ceiling, which also tells the model *why* nothing happened rather
+   * than leaving it to guess at a silent gap.
+   */
+  private closeUnrunCalls(
+    calls: ReadonlyArray<{ id: string; function: { name: string } }>,
+    from: number,
+    stop: BudgetStop,
+    messages: LLMMessage[],
+    onChunk?: (chunk: StreamChunk) => void,
+  ): void {
+    for (let i = Math.max(0, from); i < calls.length; i++) {
+      const call = calls[i];
+      const note = JSON.stringify({
+        not_run: true,
+        reason: 'budget_exceeded',
+        budget: { kind: stop.kind, limit: stop.limit, used: stop.used },
+        tool: call.function.name,
+        note: `预算上限（${stop.kind} ${stop.limit}）已达，这次调用没有执行。`,
+      });
+      const msg: LLMMessage = { role: 'tool', content: note, tool_call_id: call.id };
+      this.history.push(msg);
+      messages.push(msg);
+      onChunk?.({ type: 'tool_result', toolCallId: call.id, toolName: call.function.name, content: note });
+    }
   }
 
   /**

@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.2.0",
   "license": "Apache-2.0",
-  "description": "SHE v2 â€?Structured Hierarchy Engine: agent-runtime with Group Memory + PulseSeed retrieval",
+  "description": "SHE v2 ?Structured Hierarchy Engine: agent-runtime with Group Memory + PulseSeed retrieval",
   "scripts": {
     "build": "pnpm -r build",
     "dev:ui": "pnpm --filter @she/ui dev",
@@ -45,7 +45,7 @@
     "check:restart": "node scripts/restart-check.mjs",
     "check:encoding": "node scripts/encoding-check.mjs",
     "vendor:fonts": "node scripts/vendor-fonts.mjs",
-    "check:offline": "pnpm -r build && pnpm -r test && pnpm eval && pnpm check:restart && pnpm check:encoding && pnpm check:data && pnpm check:subagent && pnpm check:preflight && pnpm check:plan && pnpm check:delivery && pnpm check:audit && pnpm check:runs && pnpm check:security && pnpm check:shell && pnpm check:host && pnpm check:lock && pnpm check:theme && pnpm check:uistruct && pnpm check:dist && pnpm check:logs && pnpm check:a11y && pnpm check:docs && pnpm check:portability && pnpm check:metrics && pnpm check:schedule && pnpm check:lsp && pnpm check:i18n && pnpm check:toolresult && pnpm check:errorbook && pnpm check:reflection && pnpm check:ui && pnpm check:docker && pnpm check:api && pnpm check:plugins",
+    "check:offline": "pnpm -r build && pnpm -r test && pnpm eval && pnpm check:restart && pnpm check:encoding && pnpm check:data && pnpm check:subagent && pnpm check:preflight && pnpm check:plan && pnpm check:delivery && pnpm check:audit && pnpm check:runs && pnpm check:security && pnpm check:shell && pnpm check:host && pnpm check:lock && pnpm check:theme && pnpm check:uistruct && pnpm check:dist && pnpm check:logs && pnpm check:a11y && pnpm check:docs && pnpm check:portability && pnpm check:metrics && pnpm check:schedule && pnpm check:lsp && pnpm check:i18n && pnpm check:toolresult && pnpm check:errorbook && pnpm check:reflection && pnpm check:budget && pnpm check:ui && pnpm check:docker && pnpm check:api && pnpm check:plugins",
     "check:all": "pnpm check:offline && pnpm eval:verify",
     "pack:win": "pnpm build && pnpm --filter @she/desktop dist:win && pnpm check:packaged",
     "dist:desktop": "pnpm --filter @she/desktop dist:win",
@@ -56,7 +56,8 @@
     "check:errorbook": "node scripts/errorbook-check.mjs",
     "check:audit": "node scripts/audit-check.mjs",
     "check:runs": "node scripts/run-trace-check.mjs",
-    "check:reflection": "node scripts/reflection-check.mjs"
+    "check:reflection": "node scripts/reflection-check.mjs",
+    "check:budget": "node scripts/budget-check.mjs"
   },
   "engines": {
     "node": ">=20"

@@ -92,7 +92,9 @@ target missing, state precondition unmet, empty result, endpoint unreachable, ti
 limited, non-zero exit, unrecognised — and attaches the one thing that can work next. `retryable`
 is part of that verdict, so a call that cannot succeed differently is no longer retried: a
 timeout is worth resending with a smaller request, a wrong argument is not worth resending at
-all. Waiting for a human (the confirm gate, a staged patch) is a **state** and deliberately not a
+all — and the runaway-loop detector reads it too (see the budget entry below), giving a
+transient failure one more attempt before the repetition is treated as being stuck.
+Waiting for a human (the confirm gate, a staged patch) is a **state** and deliberately not a
 failure, and the classifier only reads shell status as a whole shape, so a command that merely
 *prints* `exit code: 1` or `(timed out)` is not mistaken for one that failed. `pnpm
 check:toolresult` drives the real tools and a real agent turn, and additionally extracts every
@@ -275,6 +277,48 @@ serves the mirror and is readable in a **new process** from the file on disk, an
 resetting someone's calibration history is a change worth being able to date. `pnpm check:reflection`
 drives real tools and a real server for all of the above and refuses to pass on the fuzzy cases:
 a soft constraint must *not* read as drift, and insufficient samples must *not* produce a verdict.
+
+**A budget you turn on, so no ceiling can cut real work short by default.** Every long-running agent
+eventually needs a stop condition that is not "the model decides to stop", and every implementation
+of one has the same failure: it arms itself, and a task that would have finished is truncated for a
+user who never asked for a limit and has no way to see why. So the ceiling is a switch —
+`budget.enabled: false` and `0` on every axis in `DEFAULTS`, with `SHE_BUDGET_ENABLED` /
+`SHE_BUDGET_MAX_TOOL_ROUNDS` / `_MAX_TOOL_CALLS` / `_MAX_TOKENS` / `_MAX_SECONDS` for an operator who
+wants it without editing YAML. With it off, `budgetStop` cannot return a stop for any usage, which
+is asserted end-to-end rather than assumed.
+
+*Checked where stopping is still free.* Three junctions, each **before** the work they guard: before
+a model round (`maxToolRounds`), after a response arrives and its usage is known but **before** its
+tools run (`maxTokens`), and between tool calls inside one response (`maxToolCalls`, `maxSeconds`).
+A ceiling tested after the fact has already spent the thing it was protecting.
+
+*Stopping is not failing.* A budget stop goes through its own ending — `endTurnForBudget`, run
+reason `budget` — not `failTurn`, so it is not counted as a crash, does not enter the errorbook, and
+does not read as a result. The message names the axis, the ceiling, how much was used, and states
+plainly that this is not a task failure and that 「继续」 will pick up from here. Calls already
+present in the response that will not run are closed with `{ not_run: true, reason:
+'budget_exceeded' }`, because a `tool_calls` block with no matching result is a transcript the next
+request cannot be built on — the turn has to be interruptible *and* appendable.
+
+**Read-only tools start together; nothing else does.** Independent reads are the one place
+concurrency is free of correctness risk, so they are run in waves — but only the **leading
+contiguous run** of read-only calls is prefetched, and only for names on a static allowlist
+(`fs_read`, `fs_list`, `grep`, `git_status` / `_diff` / `_log`, `kb_query`, `errorbook_lookup`,
+`memo_list`, `plan_list`, `schedule_list`, `schedule_window`, `reflection_check`). The first call
+that is not on that list — including a name the runtime has never seen — ends the wave and
+everything after it goes through the serial path, which is the conservative direction: a wrong
+"this is safe to parallelise" would interleave a write with a read, while a wrong "this is not"
+costs a few milliseconds. Waves are capped by `MAX_PARALLEL_READS` (4).
+
+**The same read asked twice in one turn touches the disk once.** Identity is the tool name plus its
+arguments under a canonical key order, so an argument map rewritten in a different order is the same
+query and not a miss. The cache lives for exactly one turn and is cleared the moment any call that is
+not read-only runs — not on a heuristic that a tool "probably" writes, but on the refusal to assume
+otherwise — so a read that follows a write cannot receive pre-write contents with nothing to
+distinguish it from a correct answer. A reuse is reported as a status line rather than happening
+silently, and the reused result is byte-identical to the first. `pnpm check:budget` drives all of
+this through a real `Agent`, and asserts the two things a regression would break quietly: that the
+off switch is really off, and that a write always invalidates.
 
 **Prometheus-style process metrics** at `GET /api/metrics`: turns, latency (avg and
 p95), token breakdown, tool usage and failures, and the **prompt-cache hit rate**. The

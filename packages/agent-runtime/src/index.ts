@@ -29,6 +29,17 @@ export {
   isToolFailure,
 } from './tool-result.js';
 export type { ToolFailureKind, ToolResultVerdict } from './tool-result.js';
+export { DEFAULT_BUDGET, budgetStop, parseBudgetLimits, renderBudgetStop } from './budget.js';
+export type { BudgetKind, BudgetLimits, BudgetStop, BudgetUsage } from './budget.js';
+export {
+  MAX_PARALLEL_READS,
+  READ_ONLY_TOOLS,
+  inWaves,
+  isReadOnlyTool,
+  queryKey,
+  readsToPrefetch,
+  stableStringify,
+} from './read-batch.js';
 export { RunTraceStore, RunRecorder, distinctTokens } from './run-trace.js';
 export type { RunEvent, RunEventKind, RunState, RunSummary, RunReadResult, RunTraceOptions } from './run-trace.js';
 export {

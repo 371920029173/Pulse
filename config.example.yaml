@@ -101,6 +101,28 @@ skills:
   # dev | liberal | general | custom — which skill files get injected.
   profile: general
 
+# Cost ceilings for ONE turn. Off by default, and off unless `enabled: true`.
+#
+# The project's standing decision is that no quota may cut a real task short: a task stopped
+# halfway usually costs more to redo than the overrun it was meant to prevent. So this is a
+# switch for whoever pays the bill, not a policy — with `enabled: false` the agent behaves
+# exactly as it did before this existed, and a turn that stops on budget says so and can be
+# resumed with 「继续」.
+#
+# 0 on an axis means "no limit on that axis". Checking is most-expensive-first: tokens, then
+# seconds, then rounds, then calls. `maxToolCalls` is enforced between tool calls, and any
+# call it prevents is answered with an explicit "not run" result so the transcript stays
+# valid and the model learns why nothing happened.
+#
+# Environment variables: SHE_BUDGET_ENABLED=1, SHE_BUDGET_MAX_TOOL_ROUNDS,
+# SHE_BUDGET_MAX_TOOL_CALLS, SHE_BUDGET_MAX_TOKENS, SHE_BUDGET_MAX_SECONDS.
+budget:
+  enabled: false
+  maxToolRounds: 0
+  maxToolCalls: 0
+  maxTokens: 0
+  maxSeconds: 0
+
 # Skip confirms and ask fewer questions. This is a conversational stance, NOT a
 # permission grant: it never enables allowAllCommands.
 automationMode: true

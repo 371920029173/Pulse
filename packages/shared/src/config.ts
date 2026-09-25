@@ -172,6 +172,32 @@ export interface SheConfig {
     /** Active skill profile — see SKILL_PROFILES for the full set. */
     profile: SkillProfile;
   };
+  /**
+   * Cost ceilings for a single turn — **off unless enabled**.
+   *
+   * The standing decision in this project is that no product quota may cut a real task short
+   * (`docs/s-tier-backlog.md`): a task stopped halfway costs more to redo than the overrun it was
+   * meant to prevent. That is an argument about the DEFAULT, not about the capability, so this
+   * exists as a switch whose default leaves the old behaviour byte-identical —
+   * `agent-runtime/src/budget.ts` returns null on every check while `enabled` is false.
+   *
+   * Not surfaced in the Settings UI on purpose: a ceiling is set by whoever pays the bill, once,
+   * in a config file or an environment variable, and a slider that silently caps a long refactor
+   * would be the exact complaint the decision above is about.
+   *
+   * `0` on any axis means "no limit on this axis".
+   */
+  budget: {
+    enabled: boolean;
+    /** Model round trips in one turn. */
+    maxToolRounds: number;
+    /** Tool calls in one turn. */
+    maxToolCalls: number;
+    /** Prompt + completion tokens for the turn, as the provider reports them. */
+    maxTokens: number;
+    /** Wall clock for the turn, in seconds. */
+    maxSeconds: number;
+  };
   /** When true: skip confirms, auto KB hygiene, less babysitting (Cursor/CC-like). */
   automationMode: boolean;
   /**
@@ -257,6 +283,17 @@ const DEFAULTS: SheConfig = {
   skills: {
     profile: 'general',
   },
+  /*
+   * Off. Every axis is 0 as well, so even a future change that reads a limit without checking
+   * `enabled` cannot start enforcing something nobody asked for.
+   */
+  budget: {
+    enabled: false,
+    maxToolRounds: 0,
+    maxToolCalls: 0,
+    maxTokens: 0,
+    maxSeconds: 0,
+  },
   automationMode: true,
   schedule: {
     enabled: true,
@@ -326,7 +363,7 @@ export function tryLoadYaml(filePath: string): Record<string, unknown> | null {
  * applied but is not is worse than one that fails.
  */
 const KNOWN_TOP_LEVEL_KEYS = new Set([
-  'llm', 'workspace', 'kb', 'sandbox', 'skills', 'automationMode', 'schedule', 'server',
+  'llm', 'workspace', 'kb', 'sandbox', 'skills', 'automationMode', 'schedule', 'server', 'budget',
 ]);
 
 /** Warn about keys we do not read, so a typo is visible. */
@@ -386,6 +423,31 @@ export function loadConfig(workspaceRoot?: string): SheConfig {
     console.warn(`[config] 未识别的顶层配置键「${key}」—— 它不会有任何效果，请检查拼写。${configPath ? ` (${configPath})` : ''}`);
   }
   const config = deepMerge(DEFAULTS as unknown as Record<string, unknown>, fileConfig) as unknown as SheConfig;
+
+  /*
+   * Normalise the budget block against the defaults.
+   *
+   * A YAML file can say anything: `maxTokens: "20k"` coerces to `NaN`, and `budget:` with no
+   * body merges as `null` and would make the block below throw on property access. A value that
+   * is not a non-negative number is dropped back to the default rather than coerced, because
+   * `NaN >= limit` is FALSE — a bad value would leave the axis permanently unfired while the
+   * user believed a ceiling was protecting them, which is the one failure mode this feature
+   * cannot afford.
+   */
+  {
+    const fromFile = config.budget as unknown;
+    config.budget = { ...DEFAULTS.budget };
+    if (fromFile && typeof fromFile === 'object' && !Array.isArray(fromFile)) {
+      const src = fromFile as Record<string, unknown>;
+      if (typeof src.enabled === 'boolean') config.budget.enabled = src.enabled;
+      for (const key of ['maxToolRounds', 'maxToolCalls', 'maxTokens', 'maxSeconds'] as const) {
+        const raw = src[key];
+        if (raw === undefined || raw === null || raw === '') continue;
+        const n = Number(raw);
+        if (Number.isFinite(n) && n >= 0) config.budget[key] = Math.trunc(n);
+      }
+    }
+  }
 
   const env = process.env;
   if (env.SHE_LLM_PROVIDER === 'openai' || env.SHE_LLM_PROVIDER === 'anthropic') {
@@ -491,6 +553,30 @@ export function loadConfig(workspaceRoot?: string): SheConfig {
   if (env.SHE_SKILL_PROFILE === 'dev' || env.SHE_SKILL_PROFILE === 'liberal' || env.SHE_SKILL_PROFILE === 'general' || env.SHE_SKILL_PROFILE === 'custom') {
     config.skills.profile = env.SHE_SKILL_PROFILE;
   }
+  /*
+   * Cost ceilings. All optional, all off by default.
+   *
+   * `SHE_BUDGET_ENABLED` is what turns enforcement on; setting a limit alone does nothing, which
+   * is deliberate — an environment where someone exported `SHE_BUDGET_MAX_TOKENS` for another
+   * purpose must not silently start cutting turns short. Malformed values are ignored (leaving
+   * that axis unlimited) rather than coerced to 0, because 0 already means "unlimited" and a
+   * typo that reads as "unlimited" is only visible if it is reported. It is NOT reported here —
+   * `readNonNegative` is used, which drops non-numeric input silently; the check script and
+   * `parseBudgetLimits` are where the shape is asserted.
+   */
+  if (env.SHE_BUDGET_ENABLED !== undefined) {
+    const raw = env.SHE_BUDGET_ENABLED.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(raw)) config.budget.enabled = true;
+    else if (['0', 'false', 'no', 'off'].includes(raw)) config.budget.enabled = false;
+  }
+  const budgetRounds = readNonNegative(env.SHE_BUDGET_MAX_TOOL_ROUNDS);
+  if (budgetRounds !== undefined) config.budget.maxToolRounds = Math.trunc(budgetRounds);
+  const budgetCalls = readNonNegative(env.SHE_BUDGET_MAX_TOOL_CALLS);
+  if (budgetCalls !== undefined) config.budget.maxToolCalls = Math.trunc(budgetCalls);
+  const budgetTokens = readNonNegative(env.SHE_BUDGET_MAX_TOKENS);
+  if (budgetTokens !== undefined) config.budget.maxTokens = Math.trunc(budgetTokens);
+  const budgetSeconds = readNonNegative(env.SHE_BUDGET_MAX_SECONDS);
+  if (budgetSeconds !== undefined) config.budget.maxSeconds = budgetSeconds;
   if (env.SHE_ALLOW_ALL_COMMANDS === '1' || env.SHE_ALLOW_ALL_COMMANDS === 'true') {
     config.sandbox.allowAllCommands = true;
     config.sandbox.denyDestructiveByDefault = false;
