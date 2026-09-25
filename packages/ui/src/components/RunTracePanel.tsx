@@ -21,6 +21,9 @@ export interface RunSummary {
   steps: number;
   error?: string;
   reason?: string;
+  /** The spare endpoint answered at least one round. */
+  fallbackUsed?: boolean;
+  fallbackTo?: string;
 }
 
 export interface RunEvent {
@@ -46,6 +49,8 @@ export interface RunEvent {
   usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
   runs?: string[];
   reason?: string;
+  /** `end`: the spare endpoint served this run. */
+  fallback?: { from: string; to: string; reason: string };
 }
 
 interface RunsResponse {
@@ -249,6 +254,13 @@ export function RunTracePanel({ onClose, sessionId }: { onClose: () => void; ses
                   onClick={() => setSelected(r.id)}
                 >
                   <span className={`${styles.badge} ${stateClass(r.state)}`}>{stateLabel(r.state)}</span>
+                  {/* A run served by the spare says so in the LIST, not only in its detail: the
+                      reason to open a trace at all is often exactly this. */}
+                  {r.fallbackUsed ? (
+                    <span className={styles.warn} title={t('这一轮由备用接口 {to} 回答', { to: r.fallbackTo ?? '' })}>
+                      {t('备用')}
+                    </span>
+                  ) : null}
                   <span className={styles.itemPrompt}>{r.prompt || t('（无提问文本）')}</span>
                   <span className={styles.itemMeta}>
                     {hhmmss(r.startedAt)}
@@ -349,6 +361,21 @@ export function RunTracePanel({ onClose, sessionId }: { onClose: () => void; ses
                             {e.reason ? ` · ${e.reason}` : ''}
                             {e.durationMs !== undefined ? ` · ${ms(e.durationMs)}` : ''}
                             {e.usage?.total_tokens ? ` · ${t('{n} tokens', { n: e.usage.total_tokens })}` : ''}
+                            {/*
+                              The spare endpoint, named on the closing event.
+
+                              Shown here rather than only in the `status` line that announced the
+                              switch, because the two are read differently: the status line scrolls
+                              past among a hundred others, while this is the one row a reader who
+                              comes back a month later looks at to find out which model produced
+                              the answer they are now doubting.
+                            */}
+                            {e.fallback ? (
+                              <div className={styles.warn}>
+                                {t('这一轮由备用接口回答：{to}', { to: e.fallback.to })}
+                                {` · ${t('主接口 {from} 失败：{why}', { from: e.fallback.from, why: e.fallback.reason })}`}
+                              </div>
+                            ) : null}
                             {e.text ? <div className={styles.evSub}>{e.text}</div> : null}
                           </div>
                         ) : null}

@@ -1,10 +1,24 @@
 import { useCallback, useEffect, useState } from 'react';
 import { fetchJSON } from '../lib/api';
+import { t } from '../lib/i18n';
 import { toast } from '../lib/toast';
 import styles from '../styles/StatusBar.module.css';
 
 interface SettingsSnapshot {
-  llm: { provider: string; model: string; hasKey: boolean; baseUrl?: string };
+  llm: {
+    provider: string;
+    model: string;
+    hasKey: boolean;
+    baseUrl?: string;
+    /**
+     * The spare endpoint, as configured.
+     *
+     * Surfaced in the status bar because "do I have a fallback" is not answerable from anywhere
+     * else in the UI: the agent only mentions it at the moment the primary fails, and a silent
+     * single-model setup looks exactly like a resilient one until the day it does not.
+     */
+    fallback?: { provider: string; model: string; baseUrl?: string; hasKey: boolean };
+  };
   workspace: { root: string };
   automationMode?: boolean;
 }
@@ -16,7 +30,7 @@ interface CheckpointMeta {
   created_at: string;
 }
 
-export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, focusChat = false, onToggleFocus, onOpenImport, onOpenCluster, onOpenPlans, onOpenSources, onOpenMemo }: { onOpenCheckpoints?: () => void; theme?: 'dark' | 'light'; onToggleTheme?: () => void; focusChat?: boolean; onToggleFocus?: () => void; onOpenImport?: () => void; onOpenCluster?: () => void; onOpenPlans?: () => void; onOpenSources?: () => void; onOpenMemo?: () => void }) {
+export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, focusChat = false, onToggleFocus, onOpenImport, onOpenCluster, onOpenPlans, onOpenSources, onOpenMemo, onOpenWorktrees }: { onOpenCheckpoints?: () => void; theme?: 'dark' | 'light'; onToggleTheme?: () => void; focusChat?: boolean; onToggleFocus?: () => void; onOpenImport?: () => void; onOpenCluster?: () => void; onOpenPlans?: () => void; onOpenSources?: () => void; onOpenMemo?: () => void; onOpenWorktrees?: () => void }) {
   const [s, setS] = useState<SettingsSnapshot | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [cps, setCps] = useState<CheckpointMeta[]>([]);
@@ -81,6 +95,18 @@ export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, fo
   const short = root.length > 42 ? '…' + root.slice(-40) : root;
   const latest = cps[0];
 
+  /*
+   * "Configured" mirrors the condition the agent uses to build a spare provider.
+   *
+   * That condition is `(apiKey || baseUrl) && (model || baseUrl)` — an endpoint AND something to ask
+   * of it. A looser test would light this badge up for a `fallback:` block the agent ignores, which
+   * is the worst version of the indicator: a reassurance rather than a fact. `llm.hasKey` is not part
+   * of it, because the spare borrows the primary's key when it has none of its own.
+   */
+  const fb = s?.llm.fallback;
+  const fallbackConfigured = Boolean(fb) && (fb!.hasKey || Boolean(fb!.baseUrl))
+    && (Boolean(fb!.model) || Boolean(fb!.baseUrl));
+
   // Only meaningful once the provider has actually reported cache accounting; a
   // provider without prompt caching leaves both counters absent.
   const cacheAccounted = (usage?.cache_hit_tokens ?? 0) + (usage?.cache_miss_tokens ?? 0);
@@ -99,6 +125,27 @@ export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, fo
         <span className={styles.label}>密钥</span>
         <span className={`${styles.value} ${s?.llm.hasKey ? styles.ok : styles.warn}`}>
           {s ? (s.llm.hasKey ? '已配置' : '未配置') : '…'}
+        </span>
+      </span>
+      {/*
+        The spare endpoint.
+
+        Rendered only once settings have loaded, and stated even when there is none — an absent
+        badge reads as "unknown", and the question it answers ("will a provider outage stop this
+        thing") has a definite answer either way.
+      */}
+      <span className={styles.sep}>·</span>
+      <span
+        className={styles.item}
+        title={
+          fallbackConfigured
+            ? t('主接口失败时改用 {model}', { model: `${fb?.provider}/${fb?.model || t('（同主接口模型）')}` })
+            : t('没有配置备用接口：主接口失败时这一轮直接失败')
+        }
+      >
+        <span className={styles.label}>{t('备用')}</span>
+        <span className={`${styles.value} ${fallbackConfigured ? styles.ok : styles.warn}`}>
+          {!s ? '…' : fallbackConfigured ? (fb?.model || t('已配置')) : t('未配置')}
         </span>
       </span>
       <span className={styles.sep}>·</span>
@@ -164,6 +211,16 @@ export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, fo
       )}
       {onOpenPlans && (
         <button type="button" className={styles.timeline} onClick={onOpenPlans} title="长程计划与进度">计划</button>
+      )}
+      {onOpenWorktrees && (
+        <button
+          type="button"
+          className={styles.timeline}
+          onClick={onOpenWorktrees}
+          title={t('并行工作副本：每个副本是仓库旁边的一个独立目录，两个会话互不覆盖文件')}
+        >
+          {t('副本')}
+        </button>
       )}
       <button type="button" className={styles.timeline} onClick={onOpenCheckpoints} title="检查点时间线">时间线</button>
       <button

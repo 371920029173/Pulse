@@ -110,6 +110,16 @@ export interface RunEvent {
   runs?: string[];
   /** `error`, or `end` on a run that stopped short: why. */
   reason?: string;
+  /**
+   * `end`: the spare endpoint actually answered part of this turn.
+   *
+   * Recorded as a field rather than left to the `status` step that announces it, because the two
+   * answer different questions. The step is a moment ("at 14:02 the primary timed out"); this is the
+   * property of the whole run ("every answer in this transcript came from the spare"), and the
+   * second is the one someone needs a month later when the quality of a batch of answers is in
+   * doubt. Without it, "was this run served by the fallback" is answerable only by reading prose.
+   */
+  fallback?: { from: string; to: string; reason: string };
 }
 
 /** What a reader sees in the list, folded from the events. */
@@ -132,6 +142,10 @@ export interface RunSummary {
   error?: string;
   /** Reasons the run stopped short: `awaiting_confirm`, `turn_in_progress`, `aborted`, … */
   reason?: string;
+  /** The spare endpoint answered at least one round. Lifted from the `end` event. */
+  fallbackUsed?: boolean;
+  /** Which endpoint the spare was, for the header of a trace view ("备用：openai/x"). */
+  fallbackTo?: string;
 }
 
 export interface RunReadResult {
@@ -301,6 +315,10 @@ function summarise(id: string, events: RunEvent[]): RunSummary {
         summary.durationMs = e.durationMs;
         if (e.reason) summary.reason = e.reason;
         if (e.ok === false && e.text) summary.error = e.text;
+        if (e.fallback) {
+          summary.fallbackUsed = true;
+          summary.fallbackTo = e.fallback.to;
+        }
         break;
       default:
         break;
@@ -516,13 +534,21 @@ export class RunRecorder {
    * confirmation gate is not a turn that failed, and a run closed by an abort is not a run that
    * completed.
    */
-  end(info: { ok: boolean; reason?: string; text?: string; durationMs?: number; usage?: RunEvent['usage'] }): RunEvent | null {
+  end(info: {
+    ok: boolean;
+    reason?: string;
+    text?: string;
+    durationMs?: number;
+    usage?: RunEvent['usage'];
+    fallback?: RunEvent['fallback'];
+  }): RunEvent | null {
     const event = this.write('end', this.capAll({
       ok: info.ok,
       reason: info.reason,
       text: info.text,
       durationMs: info.durationMs,
       usage: info.usage,
+      fallback: info.fallback,
     }));
     this.closed = true;
     return event;

@@ -30,6 +30,7 @@ import { SessionHistory } from './components/SessionHistory';
 import { SchedulePanel } from './components/SchedulePanel';
 import { AuditPanel } from './components/AuditPanel';
 import { RunTracePanel } from './components/RunTracePanel';
+import { WorktreePanel } from './components/WorktreePanel';
 import { ThemeStudio } from './components/ThemeStudio';
 import { useUserTheme } from './hooks/useUserTheme';
 import { pickActiveSession, isSessionKnown } from './lib/sessionChoice';
@@ -131,6 +132,7 @@ export function App() {
   const [showSchedule, setShowSchedule] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
   const [showRuns, setShowRuns] = useState(false);
+  const [showWorktrees, setShowWorktrees] = useState(false);
   const [showTheme, setShowTheme] = useState(false);
 
   /*
@@ -673,8 +675,44 @@ export function App() {
     await refreshSessions();
   }, [chat, refreshSessions]);
 
+  /**
+   * Open a conversation in a worktree directory.
+   *
+   * Reuses an existing conversation for that directory when there is one, because the alternative —
+   * a new session per click — turns a panel that lists three copies into a sidebar holding nine
+   * chats all titled `feature-a`, with no way to tell which one has the history.
+   *
+   * Comparison is done on normalised separators: `git worktree list` reports forward slashes even on
+   * Windows while the session store holds native paths, so a raw `===` would never match and the
+   * reuse would silently never happen — the failure would look like nothing at all.
+   */
+  const handleOpenWorktreeSession = useCallback(async (directory: string) => {
+    const norm = (p: string | undefined) => (p ?? '').replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase();
+    const existing = sessions.find((s) => s.kind !== 'cluster' && norm(s.directory) === norm(directory));
+    try {
+      let id = existing?.id;
+      if (!id) {
+        const created = await fetchJSON<{ id: string }>('/api/sessions', {
+          method: 'POST',
+          body: { directory, title: directory.split(/[\\/]/).filter(Boolean).pop() || t('并行副本') },
+        });
+        id = created.id;
+      }
+      const opened = await fetchJSON<{ id: string }>(`/api/sessions/${id}/activate`, { method: 'POST', body: {} });
+      setClusterRoomId(null);
+      setActiveSessionId(opened.id);
+      await chat.loadHistory(opened.id);
+      await refreshSessions();
+      await kb.fetchTree();
+      setShowWorktrees(false);
+      toast(t('已切到这个工作副本'));
+    } catch (e) {
+      toast(t('未能打开副本会话：{msg}', { msg: (e as Error).message }));
+    }
+  }, [sessions, chat, refreshSessions, kb]);
+
   const paletteCommands: CommandItem[] = [
-    { id: 'new', title: '新建会话', group: '会话', hint: 'N', run: () => { void handleNewSession(); } },
+    { id: 'new', title: '新建会话', group: t('会话'), hint: 'N', run: () => { void handleNewSession(); } },
     {
       id: 'worktree',
       title: t('新建并行工作副本'),
@@ -704,26 +742,27 @@ export function App() {
         })();
       },
     },
-    { id: 'skill-dev', title: '技能档位：开发', group: '技能', run: () => { void handleSkillProfile('dev'); } },
-    { id: 'skill-lib', title: '技能档位：创作', group: '技能', run: () => { void handleSkillProfile('liberal'); } },
-    { id: 'skill-gen', title: '技能档位：通用', group: '技能', run: () => { void handleSkillProfile('general'); } },
-    { id: 'skill-custom', title: '技能档位：自定义', group: '技能', run: () => { void handleSkillProfile('custom'); } },
-    { id: 'settings', title: '打开设置', group: '导航', hint: ',', run: () => setShowSettings(true) },
-    { id: 'plans', title: '打开长程计划', group: '协作', run: () => setShowPlans(true) },
-    { id: 'schedule', title: '打开定时任务', group: '协作', run: () => setShowSchedule(true) },
-    { id: 'audit', title: t('打开审计记录'), group: '协作', run: () => setShowAudit(true) },
-    { id: 'runs', title: t('打开运行轨迹'), group: '协作', run: () => setShowRuns(true) },
+    { id: 'skill-dev', title: '技能档位：开发', group: t('技能'), run: () => { void handleSkillProfile('dev'); } },
+    { id: 'skill-lib', title: '技能档位：创作', group: t('技能'), run: () => { void handleSkillProfile('liberal'); } },
+    { id: 'skill-gen', title: '技能档位：通用', group: t('技能'), run: () => { void handleSkillProfile('general'); } },
+    { id: 'skill-custom', title: '技能档位：自定义', group: t('技能'), run: () => { void handleSkillProfile('custom'); } },
+    { id: 'settings', title: '打开设置', group: t('导航'), hint: ',', run: () => setShowSettings(true) },
+    { id: 'plans', title: '打开长程计划', group: t('协作'), run: () => setShowPlans(true) },
+    { id: 'schedule', title: '打开定时任务', group: t('协作'), run: () => setShowSchedule(true) },
+    { id: 'audit', title: t('打开审计记录'), group: t('协作'), run: () => setShowAudit(true) },
+    { id: 'runs', title: t('打开运行轨迹'), group: t('协作'), run: () => setShowRuns(true) },
+    { id: 'worktrees', title: t('管理并行工作副本'), group: t('协作'), run: () => setShowWorktrees(true) },
     { id: 'theme', title: t('自定义样式（换肤）'), group: t('外观'), run: () => setShowTheme(true) },
-    { id: 'cluster', title: '打开自动化讨论群', group: '协作', run: () => setShowCluster(true) },
-    { id: 'sources', title: '导入 Cursor / Claude Code / Codex 对话', group: '知识库', run: () => setShowSources(true) },
-    { id: 'kb-import', title: '导入知识库', group: '知识库', hint: 'I', run: () => setShowImport(true) },
-    { id: 'import', title: '导入知识到 KB', group: '知识库', run: () => setShowKnowledge(true) },
-    { id: 'terminal', title: showTerminal ? '折叠终端' : '展开终端', group: '导航', hint: '`', run: () => setShowTerminal((v) => !v) },
-    { id: 'trace', title: showTrace ? '隐藏组结构轨迹' : '显示组结构轨迹', group: '导航', run: () => setShowTrace((v) => !v) },
-    { id: 'cp', title: '打开检查点时间线', group: '工作区', run: () => setShowCheckpoints(true) },
-    { id: 'focus', title: focusChat ? '退出专注对话' : '专注对话（放大聊天区）', group: '外观', hint: '\\', run: () => setFocusChat((v) => !v) },
-    { id: 'theme', title: theme === 'dark' ? '切换到浅色主题' : '切换到深色主题', group: '外观', hint: 'T', run: () => setTheme((v) => (v === 'dark' ? 'light' : 'dark')) },
-    { id: 'clear', title: '清空当前对话', group: '会话', run: () => { void chat.clearHistory(); } },
+    { id: 'cluster', title: '打开自动化讨论群', group: t('协作'), run: () => setShowCluster(true) },
+    { id: 'sources', title: '导入 Cursor / Claude Code / Codex 对话', group: t('知识库'), run: () => setShowSources(true) },
+    { id: 'kb-import', title: '导入知识库', group: t('知识库'), hint: 'I', run: () => setShowImport(true) },
+    { id: 'import', title: '导入知识到 KB', group: t('知识库'), run: () => setShowKnowledge(true) },
+    { id: 'terminal', title: showTerminal ? '折叠终端' : '展开终端', group: t('导航'), hint: '`', run: () => setShowTerminal((v) => !v) },
+    { id: 'trace', title: showTrace ? '隐藏组结构轨迹' : '显示组结构轨迹', group: t('导航'), run: () => setShowTrace((v) => !v) },
+    { id: 'cp', title: '打开检查点时间线', group: t('工作区'), run: () => setShowCheckpoints(true) },
+    { id: 'focus', title: focusChat ? '退出专注对话' : '专注对话（放大聊天区）', group: t('外观'), hint: '\\', run: () => setFocusChat((v) => !v) },
+    { id: 'theme', title: theme === 'dark' ? '切换到浅色主题' : '切换到深色主题', group: t('外观'), hint: 'T', run: () => setTheme((v) => (v === 'dark' ? 'light' : 'dark')) },
+    { id: 'clear', title: '清空当前对话', group: t('会话'), run: () => { void chat.clearHistory(); } },
   ];
 
   useEffect(() => {
@@ -765,6 +804,7 @@ export function App() {
         else if (showSchedule) setShowSchedule(false);
         else if (showAudit) setShowAudit(false);
         else if (showRuns) setShowRuns(false);
+        else if (showWorktrees) setShowWorktrees(false);
         else if (showMemo) setShowMemo(false);
         else if (selectedGroupId) setSelectedGroupId(null);
         else setShowTrace(false);
@@ -772,7 +812,7 @@ export function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [selectedGroupId, showSettings, showImport, showKnowledge, filePreview, showCheckpoints, showPalette, showTerminal, showTrace, showCluster, showPlans, showAudit, showRuns, chat, handleNewSession, focusChat, theme]);
+  }, [selectedGroupId, showSettings, showImport, showKnowledge, filePreview, showCheckpoints, showPalette, showTerminal, showTrace, showCluster, showPlans, showAudit, showRuns, showWorktrees, chat, handleNewSession, focusChat, theme]);
 
   /**
    * The wallpaper layer.
@@ -827,6 +867,13 @@ export function App() {
       {showSchedule && <SchedulePanel onClose={() => setShowSchedule(false)} />}
       {showAudit && <AuditPanel onClose={() => setShowAudit(false)} />}
       {showRuns && <RunTracePanel onClose={() => setShowRuns(false)} sessionId={activeSessionId} />}
+      {showWorktrees && (
+        <WorktreePanel
+          onClose={() => setShowWorktrees(false)}
+          repo={sessions.find((s) => s.id === activeSessionId)?.directory}
+          onOpenSession={handleOpenWorktreeSession}
+        />
+      )}
       {showTheme && <ThemeStudio onClose={() => setShowTheme(false)} userTheme={userTheme} />}
     </>
   );
@@ -1060,6 +1107,7 @@ export function App() {
          * where a user looks for it.
          */
         onOpenMemo={() => setShowMemo(true)}
+        onOpenWorktrees={() => setShowWorktrees(true)}
       />
 
       {showPalette && (

@@ -80,6 +80,15 @@ export class TurnInProgressError extends Error {
 export class Agent {
   private provider: LLMProvider;
   private fallbackProvider: LLMProvider | null = null;
+  /**
+   * The endpoint that answered the CURRENT turn, when it was not the primary.
+   *
+   * Reset in `beginRun`, written on the switch, and read once when the run closes. Kept as one
+   * value rather than a counter because the question a reader asks is not "how many rounds" but
+   * "was this answer produced by the model I configured" — and a run where the spare answered
+   * one round out of nine still has that answer in it.
+   */
+  private runFallback: { from: string; to: string; reason: string } | null = null;
   private history: LLMMessage[] = [];
   // reasoning_tokens is tracked because the thinking-level slider is only
   // verifiable if its effect (a separate reasoning budget) is visible.
@@ -213,6 +222,8 @@ export class Agent {
   private calibrationBlock = '';
   /** `provider/model`, recorded on the `start` event so a trace says which model was answering. */
   private readonly modelLabel: string;
+  /** `provider/model` of the spare, for the trace and the status line. Null when none is configured. */
+  private readonly fallbackLabel: string | null = null;
   /** Aborts the in-flight turn (LLM request + tool loop). */
   private aborter: AbortController | null = null;
   /**
@@ -331,6 +342,15 @@ export class Agent {
       } else if (fKey || fBase) {
         this.fallbackProvider = new OpenAIProvider(fKey, fBase, fModel, config.llm.maxTokens, config.llm.temperature, level);
       }
+      /*
+       * The spare is labelled at construction, and only when the provider was actually built.
+       *
+       * A label derived later from `config.llm.fallback` would name a model that may not exist: the
+       * branch above can decline to construct one (no key and no base URL), and `fallback.model`
+       * defaults to the primary's, so reading the config would report a spare that was never
+       * instantiated. The label is what a trace prints, so it has to be true.
+       */
+      if (this.fallbackProvider) this.fallbackLabel = `${fProvider}/${fModel}`;
     }
 
     this.systemPrompt = getSystemPrompt(config.workspace.root, undefined, config.automationMode !== false);
@@ -774,7 +794,24 @@ export class Agent {
         }
         if (this.fallbackProvider) {
           const msg = err instanceof Error ? err.message : String(err);
-          track({ type: 'status', content: `主接口失败（${msg}），改备用接口…` });
+          /*
+           * The switch is announced with both endpoints named, and recorded on the run.
+           *
+           * The message used to name only the failure ("主接口失败（…），改备用接口…"), which leaves
+           * the two questions a user actually has unanswered: which endpoint failed, and what is
+           * answering now. A fallback is silent by construction otherwise — the answer looks the
+           * same, arrives the same way, and is produced by a different model with different
+           * behaviour and a different bill.
+           */
+          this.runFallback = {
+            from: this.modelLabel,
+            to: this.fallbackLabel ?? '备用接口',
+            reason: msg.slice(0, 200),
+          };
+          track({
+            type: 'status',
+            content: `主接口 ${this.modelLabel} 失败（${msg}），改备用接口 ${this.fallbackLabel ?? ''}…`.replace(/\s+…/, '…'),
+          });
           try {
             response = await this.fallbackProvider.chat(messages, this.allToolDefs, track, signal);
           } catch (fallbackErr) {
@@ -1496,6 +1533,7 @@ export class Agent {
     }
     this.runPaused = null;
     this.runFailure = null;
+    this.runFallback = null;
     this.runStartedAt = Date.now();
     // A new run starts with no tool events of its own, and no inherited pre-flight confidence: the
     // mirror's sample must attribute this turn's claim to this turn's outcome.
@@ -1733,6 +1771,7 @@ export class Agent {
       reason,
       text,
       durationMs: Date.now() - this.runStartedAt,
+      fallback: this.runFallback ?? undefined,
       usage: {
         prompt_tokens: this.tokenUsage.prompt_tokens,
         completion_tokens: this.tokenUsage.completion_tokens,

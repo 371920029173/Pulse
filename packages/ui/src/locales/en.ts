@@ -240,4 +240,54 @@ registerDictionary('en', {
   '失败后跳过': 'On failure: skip',
   '失败后问用户': 'On failure: ask the user',
   '失败后停下等你决定': 'On failure: stop and wait for you',
+
+  // ── 备用接口可见 / fallback endpoint visibility ──
+  '备用': 'Spare',
+  '未配置': 'Not set',
+  '已配置': 'Set',
+  '（同主接口模型）': '(same model as the primary)',
+  '主接口失败时改用 {model}': 'Falls back to {model} when the primary fails',
+  '没有配置备用接口：主接口失败时这一轮直接失败':
+    'No spare endpoint configured: a primary failure ends the turn',
+  '这一轮由备用接口回答：{to}': 'This run was answered by the spare endpoint: {to}',
+  '主接口 {from} 失败：{why}': 'the primary {from} failed: {why}',
+  '这一轮由备用接口 {to} 回答': 'This run was answered by the spare endpoint {to}',
+
+  // ── 并行工作副本 / worktrees ──
+  '副本': 'Copies',
+  '副本名称': 'Copy name',
+  '并行工作副本': 'Parallel working copies',
+  '管理并行工作副本': 'Manage parallel working copies',
+  '新建副本': 'New copy',
+  '还没有并行工作副本': 'No parallel working copies yet',
+  '已创建并行工作副本': 'Parallel working copy created',
+  '已切到这个工作副本': 'Switched to this working copy',
+  '未能打开副本会话：{msg}': 'Could not open a conversation in the copy: {msg}',
+  '副本名称，例如 feature-a': 'Copy name, e.g. feature-a',
+  '副本是仓库旁边的一个独立目录，在 she/<名字> 分支上。两个会话各用一个副本，就不会互相覆盖文件。':
+    'A copy is a separate directory beside the repo, on a she/<name> branch. Two conversations '
+    + 'using two copies cannot overwrite each other\u2019s files.',
+  '在副本目录里开一个会话': 'Start a conversation in this copy directory',
+  '在此开会话': 'Open here',
+  '把这棵树重置到主仓库当前的提交': 'Reset this tree to the repo\u2019s current commit',
+  '已重置到主仓库当前提交（未提交的改动已丢弃）':
+    'Reset to the repo\u2019s current commit (uncommitted changes discarded)',
+  '删除工作副本 {dir}？里面的未提交改动会一起丢掉。':
+    'Delete the working copy {dir}? Uncommitted changes in it will be lost.',
+  '当前工作区不能删除': 'The main checkout cannot be deleted',
+  '删除这棵工作树': 'Delete this worktree',
+  '主仓库': 'Main checkout',
+  '（游离 HEAD）': '(detached HEAD)',
+  '仓库：{repo}': 'Repository: {repo}',
+  '并行副本': 'Parallel copy',
+
+  // ── 命令面板分组 / command palette groups ──
+  // These are group KEYS as well as labels: the palette groups commands by this value, so they go
+  // through `t()` for the same reason the labels do — otherwise English mode would show translated
+  // titles under mixed-language headings. `会话` and `外观` were already in the dictionary.
+  '技能': 'Skills',
+  '导航': 'Navigation',
+  '协作': 'Collaboration',
+  '知识库': 'Knowledge base',
+  '工作区': 'Workspace',
 });

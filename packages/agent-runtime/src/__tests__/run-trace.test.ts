@@ -594,3 +594,120 @@ describe('Agent writes the trace, including across continuations', () => {
   });
 });
 
+/**
+ * A turn answered by the SPARE endpoint.
+ *
+ * This is the case the product is silent about by construction: the failure is absorbed, the answer
+ * arrives normally, and nothing in the reply distinguishes a model the user configured from a backup
+ * that took over mid-turn. A month later, "why were this batch of answers worse" has no answer at
+ * all unless the trace kept it — which is why the assertion is on the folded SUMMARY (what a panel
+ * shows) and not only on the event.
+ */
+describe('Agent — a run the spare endpoint answered says so', () => {
+  const cfgFor = (root: string) => ({
+    llm: { provider: 'openai', model: 'stub', baseUrl: 'http://x', apiKey: 'k', maxTokens: 100, temperature: 0, thinkingLevel: 'low' },
+    workspace: { root },
+    kb: {
+      dbPath: join(root, '.she', 'kb.sqlite'),
+      maxChildrenBeforeSplit: 12, dormancyThresholdDays: 30, activationBudget: 100, boostOnAccess: 1.5,
+      pulseSeed: { initialEnergy: 1, decayRate: 0.3, resonanceThreshold: 0.15, maxHops: 6 },
+    },
+    skills: { profile: 'dev' },
+    automationMode: true,
+    server: { port: 0, host: '127.0.0.1' },
+    sandbox: { shell: 'auto', timeout: 1000, maxOutputBytes: 1000, denyDestructiveByDefault: true, allowAllCommands: true },
+    schedule: { enabled: false, tickSeconds: 30, workingWindow: null },
+  });
+
+  /**
+   * An agent with an explicit spare.
+   *
+   * The spare is normally built by the constructor from `llm.fallback`; installing it here keeps the
+   * test about the SWITCH rather than about the config branch that precedes it, which
+   * `provider-resilience` covers separately.
+   */
+  const agentWithSpare = (root: string, primary: LLMProvider, spare: LLMProvider): Agent => {
+    const agent = new Agent(
+      cfgFor(root) as never,
+      {} as never,
+      { definitions: [] as ToolDefinition[], execute: async () => 'ok' } as never,
+      'sess-fallback',
+    );
+    const priv = agent as unknown as {
+      provider: LLMProvider;
+      fallbackProvider: LLMProvider | null;
+      fallbackLabel: string | null;
+    };
+    priv.provider = primary;
+    priv.fallbackProvider = spare;
+    priv.fallbackLabel = 'openai/spare-model';
+    return agent;
+  };
+
+  const failing = (): LLMProvider => ({
+    name: 'primary',
+    chat: async () => { throw new Error('ECONNREFUSED 127.0.0.1:443'); },
+  } as never);
+
+  const answering = (text: string): LLMProvider => ({
+    name: 'spare',
+    chat: async (): Promise<LLMMessage> => ({ role: 'assistant', content: text }),
+  } as never);
+
+  it('records which endpoint answered, and why the primary was dropped', async () => {
+    const root = dir();
+    const agent = agentWithSpare(root, failing(), answering('兜底的回答'));
+
+    const chunks: StreamChunk[] = [];
+    const reply = await agent.chat('你好', (c) => chunks.push(c));
+    // The user still gets an answer: the switch is absorbed, and that is the point.
+    assert.equal(reply.content, '兜底的回答');
+
+    const run = agent.getRunTraceStore().list()[0];
+    assert.equal(run.state, 'done');
+    assert.equal(run.fallbackUsed, true, JSON.stringify(run));
+    assert.equal(run.fallbackTo, 'openai/spare-model');
+
+    // Both endpoints are named in the transcript, so the user watching the turn knows too — the
+    // disk record alone would make it a fact only an auditor can see.
+    const status = chunks.filter((c) => c.type === 'status').map((c) => String(c.content)).join('\n');
+    assert.match(status, /spare-model/);
+    assert.match(status, /ECONNREFUSED/);
+
+    const end = agent.getRunTraceStore().read(run.id)!.events.find((e) => e.kind === 'end')!;
+    assert.equal(end.fallback?.from, 'openai/stub');
+    assert.equal(end.fallback?.to, 'openai/spare-model');
+  });
+
+  it('leaves the field off a run the primary answered', async () => {
+    const root = dir();
+    const agent = agentWithSpare(root, answering('正常回答'), answering('不该用到的备用'));
+
+    await agent.chat('你好', () => { /* unused */ });
+
+    const run = agent.getRunTraceStore().list()[0];
+    // Absent rather than `false`: a reader has to be able to tell "the spare was not needed" from
+    // "this build did not record it", and only the absence of the field says the former.
+    assert.equal(run.fallbackUsed, undefined, JSON.stringify(run));
+    assert.equal(run.fallbackTo, undefined);
+  });
+
+  it('does not carry one turn\u2019s fallback into the next run', async () => {
+    const root = dir();
+    const agent = agentWithSpare(root, failing(), answering('兜底'));
+    await agent.chat('第一轮', () => { /* unused */ });
+
+    // A second turn on the SAME agent whose primary now works. The reference is per-run: a stale
+    // value here would mark every later run as degraded, which is the same as marking none.
+    const priv = agent as unknown as { provider: LLMProvider };
+    priv.provider = answering('第二轮正常');
+    await agent.chat('第二轮', () => { /* unused */ });
+
+    const runs = agent.getRunTraceStore().list();
+    assert.equal(runs.length, 2);
+    assert.equal(runs[0].prompt, '第二轮');
+    assert.equal(runs[0].fallbackUsed, undefined, JSON.stringify(runs[0]));
+    assert.equal(runs[1].fallbackUsed, true);
+  });
+});
+
