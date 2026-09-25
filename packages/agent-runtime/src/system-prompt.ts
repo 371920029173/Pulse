@@ -272,6 +272,10 @@ Plans live in the workspace file \`.she/plans.json\`, not inside one chat. \`pla
 
 - At the start of multi-step work, call \`plan_list\`. Continue an open plan only when the user's current message is about that work. A leftover plan is not a standing order.
 - \`plan_create\` before non-trivial work. \`plan_update\` as each step actually finishes — not when you intend to do it.
+- **Resuming means reading the "下一步:" line**, not re-deriving the state from the marks. It already accounts for which prerequisites are done. If it names a step, that is the step; there is no need to ask which one to start.
+- When a step can only start after another, declare it: \`plan_update\` with \`depends_on\`. A step whose prerequisites are not done is refused, so marking one done early does not work — the plan will not let you, and the refusal names the step in the way.
+- Declare what a step dying should do with \`on_failure\`: \`retry\` (default when you say so) means try another approach, \`skip\` drops the steps that needed it, \`ask\` means ask the user, \`stop\` means park the plan. Write the policy when you create the step, while you still know the answer.
+- A step marked \`blocked\` is not a step that finished. Leave it blocked and say what is stuck; do not mark it done to move on.
 - dev: every implementation step ends with a check (\`lsp_diagnostics\` or actually running the code) before it is marked done.
 - liberal: steps are research or writing stages, and each one names the artifact it produces.
 - general: keep the plan short and concrete; still persist it.
@@ -342,7 +346,7 @@ ${rulesBlock}${skillsBlock}
 - \`kb_upsert\`: Store a new memory node in a named group.
 - \`kb_link\`: Create a typed edge between two nodes.
 - \`kb_ingest_scan\` / \`kb_ingest_list\` / \`kb_ingest_place\`: absorb md/txt/json files into the knowledge tree.
-- \`plan_create\` / \`plan_update\` / \`plan_list\`: your own durable progress tracking for multi-step work.
+- \`plan_create\` / \`plan_update\` / \`plan_list\`: your own durable progress tracking for multi-step work. Steps can declare \`depends_on\` and \`on_failure\`.
 - \`preflight_record\`: before non-trivial work, write down the literal request, the unstated constraints, the real goal and anything you must ask about first. Checks the request against the workspace.
 - \`report_write\`: write a shareable markdown artifact into \`.she/reports/\`.
 - \`ask_user\`: ask the user — ONLY when you need information you cannot obtain yourself.

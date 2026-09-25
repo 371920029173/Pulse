@@ -221,4 +221,23 @@ registerDictionary('en', {
     'Copy name. Creates a separate directory next to the repository, so it cannot overwrite the current files.',
   '已打开并行副本': 'Opened the parallel copy',
   '未能创建并行副本：{msg}': 'Could not create the parallel copy: {msg}',
+
+  // ── 长程计划 / Plan panel ──
+  '完成': 'Done',
+  '进行中': 'In progress',
+  '已完成': 'Finished',
+  '已放弃': 'Abandoned',
+  '待办': 'To do',
+  '受阻': 'Blocked',
+  '已弃': 'Skipped',
+  '标记为未完成': 'Mark as not done',
+  '标记为完成': 'Mark as done',
+  '下一步：{id} {title}': 'Next: {id} {title}',
+  '下一步：无，计划已收口': 'Next: none — the plan is closed out',
+  '依赖：{deps}': 'Depends on: {deps}',
+  '已试 {n} 次': 'Tried {n} time(s)',
+  '失败后重试': 'On failure: try again',
+  '失败后跳过': 'On failure: skip',
+  '失败后问用户': 'On failure: ask the user',
+  '失败后停下等你决定': 'On failure: stop and wait for you',
 });

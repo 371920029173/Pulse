@@ -4,8 +4,8 @@ export { Agent, TurnInProgressError } from './agent.js';
 export { getSystemPrompt } from './system-prompt.js';
 export { createKBTools } from './kb-tools.js';
 export { readSkillProfile, writeSkillProfile, type SkillProfile } from './system-prompt.js';
-export { PlanStore, renderPlan, createPlanTools } from './plan-tools.js';
-export type { Plan, PlanStep, StepStatus } from './plan-tools.js';
+export { PlanStore, renderPlan, createPlanTools, nextStepOf } from './plan-tools.js';
+export type { Plan, PlanStep, StepStatus, StepFailurePolicy, StepInput, StepUpdate } from './plan-tools.js';
 export {
   analyzeRequest,
   buildRecord,

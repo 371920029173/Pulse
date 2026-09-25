@@ -129,6 +129,27 @@ store, and reads the rows back — it caught the query filter silently returning
 it matched the retrieval trace against `errors/` while the engine renders that path as
 `errors → shell`.
 
+**Plans are a graph, so a plan can be resumed instead of re-derived.** A plan was a flat list
+with five statuses, which meant two failures that both read as success. A step could be marked
+`done` while the step it needed was still pending — the plan then reported `4/4 完成` over work
+that was never done, and the number is exactly what a reader trusts. And a step that could not be
+done had nowhere to say so: `blocked` was a mark with no instruction, so a plan parked forever
+and looked, from the outside, the same as one that had finished. Steps now declare `depends_on`
+and `on_failure`. Starting or finishing a step whose prerequisites are not `done` is **refused**,
+and the refusal names the step in the way rather than reporting a generic failure — the model is
+told what to do, not that something went wrong. `on_failure` is the plan's own instruction for
+what happens when a step dies: `retry` (try another approach), `skip` (**cascades** — the steps
+that declared they needed it are dropped too, with a note naming the culprit, because a step
+waiting for input that will never arrive is a plan that hangs), `ask` (this needs the user), and
+`stop`. `retry` counts attempts rather than looping quietly: "tried 3 times" is a decision point,
+and an untracked retry is a silent one. The rendered plan ends with **`下一步: s2 构建产物`**, and
+that line — not the status marks — is what "resume" reads: after a restart, or in a different
+conversation, it already accounts for which prerequisites are done, and it comes from the same
+rule as the tool output so the two cannot disagree. A plan that finds new work reopens rather
+than staying closed, and dependency cycles and dangling references are refused and not written to
+disk, since a cycle means no step can ever start. `pnpm check:plan` drives the real tools, throws
+the toolset away to simulate a restart, and reads the plan back from `.she/plans.json`.
+
 **Prometheus-style process metrics** at `GET /api/metrics`: turns, latency (avg and
 p95), token breakdown, tool usage and failures, and the **prompt-cache hit rate**. The
 last one matters most — a cache regression is invisible until it appears on a bill.

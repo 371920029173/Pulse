@@ -12,7 +12,7 @@ import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLin
 import { SandboxShell, createTools, ConfirmTicketStore } from '@she/sandbox';
 import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile } from '@she/agent-runtime';
 import type { SubagentRunner } from '@she/agent-runtime';
-import { PlanStore, MemoStore } from '@she/agent-runtime';
+import { PlanStore, MemoStore, nextStepOf } from '@she/agent-runtime';
 import type { StepStatus } from '@she/agent-runtime';
 import { metrics } from './metrics.js';
 import { PRODUCT_VERSION } from './version.js';
@@ -3525,7 +3525,20 @@ router.get('/api/fs/tree', (req, res) => {
     });
 
   router.get('/api/plans', (req, res) => {
-    sendJSON(res, { plans: planStoreFor(req).list() });
+    const store = planStoreFor(req);
+    /*
+     * The resume point is computed here, from `nextStepOf`, rather than in the panel.
+     *
+     * The panel drawing its own version of "what is next" is the same class of bug as two copies
+     * of a cache key: the tool output the agent reads and the line the user reads would disagree,
+     * and the user would be looking at a plan the agent is not following.
+     */
+    sendJSON(res, {
+      plans: store.list().map((p) => {
+        const next = nextStepOf(p);
+        return { ...p, next: next ? { stepId: next.step.id, title: next.step.title, why: next.why } : null };
+      }),
+    });
   });
 
   router.post('/api/plans/step', async (req, res) => {
@@ -3543,9 +3556,16 @@ router.get('/api/fs/tree', (req, res) => {
     if (!['pending', 'active', 'done', 'blocked', 'dropped'].includes(status)) {
       throw new HttpError(400, 'invalid status');
     }
-    const plan = planStoreFor(req, body).updateStep(planId, stepId, status as StepStatus, body.note);
-    if (!plan) throw new HttpError(404, 'plan or step not found');
-    sendJSON(res, plan);
+    const result = planStoreFor(req, body).setStepStatus(planId, stepId, status as StepStatus, body.note);
+    if (!result.ok) {
+      /*
+       * A refused transition is not a 404. The plan and the step exist; the plan's own rule is
+       * what says no (a prerequisite that is still pending), and the reason is the useful part —
+       * the panel shows it verbatim.
+       */
+      throw new HttpError(/not found/i.test(result.reason) ? 404 : 409, result.reason);
+    }
+    sendJSON(res, result.plan);
   });
 
   // The agent's ask_user tool surfaces a question here.
