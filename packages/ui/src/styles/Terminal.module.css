@@ -78,7 +78,7 @@
   cursor: pointer;
   font-size: 12px;
 }
-.confirmOk { background: var(--warning); color: #111; border-color: transparent; }
+.confirmOk { background: var(--warning); color: var(--on-warning); border-color: transparent; }
 .confirmNo { background: transparent; color: var(--text-secondary); }
 
 .inputRow {

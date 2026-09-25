@@ -3,7 +3,7 @@ import { useChat } from './hooks/useChat';
 import { useKB } from './hooks/useKB';
 import { useBackground } from './hooks/useBackground';
 import { useClusterChat } from './hooks/useClusterChat';
-import { fetchJSON } from './lib/api';
+import { fetchJSON, apiFetch } from './lib/api';
 import { isSkillProfile } from './lib/skills';
 import { Chat, type SkillProfileId, type ThinkingLevel } from './components/Chat';
 import { Sidebar, type SessionMeta } from './components/Sidebar';
@@ -603,7 +603,7 @@ export function App() {
 
     let res: Response;
     try {
-      res = await fetch(endpoint);
+      res = await apiFetch(endpoint);
     } catch (e) {
       toast(`导出失败：${(e as Error).message}`);
       return;

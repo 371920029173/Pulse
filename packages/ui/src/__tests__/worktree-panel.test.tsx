@@ -28,6 +28,8 @@ vi.mock('../lib/api', () => ({ fetchJSON: (...args: unknown[]) => fetchJSON(...a
 
 const { WorktreePanel } = await import('../components/WorktreePanel');
 
+// portability-check:allow — 面板要做的正是「把以盘符开头的绝对路径显示成人看得懂的样子」，
+// 所以夹具必须是盘符路径；换成 path.join 就测不到那个分支了。
 const MAIN = 'D:\\AGI\\she-agent-cloud';
 const COPY = 'D:\\AGI\\.she-worktrees\\she-agent-cloud\\feature-a';
 
@@ -88,6 +90,7 @@ describe('WorktreePanel', () => {
   it('【关键】删除被 git 拒绝时，理由留在那一行上', async () => {
     fetchJSON.mockImplementation(async (_url: string, opts?: { method?: string }) => {
       if (opts?.method === 'DELETE') {
+        // portability-check:allow — git 的原文错误信息就是长这样的，夹具得照抄才测得准。
         throw new Error("fatal: 'D:\\AGI\\.she-worktrees\\...' contains modified or untracked files, use --force to delete it");
       }
       return list([{ path: COPY, head: 'b'.repeat(40), branch: 'she/feature-a' }]);

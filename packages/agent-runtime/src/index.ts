@@ -101,7 +101,13 @@ export { createIngestTools, chunkFileContent } from './ingest-tools.js';
 export type { IngestItem, IngestBatch } from './ingest-tools.js';
 export { MemoStore, createMemoTools } from './memo-tools.js';
 export type { MemoEntry } from './memo-tools.js';
-export { createSubagentTools } from './subagent-tools.js';
-export type { SubagentRunner, SubagentRequest, SubagentResult } from './subagent-tools.js';
+export { createSubagentTools, composeHandoffPrompt, shouldIsolate } from './subagent-tools.js';
+export type {
+  SubagentRunner,
+  SubagentRequest,
+  SubagentResult,
+  SubagentHandoff,
+  SubagentWorktree,
+} from './subagent-tools.js';
 export { makeScheduleTools, executeScheduleTool } from './schedule-tools.js';
 export type { ScheduleBridge, ScheduledTaskView, WindowView } from './schedule-tools.js';

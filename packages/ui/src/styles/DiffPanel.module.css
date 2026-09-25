@@ -37,7 +37,7 @@
 .apply {
   background: var(--success);
   border-color: transparent;
-  color: #04110a;
+  color: var(--on-success);
   font-weight: 600;
 }
 .reject {

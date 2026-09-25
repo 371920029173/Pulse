@@ -156,7 +156,7 @@
 .primary {
   border: none;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 600;
 }
 .primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 86%, #fff); }

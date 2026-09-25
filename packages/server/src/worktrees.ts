@@ -68,16 +68,47 @@ export function listWorktrees(repo: string): WorktreeInfo[] {
   return out;
 }
 
+/**
+ * Turn a free-form label into a directory name that is safe on every filesystem.
+ *
+ * The character class is `\p{L}\p{N}` rather than `a-zA-Z0-9` on purpose. The old ASCII-only
+ * filter replaced every CJK character with `-`, so a task named in Chinese produced an empty
+ * slug, and `worktreePath` then threw '名称是空的' — which, in the subagent path, meant that
+ * asking for isolation in Chinese silently fell back to the shared checkout. A Unicode letter is
+ * a perfectly good directory character on Windows, macOS and Linux, and the things that actually
+ * need removing are separators, whitespace and the Windows-illegal tail characters.
+ */
+function slug(name: string): string {
+  return name
+    .trim()
+    .replace(/[^\p{L}\p{N}._-]+/gu, '-')
+    .replace(/^-+|-+$/g, '')
+    // Windows cannot create a name ending in a dot or space, and `..` must never survive.
+    .replace(/[. ]+$/g, '')
+    .slice(0, 40);
+}
+
 function worktreePath(repo: string, name: string): string {
-  const safe = name.trim().replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+  const safe = slug(name);
   if (!safe) throw new Error('worktree 名称是空的');
   return join(dirname(repo), '.she-worktrees', basename(repo), safe);
 }
 
-/** Create a worktree on a new branch `she/<name>`, starting from the repo's current HEAD. */
-export function addWorktree(repo: string, name: string): WorktreeInfo {
+/**
+ * Create a worktree on a new branch `she/<name>`, starting from the repo's current HEAD.
+ *
+ * `unique` appends a numeric suffix when the path is taken. Two subagents given the same label —
+ * "修复测试", say — are an ordinary way to use delegation, and having the second one silently drop
+ * out of isolation because its sibling got there first would be a worse outcome than a `-2` in the
+ * directory name. The interactive route leaves it off: a user who types a name that already exists
+ * should be told, not quietly given a different branch.
+ */
+export function addWorktree(repo: string, name: string, opts?: { unique?: boolean }): WorktreeInfo {
   assertRepo(repo);
-  const path = worktreePath(repo, name);
+  let path = worktreePath(repo, name);
+  if (opts?.unique) {
+    for (let n = 2; existsSync(path) && n < 100; n++) path = `${worktreePath(repo, name)}-${n}`;
+  }
   if (existsSync(path)) throw new Error(`目录已存在: ${path}`);
   mkdirSync(dirname(path), { recursive: true });
   const branch = `she/${basename(path)}`;
@@ -117,4 +148,38 @@ export function transferLocalChanges(from: string, to: string): string {
   const apply = git(to, ['apply'], diff.stdout + '\n');
   if (!apply.ok) return `会话已搬走，改动未能套用：${apply.stderr}`;
   return '未提交的改动已套用到目标目录';
+}
+
+/**
+ * Repo-relative paths with uncommitted work in `dir`.
+ *
+ * Used to report what an isolated child actually did. `git diff --name-only` alone would miss
+ * files the child CREATED, which is the usual shape of a delegated change, so the untracked list
+ * is included and reported as-is rather than only as a count — a count cannot be acted on.
+ */
+export function changedFiles(dir: string): string[] {
+  if (!existsSync(join(dir, '.git'))) return [];
+  const tracked = git(dir, ['diff', '--name-only']);
+  const untracked = git(dir, ['ls-files', '--others', '--exclude-standard']);
+  const out = new Set<string>();
+  for (const block of [tracked, untracked]) {
+    if (!block.ok) continue;
+    for (const line of block.stdout.split('\n')) {
+      const p = line.trim();
+      if (p) out.add(p);
+    }
+  }
+  return [...out].sort();
+}
+
+/**
+ * Whether `dir` is inside a git work tree.
+ *
+ * Not `existsSync(dir/.git)`: in a LINKED worktree `.git` is a file, and a repository whose root
+ * is above `dir` is still a repository. `rev-parse` answers the real question, and asking git
+ * rather than guessing from the filesystem is the difference between a wrong answer and no answer.
+ */
+export function isGitRepo(dir: string): boolean {
+  if (!existsSync(dir)) return false;
+  return git(dir, ['rev-parse', '--is-inside-work-tree']).stdout === 'true';
 }

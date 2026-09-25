@@ -75,6 +75,18 @@ let cleanupDir = null;
 if (!existsSync(DB)) {
   usingFixture = true;
   cleanupDir = mkdtempSync(join(tmpdir(), 'she-eval-fixture-'));
+  /*
+   * Removed on the way out, whatever the exit path.
+   *
+   * The variable was assigned and then never read, so every run left its fixture library behind:
+   * dozens of `she-eval-fixture-*` directories from a single week of runs. Registered on `exit`
+   * rather than written at the end of the report because this script exits from several places —
+   * including the failures above — and a cleanup that only runs on the happy path is exactly the
+   * leak this already was. `rmSync` is synchronous, so it is legal in an `exit` handler.
+   */
+  process.on('exit', () => {
+    try { rmSync(cleanupDir, { recursive: true, force: true }); } catch { /* a leftover is not an error */ }
+  });
   DB = join(cleanupDir, 'kb.sqlite');
   const fixture = JSON.parse(readFileSync(join(HERE, 'fixture.json'), 'utf8'));
   const seed = new KBStore(DB);

@@ -7,3 +7,5 @@ export { PendingPatchStore } from './patches.js';
 export type { PendingPatch } from './patches.js';
 export { CheckpointStore } from './checkpoints.js';
 export type { Checkpoint } from './checkpoints.js';
+export { summarizeChange, MAX_DIFF_LINES, MAX_DIFF_CHARS } from './change-summary.js';
+export type { ChangeSummary } from './change-summary.js';

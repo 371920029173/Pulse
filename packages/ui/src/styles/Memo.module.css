@@ -45,7 +45,7 @@
   border-radius: 8px;
   border: none;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
@@ -81,7 +81,7 @@
   cursor: pointer;
   padding: 0;
 }
-.itemDone .check { background: var(--success); border-color: transparent; color: #fff; }
+.itemDone .check { background: var(--success); border-color: transparent; color: var(--on-success); }
 
 .text {
   flex: 1 1 auto;

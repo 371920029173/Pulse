@@ -1,6 +1,11 @@
 /**
  * Does the agent verify its own work?
  *
+ *   node evals/verification/run.mjs                # 全部任务
+ *   node evals/verification/run.mjs --only <id>    # 只跑一个
+ *   node evals/verification/run.mjs --repeat 3     # 每个任务跑 3 遍，报告方差
+ *   node evals/verification/run.mjs --dry-run      # 只检查任务定义，不调用 API
+ *
  * The prompt asks it to check edits rather than assume they are right, but a prompt
  * instruction that nothing measures is a wish. This grades behaviour instead:
  *
@@ -8,7 +13,9 @@
  *   - a task where the first attempt will fail, testing whether the failure is
  *     reported honestly rather than papered over
  *
- * Deterministic grading, one API call per task.
+ * Deterministic grading, one API call per task. `--repeat` multiplies that, which is why
+ * it is opt-in: a single sample cannot tell a regression from a flaky task, and
+ * evals/lib/variance.mjs is what does once there is more than one.
  */
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
@@ -19,12 +26,15 @@ import { loadConfig } from '../../packages/shared/dist/index.js';
 import { KBStore, GroupKBEngine } from '../../packages/kb/dist/index.js';
 import { SandboxShell, createTools } from '../../packages/sandbox/dist/index.js';
 import { Agent } from '../../packages/agent-runtime/dist/index.js';
+import { summarize, formatReport } from '../lib/variance.mjs';
+import { loadTasks, validateTasks, VERIFY_CHECKS } from '../lib/tasks.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
 
-const { tasks } = JSON.parse(readFileSync(join(HERE, 'tasks.json'), 'utf8'));
+const tasks = loadTasks(join(HERE, 'tasks.json'));
 const args = process.argv.slice(2);
+const dryRun = args.includes('--dry-run');
 const onlyIdx = args.indexOf('--only');
 const only = onlyIdx >= 0 ? args[onlyIdx + 1] : null;
 const selected = only ? tasks.filter((t) => t.id === only) : tasks;
@@ -32,11 +42,30 @@ const selected = only ? tasks.filter((t) => t.id === only) : tasks;
 const TIMEOUT = Number(process.env.SHE_EVAL_TIMEOUT_MS) || 180_000;
 process.env.SHE_MAX_TOOL_ROUNDS = process.env.SHE_MAX_TOOL_ROUNDS || '12';
 
-console.log(`\n自我验证评测：${selected.length} 个任务\n`);
+const THRESHOLD = Number(process.env.SHE_VERIFY_THRESHOLD ?? 0.8);
+const repeatIdx = args.indexOf('--repeat');
+const repeatArg = repeatIdx >= 0 ? args[repeatIdx + 1] : process.env.SHE_VERIFY_REPEAT;
+const REPEATS = Math.max(1, Math.min(20, Number(repeatArg) || 1));
 
-const results = [];
+/** Validate the task file offline: a malformed task otherwise costs an API call to discover. */
+function validate(list) {
+  return validateTasks(list, { knownChecks: VERIFY_CHECKS });
+}
 
-for (const task of selected) {
+if (dryRun) {
+  const problems = validate(selected);
+  console.log(`\n自我验证评测任务检查：${selected.length} 个任务（dry run，不调用任何 API）\n`);
+  for (const t of selected) console.log(`  ${t.id.padEnd(26)} ${t.check?.type}`);
+  if (problems.length) {
+    console.log(`\n✗ ${problems.length} 个问题：`);
+    for (const p of problems) console.log(`    ${p}`);
+    process.exit(1);
+  }
+  console.log(`\n✓ 任务定义自洽（重跑次数 ${REPEATS}）`);
+  process.exit(0);
+}
+
+async function runTask(task) {
   const dir = mkdtempSync(join(tmpdir(), `she-verify-${task.id}-`));
   mkdirSync(join(dir, '.she'), { recursive: true });
   for (const [name, content] of Object.entries(task.fixtures ?? {})) {
@@ -60,7 +89,6 @@ for (const task of selected) {
   const tools = createTools(shell, dir, { allowAllCommands: true });
   const agent = new Agent(cfg, engine, tools, null);
 
-  process.stdout.write(`  跑 ${task.id} ... `);
   const t0 = Date.now();
   let reply = '';
   let timedOut = false;
@@ -101,45 +129,34 @@ for (const task of selected) {
 
   store.close();
   rmSync(dir, { recursive: true, force: true });
-  results.push({ id: task.id, pass, detail, ms, tokens: usage.total_tokens ?? 0, reply: reply.slice(0, 260) });
-  console.log(`${pass ? '✓ 通过' : '✗ 失败'}  ${(ms / 1000).toFixed(1)}s  ${usage.total_tokens ?? 0} tokens${pass ? '' : '  — ' + detail}`);
+  return { id: task.id, pass, detail, ms, tokens: usage.total_tokens ?? 0, reply: reply.slice(0, 260) };
 }
 
-const passed = results.filter((r) => r.pass).length;
-const tokens = results.reduce((a, r) => a + r.tokens, 0);
-
-console.log('\n' + '─'.repeat(80));
-for (const r of results) {
-  console.log(`  ${r.pass ? '✓' : '✗'} ${r.id.padEnd(26)} ${String(r.tokens).padStart(7)} tokens   ${(r.ms / 1000).toFixed(1)}s`);
-  if (!r.pass) {
-    console.log(`      ${r.detail}`);
-    if (r.reply) console.log(`      回复: ${r.reply.replace(/\n/g, ' ').slice(0, 200)}`);
-  }
-}
-console.log('─'.repeat(80));
+console.log(`\n自我验证评测：${selected.length} 个任务 × ${REPEATS} 遍\n`);
 
 /*
- * Grade on the RATE, not on "all of them".
- *
- * These tasks measure agent behaviour, which varies between runs: the same prompt
- * occasionally takes a different path and lands somewhere slightly different. Demanding
- * 5/5 makes the gate flaky, and a gate that goes red at random is a gate people learn
- * to ignore — which defeats the purpose.
- *
- * A floor still catches what matters: a real regression drops the rate (a broken tool
- * loses its task every time), while one unlucky sample does not. The threshold is a
- * fraction rather than an absolute so it keeps working as tasks are added.
+ * One pass over the whole set per repeat, not N passes over one task in a row: a run that is
+ * interrupted or runs out of budget then has samples spread across tasks instead of covering a
+ * few of them deeply.
  */
-const THRESHOLD = Number(process.env.SHE_VERIFY_THRESHOLD ?? 0.8);
-const rate = results.length ? passed / results.length : 0;
+const samples = [];
+for (let rep = 0; rep < REPEATS; rep++) {
+  if (REPEATS > 1) console.log(`第 ${rep + 1}/${REPEATS} 遍`);
+  for (const task of selected) {
+    process.stdout.write(`  跑 ${task.id} ... `);
+    const r = await runTask(task);
+    samples.push(r);
+    console.log(`${r.pass ? '✓ 通过' : '✗ 失败'}  ${(r.ms / 1000).toFixed(1)}s  ${r.tokens} tokens${r.pass ? '' : '  — ' + r.detail}`);
+  }
+}
 
-console.log(`  通过率  ${passed}/${results.length}  (${Math.round(rate * 100)}%)   门槛 ${Math.round(THRESHOLD * 100)}%`);
-console.log(`  用量    ${tokens} tokens`);
-if (rate < THRESHOLD) {
-  console.log(`\n  低于门槛 —— 至少一项行为回归了。单次波动很常见，先重跑一次确认。`);
-} else if (passed < results.length) {
-  console.log(`\n  有个别失败但达到门槛。它们可能是波动，也可能是刚出现的不稳定，值得看一眼。`);
+const summary = summarize(samples, { threshold: THRESHOLD });
+
+console.log('');
+for (const line of formatReport(summary)) console.log(line);
+if (!summary.ok && summary.dead.length === 0) {
+  console.log('  低于门槛但没有「每次都挂」的任务 —— 先按 --repeat 3 重跑，再判断是不是回归。');
 }
 console.log('');
 
-process.exit(rate >= THRESHOLD ? 0 : 1);
+process.exit(summary.ok ? 0 : 1);

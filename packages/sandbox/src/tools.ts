@@ -8,6 +8,7 @@ import type { SandboxShell } from './shell.js';
 import { ConfirmTicketStore } from './tickets.js';
 import { computerClick, computerKey, computerScroll, computerType, computerUseEnabled } from './computer.js';
 import { PendingPatchStore } from './patches.js';
+import { summarizeChange } from './change-summary.js';
 
 const execFileAsync = promisify(execFile);
 const IS_WINDOWS = platform() === 'win32';
@@ -150,7 +151,14 @@ export function createTools(shell: SandboxShell, workspaceRoot: string, opts?: {
       const dir = dirname(filePath);
       await mkdir(dir, { recursive: true });
       await writeFile(filePath, next, 'utf-8');
-      return `Wrote ${next.length} bytes to ${rel}`;
+      /*
+       * 直写路径也给出前后对比。
+       *
+       * 走确认门的那条路会把完整补丁交给用户审；这条路没有人在中间看，所以回执本身就是唯一的
+       * 说明。没有它，「写了个字节数」在「改了关键三行」和「原样重写了一遍」之间长得一模一样，
+       * 而模型会照着后者继续宣称自己改好了。
+       */
+      return `Wrote ${next.length} bytes to ${rel}\n${summarizeChange(rel, before, next).text}`;
     },
   );
 

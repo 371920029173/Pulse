@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { fetchJSON } from '../lib/api';
+import { fetchJSON, apiFetch } from '../lib/api';
 
 export interface BackgroundMeta {
   url: string | null;
@@ -65,7 +65,7 @@ export function useBackground() {
     setError(null);
     try {
       // Raw binary upload: no base64 inflation, so large videos are practical.
-      const res = await fetch('/api/background', {
+      const res = await apiFetch('/api/background', {
         method: 'POST',
         headers: {
           'Content-Type': file.type || 'application/octet-stream',

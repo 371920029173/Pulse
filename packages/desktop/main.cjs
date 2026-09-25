@@ -433,6 +433,18 @@ function createWindow() {
       // ipcRenderer, both of which are available under sandbox: true, so there
       // is no reason to weaken isolation here.
       sandbox: true,
+      /*
+       * The access token, handed to the preload.
+       *
+       * A sandboxed preload has no `process.env`, so `additionalArguments` is the supported way to
+       * get a value in — it arrives on the renderer's `process.argv` and nowhere else. Only the
+       * single-token form can be passed: `SHE_AUTH_TOKENS` holds several tenants' tokens and picking
+       * one for the desktop would silently make this shell one tenant's client, which is a decision
+       * the operator has to make on purpose instead.
+       */
+      additionalArguments: process.env.SHE_AUTH_TOKEN
+        ? [`--she-auth-token=${process.env.SHE_AUTH_TOKEN}`]
+        : [],
       preload: path.join(__dirname, 'preload.cjs'),
     },
   });

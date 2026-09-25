@@ -49,7 +49,16 @@ export type AuditKind =
    * credential that reached an answer may already have been copied, pasted or forwarded. A log line
    * that rotates away is not enough — "when did we first emit this key" has to be answerable.
    */
-  | 'guardrail';
+  | 'guardrail'
+  /**
+   * A request was refused because of who sent it, not because of what it asked for.
+   *
+   * This is the only kind triggered by someone who is not the operator. It is recorded for the
+   * same reason a failed login is: a single refusal is noise, and a hundred of them from the same
+   * source at 3am is the one thing that tells you the port is exposed. The token is never written
+   * — only whether one was presented.
+   */
+  | 'auth';
 
 /**
  * Every kind, as a value.
@@ -60,7 +69,7 @@ export type AuditKind =
  * nothing else, which is exactly why the copy belongs in the same file as the type it mirrors.
  */
 export const AUDIT_KINDS: readonly AuditKind[] = [
-  'request', 'tool', 'confirm', 'rotation', 'config', 'guardrail',
+  'request', 'tool', 'confirm', 'rotation', 'config', 'guardrail', 'auth',
 ] as const;
 
 export interface AuditRecord {
@@ -86,6 +95,11 @@ export interface AuditRecord {
   dropped?: string[];
   /** `config`: what was changed. */
   change?: string;
+  /** `auth`: which tenant the refused request claimed, if it resolved to one. */
+  tenant?: string;
+  /** `auth`: the route it tried, and whether any token was presented at all. */
+  path?: string;
+  presented?: boolean;
   /** Free-form detail for a kind that needs it. */
   note?: string;
 }

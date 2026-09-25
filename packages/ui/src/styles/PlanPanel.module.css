@@ -92,7 +92,7 @@
   transition: background 180ms var(--ease-out), color 180ms var(--ease-out);
 }
 .planTab:hover { color: var(--text-primary); background: var(--fill-control-hover); }
-.planTabActive { background: var(--accent); color: #fff; font-weight: 600; }
+.planTabActive { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 
 .body { padding: 12px 16px 18px; overflow-y: auto; }
 
@@ -152,12 +152,12 @@
 .stepLabel { flex-shrink: 0; font-size: 11px; color: var(--text-tertiary); padding-top: 2px; }
 
 .step_done .stepTitle { color: var(--text-secondary); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--text-tertiary) 60%, transparent); }
-.step_done .stepMark { background: var(--success); border-color: transparent; color: #fff; }
+.step_done .stepMark { background: var(--success); border-color: transparent; color: var(--on-success); }
 
 .step_active .stepMark {
   background: var(--accent);
   border-color: transparent;
-  color: #fff;
+  color: var(--on-accent);
   animation: stepPulse 2.4s ease-in-out infinite;
 }
 .step_active .stepLabel { color: var(--accent); font-weight: 600; }
@@ -167,7 +167,7 @@
   50%      { box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 0%, transparent); }
 }
 
-.step_blocked .stepMark { background: var(--warning); border-color: transparent; color: #fff; }
+.step_blocked .stepMark { background: var(--warning); border-color: transparent; color: var(--on-warning); }
 .step_blocked .stepLabel { color: var(--warning); font-weight: 600; }
 
 .step_dropped .stepTitle { color: var(--text-tertiary); text-decoration: line-through; }

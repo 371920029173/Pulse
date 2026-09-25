@@ -75,7 +75,7 @@
 }
 .filter:hover:not(:disabled) { color: var(--text-primary); background: var(--fill-control-hover); }
 .filter:disabled { opacity: 0.45; cursor: not-allowed; }
-.filterActive { background: var(--accent); color: #fff; font-weight: 600; }
+.filterActive { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 
 .note { margin-left: auto; font-size: 11px; color: var(--text-tertiary); }
 

@@ -28,7 +28,7 @@ import { readFileSync, writeFileSync, readdirSync, mkdtempSync, mkdirSync, rmSyn
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { pickSafePort } from './safe-port.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -83,6 +83,43 @@ async function api(path, { method = 'GET', body } = {}) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Index of the first byte that is not part of a valid UTF-8 sequence, or -1.
+ *
+ * Written out by hand rather than taken from a decode attempt, because the position is the whole
+ * point: "this file is not UTF-8" is not actionable on a 3000-line file, while the two bytes before
+ * the offset usually name the character that got mangled. The ranges are the full ones from
+ * RFC 3629 — overlong forms, surrogates and code points past U+10FFFF are all rejected — so this
+ * agrees with a strict decoder instead of accepting files it would throw out.
+ */
+function firstInvalidUtf8(buf) {
+  let i = 0;
+  while (i < buf.length) {
+    const c = buf[i];
+    let need;
+    let lo = 0x80;
+    let hi = 0xbf;
+    if (c < 0x80) need = 1;
+    else if (c >= 0xc2 && c <= 0xdf) need = 2;
+    else if (c === 0xe0) { need = 3; lo = 0xa0; }
+    else if (c >= 0xe1 && c <= 0xec) need = 3;
+    else if (c === 0xed) { need = 3; hi = 0x9f; }
+    else if (c >= 0xee && c <= 0xef) need = 3;
+    else if (c === 0xf0) { need = 4; lo = 0x90; }
+    else if (c >= 0xf1 && c <= 0xf3) need = 4;
+    else if (c === 0xf4) { need = 4; hi = 0x8f; }
+    else return i;
+    if (i + need > buf.length) return i;
+    for (let k = 1; k < need; k++) {
+      const limit = k === 1 ? [lo, hi] : [0x80, 0xbf];
+      const d = buf[i + k];
+      if (d < limit[0] || d > limit[1]) return i;
+    }
+    i += need;
+  }
+  return -1;
+}
 
 let workspace = null;
 let appDir = null;
@@ -163,6 +200,58 @@ writeFileSync(join(workspace, '.env'), [
   `SHE_PORT=${PORT}`,
   '',
 ].join('\n'), 'utf8');
+
+/*
+ * ── 0. The repository's own files are text too ──
+ *
+ * Everything below drives the running system; this section reads the bytes on disk instead. The
+ * damage it looks for is the kind that never announces itself: a file written through a console
+ * that was not in UTF-8 keeps the wrong bytes forever, and nothing notices until some reader
+ * happens to open it. Then the symptom appears somewhere unrelated to the cause.
+ *
+ * `package.json` is the sharp end of that. One bad byte in the manifest makes Node's own
+ * `require('./package.json')` throw `ERR_INVALID_PACKAGE_CONFIG` — a message naming the whole file
+ * and no byte — while `pnpm` keeps working because it decodes leniently. So the project looks fine
+ * and every tool that reads the manifest through Node looks broken.
+ *
+ * Tracked files only: an untracked scratch file is not something anyone can be asked to fix, and
+ * build output is regenerated rather than edited.
+ */
+{
+  const listed = spawnSync('git', ['ls-files'], { cwd: ROOT, maxBuffer: 1 << 28, encoding: 'utf8', windowsHide: true });
+  const files = listed.status === 0
+    ? String(listed.stdout).split('\n').map((s) => s.trim()).filter(Boolean)
+    : [];
+
+  if (!files.length) {
+    console.log('  · 跳过源码编码扫描（拿不到仓库文件列表）');
+  } else {
+    const strict = new TextDecoder('utf-8', { fatal: true });
+    const broken = [];
+    let textFiles = 0;
+    for (const f of files) {
+      let buf;
+      try { buf = readFileSync(join(ROOT, f)); } catch { continue; }
+      // A NUL byte means binary under every definition that matters here (fonts, images, archives).
+      // Decoding those as text reports noise, and there is nothing in them to fix.
+      if (buf.includes(0)) continue;
+      textFiles++;
+      try {
+        strict.decode(buf);
+      } catch {
+        const at = firstInvalidUtf8(buf);
+        /*
+         * Decoded leniently for the message on purpose: the bad byte turns into U+FFFD and the
+         * surrounding text stays readable, so the report shows *where in the sentence* the damage is
+         * — a latin1 dump of the same slice is mojibake that hides the very character being named.
+         */
+        const around = new TextDecoder('utf-8').decode(buf.subarray(Math.max(0, at - 12), at + 4));
+        broken.push(`${f} @ 第 ${at} 字节，附近「${around}」，坏字节 0x${buf[at].toString(16)}`);
+      }
+    }
+    check(`仓库里的文本文件都是合法 UTF-8（${textFiles} 个）`, broken.length === 0, broken.slice(0, 5).join('  |  '));
+  }
+}
 
 await boot();
 

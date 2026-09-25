@@ -224,10 +224,21 @@ const RULES: Rule[] = [
     re: /escapes workspace|工作区外|只允许工作区内/i,
     from: 'shell.ts `Path escapes workspace`, `cd 目标在工作区外`, ingest-tools.ts',
   },
+  /*
+   * The output-side guardrail refuses to write a file containing a detected secret. It is a
+   * policy refusal, not a bad argument: the same call with the same path will be refused
+   * again, and only a human can decide whether the value really belongs in the file. Telling
+   * the model "something failed" would invite it to retry, which is the wrong move twice over.
+   */
+  {
+    kind: 'permission',
+    re: /已拒绝写入|检测到敏感内容/,
+    from: 'guardrail.ts `交付文件里检测到敏感内容，已拒绝写入`',
+  },
   {
     kind: 'invalid_args',
-    re: /required|必填|不能为空|缺少|必须给|至少要给|不合法|非法|必须是|no usable tasks|createIfMissing/i,
-    from: 'plan-tools.ts / memo-tools.ts / kb-tools.ts / errorbook.ts argument checks',
+    re: /required|必填|不能为空|缺少|必须给|至少要给|不合法|非法|必须是|没有说明交付物|no usable tasks|createIfMissing/i,
+    from: 'plan-tools.ts / memo-tools.ts / kb-tools.ts / errorbook.ts / subagent-tools.ts argument checks',
   },
   {
     kind: 'not_found',

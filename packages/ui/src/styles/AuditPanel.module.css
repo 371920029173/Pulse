@@ -80,7 +80,7 @@
   transition: background 180ms var(--ease-out), color 180ms var(--ease-out);
 }
 .filter:hover { color: var(--text-primary); background: var(--fill-control-hover); }
-.filterActive { background: var(--accent); color: #fff; font-weight: 600; }
+.filterActive { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 
 .note { margin-left: auto; font-size: 11px; color: var(--text-tertiary); }
 

@@ -290,4 +290,8 @@ registerDictionary('en', {
   '协作': 'Collaboration',
   '知识库': 'Knowledge base',
   '工作区': 'Workspace',
+
+  // ── 本地鉴权 / local auth ──
+  '本地服务要求访问令牌，但客户端没有提供。请设置 SHE_AUTH_TOKEN 重启服务，并在本机填入同一个令牌。':
+    'The local service requires an access token and this client did not send one. Set SHE_AUTH_TOKEN and restart the server, then enter the same token on this machine.',
 });

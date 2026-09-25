@@ -176,6 +176,40 @@ describe('Tool: fs_write', () => {
     const content = await readFile(join(tempDir, 'deep/nested/dir/file.txt'), 'utf-8');
     assert.equal(content, 'deep');
   });
+
+  /*
+   * 回执必须说清「改了什么」。
+   *
+   * 这三条盯的是同一件事：回执不能只有字节数。改三行的回执、原样重写的回执、什么都没动的回执，
+   * 如果长得一样，模型就会照着「我已经改好了」继续往下走，而审计的人只能去读整个文件。
+   */
+  it('直写回执带前后对比，而不是只有字节数', async () => {
+    const tools = createTools(shell, tempDir, { allowAllCommands: true });
+    await tools.execute('fs_write', { path: 'diff-target.txt', content: 'keep\nalpha\nkeep2' });
+    const out = await tools.execute('fs_write', { path: 'diff-target.txt', content: 'keep\nbeta\nkeep2' });
+
+    assert.ok(out.includes('Wrote'), out);
+    assert.match(out, /^-alpha$/m, `应给出被删的行: ${out}`);
+    assert.match(out, /^\+beta$/m, `应给出新增的行: ${out}`);
+    assert.match(out, /\+1 −1/, `应报出增删计数: ${out}`);
+  });
+
+  it('原样重写时明说文件没有变化', async () => {
+    const tools = createTools(shell, tempDir, { allowAllCommands: true });
+    const body = 'same-a\nsame-b\nsame-c';
+    await tools.execute('fs_write', { path: 'noop.txt', content: body });
+    const out = await tools.execute('fs_write', { path: 'noop.txt', content: body });
+
+    assert.match(out, /完全相同/, `原样重写不该看起来像一次改动: ${out}`);
+  });
+
+  it('新建文件不把内容回灌一遍', async () => {
+    const tools = createTools(shell, tempDir, { allowAllCommands: true });
+    const out = await tools.execute('fs_write', { path: 'fresh.txt', content: 'brand new body' });
+
+    assert.match(out, /新建文件/, out);
+    assert.ok(!out.includes('+brand new body'), `新建不该回灌内容: ${out}`);
+  });
 });
 
 describe('Tool: fs_list', () => {

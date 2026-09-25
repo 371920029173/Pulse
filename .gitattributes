@@ -19,6 +19,13 @@
 *.sh    text eol=lf
 *.bash  text eol=lf
 
+# The Dockerfile is read from the working copy by `docker build`, not from the repo blob,
+# so a CRLF copy here is a real parse risk (line continuations, heredocs) even though git
+# reports the file clean. Declaring eol=lf makes the checkout deterministic.
+Dockerfile    text eol=lf
+Dockerfile.*  text eol=lf
+*.dockerfile  text eol=lf
+
 # Windows batch files must be CRLF for reliable parsing.
 *.bat   text eol=crlf
 *.cmd   text eol=crlf

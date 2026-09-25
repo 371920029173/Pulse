@@ -93,7 +93,7 @@
    pointer's target is unambiguous before the click commits. */
 .tab:hover:not(.tabOn) { background: var(--fill-control-hover); color: var(--text-primary); }
 
-.tabOn { background: var(--accent); color: #fff; font-weight: 600; }
+.tabOn { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 
 .error {
   margin: 0 18px 10px;

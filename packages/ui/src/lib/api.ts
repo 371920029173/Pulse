@@ -24,6 +24,73 @@ function friendlyNetworkError(err: unknown): Error {
   return err instanceof Error ? err : new Error(msg);
 }
 
+/** Header the server reads the access token from; see `packages/server/src/tenancy.ts`. */
+const AUTH_HEADER = 'X-SHE-Token';
+/** Where a browser client keeps its token. The desktop shell injects `__sheAuthToken` instead. */
+const AUTH_STORAGE_KEY = 'she.authToken';
+
+/**
+ * The access token for this client, if the server needs one.
+ *
+ * Three sources, in this order, because the three ways of running this app are genuinely different:
+ * the desktop shell already knows the token from its own environment and hands it to the preload,
+ * which is the only one that is ready before the first request; a browser tab has nowhere to get it
+ * from except the person sitting there, so it reads a value they set once; and a raw injected global
+ * covers a page that was wired up by hand. None of them stores the token anywhere the SERVER could
+ * read — the point of the token is that it does not live in the workspace.
+ */
+export function authToken(): string | null {
+  const desktop = (globalThis as { sheDesktop?: { authToken?: unknown } }).sheDesktop?.authToken;
+  if (typeof desktop === 'string' && desktop.trim()) return desktop.trim();
+  const injected = (globalThis as { __sheAuthToken?: unknown }).__sheAuthToken;
+  if (typeof injected === 'string' && injected.trim()) return injected.trim();
+  try {
+    const stored = globalThis.localStorage?.getItem(AUTH_STORAGE_KEY);
+    return stored && stored.trim() ? stored.trim() : null;
+  } catch {
+    // Private-mode browsers and some sandboxed renderers throw on localStorage access.
+    return null;
+  }
+}
+
+/** Headers for a request that may need to authenticate. */
+function requestHeaders(json: boolean): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (json) headers['Content-Type'] = 'application/json';
+  const token = authToken();
+  if (token) headers[AUTH_HEADER] = token;
+  return headers;
+}
+
+/**
+ * Turn a 401 into an instruction.
+ *
+ * The server's own body is just "Unauthorized", which reads as a bug rather than a setting. When
+ * the API is token-gated and this client has no token, the only useful thing to say is where the
+ * token comes from — otherwise the symptom is an empty session list and no reason for it.
+ */
+function authHint(status: number, fallback: string): Error {
+  if (status === 401) {
+    return new Error(t('本地服务要求访问令牌，但客户端没有提供。请设置 SHE_AUTH_TOKEN 重启服务，并在本机填入同一个令牌。'));
+  }
+  return new Error(fallback);
+}
+
+/**
+ * `fetch` with the access token attached.
+ *
+ * The raw calls scattered across the theme, background and export code predate the token and would
+ * each 401 on their own once the server is gated — so "auth is on" would mean "the theme panel is
+ * broken", which is a worse outcome than not having the setting. One wrapper, used everywhere, is
+ * the only version of this that stays correct as call sites are added.
+ */
+export async function apiFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  const token = authToken();
+  if (token) headers.set(AUTH_HEADER, token);
+  return fetch(`${BASE}${url}`, { ...init, headers });
+}
+
 export async function fetchJSON<T = unknown>(
   url: string,
   opts: FetchOptions = {},
@@ -43,14 +110,14 @@ export async function fetchJSON<T = unknown>(
   try {
     const res = await fetch(`${BASE}${url}`, {
       method: opts.method ?? 'GET',
-      headers: opts.body != null ? { 'Content-Type': 'application/json' } : undefined,
+      headers: requestHeaders(opts.body != null),
       body: opts.body != null ? JSON.stringify(opts.body) : undefined,
       signal: controller.signal,
     });
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error((err as { error?: string }).error ?? `HTTP ${res.status}`);
+      throw authHint(res.status, (err as { error?: string }).error ?? `HTTP ${res.status}`);
     }
 
     return (await res.json()) as T;
@@ -110,14 +177,14 @@ export function streamSSE(
 
   fetch(`${BASE}${url}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: requestHeaders(true),
     body: JSON.stringify(body),
     signal: local.signal,
   })
     .then(async (res) => {
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: res.statusText }));
-        throw new Error((err as { error?: string }).error ?? `HTTP ${res.status}`);
+        throw authHint(res.status, (err as { error?: string }).error ?? `HTTP ${res.status}`);
       }
 
       const reader = res.body?.getReader();

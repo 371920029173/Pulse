@@ -23,6 +23,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { promoteDocumentSelectors } from '../lib/userCss';
+import { apiFetch } from '../lib/api';
 import { t } from '../lib/i18n';
 
 export interface CssIssue {
@@ -107,7 +108,7 @@ async function escapeHatchFromUrl(): Promise<boolean> {
   const url = new URL(window.location.href);
   if (url.searchParams.get('theme') !== 'off') return false;
   try {
-    await fetch('/api/theme/disable', { method: 'POST' });
+    await apiFetch('/api/theme/disable', { method: 'POST' });
   } catch {
     // Even if the request fails, stop applying the stylesheet for this load — otherwise
     // the escape does nothing at all, which is worse than not persisting it.
@@ -130,7 +131,7 @@ export function useUserTheme() {  const [theme, setTheme] = useState<ThemeSnapsh
 
   const refresh = useCallback(async () => {
     try {
-      const r = await fetch('/api/theme');
+      const r = await apiFetch('/api/theme');
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = (await r.json()) as Omit<ThemeSnapshot, 'issues'> & { validation?: { issues: CssIssue[] } };
       const snap: ThemeSnapshot = {
@@ -198,7 +199,7 @@ export function useUserTheme() {  const [theme, setTheme] = useState<ThemeSnapsh
     opts?: { force?: boolean; enabled?: boolean },
   ): Promise<{ ok: boolean; issues: CssIssue[]; forced?: boolean; error?: string }> => {
     const q = opts?.force ? '?force=1' : '';
-    const r = await fetch(`/api/theme${q}`, {
+    const r = await apiFetch(`/api/theme${q}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ css, ...(opts?.enabled !== undefined ? { enabled: opts.enabled } : {}) }),
@@ -215,7 +216,7 @@ export function useUserTheme() {  const [theme, setTheme] = useState<ThemeSnapsh
   /** Validate a draft without saving. Debounced by the caller. */
   const validate = useCallback(async (css: string): Promise<{ issues: CssIssue[]; stats: ThemeSnapshot['stats'] } | null> => {
     try {
-      const r = await fetch('/api/theme/validate', {
+      const r = await apiFetch('/api/theme/validate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ css }),
@@ -230,22 +231,22 @@ export function useUserTheme() {  const [theme, setTheme] = useState<ThemeSnapsh
   }, []);
 
   const disable = useCallback(async () => {
-    await fetch('/api/theme/disable', { method: 'POST' });
+    await apiFetch('/api/theme/disable', { method: 'POST' });
     await refresh();
   }, [refresh]);
 
   const enable = useCallback(async () => {
-    await fetch('/api/theme/enable', { method: 'POST' });
+    await apiFetch('/api/theme/enable', { method: 'POST' });
     await refresh();
   }, [refresh]);
 
   const reset = useCallback(async () => {
-    await fetch('/api/theme', { method: 'DELETE' });
+    await apiFetch('/api/theme', { method: 'DELETE' });
     await refresh();
   }, [refresh]);
 
   const revert = useCallback(async (): Promise<{ ok: boolean; reason?: string }> => {
-    const r = await fetch('/api/theme/revert', { method: 'POST' });
+    const r = await apiFetch('/api/theme/revert', { method: 'POST' });
     let body: { ok?: boolean; css?: string } = {};
     try { body = await r.json(); } catch { /* ignore */ }
     await refresh();

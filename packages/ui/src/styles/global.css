@@ -34,9 +34,23 @@
   --border: #30363d;
   --border-focus: #58a6ff;
 
+  /*
+   * Text ramp.
+   *
+   * The values are set by measurement, not by eye: `scripts/a11y-check.mjs` computes
+   * WCAG contrast for every text token against every surface token in both themes and
+   * fails the build below 4.5:1 on the two reading surfaces (bg-primary/secondary)
+   * and 3:1 on the tinted ones (bg-tertiary/hover).
+   *
+   * This is why --text-tertiary is brighter than it used to be (#6e7681). That value
+   * sat at 2.66:1 on a hovered row — below even the large-text floor — so timestamps
+   * and hint labels were not just faint, they were unreadable for anyone with reduced
+   * contrast sensitivity. `--text-secondary` moved up with it to keep the three-step
+   * ramp visible instead of collapsing two tokens into one grey.
+   */
   --text-primary: #e6edf3;
-  --text-secondary: #8b949e;
-  --text-tertiary: #6e7681;
+  --text-secondary: #9ba7b4;
+  --text-tertiary: #7d8590;
   --text-link: #58a6ff;
 
   --accent: #58a6ff;
@@ -45,6 +59,20 @@
   --warning: #d29922;
   --danger: #f85149;
   --info: #79c0ff;
+
+  /*
+   * Text colour for content sitting ON a filled control.
+   *
+   * The accent is a light blue in this theme, so white text on it measured 2.61:1 —
+   * every primary button and active tab was failing. A fixed `#fff` cannot be right
+   * in both themes, because the light theme's accent is dark; hence a token that
+   * flips with the theme rather than a literal in each rule.
+   */
+  --on-accent: #0b0d12;
+  --on-success: #0b0d12;
+  --on-warning: #0b0d12;
+  --on-danger: #0b0d12;
+  --on-info: #0b0d12;
 
   /* Frosted glass — dark: keep body readable, still show wallpaper through */
   --glass-bg: color-mix(in srgb, var(--bg-secondary) 38%, transparent);
@@ -272,7 +300,7 @@ input, textarea {
    which is the only place colour carries meaning. */
 .she-btn--primary {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .she-btn--primary:hover:not(:disabled) {
@@ -475,8 +503,8 @@ body {
   --syntax-attr: #bf3989;
 
   --text-primary: #1f2328;
-  --text-secondary: #656d76;
-  --text-tertiary: #8c959f;
+  --text-secondary: #5b636d;
+  --text-tertiary: #666e77;
   --text-link: #0969da;
 
   --accent: #0969da;
@@ -485,6 +513,14 @@ body {
   --warning: #9a6700;
   --danger: #cf222e;
   --info: #0969da;
+
+  /* Filled controls are dark here, so their text is white — the opposite of the
+     dark theme. See the note on `--on-accent` above. */
+  --on-accent: #ffffff;
+  --on-success: #ffffff;
+  --on-warning: #ffffff;
+  --on-danger: #ffffff;
+  --on-info: #ffffff;
 
   --shadow-sm: 0 1px 2px rgba(31, 35, 40, 0.08);
   --shadow-md: 0 4px 12px rgba(31, 35, 40, 0.12);

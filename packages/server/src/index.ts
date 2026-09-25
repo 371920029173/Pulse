@@ -10,8 +10,8 @@ import type { SheConfig, StreamChunk, EdgeKind, SkillProfile } from '@she/shared
 import { KBStore, GroupKBEngine, mergeKnowledgeBases } from '@she/kb';
 import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLink } from './kb-link.js';
 import { SandboxShell, createTools, ConfirmTicketStore } from '@she/sandbox';
-import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings } from '@she/agent-runtime';
-import type { SubagentRunner } from '@she/agent-runtime';
+import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate } from '@she/agent-runtime';
+import type { SubagentRunner, SubagentResult } from '@she/agent-runtime';
 import { PlanStore, MemoStore, nextStepOf } from '@she/agent-runtime';
 import { RunTraceStore, ConfidenceMirror, REFLECTION_DIR } from '@she/agent-runtime';
 import type { StepStatus } from '@she/agent-runtime';
@@ -35,12 +35,23 @@ import { FeishuBridge, type FeishuConfig } from './feishu.js';
 import { AuditLog } from './audit.js';
 import { AUDIT_KINDS } from './audit.js';
 import type { AuditRecord, AuditKind } from './audit.js';
+import {
+  AUTH_HEADER,
+  authenticate,
+  currentTenant,
+  isPublicRoute,
+  loadTenancy,
+  presentedTokens,
+  runInTenant,
+  TenantLedger,
+} from './tenancy.js';
+import type { Tenancy } from './tenancy.js';
 import { listTree, readWorkspaceFile, suggestPaths } from './files.js';
 import { outlinePath, suggestSymbols } from './outline.js';
 import { parseContextExport } from './contextParsers.js';
 import { discoverConversations, loadTranscript, materializeConversation } from './discovery.js';
 import { knownProjectRoots, rememberProject } from './projects.js';
-import { addWorktree, listWorktrees, removeWorktree, resetWorktree, transferLocalChanges } from './worktrees.js';
+import { addWorktree, changedFiles, isGitRepo, listWorktrees, removeWorktree, resetWorktree, transferLocalChanges } from './worktrees.js';
 import { taskBoard } from './taskBoard.js';
 
 const log = createLogger('server');
@@ -477,7 +488,92 @@ function projectRoots(): string[] {
   return knownProjectRoots(projectIndexFile(), config.workspace.root, extra);
 }
 
+/**
+ * Auth + tenancy for this process.
+ *
+ * Parsed once at module load, because it comes from the environment and the environment does not
+ * change while the process runs. `loadTenancy` throws on a token that is too short or duplicated —
+ * deliberately at startup, where the operator sees it, rather than on the first request.
+ *
+ * Declared above `findSession` rather than beside `auditLog` below it because `findSession` reads
+ * it, and a `let` that is still in its temporal dead zone is a crash, not a default.
+ */
+let tenancy: Tenancy = { enabled: false, tenants: [], implicit: 'local', system: 'system' };
+let tenancyError: string | null = null;
+try {
+  tenancy = loadTenancy(process.env);
+} catch (err) {
+  // A misconfigured token must NOT silently degrade to "no auth": that is the failure mode where
+  // the operator believes the port is protected. Refuse to serve and say why.
+  tenancyError = err instanceof Error ? err.message : String(err);
+}
+
+/** Session → tenant, kept per workspace like the audit log. */
+let ledger: TenantLedger | null = null;
+let ledgerRoot = '';
+function tenantLedger(): TenantLedger {
+  const root = resolve(config.workspace.root);
+  if (!ledger || ledgerRoot !== root) {
+    ledger = new TenantLedger(root);
+    ledgerRoot = root;
+  }
+  return ledger;
+}
+
+/**
+ * The tenant that owns work created with no request behind it.
+ *
+ * `currentTenant()` is undefined in a scheduled task or a startup migration; those sessions still
+ * need an owner, or the first tenant to ask for them would be refused (and with several tenants
+ * they must not fall into the "unowned is readable" branch).
+ */
+function ownerTenant(): string {
+  return currentTenant() ?? tenancy.system;
+}
+
+/**
+ * Create a session and record who owns it.
+ *
+ * Every creation goes through here rather than calling `sessions.create` / `store.create`
+ * directly. Ownership that is assigned in five places is ownership that will be forgotten in the
+ * sixth, and a forgotten claim is not a cosmetic bug: it is a session that either disappears from
+ * its owner's list or is refused on the next request.
+ */
+function createSession(
+  store: SessionStore,
+  title: string | undefined,
+  opts: { directory: string; parentId?: string; background?: boolean },
+): ChatSession {
+  const created = store.create(title, opts);
+  if (tenancy.enabled) tenantLedger().claim(created.id, ownerTenant());
+  return created;
+}
+
+/**
+ * Drop sessions the current tenant may not see.
+ *
+ * `findSession` guards reads by id, and it is not enough on its own: the LIST routes never go
+ * through it, they enumerate every store. Without this, tenant A's sidebar would show tenant B's
+ * conversation titles — the ids would then be refused on open, which is a confusing state rather
+ * than a leak, but the titles alone are often the sensitive part.
+ */
+function visibleToTenant<T extends { id: string }>(items: T[]): T[] {
+  if (!tenancy.enabled) return items;
+  const tenant = currentTenant();
+  if (tenant === undefined) return items;
+  return items.filter((s) => tenantLedger().canAccess(s.id, tenant, tenancy));
+}
+
 function findSession(id: string): { store: SessionStore; session: ChatSession } | null {
+  /*
+   * The one place every session read passes through, so the one place tenancy has to be enforced.
+   *
+   * Deliberately not a check in each route: sessions are addressed by id, and a caller holding
+   * another tenant's id — from a log line, a shared link, a `parent_id` in a JSON dump — would
+   * otherwise read that transcript from a dozen different endpoints. Returning "not found" rather
+   * than "forbidden" is also a choice: whether a session id EXISTS is itself tenant information.
+   */
+  if (!tenantLedger().canAccess(id, currentTenant(), tenancy)) return null;
   const local = sessions.get(id);
   if (local) return { store: sessions, session: local };
   for (const root of projectRoots()) {
@@ -578,30 +674,118 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
 
   return {
     async run(req) {
-      const directory = parentCfg.workspace.root;
-      const owner = storeFor(directory);
-      const childSession = owner.create(req.description, {
+      const baseDir = parentCfg.workspace.root;
+
+      /*
+       * Isolation is decided before anything is created, and a request for it that cannot be
+       * granted is reported rather than silently downgraded. A child the parent believes is in a
+       * private tree, while it is in fact editing the shared checkout, is the exact accident this
+       * is meant to prevent — so the note travels back in the result.
+       */
+      let directory = baseDir;
+      let worktree: { path: string; branch: string } | null = null;
+      let isolationNote: string | undefined;
+
+      const repo = isGitRepo(baseDir);
+      /*
+       * Two answers from one rule, so the reporting cannot drift from the decision.
+       *
+       * `isolate` is the real decision in this workspace; `wanted` is the same rule asked with the
+       * git constraint lifted ("would this task be isolated if it could be?"). Asking the runtime
+       * both ways is what lets the reply distinguish "isolation was not called for" — the common
+       * read-only case, which must stay quiet — from "isolation was called for and did not happen",
+       * which the parent has to know about.
+       */
+      const isolate = shouldIsolate(req, repo);
+      const wanted = shouldIsolate(req, true);
+      if (isolate) {
+        try {
+          const info = addWorktree(baseDir, `sub-${req.description}`, { unique: true });
+          worktree = { path: info.path, branch: info.branch };
+          directory = info.path;
+          // Carry the parent's uncommitted work across, or the child would be editing a version
+          // of the project that is older than the one the parent is describing to it.
+          const moved = transferLocalChanges(baseDir, directory);
+          if (!/已套用|没有未提交/.test(moved)) isolationNote = moved;
+        } catch (err) {
+          isolationNote = `隔离副本创建失败，已回退到主工作区：${err instanceof Error ? err.message : String(err)}`;
+          worktree = null;
+          directory = baseDir;
+        }
+      } else if (wanted) {
+        isolationNote = '主工作区不是 git 仓库，无法开隔离副本，这个子任务在共享工作区里跑';
+      }
+
+      const childSession = createSession(storeFor(directory), req.description, {
         directory,
         parentId: parentSessionId,
       });
+      /*
+       * Register the worktree as a known project.
+       *
+       * Without this the child's transcript is written into `.she/` inside the worktree and is then
+       * invisible: `/api/sessions` enumerates known project roots, and a directory nobody has
+       * registered is not one. The child's session would exist on disk with no way to open it —
+       * "it ran in isolation" and "there is no record of what it did" are not the same feature.
+       */
+      if (worktree) {
+        try { rememberProject(projectIndexFile(), directory); } catch { /* non-fatal */ }
+      }
       const shell = new SandboxShell(directory, parentCfg.sandbox);
       const tools = createTools(shell, directory, {
         allowAllCommands: parentCfg.sandbox.allowAllCommands,
       });
-      const child = new Agent(parentCfg, engineFor(parentCfg.kb.dbPath), tools, childSession.id, { isSubagent: true });
+      const childCfg = configForRoot(directory);
+      const child = new Agent(childCfg, engineFor(childCfg.kb.dbPath), tools, childSession.id, { isSubagent: true });
       agents.set(childSession.id, child);
 
-      const job = (async () => {
+      // The brief the child actually receives: the structured handoff, then the parent's words.
+      const brief = composeHandoffPrompt(req, { workdir: directory, isolated: Boolean(worktree) });
+
+      const collectWorktree = (pending?: string): SubagentResult['worktree'] => {
+        if (!worktree) return undefined;
+        return {
+          path: worktree.path,
+          branch: worktree.branch,
+          changed: changedFiles(worktree.path),
+          note: [isolationNote, pending].filter(Boolean).join(' ') || undefined,
+        };
+      };
+
+      /*
+       * Isolation status, reported on every return path including the ones with no worktree.
+       *
+       * `handOff` and the failure branch both used to drop it: `collectWorktree` returns undefined when
+       * there is no worktree, so a parent that asked for isolation and did not get it heard nothing at
+       * all — the child simply ran in the shared checkout and the reply looked normal.
+       */
+      const isolationInfo = (): SubagentResult['isolation'] => ({
+        requested: wanted,
+        applied: Boolean(worktree),
+        note: isolationNote,
+      });
+
+      const job = (async (): Promise<SubagentResult> => {
         let timedOut = false;
         try {
           const out = await Promise.race([
-            child.chat(req.prompt),
+            child.chat(brief),
             new Promise<null>((r) => setTimeout(() => { timedOut = true; r(null); }, TIMEOUT_MS)),
           ]);
           if (timedOut) {
             try { child.stop(); } catch { /* ignore */ }
           }
-          try { owner.update(childSession.id, { messages: child.historyForDisk() }); } catch { /* keep the reply */ }
+          try {
+            /*
+             * The title is passed back on every persist.
+             *
+             * `SessionStore.update` derives a title from the first user message when none is given,
+             * and the child's first user message is now the handoff brief — so persisting without
+             * it would rename every isolated subtask to "## 交接单 - 交付物：…". The parent named
+             * this job; that name is what the session list should show.
+             */
+            storeFor(directory).update(childSession.id, { title: req.description, messages: child.historyForDisk() });
+          } catch { /* keep the reply */ }
           const text = timedOut
             ? `子任务超时（${TIMEOUT_MS / 1000}s）`
             : (out?.content ?? '(无输出)');
@@ -609,24 +793,33 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
             description: req.description,
             ok: !timedOut,
             result: `${text}\n\n（子会话 ${childSession.id}）`,
+            handoff: req.handoff,
+            worktree: collectWorktree(),
+            isolation: isolationInfo(),
           };
         } catch (err) {
-          try { owner.update(childSession.id, { messages: child.historyForDisk() }); } catch { /* ignore */ }
+          try { storeFor(directory).update(childSession.id, { title: req.description, messages: child.historyForDisk() }); } catch { /* ignore */ }
           return {
             description: req.description,
             ok: false,
             result: `子任务失败: ${err instanceof Error ? err.message : String(err)}\n\n（子会话 ${childSession.id}）`,
+            handoff: req.handoff,
+            worktree: collectWorktree(),
+            isolation: isolationInfo(),
           };
         }
       })();
 
-      const handOff = () => {
-        owner.markBackground(childSession.id);
+      const handOff = (): SubagentResult => {
+        storeFor(directory).markBackground(childSession.id);
         void job;
         return {
           description: req.description,
           ok: true,
           result: `已在后台继续。打开会话「${childSession.title}」（${childSession.id}）可以看它的过程。`,
+          handoff: req.handoff,
+          worktree: collectWorktree('子任务仍在后台运行，改动清单要等它结束后再取。'),
+          isolation: isolationInfo(),
         };
       };
       if (req.background) return handOff();
@@ -905,7 +1098,7 @@ async function runScheduledTask(task: ScheduledTask): Promise<void> {
      * because the run then left messages here, the startup pick preferred this job log over
      * the user's own chat on the next boot.
      */
-    const created = sessions.create(task.name, {
+    const created = createSession(sessions, task.name, {
       directory: resolve(config.workspace.root),
       background: true,
     });
@@ -1099,7 +1292,7 @@ function agentFor(
     if (opts?.createIfMissing === false) {
       return makeAgent(config);
     }
-    const created = sessions.create(undefined, { directory: resolve(config.workspace.root) });
+    const created = createSession(sessions, undefined, { directory: resolve(config.workspace.root) });
     id = created.id;
   }
   if (activeAgentId !== id) activeAgentId = id;
@@ -1380,6 +1573,25 @@ function registerRoutes(router: Router): void {
    */
   router.get('/api/config/recovery', (_req, res) => {
     sendJSON(res, configReport());
+  });
+
+  /*
+   * Who the caller is, according to the server.
+   *
+   * Requires a token like every other route, which is what makes the answer worth anything: a 200
+   * here means the token you hold is one the server accepts, and `tenant` names the data you can
+   * reach. It never echoes the token back — a client that has it does not need it returned, and a
+   * response is one more place it could be logged.
+   */
+  router.get('/api/auth/status', (_req, res) => {
+    sendJSON(res, {
+      enabled: tenancy.enabled,
+      tenant: currentTenant() ?? tenancy.implicit,
+      /** Where the token is expected, so a client does not have to guess (or use a query string). */
+      header: AUTH_HEADER,
+      /** How many tenants exist. Not their ids: that is a list of who else uses this install. */
+      tenants: tenancy.tenants.length,
+    });
   });
 
   /*
@@ -3446,28 +3658,30 @@ router.get('/api/fs/tree', (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     const includeClosed = url.searchParams.get('all') === '1';
     if (url.searchParams.get('scope') !== 'all') {
-      sendJSON(res, sessions.list(includeClosed));
+      const own = sessions.list(includeClosed);
+      sendJSON(res, { ...own, sessions: visibleToTenant(own.sessions) });
       return;
     }
     const mine = sessions.list(includeClosed);
-    const seen = new Set(mine.sessions.map((s) => s.id));
+    const mineVisible = visibleToTenant(mine.sessions);
+    const seen = new Set(mineVisible.map((s) => s.id));
     const extra = [];
     for (const root of projectRoots()) {
       if (resolve(root) === resolve(sessions.rootDir)) continue;
-      for (const s of storeFor(root).list(includeClosed).sessions) {
+      for (const s of visibleToTenant(storeFor(root).list(includeClosed).sessions)) {
         if (seen.has(s.id)) continue;
         seen.add(s.id);
         extra.push({ ...s, directory: s.directory || root });
       }
     }
-    sendJSON(res, { active_id: mine.active_id, sessions: [...mine.sessions, ...extra] });
+    sendJSON(res, { active_id: mine.active_id, sessions: [...mineVisible, ...extra] });
   });
 
   /** Closed sessions only (history view). */
   router.get('/api/sessions/history', (_req, res) => {
     sendJSON(res, {
-      closed: sessions.listClosed(),
-      open: sessions.list().sessions,
+      closed: visibleToTenant(sessions.listClosed()),
+      open: visibleToTenant(sessions.list().sessions),
     });
   });
 
@@ -3502,7 +3716,7 @@ router.get('/api/fs/tree', (req, res) => {
     const directory = resolve(body.directory?.trim() || config.workspace.root);
     if (!existsSync(directory)) throw new HttpError(404, `路径不存在: ${directory}`);
     const owner = storeFor(directory);
-    const s = owner.create(body.title, { directory, parentId: body.parent_id });
+    const s = createSession(owner, body.title, { directory, parentId: body.parent_id });
     try { rememberProject(projectIndexFile(), directory); } catch { /* non-fatal */ }
     if (resolve(directory) === resolve(config.workspace.root)) {
       activeAgentId = s.id;
@@ -3693,7 +3907,7 @@ router.get('/api/fs/tree', (req, res) => {
     const repo = resolve(body.repo?.trim() || config.workspace.root);
     try {
       const info = addWorktree(repo, body.name?.trim() || `w${Date.now().toString(36)}`);
-      const session = storeFor(info.path).create(body.name?.trim() || basename(info.path), { directory: info.path });
+      const session = createSession(storeFor(info.path), body.name?.trim() || basename(info.path), { directory: info.path });
       try {
         rememberProject(projectIndexFile(), repo);
         rememberProject(projectIndexFile(), info.path);
@@ -4231,7 +4445,7 @@ router.get('/api/fs/tree', (req, res) => {
       running?: boolean;
     }> = [];
     for (const root of projectRoots()) {
-      for (const s of storeFor(root).list().sessions) {
+      for (const s of visibleToTenant(storeFor(root).list().sessions)) {
         if (seen.has(s.id)) continue;
         seen.add(s.id);
         chats.push({
@@ -4259,7 +4473,15 @@ router.get('/api/fs/tree', (req, res) => {
     const all = [...chats, ...groups].sort((a, b) =>
       (b.updated_at ?? '').localeCompare(a.updated_at ?? ''),
     );
-    sendJSON(res, { items: all, active_id: sessions.list().active_id });
+    /*
+     * `active_id` is filtered too. It is an id, not a title, but it is the id of a conversation the
+     * caller may not open — handing it over would make the client's next request fail with a 404 it
+     * could have been spared, and it announces that some other session exists.
+     */
+    const activeId = sessions.list().active_id;
+    const activeVisible = activeId !== null
+      && (!tenancy.enabled || visibleToTenant([{ id: activeId }]).length > 0);
+    sendJSON(res, { items: all, active_id: activeVisible ? activeId : null });
   });
 
   router.post('/api/cluster/rooms', async (req, res) => {
@@ -4486,7 +4708,7 @@ function pickStartupSession() {
     const activated = sessions.setActive(chosen.id);
     if (activated) return activated;
   }
-  return stored ?? sessions.create(undefined, { directory: resolve(config.workspace.root) });
+  return stored ?? createSession(sessions, undefined, { directory: resolve(config.workspace.root) });
 }
 
 export async function startServer(overrideConfig?: SheConfig): Promise<ReturnType<typeof createServer>> {  // Resolve config against the install root so the server finds the same
@@ -4566,6 +4788,36 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
   // One-time tidying: the old version stored the wallpaper per workspace and left it there.
   cleanLegacyWorkspaceBackground();
 
+  /*
+   * Say out loud whether the port is protected, and hand over any sessions that predate the token.
+   *
+   * The log line matters as much as the adoption does. An operator who configured a token needs to
+   * see it acknowledged at boot — the alternative is guessing from whether a request 401s — and an
+   * operator who did NOT configure one should not have to read a config file to discover that the
+   * API on their loopback is open to anything running as their user.
+   */
+  if (tenancyError) {
+    log.error(`鉴权配置有误，所有请求都会被拒绝：${tenancyError}`);
+  } else if (!tenancy.enabled) {
+    log.info('鉴权：未开启（只接受本机来源；如需多用户或反代访问，设置 SHE_AUTH_TOKEN）');
+  } else {
+    log.info(`鉴权：已开启，${tenancy.tenants.length} 个租户（token 从 ${AUTH_HEADER} 或 Authorization: Bearer 读取）`);
+    const adoptTo = process.env.SHE_TENANT_ADOPT_TO?.trim();
+    if (adoptTo && tenancy.tenants.some((t) => t.id === adoptTo)) {
+      const ids: string[] = [];
+      for (const s of sessions.list(true).sessions) ids.push(s.id);
+      for (const root of projectRoots()) {
+        if (resolve(root) === resolve(sessions.rootDir)) continue;
+        for (const s of storeFor(root).list(true).sessions) ids.push(s.id);
+      }
+      const n = tenantLedger().adopt(ids, adoptTo);
+      if (n) {
+        auditSafe({ kind: 'config', change: 'tenant_adopt', note: `把 ${n} 个无主会话划给租户 ${adoptTo}` });
+        log.info(`租户：已把 ${n} 个此前无归属的会话划给 ${adoptTo}`);
+      }
+    }
+  }
+
   const router = new Router();
   registerRoutes(router);
 
@@ -4573,6 +4825,12 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
     const method = req.method || 'GET';
     const url = req.url || '/';
     const start = Date.now();
+
+    // A misconfigured token list must not silently become "no auth at all".
+    if (tenancyError) {
+      sendError(res, `鉴权配置有误：${tenancyError}`, 500);
+      return;
+    }
 
     // Refuse anything that did not originate from the local app before it
     // reaches a route (see guardRequest for what this blocks).
@@ -4583,8 +4841,37 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
       return;
     }
 
+    /*
+     * Then who is asking.
+     *
+     * Only `/api/health` is exempt: it is what the desktop shell and the offline checks poll to
+     * ask "is it up", and its payload names no workspace content. Everything else — including the
+     * config-recovery view, which names files inside the workspace — needs the token.
+     */
+    const pathname = url.split('?')[0];
+    const auth = isPublicRoute(method, pathname)
+      ? ({ ok: true as const, tenant: tenancy.implicit })
+      : authenticate(req.headers, tenancy);
+    if (!auth.ok) {
+      /*
+       * Recorded, not just logged. A single refusal is noise; a run of them from one source is
+       * the only signal that the port is reachable by something that should not reach it, and a
+       * log line that rotates away cannot answer "when did this start". The presented token is
+       * never written — only whether one was presented at all.
+       */
+      auditSafe({
+        kind: 'auth',
+        path: `${method} ${pathname}`,
+        presented: presentedTokens(req.headers).length > 0,
+        note: auth.reason,
+      });
+      log.warn(`Refused (auth): ${method} ${url} (${auth.reason})`);
+      sendError(res, 'Unauthorized', 401);
+      return;
+    }
+
     try {
-      const handled = await router.handle(req, res);
+      const handled = await runInTenant(auth.tenant, () => router.handle(req, res));
       if (!handled) {
         if (method === 'GET' && !url.startsWith('/api/')) {
           if (!tryServeStatic(req, res)) {
@@ -4648,8 +4935,8 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
     console.log('');
   });
 
-  process.on('SIGINT', () => { disposeAllAgents(); server.close(() => process.exit(0)); });
-  process.on('SIGTERM', () => { disposeAllAgents(); server.close(() => process.exit(0)); });
+  process.on('SIGINT', () => { disposeAllAgents(); tenantLedger().flush(); server.close(() => process.exit(0)); });
+  process.on('SIGTERM', () => { disposeAllAgents(); tenantLedger().flush(); server.close(() => process.exit(0)); });
 
   // ── Crash forensics ──────────────────────────────────────────────────────
   // The server previously died with exit code -1 and an EMPTY stderr, leaving

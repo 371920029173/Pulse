@@ -105,11 +105,12 @@
       "fixtures": {},
       "check": {
         "all": [
-          { "type": "usageBelow", "metric": "prompt", "max": 8000 },
-          { "type": "replyLengthBelow", "max": 400 }
+          { "type": "usageBelow", "metric": "prompt", "max": 13000 },
+          { "type": "replyLengthBelow", "max": 400 },
+          { "type": "toolCallsAtMost", "max": 0 }
         ]
       },
-      "note": "问候语不应触发工具或继承旧计划（曾一次「你好」烧掉 66k prompt tokens）"
+      "note": "问候语不应触发工具或继承旧计划（曾一次「你好」烧掉 66k prompt tokens）。上限 13000 是实测值定的：固定开销（系统提示词 + 工具表）是 10300 prompt tokens，三次跑完全一致，所以这是一条不会忽绿忽红的天花板，只用来抓爆发式增长。真正表达意图的是 toolCallsAtMost: 0——那句话里的「不该触发工具」以前只能靠用量间接推断。"
     },
     {
       "id": "subagent-delegation",
@@ -121,11 +122,12 @@
         "d.txt": "普通内容 D\n没有标记\n"
       },
       "check": {
-        "type": "fileContains",
-        "path": "answer.txt",
-        "expect": ["c.txt"]
+        "all": [
+          { "type": "fileContains", "path": "answer.txt", "expect": ["c.txt"] },
+          { "type": "toolCallsInclude", "tool": "task_spawn" }
+        ]
       },
-      "note": "子智能体委派：结果正确即可，不强制必须走某个工具路径"
+      "note": "子智能体委派：这条任务存在的理由是证明「派子智能体」这条路真的能走通，所以必须断言它真的走了。以前只断言 answer.txt 的内容，于是父智能体自己 fs_list+grep+fs_read 把答案找出来也照样通过——而这个 harness 当时根本没给 Agent 注入 subagentRunner，task_spawn 压根不在工具表里，这条任务从来没有测到过委派。"
     },
     {
       "id": "diagnostics-aware-edit",
@@ -141,6 +143,62 @@
         "expect": ["y"]
       },
       "note": "跨文件类型修复；若本机装了语言服务器，agent 可用 lsp_diagnostics 自查"
+    },
+    {
+      "id": "long-horizon-append-chain",
+      "turns": [
+        "在本目录创建 journal.txt，写入第一行：step-1。只做这一件事。",
+        "往 journal.txt 追加一行：step-2。不要重写文件，只追加。",
+        "往 journal.txt 追加一行：step-3。",
+        "往 journal.txt 再追加一行：step-4。",
+        "看看 journal.txt 现在有几行，只回答数字。"
+      ],
+      "fixtures": {},
+      "check": {
+        "all": [
+          { "type": "fileContains", "path": "journal.txt", "expect": ["step-1", "step-2", "step-3", "step-4"] },
+          { "type": "turnPromptGrowth", "max": 4 }
+        ]
+      },
+      "note": "长程累加：5 轮里每一轮都要接着上一轮的文件继续写。会丢状态的典型表现是重写文件（只剩最后一行），或者忘了前面写过什么"
+    },
+    {
+      "id": "long-horizon-deep-recall",
+      "turns": [
+        "记住这个编号：QN-8823。只回复 ok。",
+        "现在做点别的：创建 a.txt，内容写 hello。",
+        "再创建 b.txt，内容写 world。",
+        "把 a.txt 和 b.txt 的内容拼起来写进 c.txt（中间一个空格）。",
+        "确认 c.txt 的内容是什么？只回答内容本身。",
+        "第一个问题里让你记住的编号是什么？只回答编号本身，不要解释。"
+      ],
+      "fixtures": {},
+      "check": {
+        "all": [
+          { "type": "replyContains", "expect": "QN-8823" },
+          { "type": "replyLengthBelow", "max": 200 },
+          { "type": "turnPromptGrowth", "max": 6 }
+        ]
+      },
+      "note": "长程深召回：编号在第 1 轮给出、第 6 轮才问，中间隔了 4 轮无关工作。短文上下文里这一条通常能过，长文里会开始丢早期内容"
+    },
+    {
+      "id": "long-horizon-verified-artifact",
+      "turns": [
+        "创建 calc.js，导出一个 mul 函数（两个数相乘），用 module.exports。先不要运行。",
+        "给它加一个 add 函数，同样用 module.exports 导出。",
+        "现在用 node 运行一次，打印 mul(6, 7) 的结果，确认是 42。",
+        "把 add 也验证一下：打印 add(40, 2) 的结果。",
+        "最后运行 node calc.js 之前先加一行 console.log('done')，然后确认脚本能正常跑完。"
+      ],
+      "fixtures": {},
+      "check": {
+        "all": [
+          { "type": "fileContains", "path": "calc.js", "expect": ["mul", "add", "done"] },
+          { "type": "turnPromptGrowth", "max": 5 }
+        ]
+      },
+      "note": "长程产物一致性：5 轮里反复改同一个文件，最后交付物必须同时具备所有轮次要求的东西（丢一个函数就是丢状态）"
     }
   ]
 }
