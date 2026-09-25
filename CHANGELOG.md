@@ -150,6 +150,25 @@ than staying closed, and dependency cycles and dangling references are refused a
 disk, since a cycle means no step can ever start. `pnpm check:plan` drives the real tools, throws
 the toolset away to simulate a restart, and reads the plan back from `.she/plans.json`.
 
+**A hand-off has a shape, and "not verified" is not "done".** `report_write` used to produce the
+same free-form document whether the agent was answering a question or handing back finished work,
+and the two are judged differently: a report is read, a hand-off is relied on. `kind: "delivery"`
+now uses a five-part template — conclusion, evidence, assumptions, risks, open questions — chosen
+because those are the five that disagree with each other. **Evidence is required**: a conclusion
+with nothing behind it is an assertion, and the user never saw the command that produced it. The
+status is checked rather than asserted. `status: "done"` is refused while `open` has entries, and
+refused while *this conversation's* plan still has steps that are not `done` or `dropped` — the
+refusal names them instead of reporting a generic failure, and the same delivery is accepted as
+`partial` with those steps listed. The scoping matters in both directions: a plan from another
+conversation neither blocks a delivery here nor gets claimed by it, because the cheapest way past
+a broader check would be to mark steps done to unlock the word "done" — the exact behavior the
+check exists to prevent. `mode: "brief"` omits empty sections; `mode: "full"` requires that
+assumptions and risks were considered (an empty list is an answer, a missing one is not), and
+prints `（无）` rather than dropping the heading, since a heading nobody fills in makes a document
+look complete. The artifact always carries the plan's remaining steps at the moment of delivery,
+so the reader does not have to go and look. `pnpm check:delivery` drives the real tool, reads the
+artifact back from the path the tool reported, and asks the plan whether the claim holds.
+
 **Prometheus-style process metrics** at `GET /api/metrics`: turns, latency (avg and
 p95), token breakdown, tool usage and failures, and the **prompt-cache hit rate**. The
 last one matters most — a cache regression is invisible until it appears on a bill.

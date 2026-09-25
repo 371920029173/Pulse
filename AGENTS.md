@@ -51,6 +51,7 @@ pnpm check:api               # every endpoint the UI calls is actually routed
 pnpm check:plugins           # plugin end to end: install, agent can call it, uninstall takes effect
 pnpm check:preflight         # pre-flight intent analysis: missing refs, no scheduler, confidence ceiling
 pnpm check:plan              # plans as a graph: dependencies gate steps, policies name what to do, resume works
+pnpm check:delivery          # hand-off template: evidence required, "unconfirmed" is not "done"
 pnpm check:toolresult        # tool failures are classified, and every Error: message has a remedy
 pnpm check:errorbook         # past mistakes are written to the KB and read back before similar work
 pnpm check:dist              # the built bundle contains the wiring the browser needs

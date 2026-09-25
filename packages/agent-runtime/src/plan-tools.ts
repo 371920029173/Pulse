@@ -230,6 +230,20 @@ export class PlanStore {
   }
 
   /**
+   * THIS conversation's open plan, with no cross-conversation fallback.
+   *
+   * `active()` deliberately reaches into other conversations, because a plan is workspace state
+   * and resuming one is the point. That is the wrong rule for a delivery check: an old open plan
+   * from an unrelated chat must not be able to block today's delivery, or the cheapest way past
+   * the refusal would be to mark those steps `done` — the exact behavior the check exists to
+   * prevent. No session id means no plan of ours to check, so nothing is refused.
+   */
+  mine(): Plan | undefined {
+    if (!this.sessionId) return undefined;
+    return this.load().find((p) => p.status === 'open' && p.sessionId === this.sessionId);
+  }
+
+  /**
    * The step to hand to the agent when this plan is resumed.
    *
    * Kept in the store rather than derived by the caller because "where was I?" has to be the
@@ -469,6 +483,25 @@ const STATUS_MARK: Record<StepStatus, string> = {
   blocked: '[!]',
   dropped: '[-]',
 };
+
+/** How a delivery describes itself, in the artifact a human reads later. */
+const STATUS_LABEL: Record<'done' | 'partial' | 'needs_confirmation' | 'blocked', string> = {
+  done: '已完成',
+  partial: '部分完成',
+  needs_confirmation: '待确认',
+  blocked: '受阻',
+};
+
+/**
+ * A list as markdown bullets, with `empty` standing in when there is nothing.
+ *
+ * The placeholder is passed in rather than defaulted, because "no evidence" and "no risks" are
+ * very different statements and one generic `（无）` would flatten them.
+ */
+function listLines(items: string[], empty: string): string[] {
+  if (!items.length) return [empty];
+  return items.map((i) => (i.startsWith('- ') ? i : `- ${i}`));
+}
 
 export function renderPlan(plan: Plan): string {
   const done = plan.steps.filter((s) => s.status === 'done').length;
@@ -736,15 +769,21 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
     {
       name: 'report_write',
       description:
-        'Write a structured markdown report artifact into the workspace (.she/reports/). Use for analysis summaries, audit findings, comparisons or any deliverable the user will read outside the chat.',
+        'Write a markdown artifact into the workspace (.she/reports/). '
+        + 'kind="report" (default) for an analysis document or comparison. '
+        + 'kind="delivery" when you are handing back finished WORK: it uses the delivery template '
+        + '(conclusion / evidence / assumptions / risks / open questions), and the status you claim '
+        + 'is checked against the plan, so a delivery cannot report "done" over unfinished or '
+        + 'unconfirmed work.',
       parameters: {
         type: 'object',
         properties: {
+          kind: { type: 'string', description: '"report" (default) or "delivery"' },
           title: { type: 'string', description: 'Report title' },
           summary: { type: 'string', description: 'Executive summary (a few lines)' },
           sections: {
             type: 'array',
-            description: 'Report sections',
+            description: 'Report sections / the detailed steps behind a delivery (its appendix)',
             items: {
               type: 'object',
               properties: {
@@ -755,6 +794,29 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
             },
           },
           filename: { type: 'string', description: 'Optional filename stem' },
+          mode: {
+            type: 'string',
+            description: '"brief" (default) or "full". delivery only. full also requires assumptions and risks.',
+          },
+          status: {
+            type: 'string',
+            description:
+              'delivery only, required: "done" | "partial" | "needs_confirmation" | "blocked". '
+              + '"done" is refused while anything is unconfirmed or while this conversation\'s plan has unfinished steps.',
+          },
+          conclusion: { type: 'string', description: 'delivery only, required: what is now true / what the user should take away' },
+          evidence: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'delivery only, required: what you actually observed — command output, file:line, test result',
+          },
+          assumptions: { type: 'array', items: { type: 'string' }, description: 'delivery only: what you took as given' },
+          risks: { type: 'array', items: { type: 'string' }, description: 'delivery only: what could still go wrong' },
+          open: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'delivery only: what is NOT verified or NOT done, each naming what would settle it',
+          },
         },
         required: ['title'],
       },
@@ -763,6 +825,97 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
       const title = String(a.title ?? 'Report').trim();
       const summary = a.summary ? String(a.summary) : '';
       const sections = Array.isArray(a.sections) ? (a.sections as { heading: string; body: string }[]) : [];
+      const kind = String(a.kind ?? 'report');
+      if (kind !== 'report' && kind !== 'delivery') {
+        return `Error: kind 必须是 report 或 delivery，收到 "${kind}"`;
+      }
+      const mode = String(a.mode ?? 'brief');
+      if (kind === 'delivery' && mode !== 'brief' && mode !== 'full') {
+        return `Error: mode 必须是 brief 或 full，收到 "${mode}"`;
+      }
+      const strList = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => String(x ?? '').trim()).filter(Boolean) : []);
+
+      /* ── The delivery template ──
+       *
+       * The point of the five parts is that they are the ones that disagree. "Done" without
+       * evidence is an assertion; a conclusion without its assumptions is a generality; and a
+       * delivery that lists no open questions when there are some is the failure this exists to
+       * prevent. Which is why the checks below are refusals rather than a template the model is
+       * asked nicely to follow: a heading nobody fills in is worse than no heading, because the
+       * document then LOOKS complete.
+       */
+      let delivery: {
+        status: 'done' | 'partial' | 'needs_confirmation' | 'blocked';
+        conclusion: string;
+        evidence: string[];
+        assumptions: string[];
+        risks: string[];
+        open: string[];
+        unmet: PlanStep[];
+      } | null = null;
+
+      if (kind === 'delivery') {
+        const status = String(a.status ?? '').trim();
+        const statuses = ['done', 'partial', 'needs_confirmation', 'blocked'];
+        if (!statuses.includes(status)) {
+          return `Error: kind=delivery 必须给出 status，且必须是 ${statuses.join(' / ')} 之一`
+            + `${status ? `，收到 "${status}"` : '（漏了 status）'}`;
+        }
+        const conclusion = String(a.conclusion ?? '').trim();
+        if (!conclusion) {
+          return 'Error: kind=delivery 必须给出 conclusion（结论）——只罗列过程不叫交付';
+        }
+        if (a.evidence === undefined) {
+          return 'Error: kind=delivery 必须给出 evidence（证据），至少一条：命令输出、file:line、测试结果';
+        }
+        const evidence = strList(a.evidence);
+        if (!evidence.length) {
+          return 'Error: kind=delivery 必须给出 evidence（证据），至少一条——没有证据的结论是断言';
+        }
+        if (mode === 'full' && (a.assumptions === undefined || a.risks === undefined)) {
+          return 'Error: mode=full 必须给出 assumptions 和 risks（空数组也行——那说明你想过，没有就是没有）';
+        }
+        const assumptions = strList(a.assumptions);
+        const risks = strList(a.risks);
+        const open = strList(a.open);
+
+        if (status === 'done' && open.length) {
+          return `Error: 状态不合法：status=done 但还有 ${open.length} 项待确认（${open[0].slice(0, 60)}）——`
+            + '先确认掉，或者把 status 改成 needs_confirmation';
+        }
+        if (status === 'needs_confirmation' && !open.length) {
+          return 'Error: 状态不合法：status=needs_confirmation 但没有待确认的项，那这次交付就是 done';
+        }
+
+        /*
+         * The plan is the workspace's own record of what has been finished, so this is the one
+         * place where "is it really done?" has an answer that does not come from the model.
+         *
+         * Computed for every status, not just `done`: a partial delivery has to carry the list
+         * of what is left, or the reader has to go and look it up. Scoped to THIS conversation's
+         * plan: an old open plan from an unrelated chat must not block today's delivery, or the
+         * cheapest way past the refusal would be to mark those steps done — exactly the behavior
+         * being prevented.
+         */
+        const mine = plans.mine();
+        const unmet = mine ? mine.steps.filter((s) => s.status !== 'done' && s.status !== 'dropped') : [];
+        if (status === 'done' && unmet.length) {
+          return `Error: status=done 但本会话的计划还没有做完：`
+            + `${unmet.map((s) => `${s.id} ${s.title}（${s.status}）`).join('、')}——`
+            + '要么把这些步骤做完或明确标成 dropped，要么这次交付写成 partial 并把它们放进 open';
+        }
+
+        delivery = {
+          status: status as 'done' | 'partial' | 'needs_confirmation' | 'blocked',
+          conclusion,
+          evidence,
+          assumptions,
+          risks,
+          open,
+          unmet,
+        };
+      }
+
       const stem = String(a.filename ?? title)
         .replace(/[^\p{L}\p{N}._-]+/gu, '-')
         .replace(/^-|-$/g, '')
@@ -771,21 +924,51 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
       const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
       const dir = join(workspaceRoot, '.she', 'reports');
       mkdirSync(dir, { recursive: true });
-      const file = join(dir, `${stem}-${stamp}.md`);
+      const suffix = kind === 'delivery' ? `delivery-${delivery!.status}` : 'report';
+      const file = join(dir, `${stem}-${suffix}-${stamp}.md`);
 
-      const parts = [
+      const parts: string[] = [
         `# ${title}`,
         '',
         `生成时间: ${new Date().toISOString()}`,
-        '',
-        summary ? `## 摘要\n\n${summary}\n` : '',
       ];
+      if (delivery) {
+        parts.push(`交付状态: ${STATUS_LABEL[delivery.status]}（${delivery.status}）  ·  ${mode === 'full' ? '详版' : '简版'}`);
+      }
+      if (summary) parts.push('', `## 摘要`, '', summary);
+
+      if (delivery) {
+        parts.push('', '## 结论', '', delivery.conclusion);
+        parts.push('', '## 证据', '', ...listLines(delivery.evidence, '（无——没有证据的结论只能是假设）'));
+        /*
+         * Full mode prints every heading even when the list is empty: `（无）` is a real answer
+         * and its absence is ambiguous. Brief mode prints only what is there, which is the whole
+         * difference between the two versions.
+         */
+        if (mode === 'full' || delivery.assumptions.length) {
+          parts.push('', '## 假设', '', ...listLines(delivery.assumptions, '（无）'));
+        }
+        if (mode === 'full' || delivery.risks.length) {
+          parts.push('', '## 风险', '', ...listLines(delivery.risks, '（无）'));
+        }
+        parts.push('', '## 待确认', '', ...listLines(delivery.open, '（无——本次交付没有未验证的部分）'));
+        if (delivery.unmet.length) {
+          parts.push('', '### 计划里还没做完的步骤（交付时点）', '',
+            ...delivery.unmet.map((s) => `- ${s.id} ${s.title} [${s.status}]`));
+        }
+      }
+
       for (const s of sections) {
         parts.push(`## ${s.heading}\n\n${s.body ?? ''}\n`);
       }
       writeFileSync(file, parts.filter(Boolean).join('\n'), 'utf8');
 
       const rel = file.replace(resolve(workspaceRoot) + '\\', '').replace(/\\/g, '/');
+      if (delivery) {
+        return `Delivery written: ${rel}\n`
+          + `status=${delivery.status} mode=${mode} 证据 ${delivery.evidence.length} 条，待确认 ${delivery.open.length} 项，`
+          + `未完成的计划步骤 ${delivery.unmet.length} 个`;
+      }
       return `Report written: ${rel}\n(${sections.length} sections, ${parts.join('').length} chars)`;
     },
   );

@@ -9,7 +9,7 @@
  */
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PlanStore, renderPlan, createPlanTools } from '../plan-tools.js';
@@ -455,5 +455,147 @@ describe('plan tools', () => {
     await tools.execute('plan_create', { title: '列表', steps: ['a', 'b'] });
     const listed = await tools.execute('plan_list', {});
     assert.match(listed, /下一步: s1 a/);
+  });
+});
+
+/**
+ * The delivery template.
+ *
+ * A hand-off is where the agent's own summary becomes the user's only record of what happened,
+ * so the parts that are checked here are the ones a summary can lie about by omission: a
+ * conclusion with no evidence behind it, and `done` over work that is not finished.
+ */
+describe('交付模板', () => {
+  const evidence = ['shell: pnpm test → exit code: 0'];
+
+  /**
+   * Write, then read back the artifact the tool reported.
+   *
+   * From the reported path rather than "the newest file": names carry a second-resolution
+   * timestamp, two artifacts written in one test would tie, and a directory listing would then
+   * assert against whichever one happened to sort last.
+   *
+   * `evidence` is NOT injected here on purpose: one of the tests is about omitting it, and a
+   * helper that quietly supplies it would make that test pass for the wrong reason.
+   */
+  async function report(title: string, args: Record<string, unknown> = {}) {
+    const tools = createPlanTools(dir, 'sess-1');
+    const out = await tools.execute('report_write', { kind: 'delivery', title, ...args });
+    const rel = /\.she\/reports\/[^\s]+\.md/.exec(out)?.[0];
+    const text = rel ? readFileSync(join(dir, rel), 'utf8') : '';
+    return { tools, out, text };
+  }
+
+  it('没有结论或证据的交付不是交付', async () => {
+    const noConclusion = await report('T', { status: 'done', evidence });
+    assert.match(noConclusion.out, /^Error: /);
+    assert.match(noConclusion.out, /conclusion/);
+
+    const noEvidence = await report('T', { status: 'done', conclusion: '做完了' });
+    assert.match(noEvidence.out, /^Error: /);
+    assert.match(noEvidence.out, /evidence/);
+    assert.equal(
+      classifyToolResult('report_write', noEvidence.out).kind,
+      'invalid_args',
+      '参数问题是模型能自己改的，不该归成 unknown',
+    );
+  });
+
+  it('详版要求显式给出假设和风险（空数组是结论，不是遗漏）', async () => {
+    const missing = await report('T', { status: 'done', mode: 'full', conclusion: '做完了', evidence });
+    assert.match(missing.out, /^Error: /);
+    assert.match(missing.out, /assumptions/);
+
+    const empty = await report('T', {
+      status: 'done', mode: 'full', conclusion: '做完了', evidence, assumptions: [], risks: [],
+    });
+    assert.ok(!empty.out.startsWith('Error'), `空数组应被接受: ${empty.out.slice(0, 160)}`);
+  });
+
+  it('有未确认的项就不能写 done', async () => {
+    const { out } = await report('T', { status: 'done', conclusion: '做完了', evidence, open: ['线上没跑'] });
+    assert.match(out, /^Error: /);
+    assert.match(out, /线上没跑/, '要说清是哪一项没确认');
+    assert.equal(classifyToolResult('report_write', out).kind, 'invalid_args');
+  });
+
+  it('没有待确认却写 needs_confirmation 也是错的', async () => {
+    const { out } = await report('T', { status: 'needs_confirmation', conclusion: '做完了', evidence });
+    assert.match(out, /^Error: /);
+  });
+
+  it('本会话计划没做完时不能交 done，做完才行', async () => {
+    const tools = createPlanTools(dir, 'sess-1');
+    await tools.execute('plan_create', { title: '迁移', steps: ['备份', '验证'] });
+    await tools.execute('plan_update', { step_id: 's1', status: 'done' });
+
+    const refused = await tools.execute('report_write', {
+      kind: 'delivery', title: 'T', status: 'done', conclusion: '做完了', evidence,
+    });
+    assert.match(refused, /^Error: /);
+    assert.match(refused, /s2 验证/, '要说清还剩哪一步');
+    assert.equal(
+      classifyToolResult('report_write', refused).kind,
+      'precondition',
+      '这是状态前提没满足，不是参数写错',
+    );
+
+    await tools.execute('plan_update', { step_id: 's2', status: 'done' });
+    const ok = await tools.execute('report_write', {
+      kind: 'delivery', title: 'T', status: 'done', conclusion: '做完了', evidence,
+    });
+    assert.ok(!ok.startsWith('Error'), `计划做完后应该通过: ${ok.slice(0, 200)}`);
+  });
+
+  it('别的会话没做完的计划不拦这次交付', async () => {
+    const other = createPlanTools(dir, 'sess-9');
+    await other.execute('plan_create', { title: '别人的活', steps: ['a', 'b'] });
+
+    const { out } = await report('T', { status: 'done', conclusion: '做完了', evidence });
+    assert.ok(
+      !out.startsWith('Error'),
+      `别会话的计划不该拦住交付（否则模型会学会把步骤标 done 来解锁）: ${out.slice(0, 200)}`,
+    );
+  });
+
+  it('简版不印空小节，详版印（无）', async () => {
+    const brief = await report('简版', { status: 'partial', conclusion: '做了一半', evidence, open: ['回归没跑'] });
+    assert.ok(!brief.out.startsWith('Error'), brief.out.slice(0, 160));
+    assert.ok(!brief.text.includes('## 假设'), '简版没有假设就不该印这一节');
+    assert.ok(brief.text.includes('## 待确认'), '待确认这一节始终要在，它是交付的底线');
+
+    const full = await report('详版', {
+      status: 'partial', mode: 'full', conclusion: '做了一半', evidence, assumptions: [], risks: [], open: ['回归没跑'],
+    });
+    assert.ok(!full.out.startsWith('Error'), full.out.slice(0, 160));
+    assert.ok(full.text.includes('## 假设') && full.text.includes('（无）'), '详版空小节要印出来，不能消失');
+  });
+
+  it('产物里带上计划里还没做完的步骤', async () => {
+    const tools = createPlanTools(dir, 'sess-1');
+    await tools.execute('plan_create', { title: '迁移', steps: ['备份', '验证'] });
+    await tools.execute('plan_update', { step_id: 's1', status: 'done' });
+
+    const out = await tools.execute('report_write', {
+      kind: 'delivery', title: 'T', status: 'partial', conclusion: '做了一半', evidence, open: ['验证没做'],
+    });
+    assert.ok(!out.startsWith('Error'), out.slice(0, 160));
+    const rel = /\.she\/reports\/[^\s]+\.md/.exec(out)![0];
+    const text = readFileSync(join(dir, rel), 'utf8');
+    assert.ok(text.includes('计划里还没做完的步骤'), '不带计划状态的话，读者得自己去翻');
+    assert.match(text, /s2 验证 \[active\]/, '状态要真实（s1 完成后 s2 已经开始了）');
+  });
+
+  it('kind=report 不走交付模板', async () => {
+    const tools = createPlanTools(dir, 'sess-1');
+    const out = await tools.execute('report_write', {
+      title: '分析',
+      sections: [{ heading: '发现', body: '第一点' }],
+    });
+    assert.match(out, /Report written/);
+    const rel = /\.she\/reports\/[^\s]+\.md/.exec(out)![0];
+    const text = readFileSync(join(dir, rel), 'utf8');
+    assert.ok(!text.includes('交付状态'), 'report 不声称交付状态');
+    assert.ok(text.includes('## 发现'));
   });
 });
