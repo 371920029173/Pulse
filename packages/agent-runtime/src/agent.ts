@@ -16,7 +16,7 @@ import type { ToolSet } from '@she/sandbox';
 import { PendingPatchStore, CheckpointStore, resolveInsideWorkspace } from '@she/sandbox';
 import { createKBTools } from './kb-tools.js';
 import { createPlanTools } from './plan-tools.js';
-import { createPreflightTools } from './preflight.js';
+import { createPreflightTools, PreflightStore } from './preflight.js';
 import { ErrorBook, createErrorbookTools, isWorthRemembering, formatErrorEntry } from './errorbook.js';
 import type { ErrorbookEngineLike, ErrorbookStoreLike, ErrorbookKind } from './errorbook.js';
 import { classifyToolResult, annotateToolResult, isToolFailure, type ToolResultVerdict } from './tool-result.js';
@@ -27,6 +27,7 @@ import { createIngestTools } from './ingest-tools.js';
 import { createMemoTools } from './memo-tools.js';
 import { createSubagentTools, type SubagentRunner } from './subagent-tools.js';
 import { repairApiMessages } from './protocol.js';
+import { RunTraceStore, type RunRecorder } from './run-trace.js';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
@@ -121,6 +122,25 @@ export class Agent {
    * there.
    */
   private lastUserRequest = '';
+  /**
+   * The run trace for the turn in flight.
+   *
+   * One file per user request, spanning the human gate: a run that stops for a confirmation is
+   * PAUSED rather than finished, and the continuation after the user approves keeps appending to
+   * the same file. Splitting it would hide the one thing a reader most wants to see — that the
+   * dangerous step was approved by a person and what happened next.
+   */
+  private runRecorder: RunRecorder | null = null;
+  /** Set while the run is stopped at a gate, cleared when the continuation resumes it. */
+  private runPaused: 'confirm' | 'apply' | null = null;
+  /** How this run ended, when it did not simply finish. Read by the `end` event. */
+  private runFailure: { reason: string; text?: string } | null = null;
+  private runStartedAt = 0;
+  /** Depth of continuations holding the trace open across several `withTurn` scopes. */
+  private runHold = 0;
+  private readonly runTrace: RunTraceStore;
+  /** `provider/model`, recorded on the `start` event so a trace says which model was answering. */
+  private readonly modelLabel: string;
   /** Aborts the in-flight turn (LLM request + tool loop). */
   private aborter: AbortController | null = null;
   /**
@@ -169,11 +189,26 @@ export class Agent {
        * not write shared artifacts (reports, plans) that the parent owns.
        */
       isSubagent?: boolean;
+      /**
+       * Where run traces are written.
+       *
+       * Injectable so a caller can point several agents at one directory (the server does) and so
+       * a test can use a throwaway path. Defaults to `.she/runs/` under the workspace, because a
+       * turn that leaves no trace is the gap this closes — making it opt-in would mean the runs
+       * people most want to read are the ones that were never recorded.
+       */
+      runTrace?: RunTraceStore;
     },
   ) {
     this.subagentRunner = opts?.subagentRunner ?? null;
     this.onTaskEvent = opts?.onTaskEvent ?? null;
     this.isSubagent = Boolean(opts?.isSubagent);
+    /*
+     * The run trace is built here rather than in the field initialiser so the workspace root is
+     * already available, and so a subagent gets one too: "who did which step" is a question the
+     * trace can answer about delegated work, and a child's file records `agent: "subagent"`.
+     */
+    this.runTrace = opts?.runTrace ?? new RunTraceStore(config.workspace.root);
     const level = config.llm.thinkingLevel || 'medium';
     /*
      * Which model this agent talks to.
@@ -199,6 +234,7 @@ export class Agent {
       );
     }
     log.info(`Model: ${describeModel(chosen)}`);
+    this.modelLabel = `${chosen.provider}/${chosen.model}`;
 
     if (chosen.provider === 'anthropic') {
       this.provider = new AnthropicProvider(
@@ -528,6 +564,11 @@ export class Agent {
         const stopped: LLMMessage = { role: 'assistant', content: '（已中断）' };
         onChunk?.({ type: 'status', content: '已中断当前执行' });
         this.history.push(stopped);
+        // The turn ended because a person pressed stop, which is neither success nor failure. It
+        // is recorded as a reason on the closing event instead of an `error`, so the trace does not
+        // read as if the agent broke.
+        this.runFailure = { reason: 'aborted' };
+        this.runRecorder?.step('已中断当前执行');
         return stopped;
       }
       iterations++;
@@ -546,6 +587,18 @@ export class Agent {
           this.tokenUsage.cache_miss_tokens += chunk.usage.cache_miss_tokens || 0;
           turnPromptTokens += chunk.usage.prompt_tokens || 0;
         }
+        /*
+         * The agent's narration, recorded here because this is the one funnel every model-produced
+         * chunk passes through — including the fallback path below, which bypasses `onChunk`
+         * entirely by going through `track`.
+         *
+         * Only `status` is stored. `text` and `reasoning` are per-token: writing them would make
+         * the run file larger than the transcript, and the final answer is already stored once, on
+         * the closing event. A `status` line, by contrast, is the only place a decision like "the
+         * primary endpoint failed, using the spare" or "this call is a repeat, stopping" is stated
+         * at the moment it was made.
+         */
+        if (chunk.type === 'status' && chunk.content) this.runRecorder?.step(chunk.content);
         onChunk?.(chunk);
       };
       let response: LLMMessage;
@@ -558,6 +611,8 @@ export class Agent {
           const stopped: LLMMessage = { role: 'assistant', content: '（已中断）' };
           onChunk?.({ type: 'status', content: '已中断当前执行' });
           this.history.push(stopped);
+          this.runFailure = { reason: 'aborted' };
+          this.runRecorder?.step('已中断当前执行');
           return stopped;
         }
         if (this.fallbackProvider) {
@@ -586,7 +641,11 @@ export class Agent {
         const name = tc.function.name;
         const executor = this.executors.get(name);
 
-        let result: string;
+        // Initialised rather than declared-and-assigned: the run trace below records it from a
+        // `finally`, and TypeScript's definite-assignment analysis will not accept a variable
+        // whose only assignments live in the guarded `try`/`catch` above. Every reachable path
+        // sets it; the empty string is for a flow that cannot happen.
+        let result = '';
         /*
          * The classification, carried from the executor to the two places that need it: the
          * failure counter (`toolObserver`) and the annotation the model reads. Null when the
@@ -666,6 +725,23 @@ export class Agent {
             } finally {
               // In a `finally` so a throwing tool is still counted.
               this.toolObserver?.(name, Date.now() - toolStart, toolFailed);
+              /*
+               * And into the run trace, from the same scope.
+               *
+               * Recorded HERE, before the confirm/apply handling below, so the file reads in the
+               * order things happened: the call, then the pause it caused. The raw arguments are
+               * used rather than the parsed `args`, because staging (`_stage`) and the dropped
+               * model-supplied ticket are the agent's own adjustments — what a reader wants is
+               * what the model asked for.
+               */
+              this.runRecorder?.tool({
+                name,
+                args: tc.function.arguments,
+                result: typeof result === 'string' ? result : JSON.stringify(result ?? ''),
+                ms: Date.now() - toolStart,
+                ok: !toolFailed,
+                failure: verdict?.kind,
+              });
             }
             /*
              * ─────────────────────────────────────────────────────────────────────────
@@ -702,6 +778,21 @@ export class Agent {
                     content: `needs confirm: ${parsed.needs_confirm.ticket_id}`,
                     ticket: parsed.needs_confirm,
                   });
+                  /*
+                   * The run is now PAUSED, not finished.
+                   *
+                   * The tracing file stays open so the continuation after the human approves
+                   * appends to it — which is the whole point of recording here: a reader can see
+                   * that a dangerous step was approved by a person, and what happened next. Closing
+                   * the run at this point would turn the most interesting part into a second file
+                   * that nothing links to.
+                   */
+                  this.runPaused = 'confirm';
+                  this.runRecorder?.awaiting('confirm', {
+                    ticketId: parsed.needs_confirm.ticket_id,
+                    tool: name,
+                    summary: parsed.needs_confirm.summary,
+                  });
                   // The model gets a redacted result. Keep the shape honest: it IS waiting.
                   result = JSON.stringify({
                     needs_confirm: true,
@@ -722,6 +813,10 @@ export class Agent {
                     content: `needs apply: ${parsed.needs_apply.path}`,
                     patch: parsed.needs_apply,
                   });
+                  // Same pause rule as a confirmation: the human is about to decide, and the
+                  // continuation (apply or reject) belongs in this run's file.
+                  this.runPaused = 'apply';
+                  this.runRecorder?.awaiting('apply', { path: parsed.needs_apply.path });
                 }
               } catch { /* ignore */ }
             }
@@ -842,6 +937,11 @@ export class Agent {
             }
 
             onChunk?.({ type: 'status', content: `重复调用未改善，已停止：${detail}` });
+            // The turn is ending short for a reason worth stating in the run file: the approach
+            // went nowhere. `runFailure` rather than an `error` event, because nothing threw —
+            // every call may have "succeeded". The `end` event carries the reason.
+            this.runFailure = { reason: 'stuck_loop', text: detail };
+            this.runRecorder?.step(`重复调用未改善，已停止：${detail}`);
 
             /*
              * This one is not a tool failure — every call may have "succeeded". It is the
@@ -885,6 +985,9 @@ export class Agent {
     };
     this.flushInterjections();
     this.history.push(fallback);
+    // Stopped by the guard, not by its own choice, and not an error: recorded as a reason so a
+    // reader can tell "it finished" from "it was cut off and can be resumed".
+    this.runFailure = { reason: 'max_iterations', text: `达到工具调用上限 ${maxIterations} 轮` };
     return fallback;
   }
 
@@ -951,6 +1054,7 @@ export class Agent {
     this.history.push({ role: 'user', content: userMessage });
     // Recorded before the loop starts so a tool called during it sees this request.
     this.lastUserRequest = userMessage;
+    this.beginRun(userMessage);
 
     const { messages } = this.messagesForRequest();
 
@@ -974,6 +1078,99 @@ export class Agent {
     } finally {
       this.toolEventSink = null;
     }
+  }
+
+  /**
+   * Open the trace for a new user request.
+   *
+   * The previous recorder is closed as `abandoned` if it is still open. That is not a tidy-up: a
+   * run left paused at a confirmation gate and never resumed has to say so, or the file ends
+   * mid-step and a reader cannot tell "the user moved on" from "the process died".
+   */
+  private beginRun(prompt: string): void {
+    if (this.runRecorder && !this.runRecorder.isClosed()) {
+      this.runRecorder.end({
+        ok: false,
+        reason: 'abandoned',
+        text: '这一轮还没收尾就开始新的一轮（上一次停在等确认/等应用补丁）。',
+        durationMs: Date.now() - this.runStartedAt,
+      });
+    }
+    this.runPaused = null;
+    this.runFailure = null;
+    this.runStartedAt = Date.now();
+
+    const recorder = this.runTrace.begin({
+      prompt,
+      sessionId: this.sessionId,
+      model: this.modelLabel,
+      agent: this.isSubagent ? 'subagent' : 'main',
+      tools: this.allToolDefs.map((d) => d.name),
+      mode: this.config.automationMode === false ? 'manual' : 'automation',
+    });
+    this.runRecorder = recorder;
+
+    /*
+     * Link the pre-flight analysis this run was opened with.
+     *
+     * Read rather than passed in: `preflight_record` runs as a TOOL inside the turn, so at this
+     * point the record may not exist yet — but what this link is for is the OTHER direction, the
+     * analysis a previous turn wrote and this one inherited. The tool's own write is picked up by
+     * the next run's link, and the record is on disk either way.
+     */
+    try {
+      const rec = new PreflightStore(this.config.workspace.root, this.sessionId).latest();
+      if (rec) recorder.preflight(rec);
+    } catch { /* a trace must never be the reason a turn fails */ }
+  }
+
+  /** True when this run is stopped at a gate and must not be closed yet. */
+  private runIsPaused(): boolean {
+    return this.runPaused !== null;
+  }
+
+  /**
+   * True while a multi-step continuation is holding the trace open.
+   *
+   * `applyAllPatches` applies several patches, each of which runs its own `withTurn` — and
+   * `withTurn` closes the run when the turn ends. Without a hold, the first patch's turn would
+   * close the trace and every later patch in the same batch would be untraced, which reads as a
+   * run that ended early rather than as a batch. The hold is a counter because the same reasoning
+   * applies to any future nesting.
+   */
+  private runHeld(): boolean {
+    return this.runHold > 0;
+  }
+
+  /** Close the trace unless something is still holding it open. Used by both closing paths. */
+  private closeRunIfDone(): void {
+    if (this.runIsPaused() || this.runHeld()) return;
+    const failure = this.runFailure;
+    this.finishRun(!failure, failure?.reason, failure?.text);
+  }
+
+  /**
+   * Close the trace for the turn that just finished.
+   *
+   * `ok` is derived from `runFailure`, which the failure paths set, rather than from whether
+   * anything threw: the loop catches provider errors and turns them into a normal return with a
+   * message, so an exception is not what a failed turn looks like.
+   */
+  private finishRun(ok: boolean, reason: string | undefined, text?: string): void {
+    const recorder = this.runRecorder;
+    if (!recorder || recorder.isClosed()) return;
+    recorder.end({
+      ok,
+      reason,
+      text,
+      durationMs: Date.now() - this.runStartedAt,
+      usage: {
+        prompt_tokens: this.tokenUsage.prompt_tokens,
+        completion_tokens: this.tokenUsage.completion_tokens,
+        total_tokens: this.tokenUsage.total_tokens,
+      },
+    });
+    this.runRecorder = null;
   }
 
   /**
@@ -1018,6 +1215,16 @@ export class Agent {
     } finally {
       if (this.aborter === controller) this.aborter = null;
       this.turnActive = false;
+      /*
+       * Close the trace here rather than in each entry point.
+       *
+       * Every turn goes through this method, including the confirm and patch-apply continuations,
+       * so a future entry point cannot leave a run file open. A turn stopped at a gate is left
+       * OPEN on purpose — the continuation appends to it — and a batch of patches holds it open
+       * across several of these scopes. `runPaused` and `runHold` are what distinguish those from
+       * a finished turn.
+       */
+      this.closeRunIfDone();
     }
   }
 
@@ -1089,8 +1296,18 @@ export class Agent {
       args._stage = true;
     }
     log.info(`Confirming tool: ${pending.name} ticket=${ticketId}`);
+    /*
+     * The turn is RESUMING, not still paused.
+     *
+     * Cleared before the work below, because this is the point the wait ends: `withTurn` leaves the
+     * trace open while `runPaused` is set, and if it were not cleared here the file would never be
+     * closed and the run would look permanently unfinished. Set again below if this continuation
+     * pauses at another gate.
+     */
+    this.runPaused = null;
     let result: string;
     let verdict: ToolResultVerdict;
+    const confirmedStart = Date.now();
     try {
       const raw = await executor(args);
       result = typeof raw === 'string' ? raw : JSON.stringify(raw ?? '');
@@ -1103,6 +1320,22 @@ export class Agent {
      * told why, and a non-zero exit code here was previously indistinguishable from success.
      */
     verdict = classifyToolResult(pending.name, result);
+    /*
+     * The approved call recorded as its own tool event.
+     *
+     * Without this the trace would show the call only ONCE — the attempt that came back asking for a
+     * ticket — and then jump to its effects. The step that actually ran, because a person said yes,
+     * is the one a reader most needs to see attributed. `ok: false` when the gate was passed but the
+     * command failed is deliberate: approval and success are different things.
+     */
+    this.runRecorder?.tool({
+      name: pending.name,
+      args: JSON.stringify(pending.args),
+      result,
+      ms: Date.now() - confirmedStart,
+      ok: verdict.ok,
+      failure: verdict.ok ? undefined : verdict.kind,
+    });
     // Recorded like any other failure: a command the user approved and that then failed is
     // among the most worth remembering.
     if (isWorthRemembering(verdict.kind)) {
@@ -1182,6 +1415,10 @@ export class Agent {
       const patch = this.patches.take(patchId) ?? (this.lastPatch?.patch_id === patchId ? this.lastPatch : null);
       if (!patch) throw new Error('unknown or expired patch');
 
+      // Resuming: the wait for a human's decision is over, so the trace can be closed again when
+      // this turn ends. See `confirmToolBody` for the same rule.
+      this.runPaused = null;
+
       /*
        * The patch path is re-validated HERE, at the point of the write.
        *
@@ -1203,6 +1440,9 @@ export class Agent {
       writeFileSync(abs, patch.after, 'utf8');
       this.lastPatch = null;
       onChunk?.({ type: 'status', content: `applied ${patch.path}` });
+      // The human's decision, recorded as an event: "the agent changed this file because someone
+      // approved this patch" is not visible from the tool events, which happened earlier.
+      this.runRecorder?.step(`已应用补丁 \`${patch.path}\`（人工确认）`);
 
       const msg: LLMMessage = {
         role: 'assistant',
@@ -1236,6 +1476,9 @@ export class Agent {
       role: 'assistant',
       content: `Rejected edit to \`${patch.path}\`.`,
     });
+    // Recorded for the same reason an apply is: "this file was NOT changed, because a person said
+    // no" is a decision, and the `apply` event would otherwise be the last thing in the trace.
+    this.runRecorder?.step(`已拒绝补丁 \`${patch.path}\`（人工决定，文件未改动）`);
     return { ok: true, path: patch.path };
   }
 
@@ -1317,12 +1560,35 @@ export class Agent {
     onChunk?.({ type: 'text', content: text });
     onChunk?.({ type: 'status', content: '这一轮失败，但对话可以继续' });
     log.warn(`turn failed, transcript kept usable: ${detail}`);
+    /*
+     * Record the failure where the trace can see it, rather than only in the transcript.
+     *
+     * `finishRun` derives `ok` from this field instead of from whether anything threw, because
+     * this method RETURNS a normal message — to the caller a failed turn is indistinguishable from
+     * a completed one. The error event is written separately so the reason is visible at the point
+     * it happened rather than only in the closing event, and the `end` that follows still carries
+     * the same reason so a summary folded from a prefix of the file agrees with the whole.
+     */
+    this.runFailure = { reason: 'turn_failed', text: detail };
+    this.runRecorder?.error(detail);
     return msg;
   }
 
   
   listCheckpoints(limit = 20) {
     return this.checkpoints.list(limit);
+  }
+
+  /**
+   * The run trace store, so the server can list and replay runs.
+   *
+   * Exposed rather than proxied through per-method wrappers: the server's two read routes need
+   * `list`, `read` and `corroborate`, and a wrapper for each would be three more things to keep in
+   * step with the store. The store is read-mostly and every read is already safe on a missing
+   * directory.
+   */
+  getRunTraceStore(): RunTraceStore {
+    return this.runTrace;
   }
 
   undoLastCheckpoint(): { ok: true; path: string; checkpoint_id: string } {
@@ -1369,12 +1635,26 @@ export class Agent {
   async applyAllPatches(onChunk?: (chunk: StreamChunk) => void): Promise<LLMMessage> {
     const ids = this.patches.list().map((p) => p.patch_id);
     if (!ids.length) throw new Error('no pending patches');
-    for (let i = 0; i < ids.length; i++) {
-      const isLast = i === ids.length - 1;
-      await this.applyPatch(ids[i], onChunk, { continueLoop: isLast });
+    /*
+     * Hold the trace open for the whole batch.
+     *
+     * Each `applyPatch` runs its own `withTurn`, and `withTurn` is what closes a run when its turn
+     * ends. Without the hold, applying three patches would leave a trace that stops after the first
+     * one — indistinguishable from a run that died there, which is exactly the reading this store
+     * exists to make impossible.
+     */
+    this.runHold++;
+    try {
+      for (let i = 0; i < ids.length; i++) {
+        const isLast = i === ids.length - 1;
+        await this.applyPatch(ids[i], onChunk, { continueLoop: isLast });
+      }
+      // applyPatch on last already continued the loop; return last history assistant-ish
+      return this.history[this.history.length - 1] ?? { role: 'assistant', content: `Applied ${ids.length} patches.` };
+    } finally {
+      this.runHold = Math.max(0, this.runHold - 1);
+      this.closeRunIfDone();
     }
-    // applyPatch on last already continued the loop; return last history assistant-ish
-    return this.history[this.history.length - 1] ?? { role: 'assistant', content: `Applied ${ids.length} patches.` };
   }
 
   async rejectAllPatches(): Promise<{ rejected: string[] }> {

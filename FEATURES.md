@@ -21,6 +21,7 @@ Desktop window: **done** — Electron shell in `@she/desktop`, launched by `pnpm
 | Structural KB retrieve (no RAG) | done | |
 | Doctor / health | done | CLI + `/api/health` |
 | Append-only audit trail | done | `.she/audit.log` + `GET /api/audit` + read-only panel (Ctrl+K → 打开审计记录) |
+| Run traces (per-turn steps) | done | `.she/runs/*.jsonl` + `GET /api/runs[/:id]` + read-only panel (Ctrl+K → 打开运行轨迹); evidence checked against real runs |
 
 ## Packaging
 | Deliverable | Status |

@@ -193,6 +193,44 @@ says so, since every other panel edits the thing it shows. `pnpm check:audit` as
 byte-wise, walks `seq` across a restart and across a rotation, reads the trail back over HTTP from
 a real server, and confirms that a rejected request and a forged ticket leave nothing behind.
 
+**Run traces, so a single turn can be opened again and read step by step.** The audit trail answers
+"who authorised what"; it deliberately records the *junctions*, not the work between them. So "what
+did it actually do, in what order, and did each step work" still had no answer a person could go and
+read: the streamed chunks were a UI protocol and are gone when the tab reloads, the transcript holds
+messages rather than steps, and the metrics are counters that cannot say which command produced which
+output. `.she/runs/run-<stamp>-<hex>.jsonl` is one file per turn, one JSON object per line, append
+only — the run that matters most is the one that died, so a half-written file has to stay readable.
+The events are written by the **agent**, at the point it runs a tool, rather than reconstructed from
+the chunk stream: that is the only scope that holds the tool name, the arguments, the output, the
+duration and the classifier's verdict at once, and it is the only way a `stream: false` turn (which
+produces no chunks at all) leaves a trace instead of an absence indistinguishable from a quiet run.
+The file names are strictly increasing — the name is what decides the order, so it has to survive two
+runs starting in the same millisecond *and* the wall clock stepping backwards, which a plain
+timestamp does not. A turn stopped at a confirmation or apply gate is recorded as **paused**, not
+finished: the continuation appends to the same file, which is what makes "a person approved this
+step, and here is what happened next" legible; an interrupt, a detected stuck loop and the tool-round
+cap each record their own reason, so none of them reads as a failure. Tool arguments are a common
+place for an API key to appear and this is a **second** copy on disk, so credential-shaped values are
+redacted *recursively* (a top-level-only pass reports `{ headers: { Authorization: … } }` as scrubbed
+while leaving it in place), including the name/value pair form used by `env` arrays; a confirmation
+ticket is replaced entirely, because whoever holds it can authorise the dangerous call and which
+ticket it was is already attributable on its own event. Truncated fields keep their original length
+so a cut record cannot be read as a short complete one, and unparseable lines are counted rather than
+dropped. `GET /api/runs` lists, `GET /api/runs/:id` replays, and both are read-only, matching the
+audit panel (Ctrl+K → 打开运行轨迹). Retention is bounded and the prune is **recorded in a file that
+survives** — the deletion itself names what it deleted.
+
+The traces also close the gap the delivery template left open in the previous entry: a hand-off is
+required to state its evidence, and now that the runs are on disk that claim can be **checked**
+instead of trusted. `GET /api/runs/corroborate` refuses a line that names a tool this conversation
+never ran — the invented-citation case, and the reason the evidence prefix is read as a claim about
+*which* tool — and otherwise reports whether any distinctive token from the line appears in a
+recorded step. It is deliberately lenient in the direction that matters: an honest report that
+paraphrases must not be blocked, so it can say "nothing here is backed" but never "this was quoted
+correctly". `pnpm check:runs` covers the invariants and drives a real server, including that the
+corroborate route is registered before the `:id` route (otherwise it is read as a run named
+`corroborate`) and that no route can write, edit or clear a trace.
+
 **Prometheus-style process metrics** at `GET /api/metrics`: turns, latency (avg and
 p95), token breakdown, tool usage and failures, and the **prompt-cache hit rate**. The
 last one matters most — a cache regression is invisible until it appears on a bill.

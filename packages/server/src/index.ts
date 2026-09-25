@@ -13,6 +13,7 @@ import { SandboxShell, createTools, ConfirmTicketStore } from '@she/sandbox';
 import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile } from '@she/agent-runtime';
 import type { SubagentRunner } from '@she/agent-runtime';
 import { PlanStore, MemoStore, nextStepOf } from '@she/agent-runtime';
+import { RunTraceStore } from '@she/agent-runtime';
 import type { StepStatus } from '@she/agent-runtime';
 import { metrics } from './metrics.js';
 import { PRODUCT_VERSION } from './version.js';
@@ -721,6 +722,25 @@ function auditLog(): AuditLog {
     auditRoot = root;
   }
   return audit;
+}
+
+/**
+ * The run-trace store for the workspace the server is running against.
+ *
+ * A local mirror of `auditLog`'s caching: pointed at the workspace, re-created when the root
+ * changes. Built directly rather than taken from a session's `Agent`, because the run list has to
+ * be readable BEFORE any turn in this process has ever run — "show me what happened last time" is
+ * asked on a fresh start, which is precisely when no agent object exists yet.
+ */
+let runTraces: RunTraceStore | null = null;
+let runTracesRoot = '';
+function runTraceStore(): RunTraceStore {
+  const root = resolve(config.workspace.root);
+  if (!runTraces || runTracesRoot !== root) {
+    runTraces = new RunTraceStore(root);
+    runTracesRoot = root;
+  }
+  return runTraces;
 }
 
 /**
@@ -3683,6 +3703,63 @@ router.get('/api/fs/tree', (req, res) => {
       skipped_lines: result.skipped,
       records: result.records,
     });
+  });
+
+  /**
+   * The run traces.
+   *
+   * Read-only, like the audit route above and for the same reason: a trace a client can rewrite
+   * is not evidence. Three routes, splitting along what each question needs:
+   *
+   *   - the LIST answers "what has this workspace done" — summaries only, no events, because the
+   *     panel shows dozens of them and shipping every event would be the whole directory;
+   *   - one run answers "what exactly happened in this turn" — every event, in order;
+   *   - corroborate answers "is this delivery's evidence real", which is the only one that reads
+   *     the runs for their CONTENT rather than for display.
+   */
+  router.get('/api/runs', (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const sessionId = url.searchParams.get('session_id');
+    const limitRaw = Number(url.searchParams.get('limit'));
+    const all = runTraceStore().list({
+      sessionId: sessionId ?? undefined,
+      limit: Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 100,
+    });
+    /*
+     * Counts of the whole workspace travel with the list, not just of the filtered page.
+     *
+     * The panel says "这 20 条里 3 条失败" and needs to know whether that is all of them. Computing
+     * it here from `all` for the current filter, plus an unfiltered total, keeps the panel from
+     * having to make a second request to find out what it is not showing.
+     */
+    sendJSON(res, {
+      root: runTraceStore().directory(),
+      runs: all,
+      total: all.length,
+      paused: all.filter((r) => r.state === 'paused').length,
+      failed: all.filter((r) => r.state === 'failed').length,
+    });
+  });
+
+  /*
+   * Registered BEFORE `/api/runs/:id`.
+   *
+   * The router matches in registration order, so with the parameterised route first,
+   * `GET /api/runs/corroborate` would be read as a request for a run whose id is "corroborate" —
+   * a 404 about a missing file, which hides the real endpoint behind a confusing error.
+   */
+  router.get('/api/runs/corroborate', (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const sessionId = url.searchParams.get('session_id');
+    const evidence = url.searchParams.get('evidence') ?? '';
+    if (!evidence.trim()) throw new HttpError(400, 'evidence is required');
+    sendJSON(res, runTraceStore().corroborate(sessionId, evidence));
+  });
+
+  router.get('/api/runs/:id', (_req, res, params) => {
+    const result = runTraceStore().read(params.id);
+    if (!result) throw new HttpError(404, `Run not found: ${params.id}`);
+    sendJSON(res, result);
   });
 
   router.get('/api/ask/pending', (_req, res) => {

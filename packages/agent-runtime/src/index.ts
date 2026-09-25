@@ -29,6 +29,8 @@ export {
   isToolFailure,
 } from './tool-result.js';
 export type { ToolFailureKind, ToolResultVerdict } from './tool-result.js';
+export { RunTraceStore, RunRecorder, distinctTokens } from './run-trace.js';
+export type { RunEvent, RunEventKind, RunState, RunSummary, RunReadResult, RunTraceOptions } from './run-trace.js';
 export {
   ErrorBook,
   createErrorbookTools,

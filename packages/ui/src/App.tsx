@@ -29,6 +29,7 @@ import { Memo } from './components/Memo';
 import { SessionHistory } from './components/SessionHistory';
 import { SchedulePanel } from './components/SchedulePanel';
 import { AuditPanel } from './components/AuditPanel';
+import { RunTracePanel } from './components/RunTracePanel';
 import { ThemeStudio } from './components/ThemeStudio';
 import { useUserTheme } from './hooks/useUserTheme';
 import { pickActiveSession, isSessionKnown } from './lib/sessionChoice';
@@ -129,6 +130,7 @@ export function App() {
   const [showSkills, setShowSkills] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
+  const [showRuns, setShowRuns] = useState(false);
   const [showTheme, setShowTheme] = useState(false);
 
   /*
@@ -710,6 +712,7 @@ export function App() {
     { id: 'plans', title: '打开长程计划', group: '协作', run: () => setShowPlans(true) },
     { id: 'schedule', title: '打开定时任务', group: '协作', run: () => setShowSchedule(true) },
     { id: 'audit', title: t('打开审计记录'), group: '协作', run: () => setShowAudit(true) },
+    { id: 'runs', title: t('打开运行轨迹'), group: '协作', run: () => setShowRuns(true) },
     { id: 'theme', title: t('自定义样式（换肤）'), group: t('外观'), run: () => setShowTheme(true) },
     { id: 'cluster', title: '打开自动化讨论群', group: '协作', run: () => setShowCluster(true) },
     { id: 'sources', title: '导入 Cursor / Claude Code / Codex 对话', group: '知识库', run: () => setShowSources(true) },
@@ -761,6 +764,7 @@ export function App() {
         else if (showTheme) setShowTheme(false);
         else if (showSchedule) setShowSchedule(false);
         else if (showAudit) setShowAudit(false);
+        else if (showRuns) setShowRuns(false);
         else if (showMemo) setShowMemo(false);
         else if (selectedGroupId) setSelectedGroupId(null);
         else setShowTrace(false);
@@ -768,7 +772,7 @@ export function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [selectedGroupId, showSettings, showImport, showKnowledge, filePreview, showCheckpoints, showPalette, showTerminal, showTrace, showCluster, showPlans, showAudit, chat, handleNewSession, focusChat, theme]);
+  }, [selectedGroupId, showSettings, showImport, showKnowledge, filePreview, showCheckpoints, showPalette, showTerminal, showTrace, showCluster, showPlans, showAudit, showRuns, chat, handleNewSession, focusChat, theme]);
 
   /**
    * The wallpaper layer.
@@ -822,6 +826,7 @@ export function App() {
       {showPlans && <PlanPanel onClose={() => setShowPlans(false)} sessionId={activeSessionId} />}
       {showSchedule && <SchedulePanel onClose={() => setShowSchedule(false)} />}
       {showAudit && <AuditPanel onClose={() => setShowAudit(false)} />}
+      {showRuns && <RunTracePanel onClose={() => setShowRuns(false)} sessionId={activeSessionId} />}
       {showTheme && <ThemeStudio onClose={() => setShowTheme(false)} userTheme={userTheme} />}
     </>
   );
