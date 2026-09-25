@@ -25,6 +25,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { redactForRecord } from '@she/agent-runtime';
 
 export type AuditKind =
   | 'request'
@@ -40,7 +41,27 @@ export type AuditKind =
    * the first of them. It is audited for the same reason a confirmation is: it changes what the
    * agent will do next, so "why is it behaving differently now" has to be answerable afterwards.
    */
-  | 'config';
+  | 'config'
+  /**
+   * The outbound guardrail found something in an answer.
+   *
+   * Recorded because it is the one class of finding a human has to act on OUTSIDE this machine: a
+   * credential that reached an answer may already have been copied, pasted or forwarded. A log line
+   * that rotates away is not enough — "when did we first emit this key" has to be answerable.
+   */
+  | 'guardrail';
+
+/**
+ * Every kind, as a value.
+ *
+ * The union above is the type; this is the same list at runtime, and it exists so that the one place
+ * that VALIDATES a kind (the `/api/audit` filter) can be checked against it instead of repeating it.
+ * The two stay together on purpose: a new kind is added here and the compiler will complain about
+ * nothing else, which is exactly why the copy belongs in the same file as the type it mirrors.
+ */
+export const AUDIT_KINDS: readonly AuditKind[] = [
+  'request', 'tool', 'confirm', 'rotation', 'config', 'guardrail',
+] as const;
 
 export interface AuditRecord {
   /** Wall clock, for humans. `seq` is what orders records. */
@@ -236,7 +257,21 @@ export class AuditLog {
   append(rec: Omit<AuditRecord, 'ts' | 'seq'>): AuditRecord {
     this.ensureDir();
     this.rotateIfNeeded();
-    const full: AuditRecord = { ts: new Date().toISOString(), seq: this.ensureSeq() + 1, ...rec };
+    /*
+     * The free-text fields are scanned for credentials on the way in.
+     *
+     * This file is a SECOND copy of what the user typed and what the agent said, written to disk in
+     * the workspace without anyone asking for it, and it is append-only — so a key pasted into a
+     * request would sit there permanently, readable by any tool, plugin or editor in the workspace.
+     * Same rule the run trace applies to tool arguments, for the same reason.
+     *
+     * Applied here rather than at the call sites because there are four of them and a fifth is a
+     * matter of time; a scrub that each caller has to remember is one that will be forgotten.
+     */
+    const cleaned: Omit<AuditRecord, 'ts' | 'seq'> = { ...rec };
+    if (typeof cleaned.message === 'string') cleaned.message = redactForRecord(cleaned.message);
+    if (typeof cleaned.note === 'string') cleaned.note = redactForRecord(cleaned.note);
+    const full: AuditRecord = { ts: new Date().toISOString(), seq: this.ensureSeq() + 1, ...cleaned };
     if (typeof full.message === 'string' && full.message.length > MAX_MESSAGE) {
       /*
        * Truncate, and keep the original length. A cut record that does not say it was cut reads as

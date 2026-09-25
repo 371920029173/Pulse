@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from '
 import { join, resolve, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ToolDefinition } from '@she/shared';
+import { highFindings, renderGuardrailRefusal, scanOutbound } from './guardrail.js';
 
 export interface KBToolSetLike {
   definitions: ToolDefinition[];
@@ -817,6 +818,13 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
             items: { type: 'string' },
             description: 'delivery only: what is NOT verified or NOT done, each naming what would settle it',
           },
+          acknowledge_sensitive: {
+            type: 'boolean',
+            description:
+              'Set true only when the artifact genuinely has to contain something that looks like a '
+              + 'credential (e.g. you are writing key-rotation documentation). Without it, a report '
+              + 'containing a credential is refused instead of written.',
+          },
         },
         required: ['title'],
       },
@@ -923,7 +931,6 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
 
       const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
       const dir = join(workspaceRoot, '.she', 'reports');
-      mkdirSync(dir, { recursive: true });
       const suffix = kind === 'delivery' ? `delivery-${delivery!.status}` : 'report';
       const file = join(dir, `${stem}-${suffix}-${stamp}.md`);
 
@@ -961,7 +968,37 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
       for (const s of sections) {
         parts.push(`## ${s.heading}\n\n${s.body ?? ''}\n`);
       }
-      writeFileSync(file, parts.filter(Boolean).join('\n'), 'utf8');
+      const body = parts.filter(Boolean).join('\n');
+
+      /*
+       * The outbound guardrail, applied to the artifact rather than to the answer.
+       *
+       * This file is the one thing here that is written to be handed to someone else: it is read by
+       * people who were not in this conversation, attached to tickets, and archived. A credential in
+       * it is a leak that outlives the turn — and unlike the answer, it can be fixed in place,
+       * because the agent still has the context that produced it.
+       *
+       * So this is the blocking half of the guardrail, and it refuses rather than warns. The
+       * override is explicit, and it is the same stance the stylesheet guard takes: a deliberate
+       * choice is recorded, not policed. `acknowledge_sensitive` is deliberately verbose for a flag
+       * and deliberately has no short alias — it should not be reachable by accident.
+       *
+       * `scanOutbound` is imported lazily through the module scope above; the scan is cheap and
+       * deterministic, so there is no reason to make it conditional on the tool being used.
+       *
+       * The directory is created below, AFTER this check, and not here. A refusal has to leave the
+       * workspace exactly as it found it: creating `.she/reports/` on the way to saying no means a
+       * caller that retries with the secret removed (or a test that asserts nothing was written)
+       * cannot tell "refused" from "wrote an empty report".
+       */
+      if (a.acknowledge_sensitive !== true) {
+        const findings = scanOutbound(body);
+        const high = highFindings(findings);
+        if (high.length) return renderGuardrailRefusal(findings);
+      }
+
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(file, body, 'utf8');
 
       const rel = file.replace(resolve(workspaceRoot) + '\\', '').replace(/\\/g, '/');
       if (delivery) {

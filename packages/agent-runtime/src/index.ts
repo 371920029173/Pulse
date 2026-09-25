@@ -81,6 +81,22 @@ export type {
 } from './reflection.js';
 export { reviewClaims, renderCriticReview, extractClaims, actionableFindings } from './critic.js';
 export type { CriticClaim, CriticFinding, CriticReview, CriticStatus, CriticVerdict } from './critic.js';
+export {
+  guardrailEnabled,
+  guardrailPolicy,
+  highFindings,
+  redactForRecord,
+  renderGuardrailNotice,
+  renderGuardrailRefusal,
+  scanOutbound,
+  summariseFindings,
+} from './guardrail.js';
+export type {
+  GuardrailFinding,
+  GuardrailKind,
+  GuardrailPolicy,
+  GuardrailSeverity,
+} from './guardrail.js';
 export { createIngestTools, chunkFileContent } from './ingest-tools.js';
 export type { IngestItem, IngestBatch } from './ingest-tools.js';
 export { MemoStore, createMemoTools } from './memo-tools.js';

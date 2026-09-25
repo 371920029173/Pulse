@@ -1,16 +1,16 @@
 import { createServer } from 'node:http';
 import os from 'node:os';
-import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, rmSync, openSync, readSync, closeSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, rmSync, copyFileSync, renameSync, openSync, readSync, closeSync } from 'node:fs';
 import { join, extname, resolve, dirname, basename, relative, isAbsolute } from 'node:path';
 import { realpathSync, createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { createLogger, loadConfig, resolveEnvFile, mergeMissingEnvFile, updateEnvFile, THINKING_LEVELS } from '@she/shared';
+import { createLogger, loadConfig, resolveEnvFile, mergeMissingEnvFile, updateEnvFile, THINKING_LEVELS, getConfigRecovery, getConfigFileInUse, lastGoodConfigPath, lastGoodConfigMetaPath } from '@she/shared';
 import type { SheConfig, StreamChunk, EdgeKind, SkillProfile } from '@she/shared';
 import { KBStore, GroupKBEngine, mergeKnowledgeBases } from '@she/kb';
 import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLink } from './kb-link.js';
 import { SandboxShell, createTools, ConfirmTicketStore } from '@she/sandbox';
-import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile } from '@she/agent-runtime';
+import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings } from '@she/agent-runtime';
 import type { SubagentRunner } from '@she/agent-runtime';
 import { PlanStore, MemoStore, nextStepOf } from '@she/agent-runtime';
 import { RunTraceStore, ConfidenceMirror, REFLECTION_DIR } from '@she/agent-runtime';
@@ -33,6 +33,7 @@ import { PluginManager, KNOWN_PERMISSIONS, type PluginManifest } from './plugins
 import { FeishuBridge, type FeishuConfig } from './feishu.js';
 
 import { AuditLog } from './audit.js';
+import { AUDIT_KINDS } from './audit.js';
 import type { AuditRecord, AuditKind } from './audit.js';
 import { listTree, readWorkspaceFile, suggestPaths } from './files.js';
 import { outlinePath, suggestSymbols } from './outline.js';
@@ -778,6 +779,73 @@ function auditSafe(rec: Omit<AuditRecord, 'ts' | 'seq'>): void {
   }
 }
 
+/** The config file the running process read, if one was found. */
+function configRecoveryFile(): string | null {
+  return getConfigRecovery()?.file ?? null;
+}
+
+/** The config file in force, whether or not a fallback happened. */
+function configFileInUse(): string | null {
+  return getConfigFileInUse();
+}
+
+/**
+ * What the UI and the probes need to know about the config in force.
+ *
+ * `recovery` is null in the normal case and non-null only when the file on disk could not be used
+ * and the last good snapshot was loaded instead. It is deliberately part of `/api/health`: a probe
+ * that reports "ok" while the operator's edits are being ignored is exactly the kind of green light
+ * that costs an afternoon.
+ */
+function configReport(): {
+  file: string | null;
+  recovery: ReturnType<typeof getConfigRecovery>;
+  snapshot: { path: string; exists: boolean; takenAt?: string };
+  /** True when what is running is NOT what is on disk. */
+  degraded: boolean;
+} {
+  const file = getConfigFileInUse();
+  const snapshotPath = file ? lastGoodConfigPath(file) : null;
+  const recovery = getConfigRecovery();
+  let takenAt: string | undefined;
+  if (file) {
+    try {
+      const meta = JSON.parse(readFileSync(lastGoodConfigMetaPath(file), 'utf8')) as { takenAt?: unknown };
+      if (typeof meta.takenAt === 'string') takenAt = meta.takenAt;
+    } catch { /* a missing sidecar just means the timestamp is unknown */ }
+  }
+  return {
+    file: file ?? recovery?.file ?? null,
+    recovery,
+    snapshot: snapshotPath
+      ? { path: snapshotPath, exists: existsSync(snapshotPath), ...(takenAt ? { takenAt } : {}) }
+      : { path: '', exists: false },
+    degraded: recovery !== null,
+  };
+}
+
+/**
+ * Put the guardrail's findings on the append-only timeline, once per turn that produced any.
+ *
+ * The turn's own warning is a status chunk in a stream that the user may have already scrolled past,
+ * and the log line rotates. The audit file does neither, and this is the finding class where the
+ * question comes later ("when did that key first appear in an answer?"), from someone who was not
+ * watching. Kinds, counts and MASKED previews only — see `guardrail.ts` on why the value itself is
+ * never written down.
+ */
+function auditGuardrail(agent: Agent, sessionId: string, origin: string): void {
+  const report = agent.getGuardrailReport();
+  if (!report?.findings.length) return;
+  const summary = summariseFindings(report.findings);
+  auditSafe({
+    kind: 'guardrail',
+    session_id: sessionId,
+    change: origin,
+    note: `回答里有 ${report.findings.length} 处敏感内容：${summary.map((s) => `${s.label}×${s.count}`).join('、')}`
+      + `（已遮罩：${report.findings.slice(0, 3).map((f) => f.preview).join(' / ')}）`,
+  });
+}
+
 /**
  * Record one turn's cost and outcome into the process metrics.
  *
@@ -856,6 +924,7 @@ async function runScheduledTask(task: ScheduledTask): Promise<void> {
     const note = `[定时任务「${task.name}」] ${reply.content?.slice(0, 200) ?? ''}`;
     log.info(note);
     recordTurnMetrics(agent, turnStart, usageBefore, true);
+    auditGuardrail(agent, sid, '定时任务');
   } catch (err) {
     recordTurnMetrics(agent, turnStart, usageBefore, false);
     throw err;
@@ -1292,12 +1361,68 @@ function expandMentions(message: string, workspaceRoot: string): string {
 function registerRoutes(router: Router): void {
 
   router.get('/api/health', (_req, res) => {
-    sendJSON(res, { status: 'ok', version: PRODUCT_VERSION, kbReady: !!store });
+    sendJSON(res, { status: 'ok', version: PRODUCT_VERSION, kbReady: !!store, config: configReport() });
   });
 
   /** Same payload as /api/health — ops probes often hit /health and used to get the SPA shell. */
   router.get('/health', (_req, res) => {
-    sendJSON(res, { status: 'ok', version: PRODUCT_VERSION, kbReady: !!store });
+    sendJSON(res, { status: 'ok', version: PRODUCT_VERSION, kbReady: !!store, config: configReport() });
+  });
+
+  /*
+   * The config file that is in force, and whether it is the one on disk.
+   *
+   * `loadConfig` falls back to the last config that parsed when the current file cannot be read
+   * (see `lastGoodConfigPath` in @she/shared). That fallback is only safe because it is never
+   * silent, and this is where it stops being silent: the UI reads this and says which file was
+   * refused and why. `recovery: null` is the normal state — it means the config on disk is the
+   * config in use.
+   */
+  router.get('/api/config/recovery', (_req, res) => {
+    sendJSON(res, configReport());
+  });
+
+  /*
+   * Put the last good config back where the broken one is.
+   *
+   * Deliberately a separate, explicit action rather than something the fallback does on its own:
+   * overwriting a file the user is editing would destroy the half-finished edit that a text editor
+   * and a diff can fix in seconds. The broken file is moved aside first (never deleted), so both
+   * versions exist afterwards. The running process keeps the config it loaded — a restart applies
+   * the change, which the response says.
+   */
+  router.post('/api/config/rollback', (_req, res) => {
+    const current = configFileInUse() ?? configRecoveryFile();
+    if (!current) throw new HttpError(404, '这个进程没有读到配置文件，没有可回退的对象');
+    const snapshot = lastGoodConfigPath(current);
+    if (!existsSync(snapshot)) throw new HttpError(404, `还没有可回退的配置快照：${snapshot}（需要先成功启动过一次）`);
+    const aside = `${current}.unusable-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    if (existsSync(current)) {
+      try {
+        renameSync(current, aside);
+      } catch (err) {
+        throw new HttpError(400, `无法把当前配置移到一边：${(err as Error).message}`);
+      }
+    }
+    try {
+      copyFileSync(snapshot, current);
+    } catch (err) {
+      // Put it back rather than leaving the user with no config file at all.
+      if (existsSync(aside)) { try { renameSync(aside, current); } catch { /* reported below */ } }
+      throw new HttpError(400, `无法写入配置：${(err as Error).message}`);
+    }
+    auditSafe({
+      kind: 'config',
+      change: 'rollback_config',
+      note: `把 ${snapshot} 回退到 ${current}${existsSync(aside) ? `（原文件留在 ${aside}）` : ''}`,
+    });
+    sendJSON(res, {
+      ok: true,
+      file: current,
+      from: snapshot,
+      kept: existsSync(aside) ? aside : null,
+      note: '已回退。重启后生效（当前进程仍用启动时读到的配置）。',
+    });
   });
 
   /**
@@ -1518,6 +1643,7 @@ function registerRoutes(router: Router): void {
           }
         });
         recordTurnMetrics(agent, turnStart, usageBefore, true);
+        auditGuardrail(agent, sid, '对话');
         sendSSEEvent(res, { type: 'done', content: reply.content });
         endSSE(res);
       } catch (err) {
@@ -1537,6 +1663,7 @@ function registerRoutes(router: Router): void {
       try {
         const reply = await agent.chat(message);
         recordTurnMetrics(agent, turnStart, usageBefore, true);
+        auditGuardrail(agent, sid, '对话');
         persistHistory(sid);
         sendJSON(res, { role: reply.role, content: reply.content, toolCalls: reply.tool_calls });
       } catch (err) {
@@ -3705,7 +3832,16 @@ router.get('/api/fs/tree', (req, res) => {
     const limitRaw = Number(url.searchParams.get('limit'));
     const kind = url.searchParams.get('kind');
     const sessionId = url.searchParams.get('session_id');
-    if (kind && !['request', 'tool', 'confirm', 'rotation', 'config'].includes(kind)) {
+    /*
+     * Validated against the union rather than a hand-written list.
+     *
+     * The list used to be literal, and it silently fell out of date: `guardrail` was added as an
+     * audit kind, was written correctly, and could not be read back through this route — it returned
+     * 400 for a kind the server itself produces. Filtering by a kind that the trail contains is not
+     * an invalid request, and a hand-maintained copy of a union is a promise to keep two lists in
+     * sync that nothing enforces. `AUDIT_KINDS` is the one place, so adding a kind cannot half-land.
+     */
+    if (kind && !(AUDIT_KINDS as readonly string[]).includes(kind)) {
       throw new HttpError(400, `invalid kind: ${kind}`);
     }
     const log = auditLog();
@@ -3783,6 +3919,7 @@ router.get('/api/fs/tree', (req, res) => {
 
   /**
    * Self-review state: drift, calibration, the critic's reading, and what was written to the book.
+
    *
    * Two sources on purpose:
    *
@@ -3823,6 +3960,31 @@ router.get('/api/fs/tree', (req, res) => {
     // about itself from now on, and that is a change to its behaviour rather than a display setting.
     auditSafe({ kind: 'config', change: 'reset_confidence_mirror', note: '重置置信度镜像历史' });
     sendJSON(res, { ok: true });
+  });
+
+  /**
+   * The outbound guardrail: the policy in force, the last turn's findings, and the running history.
+   *
+   * Read-only, and it exists for one question: "did anything this workspace produced contain
+   * something it should not have?" The per-turn warning covers the moment; this covers the
+   * afterwards, which is when a leak is usually discovered. Findings carry a MASKED preview only —
+   * an endpoint that returned the credential to audit the credential would be the leak it exists to
+   * report.
+   */
+  router.get('/api/guardrail', (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const sessionId = url.searchParams.get('session_id') ?? sessions.getActive()?.id ?? null;
+    const agent = sessionId ? agents.get(sessionId) : undefined;
+    const last = agent?.getGuardrailReport() ?? null;
+    const history = agent?.getGuardrailHistory() ?? [];
+    sendJSON(res, {
+      policy: guardrailPolicy(),
+      session_id: sessionId,
+      last,
+      history: history.map((f) => ({ kind: f.kind, severity: f.severity, label: f.label, preview: f.preview })),
+      summary: summariseFindings(last?.findings ?? []),
+      counts: { last: last?.findings.length ?? 0, history: history.length },
+    });
   });
 
   router.get('/api/ask/pending', (_req, res) => {

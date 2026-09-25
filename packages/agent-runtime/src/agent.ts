@@ -49,6 +49,14 @@ import {
   type DriftReport,
 } from './reflection.js';
 import { reviewClaims, renderCriticReview, extractClaims, type CriticReview } from './critic.js';
+import {
+  guardrailPolicy,
+  renderGuardrailNotice,
+  scanOutbound,
+  summariseFindings,
+  type GuardrailFinding,
+  type GuardrailPolicy,
+} from './guardrail.js';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
@@ -187,6 +195,15 @@ export class Agent {
   } | null = null;
   /** The critic's reading of the last run's answer. */
   private lastCritic: CriticReview | null = null;
+  /**
+   * The outbound guardrail's reading of the last answer.
+   *
+   * Kept as findings rather than as a string so the API can report it structurally, and so nothing
+   * downstream has to re-parse a rendered message to find out what was found.
+   */
+  private lastGuardrail: { at: string; findings: GuardrailFinding[]; policy: GuardrailPolicy } | null = null;
+  /** Every finding this process has reported, for `GET /api/guardrail`. Values are masked. */
+  private guardrailHistory: GuardrailFinding[] = [];
   /**
    * The calibration block for the turn in flight.
    *
@@ -1772,6 +1789,59 @@ export class Agent {
     return this.lastCritic;
   }
 
+  /**
+   * Check what the agent is about to hand over, and say so if it should not leave.
+   *
+   * Detection only — see `guardrail.ts` for why the answer is not rewritten. Three things happen
+   * when something is found, and each answers a different question afterwards:
+   *
+   *   - the user is told now, in the turn, because "do not forward this" is only useful before they
+   *     forward it;
+   *   - the finding is recorded on the run trace as a step, so a run file can be searched for the
+   *     fact that this turn emitted something (the values are never in it — the finding carries a
+   *     masked preview and nothing else);
+   *   - the history is kept in memory for `GET /api/guardrail`, which is what makes "has this
+   *     workspace ever leaked a key" an answerable question rather than a hope.
+   */
+  private checkOutbound(answer: string, onChunk?: (chunk: StreamChunk) => void): void {
+    if (!answer) return;
+    const policy = guardrailPolicy();
+    if (policy === 'off') {
+      this.lastGuardrail = null;
+      return;
+    }
+    try {
+      const findings = scanOutbound(answer);
+      this.lastGuardrail = { at: new Date().toISOString(), findings, policy };
+      if (!findings.length) return;
+      this.guardrailHistory.push(...findings);
+      // The kinds and counts go on the trace; the previews do not. A trace is a second copy on
+      // disk in the workspace, which is exactly the place a masked preview still should not be
+      // if the mask ever failed — the label alone is enough to act on.
+      this.runRecorder?.step(
+        `出口合规护栏：找到 ${findings.length} 处（${summariseFindings(findings).map((s) => `${s.label}×${s.count}`).join('、')}）`,
+      );
+      onChunk?.({ type: 'status', content: renderGuardrailNotice(findings) });
+      log.warn(
+        `出口合规护栏：回答里有 ${findings.length} 处（${summariseFindings(findings).map((s) => `${s.label}×${s.count}`).join('、')}）`,
+      );
+    } catch (err) {
+      // A guardrail that can break a turn is worse than one that misses: the failure mode of a
+      // missed credential is a leak, and the failure mode of a throwing check is a lost answer.
+      log.warn(`出口合规护栏检查失败：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** The last outbound check, or null when none has run (or it is switched off). */
+  getGuardrailReport(): { at: string; findings: GuardrailFinding[]; policy: GuardrailPolicy } | null {
+    return this.lastGuardrail;
+  }
+
+  /** Everything the guardrail has reported in this process, newest last. Values are masked. */
+  getGuardrailHistory(): GuardrailFinding[] {
+    return [...this.guardrailHistory];
+  }
+
   /** The confidence mirror, for a panel or an API route. */
   getConfidenceMirror(): ConfidenceMirror {
     return this.confidenceMirror;
@@ -1795,7 +1865,25 @@ export class Agent {
     messages: LLMMessage[],
     onChunk?: (chunk: StreamChunk) => void,
   ): Promise<LLMMessage> {
-    return this.withTurn(() => this.runLoop(messages, onChunk));
+    return this.withTurn(async () => {
+      const reply = await this.runLoop(messages, onChunk);
+      /*
+       * The outbound guardrail runs HERE, inside the turn, and not in `chat()` after it.
+       *
+       * `withTurn` closes the trace in its own `finally`, and a closed recorder refuses further
+       * events — so a check placed in `chat()` would emit its warning to the user but leave nothing
+       * in `.she/runs/`, which is precisely the record someone reads a week later to find out when
+       * a credential first appeared in an answer. Placing it here also means every entry point gets
+       * it: a confirmation, a patch application and a plain turn all produce output that leaves the
+       * machine the same way.
+       *
+       * The answer is not modified. See `guardrail.ts`: silently rewriting it would break the
+       * correspondence between what was said and what the trace recorded — the correspondence the
+       * critic, the drift check and the delivery template all read.
+       */
+      this.checkOutbound(reply.content ?? '', onChunk);
+      return reply;
+    });
   }
 
   /**

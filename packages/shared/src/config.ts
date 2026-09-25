@@ -1,5 +1,5 @@
-import { readFileSync, existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { loadEnvFile, resolveEnvFile } from './env.js';
 
@@ -402,6 +402,183 @@ function resolveConfigFile(root: string): string | null {
   return null;
 }
 
+/*
+ * ─────────────────────────────────────────────────────────────────────────────
+ * LAST-GOOD CONFIG
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * State files have been quarantined-and-recovered since `state-file.ts`; the config file
+ * had nothing. That asymmetry had a sharp edge: a state file that cannot be read costs
+ * the user a recoverable copy plus a warning, while a config file that cannot be read
+ * stops the whole app from starting — and it does so at the moment the user is least able
+ * to see why, because the process that would have printed the reason never came up.
+ *
+ * The failure is real and common: a hand-edited YAML with a tab where a space belongs, a
+ * half-finished edit saved by an editor's autosave, a `git merge` conflict marker. The
+ * file is one keystroke away from correct, in a text editor, at any time — so the useful
+ * behaviour is not "refuse to start" but "start on what last worked and say exactly what
+ * is wrong with what you have now".
+ *
+ * Two rules keep this from becoming the silent-wrong-config problem it could so easily be:
+ *
+ *   1. **It never applies quietly.** Every fallback is logged AND surfaced through
+ *      `configRecovery()` (exposed on `/api/health` and in the UI), naming the file, the
+ *      reason, and when the snapshot was taken. A config that silently is not the one on
+ *      disk is worse than one that is not applied at all.
+ *   2. **It only covers "cannot be used", not "says something odd".** An unparseable file,
+ *      a top-level list, a value of the wrong type — recovered. An unknown key, or a
+ *      missing required setting, still throws/warns on its own path, because those are
+ *      cases where the file IS readable and the user is mid-thought.
+ *
+ * The snapshot is a byte copy, not a re-serialisation: re-writing it would discard
+ * comments and key order, and the user is expected to open it and copy the good parts
+ * back. It is refreshed on every load that succeeds, so it is always the most recent
+ * config that actually worked.
+ */
+export interface ConfigRecovery {
+  /** The file that could not be used. */
+  file: string;
+  /** Why it could not be used, in the user's language. */
+  reason: string;
+  /** The snapshot that was loaded instead. */
+  snapshot: string;
+  /** ISO timestamp of the snapshot, when it is known. */
+  takenAt?: string;
+}
+
+/*
+ * The snapshot lives beside the config file it copies — `she.config.yaml.last-good` — rather than
+ * in some app directory. Two reasons, both about the moment it matters: the user is in a text
+ * editor looking at the broken file, so the good version should be the file next to it; and the
+ * path is derived from the config path alone, so `SHE_CONFIG_FILE` pointing at a config on a volume
+ * behaves identically without a second root to keep in sync.
+ */
+/** Where the last config that loaded successfully is kept. */
+export function lastGoodConfigPath(configPath: string): string {
+  return `${configPath}.last-good`;
+}
+
+/** Its sidecar, holding which file the snapshot came from and when. */
+export function lastGoodConfigMetaPath(configPath: string): string {
+  return `${configPath}.last-good.json`;
+}
+
+let configRecovery: ConfigRecovery | null = null;
+let configFileInUse: string | null = null;
+
+/**
+ * The config file this process read, or null when there was none.
+ *
+ * Exported because "which file am I actually running" is a question an operator asks, and the
+ * answer used to only exist inside `loadConfig`.
+ */
+export function getConfigFileInUse(): string | null {
+  return configFileInUse;
+}
+
+/**
+ * The last config fallback of this process, or null.
+ *
+ * Read by the server so the UI can say "you are running the last good config" rather than the user
+ * wondering why their edit had no effect. Process-wide and set once at load, which is the only time
+ * a config is read.
+ */
+export function getConfigRecovery(): ConfigRecovery | null {
+  return configRecovery;
+}
+
+/** Test/embedding seam: forget the recorded fallback. */
+export function clearConfigRecovery(): void {
+  configRecovery = null;
+}
+
+/**
+ * Copy the config that just loaded, so the next unreadable edit has something to fall back to.
+ *
+ * Failures are swallowed on purpose. Not being able to keep a safety net is not a reason to refuse
+ * to run with a config that is fine — and the next load simply has no snapshot to offer, which
+ * degrades to the old behaviour rather than to something worse.
+ *
+ * One input is refused: an EMPTY mapping. A file that was emptied (or that holds nothing but
+ * comments) still parses cleanly, so it would silently overwrite the good snapshot with "no
+ * settings at all" — and the next time the config broke, the fallback would hand back defaults,
+ * which is exactly the outcome that must never happen quietly. The snapshot only ever moves
+ * forward to a config that actually says something.
+ */
+function rememberGoodConfig(configPath: string, parsed: Record<string, unknown> | null): void {
+  if (!parsed || Object.keys(parsed).length === 0) return;
+  try {
+    const text = readFileSync(configPath, 'utf8');
+    if (text.trim() === '') return;
+    const snapshot = lastGoodConfigPath(configPath);
+    const tmp = `${snapshot}.${process.pid}.tmp`;
+    writeFileSync(tmp, text, 'utf8');
+    renameSync(tmp, snapshot);
+    const metaTmp = `${lastGoodConfigMetaPath(configPath)}.${process.pid}.tmp`;
+    writeFileSync(metaTmp, JSON.stringify({ file: configPath, takenAt: new Date().toISOString() }, null, 2) + '\n', 'utf8');
+    renameSync(metaTmp, lastGoodConfigMetaPath(configPath));
+  } catch {
+    /* a missing safety net is not worth failing a boot over */
+  }
+}
+
+/** What the snapshot knows about itself, tolerating a missing or damaged sidecar. */
+function snapshotMeta(configPath: string): { takenAt?: string } {
+  try {
+    const raw = JSON.parse(readFileSync(lastGoodConfigMetaPath(configPath), 'utf8')) as { takenAt?: unknown };
+    return typeof raw.takenAt === 'string' ? { takenAt: raw.takenAt } : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Load the config file, falling back to the last good snapshot when it cannot be used.
+ *
+ * Returns the parsed config plus, when a fallback happened, the record of it. The record is returned
+ * rather than only logged so that a check can assert on it without capturing stderr.
+ */
+function loadConfigFile(root: string): { fileConfig: Record<string, unknown>; configPath: string | null } {
+  const configPath = resolveConfigFile(root);
+  configFileInUse = configPath;
+  if (!configPath) return { fileConfig: {}, configPath: null };
+
+  try {
+    const parsed = tryLoadYaml(configPath);
+    rememberGoodConfig(configPath, parsed);
+    configRecovery = null;
+    return { fileConfig: parsed ?? {}, configPath };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    const snapshot = lastGoodConfigPath(configPath);
+    if (!existsSync(snapshot)) throw err;
+
+    let recovered: Record<string, unknown>;
+    try {
+      recovered = tryLoadYaml(snapshot) ?? {};
+    } catch {
+      // The snapshot is unreadable too. Falling back to defaults here would be exactly the "ran
+      // with a config nobody chose" outcome the original throw existed to prevent, so the original
+      // error is what the user gets.
+      throw err;
+    }
+
+    configRecovery = {
+      file: configPath,
+      reason: reason.split('\n')[0] ?? reason,
+      snapshot,
+      ...snapshotMeta(configPath),
+    };
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[config] 「${configPath}」无法使用，改用上一次能用的配置（${snapshot}`
+        + `${configRecovery.takenAt ? `，${configRecovery.takenAt}` : ''}）：${configRecovery.reason}\n`
+        + '[config] 你改的文件没有被改动，也没有被覆盖。修好后重启即可生效。',
+    );
+    return { fileConfig: recovered, configPath };
+  }
+}
+
 export function loadConfig(workspaceRoot?: string): SheConfig {
   const root = workspaceRoot || process.cwd();
 
@@ -410,7 +587,7 @@ export function loadConfig(workspaceRoot?: string): SheConfig {
   loadEnvFile(resolveEnvFile(root));
 
   const configPath = resolveConfigFile(root);
-  const fileConfig = configPath ? (tryLoadYaml(configPath) ?? {}) : {};
+  const { fileConfig } = loadConfigFile(root);
 
   /*
    * Report keys we do not read.

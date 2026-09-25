@@ -49,6 +49,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSyn
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { PreflightRecord } from './preflight.js';
+import { redactForRecord } from './guardrail.js';
 
 /** How a run ended, as far as its own events can tell. */
 export type RunState = 'running' | 'paused' | 'done' | 'failed';
@@ -152,6 +153,23 @@ const DEFAULT_MAX_FIELD = 2000;
 const MAX_PROMPT = 400;
 /** Argument keys whose VALUE is a credential, matched case-insensitively on the key name. */
 const SECRET_KEY = /(token|secret|password|passwd|api[-_]?key|authorization|bearer|cookie)/i;
+
+/**
+ * Replace credential-shaped values anywhere in a string, including in prose.
+ *
+ * The key-based `redact` above only fires when a credential sits under a credential-shaped NAME,
+ * which covers arguments and nothing else. A tool RESULT is usually prose or a file dump
+ * (`cat .env`, a CI log, an error that quotes the header it rejected), so it needs a scan of the
+ * values themselves — that is what the outbound guardrail already knows how to find, and reusing it
+ * keeps the two from drifting apart.
+ *
+ * Applied only to the copy on disk. The result the model receives is untouched: it asked for the
+ * file, and handing it a censored version would make it reason about data it cannot see.
+ */
+function scrubSecrets(value: string): string {
+  return redactForRecord(value);
+}
+
 
 function cap(value: string, max: number): { text: string; chars?: number } {
   if (value.length <= max) return { text: value };
@@ -377,7 +395,20 @@ export class RunRecorder {
     mode?: string;
   }): RunEvent | null {
     return this.write('start', this.capAll({
-      text: info.prompt,
+      /*
+       * The prompt is scrubbed like every other second copy on disk.
+       *
+       * It reads as "the input" rather than "an output", which is why it was missed: the guardrail
+       * was written about answers and artifacts. But it lands in `.she/runs/*.jsonl`, is served back
+       * by `GET /api/runs`, and is indexed for evidence matching — the same three things that make a
+       * tool result worth scrubbing. A user pasting a key in to ask "why is this rejected" is the
+       * most likely way a credential arrives here, and it is the one case where the transcript would
+       * otherwise keep the value forever.
+       *
+       * The scrub is span-level (see `redactForRecord`), so the sentence around it — what was asked,
+       * and about what — survives intact, and `corroborate` still finds its evidence.
+       */
+      text: scrubSecrets(info.prompt),
       session_id: info.sessionId ?? undefined,
       model: info.model,
       agent: info.agent ?? 'main',
@@ -413,7 +444,7 @@ export class RunRecorder {
 
   /** The agent narrating what it is doing. Cheap, and often the only explanation of a step. */
   step(text: string): RunEvent | null {
-    return this.write('step', this.capAll({ text }));
+    return this.write('step', this.capAll({ text: scrubSecrets(text) }));
   }
 
   /** One finished tool call. */
@@ -430,10 +461,21 @@ export class RunRecorder {
     return this.write('tool', this.capAll({
       tool: info.name,
       args: info.args === undefined ? undefined : redact(info.args),
-      result: info.result === undefined ? undefined : redactResult(info.result),
+      /*
+       * The RESULT is scrubbed as well as the arguments.
+       *
+       * Arguments were covered from the start (a credential under a credential-shaped key), but a
+       * result is where a secret usually arrives: `cat .env`, `kubectl get secret -o yaml`, a CI
+       * log, an error message that quotes the header it rejected. This file is a second copy on
+       * disk in the workspace, so the value would outlive the turn in a place nobody asked for it.
+       *
+       * `redactResult` first (it removes a confirmation ticket's payload), then the credential
+       * scan, because the ticket rewrite needs the original JSON shape to find its keys.
+       */
+      result: info.result === undefined ? undefined : scrubSecrets(redactResult(info.result)),
       ms: info.ms,
       ok: info.ok,
-      failure: info.failure,
+      failure: info.failure === undefined ? undefined : scrubSecrets(info.failure),
     }));
   }
 
@@ -464,7 +506,7 @@ export class RunRecorder {
 
   /** The turn failed. */
   error(message: string): RunEvent | null {
-    return this.write('error', this.capAll({ text: message }));
+    return this.write('error', this.capAll({ text: scrubSecrets(message) }));
   }
 
   /**
