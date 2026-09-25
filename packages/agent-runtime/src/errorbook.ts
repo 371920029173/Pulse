@@ -42,7 +42,18 @@ import type { ToolDefinition } from '@she/shared';
  * agent giving up after repeating itself, which is a mistake about APPROACH, and it is exactly
  * the kind of thing worth reading before starting similar work.
  */
-export type ErrorbookKind = ToolFailureKind | 'stuck_loop';
+export type ErrorbookKind = ToolFailureKind | 'stuck_loop' | 'reflection';
+
+/** A lesson from self-review, as `reflection.ts` produces them. */
+export interface ReflectionReport {
+  /** What the lesson is about. Doubles as the group's tool column and the de-duplication key. */
+  topic: string;
+  /** What to do differently. Shown as the entry's detail, because that is what a reader needs. */
+  lesson: string;
+  /** The observation that justifies it. Kept as the entry's "call". */
+  evidence: string;
+  sessionId?: string | null;
+}
 
 /** One recorded mistake. */
 export interface ErrorEntry {
@@ -147,9 +158,13 @@ export const ERRORBOOK_ROOT = 'errors';
  * What is left is what the agent got WRONG: bad arguments, a refused action, a tool that does
  * not exist, a path that is not there, a command that failed, and a failure nobody has
  * classified yet. Those are worth reading before doing similar work again.
+ *
+ * `reflection` is in the yes-list by a different route: it is not a tool failure at all, it is a
+ * self-review finding written by `reflection.ts` (drift, over-confidence, a repeated loop). It
+ * qualifies for the same test — it is a thing the agent could have done differently.
  */
 export function isWorthRemembering(kind: ErrorbookKind): boolean {
-  if (kind === 'stuck_loop') return true;
+  if (kind === 'stuck_loop' || kind === 'reflection') return true;
   switch (kind) {
     case 'invalid_args':
     case 'permission':
@@ -204,10 +219,9 @@ export class ErrorBook {
     return existing?.id ?? this.engine.createGroup(ERRORBOOK_ROOT).id;
   }
 
-  /** `errors/<tool>`, created on first write for that tool. */
-  private toolGroupId(tool: string): string {
+  /** A direct child group of `errors`, created on first write. */
+  private groupId(name: string): string {
     const root = this.rootId();
-    const name = toolGroupName(tool);
     const existing = this.store.getAllGroups()
       .find((g) => g.name === name && g.parentGroupId === root);
     return existing?.id ?? this.engine.createGroup(name, root).id;
@@ -227,15 +241,28 @@ export class ErrorBook {
   }
 
   private renderContent(entry: Omit<ErrorEntry, 'id' | 'group'>): string {
-    const lines = [
-      `工具：${entry.tool}`,
-      `失败类型：${entry.kind}`,
-      `出现次数：${entry.count}`,
-      `最近一次：${entry.lastSeenAt}`,
-    ];
-    if (entry.call) lines.push(`调用：${entry.call}`);
-    lines.push(`原始输出：${entry.detail}`);
-    if (entry.remedy) lines.push(`去路：${entry.remedy}`);
+    /*
+     * Two shapes, because the same fields mean different things for the two kinds of entry and the
+     * content is the prose a reader actually opens. Labelling a lesson "原始输出" would read as a
+     * command's output and be skimmed past as noise.
+     */
+    const lines = entry.kind === 'reflection'
+      ? [
+        `主题：${entry.tool}`,
+        `出现次数：${entry.count}`,
+        `最近一次：${entry.lastSeenAt}`,
+        `教训：${entry.detail}`,
+        ...(entry.call ? [`依据：${entry.call}`] : []),
+      ]
+      : [
+        `工具：${entry.tool}`,
+        `失败类型：${entry.kind}`,
+        `出现次数：${entry.count}`,
+        `最近一次：${entry.lastSeenAt}`,
+        ...(entry.call ? [`调用：${entry.call}`] : []),
+        `原始输出：${entry.detail}`,
+        ...(entry.remedy ? [`去路：${entry.remedy}`] : []),
+      ];
     return lines.join('\n');
   }
 
@@ -246,35 +273,97 @@ export class ErrorBook {
    * repeat is worth surfacing, without deriving it from the count.
    */
   record(report: FailureReport): { entry: ErrorEntry; recurring: boolean } {
-    const tool = toolGroupName(report.tool);
-    const groupId = this.toolGroupId(tool);
-    const groupName = `${ERRORBOOK_ROOT}/${tool}`;
-    const signature = this.signatureOf(report);
-    const now = new Date().toISOString();
-
-    const prior = this.store.getMemoriesByGroup(groupId)
-      .find((m) => m.metadata?.[MARKER] === true && m.metadata?.errorSignature === signature);
-
-    const base = {
-      tool,
+    return this.upsert({
+      groupName: toolGroupName(report.tool),
+      signature: this.signatureOf(report),
+      tool: toolGroupName(report.tool),
       kind: report.kind,
       call: oneLine(report.call ?? '', MAX_CALL),
       detail: oneLine(report.detail, MAX_DETAIL),
       remedy: report.remedy ?? null,
-      lastSeenAt: now,
-    };
+      sessionId: report.sessionId ?? null,
+    });
+  }
+
+  /**
+   * The group self-review findings are filed under.
+   *
+   * One group rather than one per topic: a reflection is read as a SET ("what have I been getting
+   * wrong lately?"), and splitting them across `errors/目标漂移` and `errors/过度自信` would make the
+   * reader collect them from several places to see the pattern. The topic survives in the entry's
+   * tool column and in its signature, which is what de-duplication and display need.
+   */
+  private static readonly REFLECTION_GROUP = '自省';
+
+  /**
+   * Write down a lesson from self-review.
+   *
+   * Goes through the same upsert as a tool failure, so a recurring lesson counts up instead of
+   * filling the book with copies, and it is retrieved by the same reads. The mapping is:
+   *
+   *   - the TOPIC fills the tool column, so `formatErrorEntry` renders it without a special case
+   *     and `errorbook_lookup({ tool })` can be asked about it by name;
+   *   - the LESSON becomes the detail, because that is the part a reader acts on;
+   *   - the EVIDENCE becomes the call, because that is the part that says whether to believe it.
+   *
+   * The signature is the topic alone — not the wording. A drift lesson re-derived on a later day
+   * will read differently (the quoted signals differ) and would otherwise be a new entry every
+   * time, which is how a book about habits turns into a log.
+   */
+  recordReflection(report: ReflectionReport): { entry: ErrorEntry; recurring: boolean } {
+    const topic = toolGroupName(report.topic);
+    return this.upsert({
+      groupName: ErrorBook.REFLECTION_GROUP,
+      signature: `reflection|${topic}`,
+      tool: topic,
+      kind: 'reflection',
+      call: oneLine(report.evidence, MAX_CALL),
+      detail: oneLine(report.lesson, MAX_DETAIL),
+      remedy: null,
+      sessionId: report.sessionId ?? null,
+    });
+  }
+
+  /**
+   * The single write path: find the entry this signature already has, or create it.
+   *
+   * Shared rather than duplicated because the pieces that matter are the ones that are easy to get
+   * subtly different in a copy — the marker, the reason a repeat is upvoted, and the co-occurrence
+   * link that keeps only the newest target per session.
+   */
+  private upsert(spec: {
+    /** Direct child of `errors` this entry belongs to. */
+    groupName: string;
+    signature: string;
+    tool: string;
+    kind: ErrorbookKind;
+    call: string;
+    detail: string;
+    remedy: string | null;
+    sessionId: string | null;
+  }): { entry: ErrorEntry; recurring: boolean } {
+    const groupId = this.groupId(spec.groupName);
+    const groupName = `${ERRORBOOK_ROOT}/${spec.groupName}`;
+    const now = new Date().toISOString();
+
+    const prior = this.store.getMemoriesByGroup(groupId)
+      .find((m) => m.metadata?.[MARKER] === true && m.metadata?.errorSignature === spec.signature);
 
     if (prior) {
       const count = Number(prior.metadata?.errorCount ?? 1) + 1;
       const entry: ErrorEntry = {
-        ...base,
         id: prior.id,
         count,
         group: groupName,
+        tool: spec.tool,
+        kind: spec.kind,
+        call: spec.call,
+        detail: spec.detail,
+        remedy: spec.remedy,
+        lastSeenAt: now,
       };
-      const title = `${tool} · ${report.kind} · ${count} 次`;
       this.store.updateMemory(prior.id, {
-        title,
+        title: `${spec.tool} · ${spec.kind} · ${count} 次`,
         content: this.renderContent(entry),
         metadata: {
           ...prior.metadata,
@@ -284,7 +373,7 @@ export class ErrorBook {
           errorCount: count,
           errorSeq: ++this.seq,
           errorLastSeenAt: now,
-          errorSessionId: report.sessionId ?? prior.metadata?.errorSessionId ?? null,
+          errorSessionId: spec.sessionId ?? prior.metadata?.errorSessionId ?? null,
         },
       });
       /*
@@ -294,32 +383,42 @@ export class ErrorBook {
        * outrank the thing that has cost the user five attempts.
        */
       this.store.boostAccess(prior.id);
-      this.linkCoOccurrence(prior.id, report.sessionId ?? null);
+      this.linkCoOccurrence(prior.id, spec.sessionId);
       return { entry, recurring: true };
     }
 
-    const entry: ErrorEntry = { ...base, id: '', count: 1, group: groupName };
+    const entry: ErrorEntry = {
+      id: '',
+      count: 1,
+      group: groupName,
+      tool: spec.tool,
+      kind: spec.kind,
+      call: spec.call,
+      detail: spec.detail,
+      remedy: spec.remedy,
+      lastSeenAt: now,
+    };
     const created = this.engine.addMemoryMaintained(
       groupId,
       'tool_outcome',
-      `${tool} · ${report.kind}`,
+      `${spec.tool} · ${spec.kind}`,
       this.renderContent(entry),
       {
         [MARKER]: true,
-        errorTool: tool,
-        errorKind: report.kind,
+        errorTool: spec.tool,
+        errorKind: spec.kind,
         errorCall: entry.call,
         errorDetail: entry.detail,
         errorRemedy: entry.remedy,
         errorCount: 1,
         errorSeq: ++this.seq,
-        errorSignature: signature,
+        errorSignature: spec.signature,
         errorLastSeenAt: now,
-        errorSessionId: report.sessionId ?? null,
+        errorSessionId: spec.sessionId,
       },
     );
     entry.id = created.id;
-    this.linkCoOccurrence(created.id, report.sessionId ?? null);
+    this.linkCoOccurrence(created.id, spec.sessionId);
     return { entry, recurring: false };
   }
 
@@ -422,14 +521,21 @@ export class ErrorBook {
   lookup(opts: { tool?: string; query?: string; limit?: number } = {}): ErrorEntry[] {
     const limit = Math.max(1, opts.limit ?? 5);
     if (opts.tool) {
-      const group = `${ERRORBOOK_ROOT}/${toolGroupName(opts.tool)}`;
+      const wanted = toolGroupName(opts.tool);
+      const group = `${ERRORBOOK_ROOT}/${wanted}`;
       /*
        * Built from `ranked()` rather than read group-by-group, so the ordering rule lives in one
        * place. It is already sorted newest-first, and `sort` is stable — so ordering by count
        * here keeps the recency order inside each count, without repeating the tiebreak.
+       *
+       * Two ways to match, because a tool failure is filed under its tool while a reflection is
+       * filed under `errors/自省` and carries its TOPIC in the tool column. Matching only the group
+       * would make `errorbook_lookup({ tool: '目标漂移' })` return nothing — a store that answers
+       * "no" about entries it is holding is worse than one that answers wrongly, because the agent
+       * concludes the mistake was never made.
        */
       return this.ranked()
-        .filter((r) => r.entry.group === group)
+        .filter((r) => r.entry.group === group || r.entry.tool === wanted)
         .map((r) => r.entry)
         .sort((a, b) => b.count - a.count)
         .slice(0, limit);
@@ -497,8 +603,8 @@ export interface ErrorbookToolSet {
  * result and records it — so there is no `errorbook_record` for the model to call. A tool that
  * let the model write its own notes would be filled with plausible lessons that were never
  * observed, and the whole value of the book is that every entry is a thing that actually
- * happened. (Reflection-driven writes are added by the self-review batch through this class,
- * not through a tool.)
+ * happened. Self-review findings arrive by the same rule: `recordReflection` is called from the
+ * agent loop with measurements it made itself, not by the model asking for an entry.
  */
 export function createErrorbookTools(book: ErrorBook): ErrorbookToolSet {
   const toolMap = new Map<string, { def: ToolDefinition; fn: (a: Record<string, unknown>) => Promise<string> }>();
@@ -511,7 +617,8 @@ export function createErrorbookTools(book: ErrorBook): ErrorbookToolSet {
       description:
         'Look up mistakes already recorded for this workspace before starting similar work: tool failures '
         + 'that were classified as the agent\'s own error (bad arguments, a refused action, a missing path, a '
-        + 'failed command) and loops where the same call was repeated until the agent gave up. '
+        + 'failed command), loops where the same call was repeated until the agent gave up, and lessons from '
+        + 'self-review (goal drift, over-confidence, a tool that failed repeatedly). '
         + 'Pass `tool` to ask about one tool precisely, or `query` to ask "have I been here before?". '
         + 'An empty result is a real answer: nothing has gone wrong here yet.',
       parameters: {

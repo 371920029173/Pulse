@@ -304,6 +304,16 @@ export class RunRecorder {
   /** Set once the first event is written; `begin` is lazy so a turn that never runs leaves nothing. */
   private opened = false;
 
+  /**
+   * Tool calls attempted, and how many of them did not come back a failure.
+   *
+   * Kept in memory as well as in the file for the confidence mirror, which needs the RATIO at the
+   * end of the turn: re-reading the JSONL to count `ok: false` would work, but the recorder already
+   * holds every event as it passes through `tool()`, and a tally cannot be affected by the field
+   * caps or by a redaction that rewrote part of the line.
+   */
+  private tally = { attempted: 0, succeeded: 0 };
+
   constructor(
     private file: string,
     private maxField: number,
@@ -415,6 +425,8 @@ export class RunRecorder {
     ok?: boolean;
     failure?: string;
   }): RunEvent | null {
+    this.tally.attempted += 1;
+    if (info.ok !== false) this.tally.succeeded += 1;
     return this.write('tool', this.capAll({
       tool: info.name,
       args: info.args === undefined ? undefined : redact(info.args),
@@ -423,6 +435,11 @@ export class RunRecorder {
       ok: info.ok,
       failure: info.failure,
     }));
+  }
+
+  /** Tool calls so far and how many succeeded. Read by the confidence mirror at the end of a turn. */
+  toolTally(): { attempted: number; succeeded: number } {
+    return { ...this.tally };
   }
 
   /** The turn stopped to wait for a human. */

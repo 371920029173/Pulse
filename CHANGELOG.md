@@ -231,6 +231,51 @@ correctly". `pnpm check:runs` covers the invariants and drives a real server, in
 corroborate route is registered before the `:id` route (otherwise it is read as a run named
 `corroborate`) and that no route can write, edit or clear a trace.
 
+**Self-review, so the agent can notice it is going wrong while it still matters.** The errorbook
+taught it to *file* a mistake and the traces made each turn readable afterwards, but nothing ran
+those two ends together: a lesson was only written when a tool already failed, and no one compared
+what the agent *said* against what it *did*. Three deterministic pieces now do.
+
+*Drift detection* compares the request's goal and constraints against the actions and plan steps
+so far, purely lexically. It separates **hard** constraints (an explicit prohibition, a
+`must not` / 「不要」 phrasing) from soft preferences, because treating a preference as a violation
+produces a check that cries wolf and gets ignored, and it reports the prohibited *object* rather
+than the sentence, so the message names what was touched. Only a hard violation sets
+`replan: true`; a soft one is a note. The whole feature is deliberately not a model: a self-review
+that can hallucinate a violation is worse than none, and this one has to be trustworthy enough to
+be believed on the turn where the agent most wants to explain itself away.
+
+*Confidence calibration* keeps `.she/reflection/confidence.json` and compares what the agent
+**claimed** during pre-flight against what actually happened — the ratio of tool calls that
+succeeded to those attempted. A windowed view means an old stretch of bad luck stops colouring the
+present, and the returned state is only `overconfident` / `underconfident` / `calibrated`: the
+point is to be told which way it is off, not to see a number to rationalise. Two inputs are
+required and either may be missing — no self-assessment means no sample, a turn with no tool calls
+contributes no success rate rather than a perfect 1.0 — so a turn that claims confidence and does
+nothing cannot be scored as well-calibrated. A `succeeded` greater than `attempted` (a caller
+miscounting) is clamped, because the arithmetic otherwise reports *underconfidence* for a bug in
+the *input*. The result is injected as a short block in the system prompt with the prefix kept
+byte-identical, so this does not throw away the prompt cache it exists to protect.
+
+*Reflections become lessons.* Drift, recurring overconfidence, the same tool failing again and a
+run that hit the iteration cap are written through the KB primitives into `errors/自省`, with the
+topic as the signature so a repeat **increments a count** rather than appending a near-duplicate.
+`errorbook_lookup` was widened to match reflection topics, since a lesson that cannot be found
+again is a diary, not a lesson.
+
+*An independent critic* reads the answer's claims against the recorded run: a claim that a tool
+succeeded when its last run failed is `contradicted` (`fail`); a tool that never ran, or an
+artifact that does not exist, is `unbacked` (`concerns`); generic prose is `unverifiable` and
+stays out of the verdict. It is a separate role (hue 350, review phase) and is driven in the
+cluster between work and review, so the check is not the same pass that produced the work.
+Citations are filtered to artifact-shaped ASCII tokens — an earlier version treated Chinese
+four-grams as quoted evidence and flagged ordinary prose as uncorroborated. `GET /api/reflection`
+serves the mirror and is readable in a **new process** from the file on disk, and
+`POST /api/reflection/confidence/reset` records a `config` entry in the audit trail, because
+resetting someone's calibration history is a change worth being able to date. `pnpm check:reflection`
+drives real tools and a real server for all of the above and refuses to pass on the fuzzy cases:
+a soft constraint must *not* read as drift, and insufficient samples must *not* produce a verdict.
+
 **Prometheus-style process metrics** at `GET /api/metrics`: turns, latency (avg and
 p95), token breakdown, tool usage and failures, and the **prompt-cache hit rate**. The
 last one matters most — a cache regression is invisible until it appears on a bill.

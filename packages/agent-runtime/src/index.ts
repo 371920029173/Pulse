@@ -39,7 +39,37 @@ export {
   formatErrorEntry,
   ERRORBOOK_ROOT,
 } from './errorbook.js';
-export type { ErrorbookKind, ErrorEntry, FailureReport, ErrorbookEngineLike } from './errorbook.js';
+export type { ErrorbookKind, ErrorEntry, FailureReport, ErrorbookEngineLike, ReflectionReport } from './errorbook.js';
+export {
+  ConfidenceMirror,
+  detectDrift,
+  deriveReflections,
+  createReflectionTools,
+  renderCalibration,
+  renderDrift,
+  renderReflection,
+  goalTerms,
+  prohibitionObject,
+  REFLECTION_DIR,
+  CONFIDENCE_SCHEMA,
+} from './reflection.js';
+export type {
+  DriftAction,
+  DriftInput,
+  DriftLevel,
+  DriftReport,
+  DriftSignal,
+  DriftSignalKind,
+  CalibrationReport,
+  CalibrationBucket,
+  ConfidenceSample,
+  ReflectionNote,
+  ReflectionSources,
+  ReflectionToolDeps,
+  ReflectionToolSet,
+} from './reflection.js';
+export { reviewClaims, renderCriticReview, extractClaims, actionableFindings } from './critic.js';
+export type { CriticClaim, CriticFinding, CriticReview, CriticStatus, CriticVerdict } from './critic.js';
 export { createIngestTools, chunkFileContent } from './ingest-tools.js';
 export type { IngestItem, IngestBatch } from './ingest-tools.js';
 export { MemoStore, createMemoTools } from './memo-tools.js';

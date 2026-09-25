@@ -27,7 +27,18 @@ import { createIngestTools } from './ingest-tools.js';
 import { createMemoTools } from './memo-tools.js';
 import { createSubagentTools, type SubagentRunner } from './subagent-tools.js';
 import { repairApiMessages } from './protocol.js';
-import { RunTraceStore, type RunRecorder } from './run-trace.js';
+import { RunTraceStore, type RunRecorder, type RunEvent } from './run-trace.js';
+import {
+  ConfidenceMirror,
+  detectDrift,
+  deriveReflections,
+  createReflectionTools,
+  renderCalibration,
+  renderDrift,
+  type DriftAction,
+  type DriftReport,
+} from './reflection.js';
+import { reviewClaims, renderCriticReview, extractClaims, type CriticReview } from './critic.js';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
@@ -139,6 +150,40 @@ export class Agent {
   /** Depth of continuations holding the trace open across several `withTurn` scopes. */
   private runHold = 0;
   private readonly runTrace: RunTraceStore;
+  /**
+   * This run's tool events, kept in memory alongside the file.
+   *
+   * The critic needs them at the END of the turn, after the recorder has been closed, and the
+   * recorder's own copy is on disk by then. Capturing the events as `tool()` returns them costs a
+   * push and avoids re-reading and re-parsing a file the process just wrote — while that file is
+   * still the record of authority for anyone reviewing the run later.
+   */
+  private runEvents: RunEvent[] = [];
+  /**
+   * The confidence mirror: stated confidence against measured tool success.
+   *
+   * One per agent, file-backed under `.she/reflection/`, so a bias is visible across sessions
+   * rather than resetting whenever the process restarts.
+   */
+  private readonly confidenceMirror: ConfidenceMirror;
+  /** The newest pre-flight record for the current run, kept for its stated confidence. */
+  private runPreflightConfidence: { confidence: number; clamped: boolean; topic?: string } | null = null;
+  /** The last self-review's reports, for the API and the UI. */
+  private lastReflection: {
+    at: string;
+    drift: DriftReport;
+    calibration: ReturnType<ConfidenceMirror['report']>;
+    written: string[];
+  } | null = null;
+  /** The critic's reading of the last run's answer. */
+  private lastCritic: CriticReview | null = null;
+  /**
+   * The calibration block for the turn in flight.
+   *
+   * Held as a field rather than recomputed in `messagesForRequest()` so every iteration of one turn
+   * sends the identical system message — the prefix cache depends on it.
+   */
+  private calibrationBlock = '';
   /** `provider/model`, recorded on the `start` event so a trace says which model was answering. */
   private readonly modelLabel: string;
   /** Aborts the in-flight turn (LLM request + tool loop). */
@@ -281,6 +326,7 @@ export class Agent {
       kbEngine as unknown as ErrorbookEngineLike,
       kbStore,
     );
+    this.confidenceMirror = new ConfidenceMirror(config.workspace.root);
 
     for (const def of sandboxTools.definitions) {
       this.allToolDefs.push(def);
@@ -350,6 +396,39 @@ export class Agent {
     for (const def of errorbookTools.definitions) {
       this.allToolDefs.push(def);
       this.executors.set(def.name, (args) => errorbookTools.execute(def.name, args));
+    }
+
+    /*
+     * Self-review, as a tool the model can call mid-task.
+     *
+     * Read-only by construction: it reports drift and calibration and cannot touch the plan or the
+     * goal. Left to the model's judgement when to call rather than run on a timer, because the
+     * interesting moments (a phase finished, several steps without progress, about to say "done")
+     * are things only the agent can recognise from the inside.
+     */
+    const reflectionTools = createReflectionTools({
+      goal: () => {
+        const rec = new PreflightStore(config.workspace.root, this.sessionId).latest();
+        return rec?.actual_goal || rec?.stated_intent || planTools.store.active()?.goal || null;
+      },
+      // Inferred constraints are passed as SOFT: pre-flight derived them from the request and the
+      // workspace rather than from the user's words, and treating a derived preference as a hard
+      // prohibition would report drift for ordinary work.
+      constraints: () => {
+        const rec = new PreflightStore(config.workspace.root, this.sessionId).latest();
+        return (rec?.inferred_constraints ?? []).map((text) => ({ text, hardness: 'soft' as const }));
+      },
+      actions: () => this.currentRunActions(),
+      currentStep: () => planTools.store.active()?.steps.find((s) => s.status === 'active')?.title ?? null,
+      budget: () => {
+        const plan = planTools.store.active();
+        return { used: this.runEvents.filter((e) => e.kind === 'tool').length, limit: plan?.steps.length };
+      },
+      calibration: () => this.confidenceMirror.report(),
+    });
+    for (const def of reflectionTools.definitions) {
+      this.allToolDefs.push(def);
+      this.executors.set(def.name, (args) => reflectionTools.execute(def.name, args));
     }
 
     // Code intelligence. Only registered when a language server is actually
@@ -423,9 +502,12 @@ export class Agent {
      *   report_*   — long-lived artifacts belong to the parent's turn
      *   kb_ingest_*— staging files is a side effect the parent should decide on
      *   schedule_* — a child must not be able to schedule the parent's future work
+     *   reflection_check — same reasoning as `preflight_*`, which it reads: the goal it compares
+     *                against is the PARENT's, so a child would be told it had drifted away from a
+     *                request it was never given
      */
     if (this.isSubagent) {
-      const denied = /^(ask_user|task_spawn|plan_|preflight_|memo_|report_|kb_ingest_|schedule_)/;
+      const denied = /^(ask_user|task_spawn|plan_|preflight_|reflection_|memo_|report_|kb_ingest_|schedule_)/;
       this.allToolDefs = this.allToolDefs.filter((d) => {
         const blocked = denied.test(d.name);
         if (blocked) this.executors.delete(d.name);
@@ -734,7 +816,7 @@ export class Agent {
                * model-supplied ticket are the agent's own adjustments — what a reader wants is
                * what the model asked for.
                */
-              this.runRecorder?.tool({
+              const toolEvent = this.runRecorder?.tool({
                 name,
                 args: tc.function.arguments,
                 result: typeof result === 'string' ? result : JSON.stringify(result ?? ''),
@@ -742,6 +824,7 @@ export class Agent {
                 ok: !toolFailed,
                 failure: verdict?.kind,
               });
+              if (toolEvent) this.runEvents.push(toolEvent);
             }
             /*
              * ─────────────────────────────────────────────────────────────────────────
@@ -1023,7 +1106,7 @@ export class Agent {
    */
   private messagesForRequest(): { messages: LLMMessage[] } {
     return {
-      messages: [{ role: 'system', content: this.systemPrompt }, ...this.history],
+      messages: [{ role: 'system', content: this.calibrationBlock ? `${this.systemPrompt}\n\n${this.calibrationBlock}` : this.systemPrompt }, ...this.history],
     };
   }
 
@@ -1061,6 +1144,15 @@ export class Agent {
     this.toolEventSink = onChunk ?? null;
     try {
       const reply = await this.runExclusive(messages, onChunk);
+      /*
+       * The critic reads the answer against the trace, before anything else looks at it.
+       *
+       * Here rather than in the API layer because this is where both halves exist at once: the reply
+       * and the tool events of the run that produced it. A caller that skipped it (a scheduled task,
+       * a `task_spawn` child) would be delivering unchecked output, and the check has to be a
+       * property of producing the answer rather than of the transport that carries it.
+       */
+      this.critiqueAnswer(reply.content ?? '');
       const stagedPatches = this.getPendingPatches();
       if (stagedPatches.length > 1) {
         const summary = {
@@ -1099,6 +1191,11 @@ export class Agent {
     this.runPaused = null;
     this.runFailure = null;
     this.runStartedAt = Date.now();
+    // A new run starts with no tool events of its own, and no inherited pre-flight confidence: the
+    // mirror's sample must attribute this turn's claim to this turn's outcome.
+    this.runEvents = [];
+    this.runPreflightConfidence = null;
+    this.lastCritic = null;
 
     const recorder = this.runTrace.begin({
       prompt,
@@ -1120,8 +1217,56 @@ export class Agent {
      */
     try {
       const rec = new PreflightStore(this.config.workspace.root, this.sessionId).latest();
-      if (rec) recorder.preflight(rec);
+      if (rec) {
+        recorder.preflight(rec);
+        // The claim this run is being measured against, kept so the mirror's sample is the one
+        // that was actually made for this work.
+        if (rec.sessionId === this.sessionId && typeof rec.confidence === 'number') {
+          this.runPreflightConfidence = {
+            confidence: rec.confidence,
+            clamped: rec.confidenceClamped === true,
+            topic: rec.actual_goal?.slice(0, 40),
+          };
+        }
+      }
     } catch { /* a trace must never be the reason a turn fails */ }
+
+    /*
+     * The calibration block for this turn, computed ONCE and reused for every iteration.
+     *
+     * Rebuilt here rather than per request because the system message is the cache prefix: a block
+     * that changed between iterations of one turn would invalidate the cache on every LLM call, and
+     * the only thing it would be reflecting is the run's own progress, which the model already has
+     * in front of it in the transcript.
+     */
+    this.calibrationBlock = this.buildCalibrationBlock();
+  }
+
+  /**
+   * The calibration reading, as a prompt block, or an empty string.
+   *
+   * Empty unless there is enough evidence for a verdict, so an agent with three runs behind it is
+   * not lectured about habits — the mirror's report says `unknown` until it has seen enough, and
+   * this passes that through rather than inventing a claim.
+   */
+  private buildCalibrationBlock(): string {
+    try {
+      const text = renderCalibration(this.confidenceMirror.report());
+      if (!text) return '';
+      return [
+        '## Self-Review — Your Calibration',
+        'The numbers below are your own stated confidences in pre-flight records, measured against how',
+        'often the tool calls in those runs actually succeeded. They are a measurement of this agent, not',
+        'of the current task:',
+        '',
+        text,
+        '',
+        'Use it when you state a confidence in a pre-flight record or decide how much to verify. Do not',
+        'report it to the user as a fact about the task.',
+      ].join('\n');
+    } catch {
+      return '';
+    }
   }
 
   /** True when this run is stopped at a gate and must not be closed yet. */
@@ -1150,6 +1295,118 @@ export class Agent {
   }
 
   /**
+   * This run's tool actions, in the shape the drift check takes.
+   *
+   * Read from the events rather than from a parallel list: the events are what the critic and the
+   * trace use, so a second record would be a second thing to keep in sync, and the first time they
+   * disagreed the drift check would be reporting on work that did not happen.
+   */
+  private currentRunActions(): DriftAction[] {
+    return this.runEvents
+      .filter((e) => e.kind === 'tool' && !!e.tool)
+      .map((e) => ({ tool: e.tool!, args: e.args, summary: e.result?.slice(0, 200) }));
+  }
+
+  /**
+   * The self-review that runs when a turn ends.
+   *
+   * Order matters, and it is the order of the evidence:
+   *
+   *   1. the mirror takes its measurement — claimed confidence (from the pre-flight record this
+   *      run was opened with) against the tool success rate the recorder tallied;
+   *   2. drift is computed from the goal and the actions that actually ran;
+   *   3. lessons are derived from those two, and written into the error book.
+   *
+   * A run with no stated confidence produces NO mirror sample. Filling the gap with the ceiling or
+   * with a default would make the mirror measure itself: the whole number is supposed to be the
+   * model's own claim, and inventing one would leave the bias looking better than it is — the
+   * direction the mirror exists to catch.
+   */
+  private reflectOnRun(): void {
+    try {
+      const tally = this.runRecorder?.toolTally() ?? { attempted: 0, succeeded: 0 };
+      const claim = this.runPreflightConfidence
+        ?? this.readPreflightConfidence();
+      if (claim) {
+        this.confidenceMirror.observe({
+          claimed: claim.confidence,
+          attempted: tally.attempted,
+          succeeded: tally.succeeded,
+          clamped: claim.clamped,
+          topic: claim.topic,
+          runId: this.runRecorder?.id,
+        });
+      }
+
+      const calibration = this.confidenceMirror.report();
+      const goal = this.readPreflightGoal();
+      const preflight = this.readPreflightRecord();
+      const drift = detectDrift({
+        goal: goal ?? '',
+        constraints: (preflight?.inferred_constraints ?? []).map((text) => ({ text, hardness: 'soft' as const })),
+        actions: this.currentRunActions(),
+        stepsUsed: this.runEvents.filter((e) => e.kind === 'tool').length,
+      });
+
+      const failures = this.runEvents
+        .filter((e) => e.kind === 'tool' && e.ok === false && !!e.tool)
+        .map((e) => ({ tool: e.tool!, kind: String(e.failure ?? 'unknown'), detail: e.result ?? '' }));
+
+      const notes = deriveReflections({
+        goal: goal ?? '',
+        drift,
+        calibration,
+        failures,
+        runFailed: this.runFailure !== null,
+        runReason: this.runFailure?.reason,
+      });
+
+      const written: string[] = [];
+      for (const note of notes) {
+        const { entry, recurring } = this.errorBook.recordReflection({ ...note, sessionId: this.sessionId });
+        written.push(recurring ? `${note.topic}（第 ${entry.count} 次）` : note.topic);
+      }
+
+      this.lastReflection = {
+        at: new Date().toISOString(),
+        drift,
+        calibration,
+        written,
+      };
+      if (written.length) {
+        log.info(`自省写入错题本：${written.join('、')}`);
+      }
+    } catch (err) {
+      // Same stance as the error book's own writes: bookkeeping must not be the reason a turn
+      // fails, and a reflection that throws has already done its job badly.
+      log.warn(`自省失败：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** The newest pre-flight record for this conversation, or null. A broken file is not an error. */
+  private readPreflightRecord(): import('./preflight.js').PreflightRecord | null {
+    try {
+      return new PreflightStore(this.config.workspace.root, this.sessionId).latest() ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private readPreflightConfidence(): { confidence: number; clamped: boolean; topic?: string } | null {
+    const rec = this.readPreflightRecord();
+    // Only a record from THIS session counts: inheriting the previous conversation's confidence
+    // would score a claim this run never made.
+    if (!rec || rec.sessionId !== this.sessionId) return null;
+    if (typeof rec.confidence !== 'number') return null;
+    return { confidence: rec.confidence, clamped: rec.confidenceClamped === true, topic: rec.actual_goal?.slice(0, 40) };
+  }
+
+  private readPreflightGoal(): string | null {
+    const rec = this.readPreflightRecord();
+    return rec?.actual_goal || rec?.stated_intent || null;
+  }
+
+  /**
    * Close the trace for the turn that just finished.
    *
    * `ok` is derived from `runFailure`, which the failure paths set, rather than from whether
@@ -1159,6 +1416,12 @@ export class Agent {
   private finishRun(ok: boolean, reason: string | undefined, text?: string): void {
     const recorder = this.runRecorder;
     if (!recorder || recorder.isClosed()) return;
+    /*
+     * Self-review BEFORE the recorder is released, because the mirror reads the run's tool tally
+     * from it. Called after the early return above so it cannot run twice for one run, and outside
+     * the `end` write below so a slow reflection cannot delay the `end` event a reader is waiting on.
+     */
+    this.reflectOnRun();
     recorder.end({
       ok,
       reason,
@@ -1171,6 +1434,58 @@ export class Agent {
       },
     });
     this.runRecorder = null;
+  }
+
+  /**
+   * Run the independent critic over an answer, against this run's tool events.
+   *
+   * Called on the reply that ends a turn. Only a CONTRADICTION is surfaced unprompted: that is the
+   * case where the trace proves the answer wrong, and letting it through is the failure this whole
+   * family of checks exists to stop. `unbacked` and `unverifiable` findings are recorded and
+   * exposed through the API instead — a checker that interrupts every turn with "this claim has no
+   * citation" is one the agent (and the user) learns to click past, and it would cost the one time
+   * it is right.
+   */
+  private critiqueAnswer(answer: string): void {
+    try {
+      const claims = extractClaims(answer);
+      if (!claims.length) {
+        this.lastCritic = { verdict: 'pass', findings: [], toolRuns: this.runEvents.filter((e) => e.kind === 'tool').length, checked: 0, summary: '这一轮的回答里没有可核对的完成性说法。' };
+        return;
+      }
+      const review = reviewClaims({
+        claims,
+        trace: this.runEvents,
+        availableTools: this.allToolDefs.map((d) => d.name),
+      });
+      this.lastCritic = review;
+      if (review.verdict === 'fail') {
+        const block = renderCriticReview(review);
+        if (block) this.toolEventSink?.({ type: 'status', content: `⚠️ ${block}` });
+      }
+    } catch (err) {
+      log.warn(`批评者复核失败：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** The last run's self-review: drift, calibration, and what was written to the error book. */
+  getReflection(): {
+    at: string;
+    drift: DriftReport;
+    calibration: ReturnType<ConfidenceMirror['report']>;
+    written: string[];
+  } | null {
+    return this.lastReflection;
+  }
+
+  /** The critic's reading of the last answer, or null when nothing has been reviewed yet. */
+  getCriticReview(): CriticReview | null {
+    return this.lastCritic;
+  }
+
+  /** The confidence mirror, for a panel or an API route. */
+  getConfidenceMirror(): ConfidenceMirror {
+    return this.confidenceMirror;
   }
 
   /**
@@ -1328,7 +1643,7 @@ export class Agent {
      * is the one a reader most needs to see attributed. `ok: false` when the gate was passed but the
      * command failed is deliberate: approval and success are different things.
      */
-    this.runRecorder?.tool({
+    const confirmedEvent = this.runRecorder?.tool({
       name: pending.name,
       args: JSON.stringify(pending.args),
       result,
@@ -1336,6 +1651,7 @@ export class Agent {
       ok: verdict.ok,
       failure: verdict.ok ? undefined : verdict.kind,
     });
+    if (confirmedEvent) this.runEvents.push(confirmedEvent);
     // Recorded like any other failure: a command the user approved and that then failed is
     // among the most worth remembering.
     if (isWorthRemembering(verdict.kind)) {

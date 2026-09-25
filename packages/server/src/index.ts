@@ -13,7 +13,7 @@ import { SandboxShell, createTools, ConfirmTicketStore } from '@she/sandbox';
 import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile } from '@she/agent-runtime';
 import type { SubagentRunner } from '@she/agent-runtime';
 import { PlanStore, MemoStore, nextStepOf } from '@she/agent-runtime';
-import { RunTraceStore } from '@she/agent-runtime';
+import { RunTraceStore, ConfidenceMirror, REFLECTION_DIR } from '@she/agent-runtime';
 import type { StepStatus } from '@she/agent-runtime';
 import { metrics } from './metrics.js';
 import { PRODUCT_VERSION } from './version.js';
@@ -741,6 +741,25 @@ function runTraceStore(): RunTraceStore {
     runTracesRoot = root;
   }
   return runTraces;
+}
+
+/**
+ * The confidence mirror for this workspace.
+ *
+ * Cached the same way as the two stores above, and for the same reason: `GET /api/reflection` has to
+ * work on a fresh process, before any session has produced an `Agent`. Each instance keeps an
+ * in-memory copy of the file, so constructing a new one per request would re-read and re-parse the
+ * same file on every poll.
+ */
+let reflectionMirrors: ConfidenceMirror | null = null;
+let reflectionMirrorsRoot = '';
+function reflectionMirror(): ConfidenceMirror {
+  const root = resolve(config.workspace.root);
+  if (!reflectionMirrors || reflectionMirrorsRoot !== root) {
+    reflectionMirrors = new ConfidenceMirror(root);
+    reflectionMirrorsRoot = root;
+  }
+  return reflectionMirrors;
 }
 
 /**
@@ -3686,7 +3705,7 @@ router.get('/api/fs/tree', (req, res) => {
     const limitRaw = Number(url.searchParams.get('limit'));
     const kind = url.searchParams.get('kind');
     const sessionId = url.searchParams.get('session_id');
-    if (kind && !['request', 'tool', 'confirm', 'rotation'].includes(kind)) {
+    if (kind && !['request', 'tool', 'confirm', 'rotation', 'config'].includes(kind)) {
       throw new HttpError(400, `invalid kind: ${kind}`);
     }
     const log = auditLog();
@@ -3760,6 +3779,50 @@ router.get('/api/fs/tree', (req, res) => {
     const result = runTraceStore().read(params.id);
     if (!result) throw new HttpError(404, `Run not found: ${params.id}`);
     sendJSON(res, result);
+  });
+
+  /**
+   * Self-review state: drift, calibration, the critic's reading, and what was written to the book.
+   *
+   * Two sources on purpose:
+   *
+   *   - a live agent's in-memory reports, which are this session's actual last turn;
+   *   - the mirror ON DISK, which is what makes the route useful before any turn has run in this
+   *     process. Calibration is a habit across sessions, so reading it only from a live agent would
+   *     report "nothing yet" on every restart — the exact moment the history matters most.
+   */
+  router.get('/api/reflection', (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const sessionId = url.searchParams.get('session_id') ?? sessions.getActive()?.id ?? null;
+    const agent = sessionId ? agents.get(sessionId) : undefined;
+    const windowRaw = Number(url.searchParams.get('window'));
+    const report = reflectionMirror().report(
+      Number.isFinite(windowRaw) && windowRaw > 0 ? { window: windowRaw } : {},
+    );
+    sendJSON(res, {
+      root: join(resolve(config.workspace.root), REFLECTION_DIR),
+      confidence: report,
+      samples: reflectionMirror().samples().slice(-50),
+      last: agent?.getReflection() ?? null,
+      critic: agent?.getCriticReview() ?? null,
+    });
+  });
+
+  /**
+   * Forget the calibration history.
+   *
+   * A write, and the only one in this family — the mirror is a measurement of the agent, not
+   * evidence about the user's work, so a reset does not erase anything the user would want to
+   * consult later. It exists because a miscalibrated history that was CORRECTED should not keep
+   * being reported, and because a workspace whose confidence file got polluted by an experiment
+   * needs a way back.
+   */
+  router.post('/api/reflection/confidence/reset', (_req, res) => {
+    reflectionMirror().clear();
+    // Recorded in the audit trail: forgetting a measurement changes what the agent will be told
+    // about itself from now on, and that is a change to its behaviour rather than a display setting.
+    auditSafe({ kind: 'config', change: 'reset_confidence_mirror', note: '重置置信度镜像历史' });
+    sendJSON(res, { ok: true });
   });
 
   router.get('/api/ask/pending', (_req, res) => {

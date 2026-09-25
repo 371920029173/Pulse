@@ -264,12 +264,80 @@ describe('ErrorBook 读取', () => {
 
 describe('isWorthRemembering', () => {
   it('记的是「做错了」，不是「碰上了」', () => {
-    for (const kind of ['invalid_args', 'permission', 'unavailable', 'not_found', 'nonzero_exit', 'unknown', 'stuck_loop'] as const) {
+    for (const kind of ['invalid_args', 'permission', 'unavailable', 'not_found', 'nonzero_exit', 'unknown', 'stuck_loop', 'reflection'] as const) {
       assert.equal(isWorthRemembering(kind), true, `${kind} 该记`);
     }
     for (const kind of ['none', 'empty', 'precondition', 'service', 'timeout', 'rate_limited'] as const) {
       assert.equal(isWorthRemembering(kind), false, `${kind} 不该记`);
     }
+  });
+});
+
+/**
+ * 自省的写入路径。
+ *
+ * 和工具失败共用一套 upsert（子组查找、重复计数、co_occurrence 连边），所以这里断言的是「映到同一套
+ * 机器上之后还成立」的那几件事：主题当工具列、教训当 detail、同一个主题重复只加计数。
+ */
+describe('ErrorBook 反思条目', () => {
+  const note = (over: Partial<Parameters<ErrorBook['recordReflection']>[0]> = {}) => ({
+    topic: '过度自信',
+    lesson: '置信度要由已核对的证据推出',
+    evidence: '自评均值 0.90，实际成功率 0.55',
+    ...over,
+  });
+
+  it('写进 errors/自省，主题和教训各就各位', () => {
+    const engine = fakeEngine();
+    const book = newBook(engine);
+    const { entry, recurring } = book.recordReflection(note());
+
+    assert.equal(recurring, false);
+    assert.equal(entry.group, `${ERRORBOOK_ROOT}/自省`);
+    assert.equal(entry.tool, '过度自信');
+    assert.equal(entry.kind, 'reflection');
+    assert.equal(entry.detail, '置信度要由已核对的证据推出');
+    assert.equal(entry.call, '自评均值 0.90，实际成功率 0.55');
+
+    const node = engine.memories[0];
+    assert.equal(node.metadata.errorKind, 'reflection');
+    assert.equal(node.metadata.errorSignature, 'reflection|过度自信');
+    // 内容的措辞按反思的形状走：教训不该被标成「原始输出」。
+    assert.match(node.content, /教训：/);
+    assert.match(node.content, /依据：/);
+    assert.ok(!/原始输出/.test(node.content));
+  });
+
+  it('同一个主题再次自省是加计数，不是又一条', () => {
+    const engine = fakeEngine();
+    const book = newBook(engine);
+    book.recordReflection(note({ evidence: '第一次' }));
+    const second = book.recordReflection(note({ evidence: '第二次', lesson: '换个说法' }));
+
+    assert.equal(second.recurring, true);
+    assert.equal(second.entry.count, 2);
+    assert.equal(engine.memories.length, 1, '习惯要说「又犯了 N 次」，不能变成 N 条各自为政的记录');
+    assert.equal(book.lookup({ tool: '过度自信' })[0].count, 2);
+  });
+
+  it('读回来时教训和依据不串位', () => {
+    const engine = fakeEngine();
+    const book = newBook(engine);
+    book.recordReflection(note());
+    const row = book.lookup({ tool: '过度自信' })[0];
+    assert.equal(row.detail, '置信度要由已核对的证据推出');
+    assert.equal(row.call, '自评均值 0.90，实际成功率 0.55');
+  });
+
+  it('反思条目不会把工具组混在一起', () => {
+    const engine = fakeEngine();
+    const book = newBook(engine);
+    book.record(report({ tool: 'shell', detail: 'exit 3' }));
+    book.recordReflection(note());
+
+    assert.equal(book.lookup({ tool: 'shell' }).length, 1);
+    assert.equal(book.lookup({ tool: '过度自信' })[0].kind, 'reflection');
+    assert.equal(book.count(), 2);
   });
 });
 

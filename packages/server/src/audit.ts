@@ -31,7 +31,16 @@ export type AuditKind =
   | 'tool'
   | 'confirm'
   /** A rotation dropped old files, and says which. */
-  | 'rotation';
+  | 'rotation'
+  /**
+   * A change to the agent's own configuration or self-measurement.
+   *
+   * Distinct from the three above, which record what the user's request caused. This one records
+   * something the agent or the operator changed ABOUT the agent — resetting the confidence mirror is
+   * the first of them. It is audited for the same reason a confirmation is: it changes what the
+   * agent will do next, so "why is it behaving differently now" has to be answerable afterwards.
+   */
+  | 'config';
 
 export interface AuditRecord {
   /** Wall clock, for humans. `seq` is what orders records. */
@@ -54,6 +63,8 @@ export interface AuditRecord {
   approved?: boolean;
   /** `rotation`: files dropped to stay bounded. */
   dropped?: string[];
+  /** `config`: what was changed. */
+  change?: string;
   /** Free-form detail for a kind that needs it. */
   note?: string;
 }

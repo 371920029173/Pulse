@@ -147,7 +147,7 @@ Most docs are written in Chinese; the code and comments are English.
 
 ## Project status
 
-`pnpm check:all` runs the build, 886 unit tests, three evaluators and 33 check scripts, and must pass
+`pnpm check:all` runs the build, 950 unit tests, three evaluators and 34 check scripts, and must pass
 before a change is considered done. It is green locally and on Linux CI. See
 [docs/testing.md](docs/testing.md) for the per-check breakdown.
 

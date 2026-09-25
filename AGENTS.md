@@ -56,6 +56,7 @@ pnpm check:toolresult        # tool failures are classified, and every Error: me
 pnpm check:errorbook         # past mistakes are written to the KB and read back before similar work
 pnpm check:audit             # the audit trail is append-only, gap-free in order, and read-only over the API
 pnpm check:runs              # run traces: readable afterwards, honest about damage, and no secrets on disk
+pnpm check:reflection        # self-review: drift, confidence calibration, lessons into the errorbook, an independent critic
 pnpm check:dist              # the built bundle contains the wiring the browser needs
 pnpm check:logs              # logs are capped and crash.log is only for crashes
 pnpm check:restart           # hard-kill + reboot: settings, sessions, groups, schedules all survive
