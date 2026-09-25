@@ -595,7 +595,9 @@ async function runChat(): Promise<void> {
     const kbStore = new kbMod.KBStore(config.kb.dbPath);
     const kbEngine = new kbMod.GroupKBEngine(kbStore, config.kb);
     const sandbox = new sandboxMod.SandboxShell(config.workspace.root, config.sandbox);
-    const sandboxTools = sandboxMod.createTools(sandbox, config.workspace.root);
+    const sandboxTools = sandboxMod.createTools(sandbox, config.workspace.root, {
+      kbDbPath: config.kb.dbPath,
+    });
 
     agent = new agentMod.Agent(config, kbEngine, sandboxTools) as AgentInterface;
     tools = agent.getToolDefinitions();

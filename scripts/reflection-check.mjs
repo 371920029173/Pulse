@@ -167,6 +167,34 @@ console.log('\n2. 约束：硬的是漂移，软的是提醒');
   check('不是禁令的约束不查（描述性约束由测试和诊断去发现问题）',
     notProhibition.level === 'none', JSON.stringify(notProhibition.signals));
 
+  /*
+   * 只读「目标」，不读正文 —— 用实测里真正触发过误报的四次调用当输入。
+   *
+   * 约束是 `shell 为 Windows cmd：无 cat/which；避免外泄重定向`，被排除的对象提成 `cat/which`，
+   * 于是「写下这条约束的 preflight」「把约束转述给子级的 task_spawn」「在备注里讨论它的 plan_update」
+   * 「正文解释它、路径无辜的 fs_write」全都命中了。四条都不是在碰它，判据因此改为只读目标字段。
+   */
+  const constraintText = 'shell 为 Windows cmd：无 cat/which；避免外泄重定向（/dev/null 曾 DENIED）';
+  const judge = (tool, args) => detectDrift({
+    goal: '给两个文件里的导出符号做一份清单',
+    constraints: [{ text: constraintText, hardness: 'hard' }],
+    actions: [{ tool, args }],
+  }).level;
+  check('【实测误报】写下这条约束的 preflight_record 不算越界',
+    judge('preflight_record', JSON.stringify({ actual_goal: '评估', inferred_constraints: [constraintText] })) === 'none', null);
+  check('【实测误报】把约束转述给子级的 task_spawn 不算越界',
+    judge('task_spawn', JSON.stringify({ tasks: [{ description: '核对', prompt: '无 cat/which', deliverable: '清单' }] })) === 'none', null);
+  check('【实测误报】plan_update 的备注在讨论它，不算越界',
+    judge('plan_update', JSON.stringify({ plan_id: 'p', step_id: 's9', status: 'done', note: 'cat/which 告警判定为误报' })) === 'none', null);
+  check('【实测误报】正文解释它、路径无辜的 fs_write 不算越界',
+    judge('fs_write', JSON.stringify({ path: 'qa/eng/notes.md', content: '该沙箱无 cat / which，请用 type / where。' })) === 'none', null);
+  check('但 path 就是那个对象时照旧越界（正文豁免不能变成整体豁免）',
+    judge('fs_write', JSON.stringify({ path: 'cat/which', content: '随便' })) === 'drift', null);
+  check('shell 的命令行照旧查（命令本身就是动作，没有「正文」这层）',
+    judge('shell', JSON.stringify({ command: 'del /f cat/which' })) === 'drift', null);
+  check('嵌套交接单里的 scope 不豁免（声明要改什么仍然是行动）',
+    judge('task_spawn', JSON.stringify({ tasks: [{ description: '改文件', scope: ['cat/which'], prompt: '随便' }] })) === 'drift', null);
+
   check('禁止句里取的是最长的那两个具体对象',
     JSON.stringify(prohibitionObject('不要修改 packages/server 里的 cluster.ts')) ===
       JSON.stringify(['packages/server', 'cluster.ts']),
@@ -177,6 +205,33 @@ console.log('\n2. 约束：硬的是漂移，软的是提醒');
   check('结构词不进目标词（否则「里的」会匹配一切）', !terms.includes('里的'), terms.join(','));
   check('中文按二元组切，短目标也能和别的句子重合',
     goalTerms('修复登录超时').includes('登录') && goalTerms('修复登录超时').includes('超时'), null);
+
+  /*
+   * 约束里的「例外」不是被禁止的对象 —— 用实测里真正触发过误报的那条约束当输入。
+   *
+   * 原文把 kb_upsert 称作「唯一被点名的写入…（用户明确指定的例外）」，旧实现把整句当禁止句读，
+   * 于是父级那次合规的 kb_upsert 被判成「越过约束」：major、直接进错题本，还会在以后动手前被
+   * 当成教训读回来。越是把例外写清楚的约束，越稳定地误报——所以例外必须排除在取值之外。
+   */
+  const exceptionText = '「只读」限定在文件/命令层面：子代理不得用 `shell`、`fs_*`、`git` 等工具，'
+    + '不得修改工作区；唯一被点名的写入是 `kb_upsert` 写知识库（用户明确指定的例外）。';
+  check('【实测误报】约束里被点名允许的对象不进禁止集',
+    !prohibitionObject(exceptionText).includes('kb_upsert'), JSON.stringify(prohibitionObject(exceptionText)));
+  check('【实测误报】那条约束下，合规的 kb_upsert 不算越界',
+    detectDrift({
+      goal: '验证子代理的知识库笔记能否被父级收割',
+      constraints: [{ text: exceptionText, hardness: 'hard' }],
+      actions: [{ tool: 'kb_upsert', args: '{"group":"project/x","title":"t","content":"c"}' }],
+    }).level === 'none', null);
+  check('例外只免它自己那一句：同句里别的禁止照旧生效（不能变成整体豁免）',
+    detectDrift({
+      goal: '整理导出',
+      constraints: ['不要改 cluster.ts，唯一允许的是只读查询——但不要动 migrations。'],
+      actions: [{ tool: 'fs_write', args: '{"path":"packages/kb/migrations/001.sql"}' }],
+    }).level === 'drift', null);
+  check('「不得改动 a.ts、b.ts」是一个禁止句里列了两个对象，顿号不切开它',
+    prohibitionObject('不要改动 a.ts、b.ts').includes('b.ts'),
+    JSON.stringify(prohibitionObject('不要改动 a.ts、b.ts')));
 }
 
 console.log('\n3. 预算与步骤');

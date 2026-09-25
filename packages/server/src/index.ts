@@ -10,8 +10,8 @@ import type { SheConfig, StreamChunk, EdgeKind, SkillProfile } from '@she/shared
 import { KBStore, GroupKBEngine, mergeKnowledgeBases } from '@she/kb';
 import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLink } from './kb-link.js';
 import { SandboxShell, createTools, ConfirmTicketStore } from '@she/sandbox';
-import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate } from '@she/agent-runtime';
-import type { SubagentRunner, SubagentResult } from '@she/agent-runtime';
+import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, selectHarvestNotes } from '@she/agent-runtime';
+import type { SubagentRunner, SubagentResult, SubagentKbHarvest } from '@she/agent-runtime';
 import { PlanStore, MemoStore, nextStepOf } from '@she/agent-runtime';
 import { RunTraceStore, ConfidenceMirror, REFLECTION_DIR } from '@she/agent-runtime';
 import type { StepStatus } from '@she/agent-runtime';
@@ -425,15 +425,73 @@ function remountKnowledgeBase(dbPath: string): void {
 /** Knowledge bases for sessions that work in some other directory. */
 const extraEngines = new Map<string, GroupKBEngine>();
 
+/**
+ * Identity of a database file, not its spelling.
+ *
+ * `resolve()` normalises separators and dots and nothing else, so one file reached two ways gets
+ * two cache keys and — worse — two live connections inside one process. That is not hypothetical:
+ * `os.tmpdir()` on Windows hands out the 8.3 short form (`C:\Users\ADMINI~1\…`) while git and
+ * `realpathSync` report the long form (`C:\Users\Administrator\…`), so the same sqlite file opened
+ * from a worktree was cached under two keys. Two writers to one file in one process is lock
+ * contention waiting to happen, and a handle you cannot find again is a handle you cannot close —
+ * which is how a directory ends up undeletable. Comparing real paths, case-insensitively on
+ * Windows because the filesystem itself is, keeps one file to one engine.
+ */
+function dbKey(p: string): string {
+  let out = resolve(p);
+  try { out = realpathSync.native(out); } catch { /* not created yet — resolve() is the best there is */ }
+  return process.platform === 'win32' ? out.toLowerCase() : out;
+}
+
+/** Whether two paths name the same knowledge base. */
+function sameDb(a: string, b: string): boolean {
+  return dbKey(a) === dbKey(b);
+}
+
 function engineFor(dbPath: string): GroupKBEngine {
-  const key = resolve(dbPath);
-  if (resolve(config.kb.dbPath) === key) return engine;
+  const abs = resolve(dbPath);
+  const key = dbKey(abs);
+  if (key === dbKey(config.kb.dbPath)) return engine;
   const hit = extraEngines.get(key);
   if (hit) return hit;
-  mkdirSync(dirname(key), { recursive: true });
-  const extra = new GroupKBEngine(new KBStore(key), config.kb);
+  mkdirSync(dirname(abs), { recursive: true });
+  const extra = new GroupKBEngine(new KBStore(abs), config.kb);
   extraEngines.set(key, extra);
   return extra;
+}
+
+/**
+ * Release the KB engine cached for one path.
+ *
+ * `extraEngines` is allowed to keep every database it has ever opened, which is right for
+ * correctness and wrong for the filesystem: a live sqlite handle inside a directory makes that
+ * directory undeletable on Windows. An isolated child opens its own KB copy inside its worktree, so
+ * without this the worktree could be reviewed but never deleted — "Invalid argument" from git, and
+ * an error nobody can act on. Dropping the map entry as well is deliberate: a later request for the
+ * same path must build a fresh engine rather than be handed a closed store.
+ */
+function closeEngineFor(dbPath: string): void {
+  const key = dbKey(dbPath);
+  const extra = extraEngines.get(key);
+  if (!extra) return;
+  try { (extra as unknown as { store: { close(): void } }).store.close(); } catch { /* ignore */ }
+  extraEngines.delete(key);
+}
+
+/**
+ * Let go of everything this process holds open inside `dir`, so `dir` can be deleted.
+ *
+ * Called before removing a worktree: the sqlite handle is what actually holds the lock, and an
+ * agent still pinned to that directory would go on working in a directory that no longer exists.
+ * Running agents are left alone — their work is not the deletion's to interrupt.
+ */
+function disposeWorkspace(dir: string): void {
+  const abs = resolve(dir);
+  closeEngineFor(join(abs, '.she', 'kb.sqlite'));
+  for (const [id, agent] of [...agents]) {
+    if (agent.isRunning()) continue;
+    if (sameDb(rootForSession(id), abs)) dropAgent(id);
+  }
 }
 
 let sessions: SessionStore;
@@ -667,13 +725,31 @@ const plugins = new PluginManager({
  * so cost grows multiplicatively. Passing `isSubagent` also strips the tools
  * that assume a human is present (see Agent's constructor).
  */
+/**
+ * How often a running subtask reports what it is doing.
+ *
+ * Chosen against the two things it can annoy: the reader (a tick is one card update, so a shorter
+ * interval is only noise) and the child (reading its transcript is cheap, but it is a share of the
+ * same event loop). Long enough to be ignorable, short enough that "still working" is visible
+ * before a user starts wondering whether it hung — which was the actual complaint.
+ */
+const SUBAGENT_HEARTBEAT_MS = 5_000;
+
 function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): SubagentRunner {
-  const TIMEOUT_MS = Number(process.env.SHE_SUBAGENT_TIMEOUT_MS) > 0
-    ? Number(process.env.SHE_SUBAGENT_TIMEOUT_MS)
-    : 180_000;
+  /*
+   * The default budget, in seconds.
+   *
+   * An env override exists for evals that want a short leash; a task can override it per call
+   * (`timeout_ms`), which is the one that matters in real use — the right number depends on the
+   * job, and the heaviest honest job does not fit in the default.
+   */
+  const DEFAULT_TIMEOUT_SECONDS = Number(process.env.SHE_SUBAGENT_TIMEOUT_MS) > 0
+    ? Number(process.env.SHE_SUBAGENT_TIMEOUT_MS) / 1000
+    : undefined;
 
   return {
-    async run(req) {
+    async run(req, _signal, hooks) {
+      const budgetMs = resolveSubagentTimeoutMs(req.timeoutMs, DEFAULT_TIMEOUT_SECONDS);
       const baseDir = parentCfg.workspace.root;
 
       /*
@@ -732,15 +808,66 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
         try { rememberProject(projectIndexFile(), directory); } catch { /* non-fatal */ }
       }
       const shell = new SandboxShell(directory, parentCfg.sandbox);
+      const at = configForRoot(directory);
+      /*
+       * The child's knowledge base is a PRIVATE copy, whether or not the child is isolated.
+       *
+       * Isolation and memory are two different questions, and the old code answered them with one
+       * switch: only an isolated child got a copy, so a read-only child — the common case — ran
+       * straight against the parent's live database. That is the worst half of both options: the
+       * parent's memory was one call away from an unreviewed edit (so writes had to be refused), and
+       * the child had nowhere to put a finding except the last paragraph it wrote.
+       *
+       * A copy fixes both ends. Writes are safe by construction because they land where the parent
+       * cannot see them, and they are not thrown away either: `takeKbNotes` reads them back when the
+       * child ends and hands the parent a list it can absorb. One rule for every child, and the file
+       * lives in the app directory rather than inside the worktree — a knowledge base is not part of
+       * the work product, and inside a worktree it showed up as an untracked `.she/` in the
+       * changed-files list the parent reads.
+       *
+       * `spawnedAt` is taken BEFORE the copy is made, so "created since" means "created by this
+       * child" rather than "already in the parent's memory".
+       */
+      const spawnedAt = Date.now();
+      const privateKb = subagentKbPath(childSession.id);
+      const childKbPath = privateKb ?? at.kb.dbPath;
+      const childCfg = privateKb ? { ...at, kb: { ...at.kb, dbPath: privateKb } } : at;
+      /*
+       * Seed the child's KB before constructing it, so its first `kb_query` already sees the
+       * project's memory. See `seedIsolatedKb` for why an empty one is the wrong default.
+       */
+      const kbCarry = seedIsolatedKb(parentCfg.kb.dbPath, childKbPath);
       const tools = createTools(shell, directory, {
         allowAllCommands: parentCfg.sandbox.allowAllCommands,
+        // Same rule as the parent's: the child's KB copy is `kb_*`-only too.
+        kbDbPath: childKbPath,
       });
-      const childCfg = configForRoot(directory);
-      const child = new Agent(childCfg, engineFor(childCfg.kb.dbPath), tools, childSession.id, { isSubagent: true });
+      const child = new Agent(childCfg, engineFor(childKbPath), tools, childSession.id, {
+        isSubagent: true,
+        /*
+         * The one remaining case where a write has to be refused: the child ended up pointed at the
+         * PARENT's own file (no private copy could be created — see `subagentKbPath`). A node there
+         * would be permanent, unreviewed, and indistinguishable from one the parent wrote. Every
+         * other child writes into its own copy, which cannot reach the parent's memory.
+         */
+        kbReadOnly: kbCarry === 'shared',
+      });
       agents.set(childSession.id, child);
 
       // The brief the child actually receives: the structured handoff, then the parent's words.
-      const brief = composeHandoffPrompt(req, { workdir: directory, isolated: Boolean(worktree) });
+      /*
+       * The brief states the deadline it will actually be held to.
+       *
+       * A child held to a clock it was never told about finds out only by being killed, and what
+       * it was holding at that moment is gone. Told the number, it can choose to conclude early —
+       * which is the whole difference between "no result" and "a partial result with its evidence".
+       */
+      const brief = composeHandoffPrompt(req, {
+        workdir: directory,
+        isolated: Boolean(worktree),
+        kb: kbCarry,
+        deadlineSeconds: budgetMs / 1000,
+      });
 
       const collectWorktree = (pending?: string): SubagentResult['worktree'] => {
         if (!worktree) return undefined;
@@ -765,12 +892,72 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
         note: isolationNote,
       });
 
+      /*
+       * What the child wrote down, read back out of its copy — and then the copy is deleted.
+       *
+       * Runs once, on every ending (a finished child, a timeout, a failure), because a child that ran
+       * out of time is exactly when its notes are the only thing it produced. The order inside is not
+       * negotiable on Windows: the handle has to be released before the file can go, which means the
+       * child's cached agent goes with it. Nothing is lost by forgetting that agent — it finished, and
+       * `dispose()` only owns its language server.
+       *
+       * A child whose KB is the parent's own file has nothing private to read, and its file is not
+       * this function's to delete.
+       */
+      let taken: SubagentKbHarvest | undefined;
+      let takeRan = false;
+      const takeKbNotes = (): SubagentKbHarvest | undefined => {
+        if (takeRan) return taken;
+        takeRan = true;
+        if (sameDb(childKbPath, parentCfg.kb.dbPath)) return undefined;
+        try {
+          closeEngineFor(childKbPath);
+          dropAgent(childSession.id);
+          const store = new KBStore(childKbPath);
+          try {
+            taken = selectHarvestNotes(store.memoriesCreatedSince(spawnedAt));
+          } finally {
+            store.close();
+          }
+        } catch (err) {
+          log.warn(`读取子任务知识库笔记失败（这些笔记只能去看它自己的会话）: ${(err as Error).message}`);
+        } finally {
+          try {
+            rmSync(childKbPath, { force: true });
+          } catch (err) {
+            log.warn(`子任务知识库副本没删掉: ${childKbPath}: ${(err as Error).message}`);
+          }
+        }
+        return taken;
+      };
+
+      /*
+       * What the parent is told about the notes the child wrote, and where the full text lives.
+       *
+       * The digest file is written whenever there are notes, not only when the reply is too small to
+       * hold them. Two reasons: a reply can be thrown away without being read (a detached parent, a
+       * background child whose caller already returned), and the copy the notes came from no longer
+       * exists — so a note that is not written down here is gone. Everything the child wrote is in
+       * that file; the reply carries the titles and enough of each one to decide.
+       */
+      const notesFor = (): SubagentKbHarvest | undefined => {
+        const harvest = takeKbNotes();
+        if (!harvest?.notes.length) return harvest;
+        const digestPath = writeHarvestDigest(parentCfg.workspace.root, childSession.id, harvest);
+        return digestPath ? { ...harvest, digestPath } : harvest;
+      };
+
       const job = (async (): Promise<SubagentResult> => {
         let timedOut = false;
         try {
           const out = await Promise.race([
             child.chat(brief),
-            new Promise<null>((r) => setTimeout(() => { timedOut = true; r(null); }, TIMEOUT_MS)),
+            /*
+             * `unref` because the timer usually outlives its purpose: a child that finishes in 10
+             * seconds leaves this pending, and a caller that asked for a 30-minute budget would
+             * then have a 30-minute timer holding the process open on its behalf.
+             */
+            new Promise<null>((r) => setTimeout(() => { timedOut = true; r(null); }, budgetMs).unref?.()),
           ]);
           if (timedOut) {
             try { child.stop(); } catch { /* ignore */ }
@@ -786,16 +973,32 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
              */
             storeFor(directory).update(childSession.id, { title: req.description, messages: child.historyForDisk() });
           } catch { /* keep the reply */ }
-          const text = timedOut
-            ? `子任务超时（${TIMEOUT_MS / 1000}s）`
-            : (out?.content ?? '(无输出)');
+          /*
+           * A timeout owes the parent an account of what it paid for.
+           *
+           * The old reply was `子任务超时（180s）` and nothing else, which left the parent with a
+           * sunk cost and one option: dispatch the same task again and pay for the same 180s
+           * twice. Read from the child's own transcript, the reply now says how far it got, what
+           * it last said, and what it changed — and names the two ways to give a heavy task
+           * enough room next time. The child is stopped either way; the difference is whether the
+           * time spent leaves a trace.
+           */
+          const timedOutText = () => formatTimeoutReport(readChildProgress(child.getHistory()), {
+            seconds: Math.round(budgetMs / 1000),
+            sessionId: childSession.id,
+            changed: collectWorktree()?.changed,
+            worktreePath: worktree?.path,
+          });
           return {
             description: req.description,
             ok: !timedOut,
-            result: `${text}\n\n（子会话 ${childSession.id}）`,
+            result: timedOut
+              ? timedOutText()
+              : `${out?.content ?? '(无输出)'}\n\n（子会话 ${childSession.id}）`,
             handoff: req.handoff,
             worktree: collectWorktree(),
             isolation: isolationInfo(),
+            kbHarvest: notesFor(),
           };
         } catch (err) {
           try { storeFor(directory).update(childSession.id, { title: req.description, messages: child.historyForDisk() }); } catch { /* ignore */ }
@@ -806,6 +1009,7 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
             handoff: req.handoff,
             worktree: collectWorktree(),
             isolation: isolationInfo(),
+            kbHarvest: notesFor(),
           };
         }
       })();
@@ -816,7 +1020,9 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
         return {
           description: req.description,
           ok: true,
-          result: `已在后台继续。打开会话「${childSession.title}」（${childSession.id}）可以看它的过程。`,
+          result: `已在后台继续。打开会话「${childSession.title}」（${childSession.id}）可以看它的过程。`
+            + `\n它结束时写下的知识库笔记会汇总到 ${join('.she', 'subagent-notes', `${childSession.id}.md`)}`
+            + '（子任务的知识库副本随后会被删除，所以需要的结论用 `fs_read` 从那份摘要里取）。',
           handoff: req.handoff,
           worktree: collectWorktree('子任务仍在后台运行，改动清单要等它结束后再取。'),
           isolation: isolationInfo(),
@@ -825,17 +1031,103 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
       if (req.background) return handOff();
 
       const started = Date.now();
-      while (Date.now() - started < TIMEOUT_MS + 2_000) {
-        const finished = await Promise.race([
-          job.then((r) => ({ ready: true as const, r })),
-          new Promise<{ ready: false }>((r) => setTimeout(() => r({ ready: false }), 300)),
-        ]);
-        if (finished.ready) return finished.r;
-        if (detachParents.has(parentSessionId)) return handOff();
+      /*
+       * The heartbeat: a reading of the child, every few seconds, for as long as it runs.
+       *
+       * The parent agent cannot consume this — it is blocked right here — but the human watching
+       * the spinner can, and until now the only thing anyone saw during a subtask was nothing at
+       * all. It is best-effort by construction: the reading is wrapped, so a child whose history
+       * is mid-write cannot take down the run it is describing.
+       */
+      const beat = hooks?.progress
+        ? setInterval(() => {
+          try {
+            const p = readChildProgress(child.getHistory());
+            hooks.progress?.({
+              description: req.description,
+              elapsedMs: Date.now() - started,
+              steps: p.steps,
+              activity: p.activity,
+            });
+          } catch { /* a progress reading must never break the run it describes */ }
+        }, SUBAGENT_HEARTBEAT_MS)
+        : undefined;
+      beat?.unref?.();
+
+      try {
+        while (Date.now() - started < budgetMs + 2_000) {
+          const finished = await Promise.race([
+            job.then((r) => ({ ready: true as const, r })),
+            new Promise<{ ready: false }>((r) => setTimeout(() => r({ ready: false }), 300)),
+          ]);
+          if (finished.ready) return finished.r;
+          if (detachParents.has(parentSessionId)) return handOff();
+        }
+        return handOff();
+      } finally {
+        if (beat) clearInterval(beat);
       }
-      return handOff();
     },
   };
+}
+
+/**
+ * Where a child's private knowledge base lives: one file per child session, in the app directory.
+ *
+ * The app directory rather than the project or the worktree. A copy is scaffolding, not work
+ * product: inside a worktree it appeared as an untracked `.she/` in the changed-files list the
+ * parent reads, and inside the project it would be a second knowledge base a user could mistake for
+ * theirs. Outside both, there is nothing to confuse it with, and the path is derived from the child
+ * session id — so the file is findable when something goes wrong and cannot collide with a sibling.
+ *
+ * Returns null when the directory cannot be created, which is the one case where the caller has to
+ * fall back to the parent's own file with writes refused. Failing the spawn instead would turn a
+ * disk problem into an unusable feature.
+ */
+function subagentKbPath(sessionId: string): string | null {
+  try {
+    const dir = join(appDir(), 'subagent-kb');
+    mkdirSync(dir, { recursive: true });
+    return join(dir, `${sessionId}.sqlite`);
+  } catch (err) {
+    log.warn(`子任务知识库副本目录不可用（子级将共享父级库且只读）: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+/**
+ * Write the child's notes to a markdown file inside the workspace, and return its path.
+ *
+ * Needed when the notes cannot all fit in the reply, and for a background child — whose reply was
+ * already sent before the child finished, so the digest is the only thing it can leave behind. The
+ * file goes under the workspace's `.she/` (unlike the KB copy, which goes to the app directory)
+ * because that is the only place the parent's own file tools can reach: a path outside the
+ * workspace is one `fs_read` refuses.
+ *
+ * Returns undefined when the write fails. The reply then says how many notes were dropped without
+ * promising a file that is not there — a dangling pointer is worse than an admitted gap, because
+ * the parent would have nothing to act on in either case and no way to tell that it was misled.
+ */
+function writeHarvestDigest(root: string, sessionId: string, harvest: SubagentKbHarvest): string | undefined {
+  if (!harvest.notes.length) return undefined;
+  try {
+    const dir = join(root, '.she', 'subagent-notes');
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${sessionId}.md`);
+    const body = [
+      `# 子任务笔记（子会话 ${sessionId}）`,
+      '',
+      '子任务在自己的知识库副本里写下的内容。副本已经删除，这里是这些笔记唯一的一份。',
+      '值得留的用 `kb_upsert` 搬进主库（组名按内容自定），其余不用管。',
+      '',
+      ...harvest.notes.map((n) => [`## ${n.title}（${n.kind}）`, '', n.content, ''].join('\n')),
+    ];
+    writeFileSync(file, body.join('\n'), 'utf8');
+    return file;
+  } catch (err) {
+    log.warn(`子任务笔记摘要写入失败（只影响这一份备份）: ${(err as Error).message}`);
+    return undefined;
+  }
 }
 
 function configForRoot(root: string): SheConfig {
@@ -849,10 +1141,64 @@ function configForRoot(root: string): SheConfig {
   };
 }
 
+/**
+ * Give a child the parent's memory.
+ *
+ * A worktree materialises tracked files, so `<worktree>/.she/` never exists: the child opened a
+ * brand-new KB, and every `kb_query` answered "no record" about a project whose history the parent
+ * had just described to it in the handoff. The prompt promises the group KB is the default memory,
+ * so an empty one is not isolation, it is amnesia — and the child has no way to tell the difference
+ * between "this project has no such note" and "my memory was reset".
+ *
+ * The fix is a copy rather than a shared file: the child reads the parent's knowledge, and anything
+ * it writes lands in the copy, which cannot reach the parent's memory. Cheap — the file is tens of
+ * kilobytes, and the copy happens once per spawn. The copy is not a dead drop: `takeKbNotes` reads
+ * it back when the child ends and deletes it (see the call site in `makeSubagentRunner`).
+ *
+ * Returns a phrase for the handoff, because a child that is told nothing will assume it can read
+ * anything it likes and blame the project when it cannot.
+ */
+function seedIsolatedKb(parentKbPath: string, childKbPath: string): 'snapshot' | 'shared' | 'empty' {
+  const from = resolve(parentKbPath);
+  const to = resolve(childKbPath);
+  // Same path means no private copy was available at all (see `subagentKbPath`), so the child is
+  // already looking at the parent's KB — say so rather than describing a copy that never happened.
+  if (from === to) return 'shared';
+  // A live sqlite can be copied while held open, but only if the copy is actually readable: a
+  // half-written file would give the child a database that fails to open, and "your memory is
+  // corrupt" is a worse answer than "your memory is empty". Verified by opening it, not by size.
+  const usable = (p: string): boolean => {
+    try {
+      const probe = new KBStore(p);
+      probe.getStats();
+      probe.close();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (existsSync(to) && usable(to)) return 'snapshot';
+  if (!existsSync(from)) return 'empty';
+  try {
+    copyKbFile(from, to);
+    if (usable(to)) return 'snapshot';
+    log.warn(`子任务知识库快照不可读，已丢弃: ${to}`);
+    rmSync(to, { force: true });
+    return 'empty';
+  } catch (err) {
+    log.warn(`子任务知识库快照失败（它将以空库运行）: ${(err as Error).message}`);
+    return 'empty';
+  }
+}
+
 function makeAgent(cfg: SheConfig, sessionId?: string | null): Agent {
   const local = configForRoot(sessionId ? rootForSession(sessionId) : cfg.workspace.root);
   const shell = new SandboxShell(local.workspace.root, local.sandbox);
-  const base = createTools(shell, local.workspace.root, { allowAllCommands: local.sandbox.allowAllCommands });
+  const base = createTools(shell, local.workspace.root, {
+    allowAllCommands: local.sandbox.allowAllCommands,
+    // The KB is reachable only through `kb_*`; raw access is refused by the shell itself.
+    kbDbPath: local.kb.dbPath,
+  });
 
   /*
    * Merge plugin-provided tools into the toolset the agent sees.
@@ -1318,7 +1664,18 @@ function persistHistory(id?: string): void {
     const found = findSession(sid);
     if (found) found.store.update(sid, { messages: disk });
     else if (sessions.get(sid)) sessions.update(sid, { messages: disk });
-    else sessions.syncActive(disk);
+    /*
+     * An id nobody stored is a session the CALLER addressed, not the one on screen.
+     *
+     * This used to be `sessions.syncActive(disk)`, which wrote the transcript into the ACTIVE
+     * conversation: posting to an unknown `session_id` erased the chat the user was reading.
+     * Creating the session keeps the addressed id addressable, and `ensure` leaves `active_id`
+     * alone so the conversation on screen is not replaced by one nobody opened.
+     */
+    else {
+      sessions.ensure(sid, { directory: resolve(config.workspace.root) });
+      sessions.update(sid, { messages: disk });
+    }
   } catch (err) {
     log.warn(`Failed to persist chat history for ${sid}: ${(err as Error).message}`);
   }
@@ -1369,7 +1726,7 @@ function mountWorkspace(root: string, sessionId?: string): ChatSession {
     const prevKb = config.kb.dbPath;
     config.workspace.root = next;
     config.kb.dbPath = resolveWorkspaceKbPath(next).dbPath;
-    if (resolve(prevKb) !== resolve(config.kb.dbPath)) remountKnowledgeBase(config.kb.dbPath);
+    if (!sameDb(prevKb, config.kb.dbPath)) remountKnowledgeBase(config.kb.dbPath);
     const nextState = resolveStateDir(config);
     if (nextState !== stateDir) {
       otherStores.set(resolve(sessions.rootDir), sessions);
@@ -2260,12 +2617,29 @@ router.put('/api/settings', async (req, res) => {
 
     if (typeof body.kbDbPath === 'string') {
       const p = body.kbDbPath.trim();
-      if (!p) {
+      /*
+       * The settings form sends its KB field on EVERY save, and the field is filled with the
+       * RESOLVED path (`<workspace>/.she/kb.sqlite`) rather than with the user's own override.
+       * Echoing that back as a binding is how a workspace switch silently welds two workspaces
+       * onto one knowledge base: the request carries the new root plus the old root's KB path, the
+       * new workspace is then bound to the OLD workspace's memory, and neither is isolated any
+       * more — the exact thing per-workspace KBs exist to prevent. It also pins the plain default
+       * as a "shared library", which then breaks if the folder is moved or cloned.
+       *
+       * So the echo is recognised and treated as "no override": either the value is this
+       * workspace's own default path, or it is the previous workspace's KB while the root is
+       * changing in this same request. A genuinely different path is still a real binding.
+       */
+      const localDefault = resolve(config.workspace.root, '.she', 'kb.sqlite');
+      const echoOfPrevious = resolve(config.workspace.root) !== prevWorkspaceRoot
+        && sameDb(p, prevKbDbPath);
+      const echoedOwnDefault = Boolean(p) && sameDb(isAbsolute(p) ? p : resolve(config.workspace.root, p), localDefault);
+      if (!p || echoOfPrevious || echoedOwnDefault) {
         // Empty = local default for this workspace; drop shared link + env override.
         clearKbLink(config.workspace.root);
         delete process.env.SHE_KB_PATH;
         setEnv('SHE_KB_PATH', '');
-        config.kb.dbPath = resolve(config.workspace.root, '.she', 'kb.sqlite');
+        config.kb.dbPath = localDefault;
       } else {
         const abs = isAbsolute(p) ? resolve(p) : resolve(config.workspace.root, p);
         config.kb.dbPath = abs;
@@ -2366,12 +2740,12 @@ router.put('/api/settings', async (req, res) => {
     }
     persistHistory();
 
-    const kbChanged = resolve(prevKbDbPath) !== resolve(config.kb.dbPath);
+    const kbChanged = !sameDb(prevKbDbPath, config.kb.dbPath);
     if (kbChanged) {
       try {
         remountKnowledgeBase(config.kb.dbPath);
       } catch (err) {
-        throw new HttpError(500, `???????: ${(err as Error).message}`);
+        throw new HttpError(500, `知识库挂载失败: ${(err as Error).message}`);
       }
     }
     const restartRequired =
@@ -2870,7 +3244,7 @@ router.get('/api/fs/tree', (req, res) => {
       copyKbFile(src, abs);
     } catch (err) {
       remountKnowledgeBase(src);
-      throw new HttpError(500, `???????: ${(err as Error).message}`);
+      throw new HttpError(500, `知识库发布失败: ${(err as Error).message}`);
     }
     writeKbLink(config.workspace.root, abs, 'shared copy of workspace KB');
     if (process.env.SHE_KB_PATH) delete process.env.SHE_KB_PATH;
@@ -2892,7 +3266,7 @@ router.get('/api/fs/tree', (req, res) => {
     const target = body.targetPath?.trim()
       ? (isAbsolute(body.targetPath.trim()) ? resolve(body.targetPath.trim()) : resolve(config.workspace.root, body.targetPath.trim()))
       : config.kb.dbPath;
-    if (!existsSync(src)) throw new HttpError(404, `???????: ${src}`);
+    if (!existsSync(src)) throw new HttpError(404, `源知识库不存在: ${src}`);
 
     try { store.close(); } catch { /* ignore */ }
     let result;
@@ -2900,7 +3274,7 @@ router.get('/api/fs/tree', (req, res) => {
       result = mergeKnowledgeBases(src, target, { label: body.label });
     } catch (err) {
       remountKnowledgeBase(config.kb.dbPath);
-      throw new HttpError(500, `????: ${(err as Error).message}`);
+      throw new HttpError(500, `合库失败: ${(err as Error).message}`);
     }
     if (resolve(target) !== resolve(config.kb.dbPath)) {
       writeKbLink(config.workspace.root, target, 'merged shared KB');
@@ -3937,6 +4311,9 @@ router.get('/api/fs/tree', (req, res) => {
     const path = resolve(url.searchParams.get('path') || '');
     if (!path) throw new HttpError(400, '缺少 path');
     try {
+      // Release the KB handle first: deleting a directory that has a live sqlite file inside it
+      // fails on Windows, and the child's KB copy always lives there.
+      disposeWorkspace(path);
       removeWorktree(repo, path);
       sendJSON(res, { ok: true });
     } catch (err) {

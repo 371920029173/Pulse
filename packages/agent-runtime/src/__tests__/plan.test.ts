@@ -459,6 +459,62 @@ describe('plan tools', () => {
 });
 
 /**
+ * The reply to `plan_update` is sent once per step of progress, a dozen times on a long task, so
+ * what it repeats is what the task pays for again and again.
+ *
+ * The contract these lock down: every step and its status are still printed (the plan has to stay
+ * readable as a whole), the note is printed only for the steps THIS call moved, and nothing is
+ * lost — `plan_list` still prints every note. The failure mode being guarded against is a filter
+ * that quietly drops a note the caller needed, which is why the "unchanged step keeps its status
+ * line" case is asserted rather than assumed.
+ */
+describe('plan_update 的回显瘦身', () => {
+  it('只印这次改动过的步骤的备注，其余步骤的状态照印', async () => {
+    const tools = createPlanTools(dir, 'sess-note');
+    await tools.execute('plan_create', { title: '瘦身', steps: ['a', 'b', 'c'] });
+    await tools.execute('plan_update', { step_id: 's1', status: 'done', note: '第一个发现' });
+    const out = await tools.execute('plan_update', { step_id: 's2', status: 'done', note: '第二个发现' });
+
+    assert.ok(out.includes('第二个发现'), `本次备注必须在: ${out}`);
+    assert.ok(!out.includes('第一个发现'), `上次的备注不该重复回显: ${out}`);
+    // The line still shows — dropping it is what would make the reply unreadable as a plan.
+    assert.match(out, /\[x\] s1 a/);
+    assert.match(out, /\[x\] s2 b/);
+    assert.match(out, /\[>\] s3 c/, '完成时自动激活的下一步也要看得见');
+  });
+
+  it('备注没有丢：plan_list 全量印出来', async () => {
+    const tools = createPlanTools(dir, 'sess-note2');
+    await tools.execute('plan_create', { title: '留底', steps: ['a', 'b'] });
+    await tools.execute('plan_update', { step_id: 's1', status: 'done', note: '第一个发现' });
+    const listed = await tools.execute('plan_list', {});
+    assert.ok(
+      listed.includes('第一个发现'),
+      `备注只该是不回显，不该是被删掉: ${listed}`,
+    );
+  });
+
+  it('start 把上一步踢回 pending 时，那一步也算「这次动过」', async () => {
+    const tools = createPlanTools(dir, 'sess-note3');
+    await tools.execute('plan_create', { title: '换手', steps: ['a', 'b'] });
+    await tools.execute('plan_update', { step_id: 's1', status: 'active', note: '在做 a' });
+    const out = await tools.execute('plan_update', { step_id: 's2', status: 'active', note: '改做 b' });
+    assert.match(out, /\[ \] s1 a/, 's1 被踢回 pending，状态变化要看得见');
+    assert.ok(out.includes('改做 b'), `本次备注必须在: ${out}`);
+  });
+
+  it('plan_add_steps 只印新加步骤的备注', async () => {
+    const tools = createPlanTools(dir, 'sess-note4');
+    const created = await tools.execute('plan_create', { title: '加活', steps: ['a'] });
+    const planId = /plan_[0-9a-f]+/.exec(created)![0];
+    await tools.execute('plan_update', { step_id: 's1', status: 'done', note: '第一步的旧备注' });
+    const added = await tools.execute('plan_add_steps', { plan_id: planId, steps: ['b'] });
+    assert.ok(!added.includes('第一步的旧备注'), `旧备注不该在加步骤时再印一次: ${added}`);
+    assert.match(added, /下一步: s2 b/);
+  });
+});
+
+/**
  * The delivery template.
  *
  * A hand-off is where the agent's own summary becomes the user's only record of what happened,

@@ -22,7 +22,7 @@ export function mergeKnowledgeBases(
   opts?: { label?: string },
 ): MergeKbResult {
   if (sourcePath === targetPath) {
-    throw new Error('??????????????');
+    throw new Error('源库与目标库是同一个文件，无需合并');
   }
 
   const src = new KBStore(sourcePath);

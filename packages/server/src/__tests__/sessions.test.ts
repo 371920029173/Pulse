@@ -278,3 +278,63 @@ describe('chooseStartupSession', () => {
     assert.equal(chooseStartupSession(null, []), null);
   });
 });
+
+/**
+ * 会话标题：谁有权给它改名。
+ *
+ * `update()` 里那句「没给 title 就从首条用户消息现推一个」原本是无条件的，而它跑的频率
+ * 远超想象 —— `persistHistory` 在每轮对话的流式回调里（节流 2 秒）、切会话时、改设置时都会
+ * 走「只带 messages」的持久化。于是凡标题不是来自自己首条消息的会话，都会被下一次持久化
+ * 覆盖掉：子代理被父级起的名字毁掉、用户手动重命名活不过下一轮。
+ *
+ * 正常闲聊看不出来，因为推出来的标题正好等于已存的标题 —— 这也是它藏这么久的原因。
+ * 所以这两条按「对外契约」测，而不是按实现测。
+ */
+describe('会话标题的归属', () => {
+  /** 一次「只带 messages」的持久化，即 `persistHistory` 的形状。 */
+  const plainPersist = (store: SessionStore, id: string, firstUser: string) =>
+    store.update(id, { messages: [msg('user', firstUser), msg('assistant', '收到')] });
+
+  it('父级给子任务起的名字，不会被子任务自己的首条消息顶掉', () => {
+    const store = new SessionStore(dir);
+    // The child's first user message is its handoff brief, not a user-typed sentence.
+    const brief = '## 交接单\n\n- 交付物：一份清单：qa/eng/sample.ts 与 src/main.ts 中每个导出符号';
+    const child = store.create('符号清单核对（只读）', { parentId: 'sess_parent' });
+
+    // The runner persists the transcript WITH the name it was given...
+    store.update(child.id, { title: '符号清单核对（只读）', messages: [msg('user', brief)] });
+    // ...and any later messages-only persist (activate / turn tick / settings save) must not undo it.
+    plainPersist(store, child.id, brief);
+
+    assert.equal(store.get(child.id)?.title, '符号清单核对（只读）');
+  });
+
+  it('用户重命名后，下一轮对话不会把它改回首条消息', () => {
+    const store = new SessionStore(dir);
+    const s = store.create();
+    plainPersist(store, s.id, '帮我把这个函数拆开');
+    assert.equal(store.get(s.id)?.title, '帮我把这个函数拆开');
+
+    store.update(s.id, { title: '重构 len()' });
+    plainPersist(store, s.id, '帮我把这个函数拆开');
+
+    assert.equal(store.get(s.id)?.title, '重构 len()');
+  });
+
+  it('没有名字的会话仍然由首条用户消息命名 —— 否则列表里全是「New chat」', () => {
+    const store = new SessionStore(dir);
+    const s = store.create();
+    assert.equal(store.get(s.id)?.title, 'New chat');
+
+    plainPersist(store, s.id, '先看看这个仓库在做什么');
+
+    assert.match(store.get(s.id)?.title ?? '', /先看看这个仓库在做什么/);
+  });
+
+  it('显式传入的 title 依然生效', () => {
+    const store = new SessionStore(dir);
+    const s = store.create('旧名字');
+    store.update(s.id, { title: '新名字', messages: [msg('user', '随便说点什么')] });
+    assert.equal(store.get(s.id)?.title, '新名字');
+  });
+});

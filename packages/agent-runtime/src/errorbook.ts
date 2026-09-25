@@ -162,8 +162,13 @@ export const ERRORBOOK_ROOT = 'errors';
  * `reflection` is in the yes-list by a different route: it is not a tool failure at all, it is a
  * self-review finding written by `reflection.ts` (drift, over-confidence, a repeated loop). It
  * qualifies for the same test — it is a thing the agent could have done differently.
+ *
+ * Takes a plain string as well as the union, and an UNRECOGNISED kind answers `true`. The two
+ * callers read their kind out of a run trace, where the value is a string that outlived the
+ * version that wrote it; a kind this build has never heard of is a reason to look, not a reason
+ * to silently drop the only record of it.
  */
-export function isWorthRemembering(kind: ErrorbookKind): boolean {
+export function isWorthRemembering(kind: ErrorbookKind | string): boolean {
   if (kind === 'stuck_loop' || kind === 'reflection') return true;
   switch (kind) {
     case 'invalid_args':
@@ -180,11 +185,23 @@ export function isWorthRemembering(kind: ErrorbookKind): boolean {
     case 'timeout':
     case 'rate_limited':
       return false;
+    default:
+      return true;
   }
 }
 
 /** Metadata marker, so a node can be recognised as an entry without guessing from the group. */
 const MARKER = 'errorbook';
+
+/**
+ * Metadata marker for an entry the agent has retired, because it was never a mistake.
+ *
+ * A flag rather than a delete. The entry is evidence about a moment in a session, and deleting it
+ * would destroy the record of what the runtime classified — which is the only thing that can be
+ * used to judge whether the classifier was wrong. Retired means "do not offer this as a lesson
+ * again", and every read (`ranked`, and therefore `lookup`, `count` and the prompt block) honours it.
+ */
+const FORGOTTEN = 'errorForgotten';
 
 /** Kept short on purpose: an entry is a note, and a long one is never read. */
 const MAX_CALL = 200;
@@ -272,7 +289,7 @@ export class ErrorBook {
    * Returns the entry and whether it had been seen before — the caller can decide whether a
    * repeat is worth surfacing, without deriving it from the count.
    */
-  record(report: FailureReport): { entry: ErrorEntry; recurring: boolean } {
+  record(report: FailureReport): { entry: ErrorEntry; recurring: boolean; reopened?: boolean } {
     return this.upsert({
       groupName: toolGroupName(report.tool),
       signature: this.signatureOf(report),
@@ -310,7 +327,7 @@ export class ErrorBook {
    * will read differently (the quoted signals differ) and would otherwise be a new entry every
    * time, which is how a book about habits turns into a log.
    */
-  recordReflection(report: ReflectionReport): { entry: ErrorEntry; recurring: boolean } {
+  recordReflection(report: ReflectionReport): { entry: ErrorEntry; recurring: boolean; reopened?: boolean } {
     const topic = toolGroupName(report.topic);
     return this.upsert({
       groupName: ErrorBook.REFLECTION_GROUP,
@@ -341,7 +358,7 @@ export class ErrorBook {
     detail: string;
     remedy: string | null;
     sessionId: string | null;
-  }): { entry: ErrorEntry; recurring: boolean } {
+  }): { entry: ErrorEntry; recurring: boolean; reopened?: boolean } {
     const groupId = this.groupId(spec.groupName);
     const groupName = `${ERRORBOOK_ROOT}/${spec.groupName}`;
     const now = new Date().toISOString();
@@ -362,11 +379,24 @@ export class ErrorBook {
         remedy: spec.remedy,
         lastSeenAt: now,
       };
+      /*
+       * An entry the agent retired and then hit AGAIN comes back.
+       *
+       * "Not a mistake" was a judgement about that situation, and this is the same thing happening
+       * in a new one — which is worth re-reading, and worth more than the retirement was. Silently
+       * counting it up behind a hidden entry would make the book lie in the other direction: the
+       * agent asked not to be told about a thing, and then the thing turned out to be real.
+       */
+      const carried: Record<string, unknown> = { ...prior.metadata };
+      const reopened = carried[FORGOTTEN] === true;
+      delete carried[FORGOTTEN];
+      delete carried.errorForgottenAt;
+      delete carried.errorForgottenReason;
       this.store.updateMemory(prior.id, {
         title: `${spec.tool} · ${spec.kind} · ${count} 次`,
         content: this.renderContent(entry),
         metadata: {
-          ...prior.metadata,
+          ...carried,
           errorCall: entry.call,
           errorDetail: entry.detail,
           errorRemedy: entry.remedy,
@@ -384,7 +414,7 @@ export class ErrorBook {
        */
       this.store.boostAccess(prior.id);
       this.linkCoOccurrence(prior.id, spec.sessionId);
-      return { entry, recurring: true };
+      return { entry, recurring: true, reopened };
     }
 
     const entry: ErrorEntry = {
@@ -480,6 +510,8 @@ export class ErrorBook {
     for (const g of toolGroups) {
       for (const m of this.store.getMemoriesByGroup(g.id)) {
         if (m.metadata?.[MARKER] !== true) continue;
+        // Retired entries are still in the store — they are only no longer offered as lessons.
+        if (m.metadata?.[FORGOTTEN] === true) continue;
         out.push({
           entry: this.toEntry(m, `${ERRORBOOK_ROOT}/${g.name}`),
           seq: Number(m.metadata?.errorSeq ?? 0),
@@ -569,6 +601,55 @@ export class ErrorBook {
   count(): number {
     return this.allEntries().length;
   }
+
+  /**
+   * Find one entry by id, including retired ones.
+   *
+   * Separate from `lookup` because the two disagree about the one thing this needs to know:
+   * `lookup` answers "what lessons apply", and a retired entry is deliberately not one.
+   */
+  private nodeById(id: string): { node: { id: string; title: string; content: string; metadata: Record<string, unknown> }; group: string } | undefined {
+    const root = this.store.getAllGroups()
+      .find((g) => g.name === ERRORBOOK_ROOT && g.parentGroupId === null);
+    if (!root) return undefined;
+    for (const g of this.store.getAllGroups().filter((x) => x.parentGroupId === root.id)) {
+      const node = this.store.getMemoriesByGroup(g.id)
+        .find((m) => m.id === id && m.metadata?.[MARKER] === true);
+      if (node) return { node, group: `${ERRORBOOK_ROOT}/${g.name}` };
+    }
+    return undefined;
+  }
+
+  /**
+   * Retire an entry that was not a mistake.
+   *
+   * Written for one measured case: the agent runs a test that fails ON PURPOSE, and its own
+   * classifier files the failure as a mistake it made. Every read afterwards repeats the charge —
+   * `errorbook_lookup` answers "you have failed at this three times" about work that went exactly
+   * as designed — and there was no way to say so, because writes belong to the loop and the
+   * loop's judgement is what was wrong. Retiring is the agent's answer to it, and it is the
+   * narrowest one available: the entry stays on disk as evidence about the classifier, and stops
+   * being offered as a lesson.
+   */
+  forget(id: string, reason?: string): { entry: ErrorEntry; already: boolean } | undefined {
+    const hit = this.nodeById(id.trim());
+    if (!hit) return undefined;
+    const entry = this.toEntry(hit.node, hit.group);
+    if (hit.node.metadata?.[FORGOTTEN] === true) return { entry, already: true };
+    const note = oneLine(reason ?? '', MAX_DETAIL);
+    this.store.updateMemory(hit.node.id, {
+      // The prose a reader opens says so too: a retired entry that still read as a live mistake
+      // would be re-filed as one by whoever found it next, this agent included.
+      content: `${hit.node.content}\n\n已退役（${entry.tool} · ${entry.kind}）：${note || '不是我的错误'}`,
+      metadata: {
+        ...hit.node.metadata,
+        [FORGOTTEN]: true,
+        errorForgottenAt: new Date().toISOString(),
+        errorForgottenReason: note || null,
+      },
+    });
+    return { entry, already: false };
+  }
 }
 
 /**
@@ -654,6 +735,47 @@ export function createErrorbookTools(book: ErrorBook): ErrorbookToolSet {
         return lines.join('\n');
       });
       return [header, ...body].join('\n');
+    },
+  );
+
+  reg(
+    {
+      name: 'errorbook_forget',
+      description:
+        'Retire one entry from the error book when it is NOT a mistake you made. The measured case: you run '
+        + 'something that fails ON PURPOSE (an intentional failing test, a deliberate bad input) and the '
+        + 'runtime files the failure as your error, so every later lookup accuses you of it. Pass the `id` '
+        + 'from `errorbook_lookup` and say why. The entry stays on disk but stops being offered, so it will '
+        + 'not distort what you conclude about this project. If the same failure happens again later it '
+        + 'reopens by itself — use this for things you know are by design, not for things you would rather '
+        + 'not hear.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Node id of the entry, as printed by `errorbook_lookup` (the [id] prefix).' },
+          reason: { type: 'string', description: 'Why it is not a mistake — one line, e.g. "an intentional failing test".' },
+        },
+        required: ['id'],
+      },
+    },
+    async (a) => {
+      const id = typeof a.id === 'string' ? a.id.trim() : '';
+      if (!id) {
+        return 'Error: 必须给 id（`errorbook_lookup` 的输出里每条记录前面的 [id]）';
+      }
+      const reason = typeof a.reason === 'string' ? a.reason.trim() : '';
+      const done = book.forget(id, reason);
+      if (!done) {
+        return `错题本里没有 id 为 ${id} 的记录。先 \`errorbook_lookup\` 拿到准确的 id —— `
+          + '凭空退役一条不存在的记录，等于自己给自己一个「已经处理过」的错觉。';
+      }
+      const { entry, already } = done;
+      if (already) {
+        return `[${entry.id}] ${entry.tool} · ${entry.kind} 早就退役过了，没有重复处理。`;
+      }
+      return `已退役 [${entry.id}] ${entry.tool} · ${entry.kind}`
+        + `${reason ? `（${reason}）` : ''}：它不会再出现在 \`errorbook_lookup\` 或提示词里。`
+        + '如果同样的失败再次发生，它会自己重新计数并回来。';
     },
   );
 

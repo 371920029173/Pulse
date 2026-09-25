@@ -21,6 +21,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import { removeTempDir } from './lib/temp.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -28,6 +29,8 @@ const ROOT = resolve(HERE, '..');
 const SERVER_DIR = join(ROOT, 'packages', 'server');
 const SERVER_ENTRY = join(SERVER_DIR, 'dist', 'index.js');
 const PORT = process.env.SHE_TEST_PORT || '5598';
+/** Port for the stub model in section 9 — the server is pointed at it instead of a real provider. */
+const LLM_PORT = Number(PORT) + 1;
 
 if (!existsSync(SERVER_ENTRY)) {
   console.error(`找不到 ${SERVER_ENTRY}\n请先 pnpm -r build`);
@@ -306,6 +309,116 @@ console.log('\n数据安全回归（会启动真实服务，用临时工作区�
       ? `版本 ${after.schema_version}${quarantined.length ? '，但出现了隔离' : ''}`
       : '内容丢失了',
   );
+  removeTempDir(ws);
+}
+
+// ── 9. A request aimed at an unknown session must not land in someone else's ──
+/*
+ * The shape of a real loss: `POST /api/chat {"session_id": "sess_typo"}`.
+ *
+ * `persistHistory` used to have no branch for an id the store did not know, so it fell through to
+ * `syncActive` — which writes into the ACTIVE conversation. Measured: a 29-message conversation was
+ * replaced by the four messages of the request that addressed an unknown id, and the file went from
+ * 786KB to 290KB. The model is a local stub here because what is under test is where the transcript
+ * is written, not what was said.
+ */
+{
+  const ws = makeWorkspace('unknown-id', {
+    schema_version: 'she-sessions/0.1',
+    active_id: 's1',
+    sessions: [
+      {
+        id: 's1', title: '用户正在读的会话',
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+        messages: [{ role: 'user', content: '重要对话一' }, { role: 'assistant', content: '重要回答' }],
+      },
+      {
+        id: 's2', title: '另一个会话',
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+        messages: [{ role: 'user', content: '另一个会话的内容' }],
+      },
+    ],
+  });
+  const file = join(ws, '.she', 'sessions.json');
+  const only = (parsed, ids) => sessionFingerprint({
+    sessions: (parsed?.sessions ?? []).filter((s) => ids.includes(s.id)),
+  });
+
+  const stub = createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: '收到。' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+      }));
+    });
+  });
+  await new Promise((r) => stub.listen(LLM_PORT, '127.0.0.1', r));
+  const child = spawn('node', [SERVER_ENTRY], {
+    cwd: SERVER_DIR,
+    env: {
+      ...process.env,
+      SHE_WORKSPACE: ws,
+      SHE_PORT: PORT,
+      SHE_APP_DIR: join(ws, 'appdir'),
+      SHE_LLM_PROVIDER: 'openai',
+      OPENAI_BASE_URL: `http://127.0.0.1:${LLM_PORT}/v1`,
+      OPENAI_MODEL: 'stub',
+      OPENAI_API_KEY: 'stub-key',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  const healthy = await new Promise((ok) => {
+    const t0 = Date.now();
+    const iv = setInterval(async () => {
+      try {
+        const r = await fetch(`http://127.0.0.1:${PORT}/api/health`, { signal: AbortSignal.timeout(1500) });
+        if (r.ok) { clearInterval(iv); ok(true); return; }
+      } catch { /* not up yet */ }
+      if (Date.now() - t0 > 30_000) { clearInterval(iv); ok(false); }
+    }, 400);
+  });
+
+  const before = only(JSON.parse(readFileSync(file, 'utf8')), ['s1', 's2']);
+  let status = 0;
+  let body = '';
+  if (healthy) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${PORT}/api/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ session_id: 'sess_typo_does_not_exist', message: '你好' }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      status = r.status;
+      body = await r.text();
+    } catch (err) {
+      body = `fetch failed: ${err.message}`;
+    }
+  }
+  await new Promise((r) => setTimeout(r, 1200));
+  try { child.kill(); } catch { /* already gone */ }
+  try { stub.close(); } catch { /* already gone */ }
+  await new Promise((r) => setTimeout(r, 800));
+
+  const after = JSON.parse(readFileSync(file, 'utf8'));
+  const survived = only(after, ['s1', 's2']) === before;
+  const homed = (after.sessions ?? []).some((s) => s.id === 'sess_typo_does_not_exist');
+  record(
+    '【关键】向不存在的 session id 发消息，不改写别的会话（曾把 786KB 历史压成 290KB）',
+    healthy && survived,
+    survived ? '' : `被改写了: ${before} -> ${only(after, ['s1', 's2'])}`,
+  );
+  record(
+    '被寻址的 id 有它自己的归处（要么新建，要么被明确拒绝）',
+    !healthy || homed || status >= 400,
+    `status=${status}${homed ? '，已为它建了会话' : ''}`,
+  );
+  record('屏幕上正在读的会话没有被换掉', after.active_id === 's1', `active_id=${after.active_id}`);
+  if (status >= 400) record('拒绝时说清了为什么', body.length > 0, body.slice(0, 200));
   removeTempDir(ws);
 }
 

@@ -1,4 +1,4 @@
-import type { ToolDefinition } from '@she/shared';
+import type { LLMMessage, ToolDefinition } from '@she/shared';
 
 /**
  * Subagent delegation.
@@ -39,6 +39,16 @@ export interface SubagentRequest {
   isolation?: 'auto' | 'worktree' | 'none';
   /** Structured job description; see `SubagentHandoff`. */
   handoff?: SubagentHandoff;
+  /**
+   * Wall-clock budget for this child, in milliseconds.
+   *
+   * Per task because the right number depends on the job, not on the runtime: a search that reads
+   * twenty files finishes in seconds, a review that runs a full build does not. One global value
+   * made the heavy case impossible to run at all — the measured complaint was a subtask that had
+   * already been trimmed to its smallest form and still hit the 180s ceiling, with the whole run
+   * discarded. Implementations clamp it; the caller states what the task is worth.
+   */
+  timeoutMs?: number;
 }
 
 /**
@@ -68,6 +78,116 @@ export interface SubagentHandoff {
  * changed paths are the point: the parent's transcript never contains the child's editing, so
  * without this list a successful isolated subtask looks identical to one that did nothing.
  */
+/**
+ * A live reading of what a child is doing, taken from its own transcript.
+ *
+ * Exists because a delegated task is the one long-running thing whose intermediate state nobody
+ * could see. The parent is blocked inside a tool call, so it cannot be shown anything mid-flight;
+ * the two audiences that CAN be served are the human watching the spinner and the parent reading
+ * the reply after a timeout. Both are served by the same reading, so it is derived once, here,
+ * from the child's messages — rather than reconstructed by each caller from a private copy.
+ */
+export interface ChildProgress {
+  /** Tool calls it has completed. */
+  steps: number;
+  /** The call it is on right now, one line: `shell pnpm test`. */
+  activity: string;
+  /** The last few calls, oldest first, for a post-mortem. */
+  recent: string[];
+  /** The last thing it said in its own words, newlines folded away. */
+  lastWords?: string;
+}
+
+/**
+ * Argument keys worth showing in a one-line reading, most specific first.
+ *
+ * A tool call's meaning is in one of its arguments, and dumping the whole JSON gives a wall of
+ * escaped text that nobody reads. Order matters: `shell` carries both `command` and `cwd`, and the
+ * command is the part that says what is happening.
+ */
+const SALIENT_ARGS = ['command', 'cmd', 'path', 'file_path', 'pattern', 'query', 'url', 'title'];
+
+/** Collapse to a single line and clip, so one reading is always one line. */
+function oneLine(value: string, max: number): string {
+  const text = value.replace(/\s+/g, ' ').trim();
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+/** The most telling argument of a call, as one line. Empty when there is nothing to show. */
+function shortArg(raw: string): string {
+  if (!raw) return '';
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    for (const key of SALIENT_ARGS) {
+      const value = parsed[key];
+      if (typeof value === 'string' && value.trim()) return oneLine(value, 70);
+    }
+    const first = Object.values(parsed).find((v) => typeof v === 'string' && v.trim());
+    return typeof first === 'string' ? oneLine(first, 70) : '';
+  } catch {
+    // A half-formed argument stream is normal in a live reading; show what arrived.
+    return oneLine(raw, 70);
+  }
+}
+
+export function readChildProgress(messages: LLMMessage[]): ChildProgress {
+  const recent: string[] = [];
+  let lastWords: string | undefined;
+  let steps = 0;
+  for (const m of messages) {
+    if (m.role !== 'assistant') continue;
+    for (const call of m.tool_calls ?? []) {
+      const name = call.function?.name ?? 'tool';
+      const arg = shortArg(call.function?.arguments ?? '');
+      steps++;
+      recent.push(arg ? `${name} ${arg}` : name);
+    }
+    const said = oneLine(m.content ?? '', 200);
+    if (said) lastWords = said;
+  }
+  return {
+    steps,
+    activity: recent.length ? recent[recent.length - 1] : '正在思考（还没有调用工具）',
+    recent: recent.slice(-8),
+    lastWords,
+  };
+}
+
+/**
+ * What the parent is told when a child runs out of time.
+ *
+ * A bare `子任务超时` was the whole reply, and that is the worst possible answer: the parent learns
+ * nothing about 180 seconds of work, so its options collapse to re-dispatching the same task and
+ * paying for it twice. This reports what the child got done, what it said, what it changed, where
+ * its transcript lives, and — the part that prevents a repeat — that the budget itself is a
+ * parameter. The work is stopped either way; the difference is whether it leaves a trace.
+ */
+export function formatTimeoutReport(
+  progress: ChildProgress,
+  opts: { seconds: number; sessionId: string; changed?: string[]; worktreePath?: string },
+): string {
+  const lines = [`子任务超时：${opts.seconds}s 预算用尽，已中止（没有结果返回）。`];
+  if (progress.steps === 0) {
+    lines.push('它一个工具都还没调用完 —— 超时不在工作量上，更可能是它在等模型或卡在某个调用上。');
+  } else {
+    lines.push('');
+    lines.push(`它做到哪一步（超时前最后 ${progress.recent.length} 次调用，共 ${progress.steps} 次）：`);
+    progress.recent.forEach((a, i) => lines.push(`  ${i + 1}. ${a}`));
+  }
+  if (progress.lastWords) lines.push('', `它最后说的是：${progress.lastWords}`);
+  if (opts.changed?.length) {
+    lines.push('', `它已经改动的文件：${opts.changed.join('、')}`);
+    if (opts.worktreePath) lines.push(`（在隔离副本 ${opts.worktreePath} 里，没有合并回主工作区）`);
+  }
+  lines.push(
+    '',
+    `完整过程在子会话 ${opts.sessionId} 里，可以打开看它做了什么。`,
+    '重派时给足预算：这个任务比默认的重。再发一次时带 `timeout_ms`（例如 600000 = 10 分钟），',
+    '或者带 `background: true` —— 那样它不再阻塞本轮，作为独立会话继续跑完。',
+  );
+  return lines.join('\n');
+}
+
 export interface SubagentWorktree {
   path: string;
   branch: string;
@@ -77,11 +197,142 @@ export interface SubagentWorktree {
   note?: string;
 }
 
+/** The slice of a KB node the harvest needs. Structural, so this module needs no KB dependency. */
+export interface HarvestCandidate {
+  title: string;
+  kind: string;
+  content: string;
+  /** `errorbook: true` marks a node the error book wrote, rather than the child. */
+  metadata?: Record<string, unknown>;
+}
+
+/** How many notes the reply lists before it starts pointing at the digest file instead. */
+export const HARVEST_INLINE_MAX = 10;
+const HARVEST_EXCERPT_CHARS = 160;
+
+function clip(value: string, max: number): string {
+  const flat = String(value ?? '').replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/**
+ * Read what a child wrote out of its copy of the knowledge base.
+ *
+ * Everything it wrote, trimmed only by length, so the caller can decide what the reply shows and
+ * what the digest file has to hold. `written` is the count before any trimming, because a list
+ * that has been shortened must not read as "this is all of it".
+ *
+ * Self-review nodes are excluded by their marker rather than by their group: a child's findings
+ * are measured against the PARENT's goal (the child has no `preflight_*` of its own), so most of
+ * them are false alarms about someone else's request. Counting them keeps the fact visible without
+ * handing the parent mistakes it never made.
+ */
+export function selectHarvestNotes(
+  nodes: HarvestCandidate[],
+  opts: { excerptChars?: number } = {},
+): SubagentKbHarvest {
+  const chars = opts.excerptChars ?? HARVEST_EXCERPT_CHARS;
+  const notes: HarvestNote[] = [];
+  let selfReview = 0;
+  for (const n of nodes) {
+    if (n.metadata?.errorbook === true) {
+      selfReview++;
+      continue;
+    }
+    notes.push({
+      title: clip(n.title, 120),
+      kind: String(n.kind ?? ''),
+      excerpt: clip(n.content, chars),
+      content: String(n.content ?? '').trim(),
+    });
+  }
+  return { notes, written: notes.length, selfReview };
+}
+
+/**
+ * The harvest, as lines of the parent's reply.
+ *
+ * Shown next to the child's own answer because it is the other half of what the child produced:
+ * the answer says what it concluded, this says what it wrote down on the way. Empty when there is
+ * nothing to say, so the caller can append it unconditionally.
+ */
+export function renderKbHarvest(harvest: SubagentKbHarvest): string[] {
+  if (!harvest.notes.length && !harvest.selfReview) return [];
+  const lines: string[] = [];
+  const shown = harvest.notes.slice(0, HARVEST_INLINE_MAX);
+  if (shown.length) {
+    lines.push(`- 它在自己的知识库副本里写下的笔记（${harvest.written} 条；副本已随子任务清理，`
+      + '值得留的用 `kb_upsert` 搬进主库，其余就此作废）：');
+    for (const n of shown) lines.push(`  - ${n.title}${n.kind ? `（${n.kind}）` : ''}：${n.excerpt}`);
+    if (harvest.written > shown.length) {
+      lines.push(`  - 还有 ${harvest.written - shown.length} 条没有列在这里。`);
+    }
+    if (harvest.digestPath) {
+      lines.push(`  全文（每条的完整内容，不只是开头）在 ${harvest.digestPath}`);
+    }
+  }
+  if (harvest.selfReview) {
+    lines.push(`- 另有 ${harvest.selfReview} 条它自己的自省记录（漂移、重复失败等）没有并入：`
+      + '那些条目是拿父级的目标衡量子级的动作得出来的，误报居多。');
+  }
+  return lines;
+}
+
+/**
+ * One note a child wrote, clipped to what a parent needs in order to judge it.
+ *
+ * A title and the opening words, not the whole node: the parent is deciding whether to absorb it,
+ * and `kb_upsert` with the same title and content is how it does that. An excerpt that is too
+ * short to tell two notes apart would make the decision a guess.
+ */
+export interface HarvestNote {
+  title: string;
+  kind: string;
+  /** The opening words: what the reply shows, enough to judge whether the note is worth absorbing. */
+  excerpt: string;
+  /** The whole note, unclipped. Kept because the copy it came from is deleted: the digest file is
+   *  the last place this text exists, and a note nobody can read in full is not harvested at all. */
+  content: string;
+}
+
+/**
+ * What a finished child left in its knowledge base.
+ *
+ * Why this exists: a child writes into a PRIVATE copy of the parent's KB (it cannot be allowed to
+ * edit the parent's memory unreviewed), and that copy is discarded when the child ends. Discarding
+ * it silently threw away the one thing the child produced deliberately — its notes — leaving the
+ * conclusions to survive only if the child remembered to repeat them in prose. Reported instead:
+ * the child writes notes as it goes, and the parent gets them as a list it can absorb with one
+ * call each.
+ *
+ * The copy is deleted either way. What is harvested is a reading, not a merge: nothing reaches the
+ * parent's memory without the parent deciding, which is the same rule the child was told.
+ */
+export interface SubagentKbHarvest {
+  /** Notes it wrote, oldest first, each clipped. Everything it wrote, unless a caller trimmed. */
+  notes: HarvestNote[];
+  /** How many notes were written in total — equal to `notes.length` unless trimmed. */
+  written: number;
+  /**
+   * Its own self-review records (drift, repeated failures), left out of `notes`.
+   *
+   * These are entries the runtime writes about the CHILD, judged against the PARENT's goal and
+   * constraints — measured on a read-only child they are mostly false alarms, and absorbing them
+   * would put mistakes the parent never made into the parent's book. Counted rather than dropped
+   * so the parent can see that the child's book was not empty.
+   */
+  selfReview: number;
+  /** File holding the full digest, when it did not fit here. Set by the caller that wrote it. */
+  digestPath?: string;
+}
+
 export interface SubagentResult {
   description: string;
   ok: boolean;
   /** The child's final message, or an error description. */
   result: string;
+  /** What the child wrote into its private knowledge base, before the copy was deleted. */
+  kbHarvest?: SubagentKbHarvest;
   /** Echoed back so the parent can check scope without re-reading the prompt it wrote. */
   handoff?: SubagentHandoff;
   worktree?: SubagentWorktree;
@@ -123,6 +374,32 @@ export interface ComposeOptions {
   workdir: string;
   /** True when `workdir` is a private copy the parent will not see changes in automatically. */
   isolated: boolean;
+  /**
+   * How the child's knowledge base relates to the parent's.
+   *
+   * `snapshot` — a private copy of the parent's KB. Reads work; writes land in the copy and are
+   *   reported back to the parent when the child ends, then the copy is deleted. This is the normal
+   *   case: every child gets its own writable copy, so nothing it writes can reach the parent's
+   *   memory unreviewed and nothing it learns is lost with the copy.
+   * `shared` — the parent's own file, and therefore READ-ONLY for the child. A fallback for when no
+   *   private copy could be created at all: a write there would be a permanent, unreviewed edit to
+   *   the parent's memory, and the alternative is a child that cannot run.
+   * `empty` — there was nothing to copy, or the copy failed.
+   *
+   * Undefined is NOT the same as `shared`: the caller says which it is, and silence means nobody
+   * established it. A child told nothing about its memory has no way to read a "no results" answer
+   * correctly — it cannot tell "this project never recorded that" from "my memory is not here".
+   */
+  kb?: 'snapshot' | 'shared' | 'empty';
+  /**
+   * Wall-clock budget, in seconds. Stated in the brief when known.
+   *
+   * A child that does not know it is on a clock spends its whole budget gathering and is killed
+   * before it writes anything down — the measured failure was a 180s subtask that returned nothing
+   * at all. Telling it the number turns a silent trap into something it can plan around: gather
+   * less, conclude sooner, hand in what it has.
+   */
+  deadlineSeconds?: number;
 }
 
 /**
@@ -153,10 +430,59 @@ export function composeHandoffPrompt(req: SubagentRequest, opts: ComposeOptions)
     lines.push('- 已知情况（父智能体已确认，不必重新验证）：');
     for (const c of context) lines.push(`  - ${c}`);
   }
+  if (opts.deadlineSeconds && opts.deadlineSeconds > 0) {
+    /*
+     * The budget, and what to do about it.
+     *
+     * "Wrap up in time" alone is not actionable — a child that reads it and keeps gathering has
+     * changed nothing. The instruction that matters is the fallback: hand in what you have. An
+     * unfinished conclusion with its evidence beats a complete one that arrives after the kill.
+     */
+    lines.push(
+      `- 时间预算：约 ${Math.round(opts.deadlineSeconds)} 秒，到点会被中止、什么都不会返回。`
+      + '请据此安排：优先做能得出结论的部分，不要把所有时间花在收集上。'
+      + '如果发现做不完，**提前**把已有结论和证据写进交付物交回来，'
+      + '一份「做了一半、说清哪一半没做」的结果远好过一份赶不上的完整结果。',
+    );
+  }
   if (opts.isolated) {
     lines.push(
       '- 你在一个隔离副本里工作：你的改动不会自动进入主工作区。'
       + '正常完成即可，父智能体会按上面列出的路径取用结果 —— 不要尝试自己合并、提交或推送。',
+    );
+  }
+  if (opts.kb === 'snapshot') {
+    /*
+     * The child owns the copy, and what it writes there comes back.
+     *
+     * Both halves matter and both were wrong before. Telling it that writes are discarded left it
+     * deciding whether to spend a call on a note nobody would read; telling it nothing left the
+     * parent absorbing an unreviewed edit. The rule is now a contract with a receiver: write the
+     * reusable conclusions down — they are read once, at the end — and put the work product in the
+     * deliverable, which is what actually reaches the parent's context.
+     */
+    lines.push(
+      '- 你的知识库是**父级库的私有副本**：`kb_query` 查得到父级已知的东西，`kb_upsert` 也能写。'
+      + '你写下的笔记会在你结束时被父级读一遍（副本随后删除），所以值得留的结论要写进去 —— '
+      + '但要写**可复用的结论**（带依据、带路径/命令/数字），不要写过程流水：'
+      + '父级只会看到每条笔记的标题和开头一段。交付物仍然是你交回答案的正路。',
+    );
+  } else if (opts.kb === 'shared') {
+    /*
+     * Sharing the parent's database is the case where the child can read history AND is one call
+     * away from editing it permanently, so silence is the one thing the brief must not do. It is
+     * read-only (see `KBToolOptions.readOnly`), and the reason is worth stating: a child that
+     * understands its memory belongs to someone else stops looking for a way around the refusal.
+     */
+    lines.push(
+      '- 你的知识库就是**父级的活动库**（`kb_query` 查得到父级已知的一切），但它对你是**只读**的：'
+      + '`kb_upsert` / `kb_link` 会拒绝。重要结论写进交付物交回父级，由父级决定是否入库 —— '
+      + '子任务直接写进去的记忆无法复核，事后也分不出是谁写的。',
+    );
+  } else if (opts.kb === 'empty') {
+    lines.push(
+      '- 你的知识库是**空的**（隔离副本里没有历史库文件）。`kb_query` 查不到任何东西是正常的，'
+      + '**不要**据此说「这个项目没有相关记录」：历史事实以交接单和代码本身为准。',
     );
   }
   lines.push('', '## 任务', '', req.prompt.trim());
@@ -170,13 +496,63 @@ export interface SubagentRunner {
    * Must NOT give the child the ability to delegate further — recursion here is
    * unbounded, and each level re-sends a full system prompt, so the cost grows
    * multiplicatively. Implementations are responsible for that guard.
+   *
+   * `hooks.progress` is optional and must be treated as best-effort: a reporter that throws, or
+   * one nobody supplied, must never be able to fail or slow down the subtask it describes.
    */
-  run(req: SubagentRequest, signal?: AbortSignal): Promise<SubagentResult>;
+  run(req: SubagentRequest, signal?: AbortSignal, hooks?: SubagentRunHooks): Promise<SubagentResult>;
+}
+
+/**
+ * The channel a child has for saying "still working, and here is on what".
+ *
+ * Its audience is whoever is NOT blocked: the human watching the spinner, and the UI. The parent
+ * agent cannot read it — it is suspended inside the tool call until that call returns — which is
+ * why a timeout also has to leave a written trace (see `formatTimeoutReport`). These are the two
+ * halves of the same answer to "a long subtask should not be a black box".
+ */
+export interface SubagentRunHooks {
+  progress?: (event: {
+    description: string;
+    elapsedMs: number;
+    steps: number;
+    activity: string;
+  }) => void;
+}
+
+/**
+ * The delegation time budget, in one place.
+ *
+ * The default is the number the tool description quotes, and the clamp is what keeps a caller from
+ * passing `timeout_ms: 86400000` and pinning the parent's turn for a day. The ceiling is high
+ * enough for the heaviest honest job (a full test suite plus a build) and low enough that a
+ * mis-typed zero cannot become an outage.
+ */
+export const DEFAULT_SUBAGENT_TIMEOUT_SECONDS = 180;
+export const MIN_SUBAGENT_TIMEOUT_SECONDS = 30;
+export const MAX_SUBAGENT_TIMEOUT_SECONDS = 30 * 60;
+
+/** Clamp a requested budget, or fall back to the default. Exported so the rule is testable. */
+export function resolveSubagentTimeoutMs(requested: unknown, fallbackSeconds = DEFAULT_SUBAGENT_TIMEOUT_SECONDS): number {
+  const fallback = fallbackSeconds * 1000;
+  const n = Number(requested);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(Math.max(n, MIN_SUBAGENT_TIMEOUT_SECONDS * 1000), MAX_SUBAGENT_TIMEOUT_SECONDS * 1000);
+}
+
+export interface SubagentProgressEvent {
+  phase: 'start' | 'done' | 'heartbeat';
+  description: string;
+  ok?: boolean;
+  /** heartbeat only: the reading from `readChildProgress`. */
+  steps?: number;
+  activity?: string;
+  elapsedMs?: number;
 }
 
 export interface SubagentToolOptions {
-  /** Called as each subtask starts/finishes, so the UI can show progress. */
-  onProgress?: (event: { phase: 'start' | 'done'; description: string; ok?: boolean }) => void;
+  /** Called as each subtask starts, ticks, and finishes, so the UI can show progress. */
+  onProgress?: (event: SubagentProgressEvent) => void;
 }
 
 export interface SubagentToolSet {
@@ -201,6 +577,16 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
       'git worktree, so it cannot race you or its siblings on the same paths. A read-only child runs',
       'in this checkout and sees your uncommitted work.',
       'Prefer 1-2 focused subtasks over many; each one re-sends the full system prompt and costs accordingly.',
+      '',
+      'Each child writes into a PRIVATE copy of this workspace\'s knowledge base. When it ends, the notes it',
+      'wrote are listed back to you (title + opening lines) and the copy is deleted — so telling a child to',
+      'record reusable findings with `kb_upsert` is useful rather than pollution: it hands you notes to absorb',
+      'with one call each, and you decide what goes into your own memory.',
+      '',
+      `Budget: each child is stopped after ${DEFAULT_SUBAGENT_TIMEOUT_SECONDS}s by default and returns NO result when that happens`,
+      '(you get a report of what it had done so far, not its findings). A child is heavy work — running tests,',
+      'reading many files — so give an expensive one its own budget with `timeout_ms`, or pass `background: true`',
+      'if you do not need the answer in this turn.',
     ].join('\n'),
     parameters: {
       type: 'object',
@@ -256,6 +642,14 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
                   "auto (default): a private worktree when `scope` is given, otherwise this checkout. " +
                   "worktree: force isolation. none: force sharing this checkout.",
               },
+              timeout_ms: {
+                type: 'number',
+                description:
+                  `How long this child may run, in milliseconds (default ${DEFAULT_SUBAGENT_TIMEOUT_SECONDS * 1000}). `
+                  + `Clamped to ${MIN_SUBAGENT_TIMEOUT_SECONDS}s..${MAX_SUBAGENT_TIMEOUT_SECONDS / 60_000}min. `
+                  + 'Set it for a task you expect to be heavy — a full build, a test suite, a wide search. '
+                  + 'A child that hits the ceiling returns no findings, only a report of what it had done.',
+              },
             },
             required: ['description', 'prompt'],
           },
@@ -289,6 +683,20 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
           background: o.background === true,
           isolation,
           handoff: Object.values(handoff).some(Boolean) ? handoff : undefined,
+          /*
+           * Clamped, not rejected. A budget that is out of range is a caller saying "give it a
+           * lot" or "keep it short", not an argument error worth a round-trip — and refusing would
+           * turn a heavy task back into an unrunnable one, which is the bug this parameter exists
+           * to fix.
+           *
+           * An ABSENT budget stays absent, rather than being filled in with the default here. The
+           * default belongs to the runtime that enforces it: filling it in at this layer made the
+           * runtime's own default unreachable — an operator's configured budget was silently
+           * replaced by this constant, so the setting could not be lowered or raised at all.
+           */
+          timeoutMs: o.timeout_ms === undefined || o.timeout_ms === null
+            ? undefined
+            : resolveSubagentTimeoutMs(o.timeout_ms),
         };
       })
       .filter((t) => t.prompt);
@@ -316,7 +724,23 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
       tasks.map(async (t) => {
         opts?.onProgress?.({ phase: 'start', description: t.description });
         try {
-          const r = await runner.run(t);
+          /*
+           * The heartbeat is forwarded, not swallowed.
+           *
+           * The parent agent cannot read it — it is blocked in this tool call — but the human
+           * watching a subtask that has run for two minutes can, and so can the task card. Passing
+           * it through costs one callback and is the difference between "it is working" and "it is
+           * hung" for everyone who is not the model.
+           */
+          const r = await runner.run(t, undefined, {
+            progress: (p) => opts?.onProgress?.({
+              phase: 'heartbeat',
+              description: p.description,
+              steps: p.steps,
+              activity: p.activity,
+              elapsedMs: p.elapsedMs,
+            }),
+          });
           opts?.onProgress?.({ phase: 'done', description: t.description, ok: r.ok });
           return r;
         } catch (err) {
@@ -353,6 +777,13 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
       }
       lines.push('');
       lines.push(r.result.trim());
+      if (r.kbHarvest) {
+        const harvest = renderKbHarvest(r.kbHarvest);
+        if (harvest.length) {
+          lines.push('');
+          lines.push(...harvest);
+        }
+      }
       lines.push('');
     }
     lines.push(

@@ -353,6 +353,25 @@ export class KBStore {
     return group.memoryIds.map(id => this.getMemory(id)).filter((m): m is MemoryNode => m !== undefined);
   }
 
+  /**
+   * Every memory CREATED at or after `since`, oldest first.
+   *
+   * Exists for the harvest a delegated child's notes go through: a child works on a private copy of
+   * this database, and when it ends the parent needs to know what it wrote before the copy is
+   * deleted. `created_at` and not `updated_at` on purpose — group maintenance moves memories
+   * between groups with `updateMemory`, which stamps `updated_at`, so an updated-since filter would
+   * report the parent's own older notes as "written by the child" and invite the parent to absorb
+   * things it already had.
+   *
+   * The caller supplies the timestamp it took BEFORE the copy was made, so the boundary is its
+   * own decision rather than something inferred here.
+   */
+  memoriesCreatedSince(since: number): MemoryNode[] {
+    const rows = this.stmt('SELECT * FROM memories WHERE created_at >= ? ORDER BY created_at ASC')
+      .all(since) as MemoryRow[];
+    return rows.map(rowToMemory);
+  }
+
   getEdgesBetween(a: string, b: string): Edge[] {
     const rows = this.db.prepare(
       'SELECT * FROM edges WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)'
@@ -587,7 +606,44 @@ export class KBStore {
     return this.getMemory(id)!;
   }
 
+  /**
+   * Remove a memory — and everything that still names it.
+   *
+   * A bare `DELETE FROM memories` leaves the graph inconsistent, and nothing downstream repairs it:
+   *
+   *   - **Edges** keep a `source_id` / `target_id` for a row that no longer exists. These are the
+   *     dangerous half. Resonance traversal follows an edge and then looks up its far end, so a
+   *     dangling edge is either a step that lands on nothing or a crash, depending on the caller —
+   *     and the `co_occurrence` edges the error book writes mean every deletion of a book entry
+   *     leaves some behind.
+   *   - **The group still lists the id** in `memory_ids`, so counts and any UI reading the group
+   *     disagree with the table. Nodes in a group the delete did not go through — a dormant sweep,
+   *     a merge — leave it behind with no code path that would ever clean it.
+   *
+   * Found by deleting rows out of a live database and then asking it what it thought it had: five
+   * edges pointed at four memories that were gone, and the group they were filed under still named
+   * all four. Deleting one node has to mean one node.
+   */
   deleteMemory(id: string): void {
+    const doomedEdges = this.db.prepare(
+      'SELECT id FROM edges WHERE source_id = ? OR target_id = ?',
+    ).all(id, id) as { id: string }[];
+    const cut = new Set(doomedEdges.map((e) => e.id));
+    this.db.prepare('DELETE FROM edges WHERE source_id = ? OR target_id = ?').run(id, id);
+
+    // Snapshot first: `updateGroup` invalidates the group cache on every call.
+    for (const group of this.getAllGroups()) {
+      const member = group.memoryIds.includes(id);
+      const weak = group.weakEdgeIds.some((e) => cut.has(e));
+      const cross = group.crossGroupEdgeIds.some((e) => cut.has(e));
+      if (!member && !weak && !cross) continue;
+      this.updateGroup(group.id, {
+        memoryIds: group.memoryIds.filter((m) => m !== id),
+        weakEdgeIds: group.weakEdgeIds.filter((e) => !cut.has(e)),
+        crossGroupEdgeIds: group.crossGroupEdgeIds.filter((e) => !cut.has(e)),
+      });
+    }
+
     this.db.prepare('DELETE FROM memories WHERE id = ?').run(id);
     this.lexical = null;
     this.invalidateMemory(id);

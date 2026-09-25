@@ -105,11 +105,30 @@ export function createMemoTools(workspaceRoot: string): {
     },
     async (a) => {
       const list = store.list();
+      const hidden = list.filter((m) => m.done).length;
       const shown = a.includeDone === true ? list : list.filter((m) => !m.done);
-      if (!shown.length) return '备忘录为空。';
-      return shown
+      /*
+       * Never let "nothing to show" read as "nothing was ever written".
+       *
+       * With completed items filtered out, a scratchpad whose entries are all done answered
+       * `备忘录为空。` — a false statement about the world, in the one voice the model trusts. An
+       * agent told the memo is empty re-notes what it already noted, or reports that the user never
+       * recorded anything. The count and the way to see them are stated instead.
+       */
+      if (!shown.length) {
+        if (hidden) {
+          return `备忘录里 ${hidden} 条都已标记完成（默认不列出）。要看就带 includeDone=true。`;
+        }
+        return '备忘录为空。';
+      }
+      const body = shown
         .map((m) => `${m.done ? '[x]' : '[ ]'} ${m.id}  (${m.author === 'user' ? '用户' : '智能体'})  ${m.text}`)
         .join('\n');
+      // Cheap honesty: one line, only when something is actually being withheld.
+      const hiddenDone = a.includeDone === true ? 0 : hidden;
+      return hiddenDone
+        ? `${body}\n（另有 ${hiddenDone} 条已完成未列出，includeDone=true 可见）`
+        : body;
     },
   );
 

@@ -25,7 +25,7 @@
  */
 import { request } from 'node:http';
 import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, rmSync, existsSync, readdirSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
@@ -130,6 +130,8 @@ async function kill() {
 }
 
 workspace = mkdtempSync(join(tmpdir(), 'she-restart-'));
+// Extra roots created by the checks themselves; removed with the workspace on success.
+const scratchDirs = [];
 appDir = join(workspace, 'appdir');
 mkdirSync(join(workspace, '.she'), { recursive: true });
 mkdirSync(appDir, { recursive: true });
@@ -160,6 +162,48 @@ const created = {};
   check('设置写入返回 200', r.status === 200, `status=${r.status}`);
 }
 
+/*
+ * 1b. The KB field is an ECHO, not an instruction.
+ *
+ * The settings form is filled with the RESOLVED path (`<workspace>/.she/kb.sqlite`) and sent on
+ * every save, so whatever is in it gets bound. Two ways that goes wrong, both silently:
+ * the plain default gets pinned as a "shared library" (breaks when the folder is moved), and a
+ * workspace switch carries the OLD workspace's path into the new one — welding two projects onto
+ * one knowledge base, which is the exact opposite of what per-workspace KBs are for.
+ */
+{
+  const localKb = join(workspace, '.she', 'kb.sqlite');
+  const before = json(await raw('/api/kb/link'));
+  check('前提：这个工作区的知识库是本地的', before?.mode === 'local', JSON.stringify(before));
+
+  const r = await raw('/api/settings', { method: 'PUT', body: { kbDbPath: localKb } });
+  check('保存时回显本工作区默认路径 → 200', r.status === 200, `status=${r.status}`);
+  const after = json(await raw('/api/kb/link'));
+  check('【关键】回显默认路径不会被钉成「共享库」',
+    after?.mode === 'local', JSON.stringify(after));
+  check('【关键】也没有凭空写出 kb-link.json',
+    !existsSync(join(workspace, '.she', 'kb-link.json')), 'kb-link.json 存在');
+
+  // A workspace switch in the same save: the field still holds the previous workspace's path.
+  const ws2 = join(dirname(workspace), `${basename(workspace)}-ws2`);
+  mkdirSync(join(ws2, '.she'), { recursive: true });
+  const r2 = await raw('/api/settings', { method: 'PUT', body: { workspaceRoot: ws2, kbDbPath: localKb } });
+  check('切换工作区时保存 → 200', r2.status === 200, `status=${r2.status}`);
+  const link2 = json(await raw('/api/kb/link'));
+  check('【关键】新工作区拿到自己的库，而不是旧工作区那一份',
+    resolve(link2?.dbPath ?? '') === resolve(join(ws2, '.she', 'kb.sqlite')), JSON.stringify(link2));
+  check('【关键】新工作区没有 kb-link.json',
+    !existsSync(join(ws2, '.she', 'kb-link.json')), 'kb-link.json 存在');
+
+  // Back to the original root, so every later assertion is about the same workspace.
+  await raw('/api/settings', { method: 'PUT', body: { workspaceRoot: workspace, kbDbPath: '' } });
+  const back = json(await raw('/api/settings'));
+  check('前提：工作区已切回原根', resolve(back?.workspace?.root ?? '') === resolve(workspace),
+    JSON.stringify(back?.workspace));
+  check('前提：切回后知识库仍是本工作区那份',
+    resolve(json(await raw('/api/kb/link'))?.dbPath ?? '') === resolve(localKb), '');
+  scratchDirs.push(ws2);
+}
 // 2. Skill profile.
 {
   const r = await raw('/api/skills/profile', { method: 'PUT', body: { profile: 'liberal' } });
@@ -492,7 +536,9 @@ await kill();
  * to look at but the symptom. The path is printed so it can be opened directly.
  */
 if (results.every((r) => r.ok)) {
-  try { rmSync(workspace, { recursive: true, force: true }); } catch { /* ignore */ }
+  for (const dir of [...scratchDirs, workspace]) {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
 } else {
   console.log(`\n  （有失败，保留工作区以便排查：${workspace}）`);
 }

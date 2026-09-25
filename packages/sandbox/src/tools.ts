@@ -35,19 +35,84 @@ function normalizeCommitCount(value: unknown): number {
   return Math.min(Math.trunc(n), MAX_COMMIT_COUNT);
 }
 
+/**
+ * Drop a leading UTF-8 BOM from text read out of the workspace.
+ *
+ * PowerShell's `Set-Content`/`Out-File` write one on Windows, so any file the agent creates through
+ * the shell — or that a user last saved in Notepad — can begin with U+FEFF. Node's `utf8` decoder
+ * does NOT remove it, which makes it a character like any other: invisible, and real. Three things
+ * then go wrong, in the order they bite:
+ *
+ *   1. `grep` misses the first line for a `^`-anchored pattern, because that line begins with
+ *      U+FEFF and not with the text being searched for.
+ *   2. The model receives that invisible character as part of the content and counts it as a column
+ *      on line 1 — so a column taken from `fs_read` is one past what the language server reports for
+ *      the same file (LSP positions are computed on the parsed document, which has no BOM). One
+ *      character of drift, silently, on every diagnostic in the first line.
+ *   3. Text repeated back in a write re-creates the BOM.
+ *
+ * Only the FIRST character is considered: a U+FEFF anywhere else is content, and stripping those
+ * would corrupt a file that uses them as a zero-width no-break space.
+ *
+ * Every other reader in this codebase already does this (`plan-tools`, `preflight`, `audit`,
+ * `run-trace`, `plugins`, `ingest-tools`, `checkpoints`, `memo-tools`, the theme store). The reading
+ * tools — the ones an agent actually inspects source with — were the ones that did not, and it cost
+ * a real turn during a live run.
+ */
+function withoutBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
 export interface ToolSet {
   definitions: ToolDefinition[];
   execute: (name: string, args: Record<string, unknown>) => Promise<string>;
 }
 
-export function createTools(shell: SandboxShell, workspaceRoot: string, opts?: { allowAllCommands?: boolean }): ToolSet {
+
+/**
+ * Why raw access to the knowledge base is refused rather than merely discouraged.
+ *
+ * Written as instructions to the reader, because the reader is a model that has just been
+ * told "no" and needs to know which call to make instead. `kb_query` is not a convenience
+ * wrapper around a SELECT: it ranks by resonance and records the access, so a raw read
+ * returns rows in an order nothing downstream can use and leaves the ranking unchanged.
+ */
+const KB_DIRECT_ACCESS_REASON =
+  '知识库文件只能通过 kb_* 工具访问：直读直写会跳过共振排序、不计访问计数，'
+  + '还可能锁住服务端已打开的库文件。查用 kb_query，写用 kb_upsert / kb_link。';
+
+export function createTools(
+  shell: SandboxShell,
+  workspaceRoot: string,
+  opts?: { allowAllCommands?: boolean; kbDbPath?: string },
+): ToolSet {
   const allowAll = Boolean(opts?.allowAllCommands);
   const root = resolve(workspaceRoot);
+
+  // Off-limits to `shell` and `fs_*`; reachable through the `kb_*` tools that own it.
+  if (opts?.kbDbPath) shell.protectDatabase(opts.kbDbPath, KB_DIRECT_ACCESS_REASON);
 
   const toolMap = new Map<string, { def: ToolDefinition; fn: (args: Record<string, unknown>) => Promise<string> }>();
 
   function reg(def: ToolDefinition, fn: (args: Record<string, unknown>) => Promise<string>) {
     toolMap.set(def.name, { def, fn });
+  }
+
+  /**
+   * Refusal text for a call that reaches for a protected file, or null to let it through.
+   *
+   * Covers both spellings of the same intent: a `shell` command that names the file, and an
+   * `fs_*` call whose `path` argument resolves to it.
+   */
+  function protectedRefusal(name: string, args: Record<string, unknown>): string | null {
+    if (name === 'shell') {
+      const reason = shell.protectedReasonInCommand(String(args.command ?? ''));
+      return reason ? `DENIED: ${reason}` : null;
+    }
+    const requested = typeof args.path === 'string' ? args.path : null;
+    if (!requested) return null;
+    const reason = shell.protectedReasonFor(requested);
+    return reason ? `Error: ${reason}` : null;
   }
 
   // ── shell ─────────────────────────────────────────────────────────────────
@@ -98,7 +163,7 @@ export function createTools(shell: SandboxShell, workspaceRoot: string, opts?: {
     },
     async (args) => {
       const filePath = shell.validatePath(args.path as string);
-      const content = await readFile(filePath, 'utf-8');
+      const content = withoutBom(await readFile(filePath, 'utf-8'));
       const startLine = args.startLine as number | undefined;
       const endLine = args.endLine as number | undefined;
 
@@ -133,7 +198,9 @@ export function createTools(shell: SandboxShell, workspaceRoot: string, opts?: {
       const next = String(args.content ?? '');
       let before = '';
       try {
-        before = await readFile(filePath, 'utf-8');
+        // Stripped like `fs_read`, so the preview does not report a phantom change on line 1 for a
+        // file whose only difference is the BOM the user's editor left behind.
+        before = withoutBom(await readFile(filePath, 'utf-8'));
       } catch {
         before = '';
       }
@@ -246,7 +313,7 @@ export function createTools(shell: SandboxShell, workspaceRoot: string, opts?: {
           }
           let text: string;
           try {
-            text = await readFile(full, 'utf8');
+            text = withoutBom(await readFile(full, 'utf8'));
           } catch {
             continue;
           }
@@ -261,7 +328,7 @@ export function createTools(shell: SandboxShell, workspaceRoot: string, opts?: {
 
       const st = await stat(searchPath);
       if (st.isFile()) {
-        const text = await readFile(searchPath, 'utf8');
+        const text = withoutBom(await readFile(searchPath, 'utf8'));
         const lines = text.split(/\r?\n/);
         for (let i = 0; i < lines.length; i++) {
           if (re.test(lines[i]!)) matches.push(`${relative(root, searchPath)}:${i + 1}:${lines[i]}`);
@@ -548,6 +615,18 @@ async function execute(name: string, args: Record<string, unknown>): Promise<str
     if (!entry) {
       return `Error: unknown tool "${name}"`;
     }
+
+    /*
+     * Protected files are refused BEFORE the confirmation gate.
+     *
+     * Order matters and is the whole point of doing it here. Behind the gate, the model's
+     * request reaches the user as a plain "write .she/kb.sqlite" card, and approving it
+     * lets raw access happen — the rule is not "ask first", it is "not this way". The
+     * refusal names the tool to use instead, which is what the model needs to move on.
+     */
+    const refused = protectedRefusal(name, args);
+    if (refused) return refused;
+
     try {
       if (entry.def.isDangerous && !allowAll) {
         const ticketId = typeof args._confirm_ticket === 'string' ? args._confirm_ticket : undefined;

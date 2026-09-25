@@ -186,6 +186,34 @@ console.log('\n4. 任务定义校验（负例必须真的被判出来）');
   const noTool = validateTasks([{ id: 't', prompt: 'x', check: { type: 'toolCallsInclude' } }], { knownChecks: AGENT_CHECKS });
   check('toolCallsInclude 没给 tool → 报出来', /需要非空 tool/.test(noTool.join('\n')), noTool.join('\n'));
 
+  /*
+   * `toolCallsExclude` — the "must NOT have run" half. Validated for the same reason as the
+   * include half: `tools: []` would exclude nothing while reading as if it excluded everything.
+   */
+  const noTools = validateTasks([{ id: 't', prompt: 'x', check: { type: 'toolCallsExclude' } }], { knownChecks: AGENT_CHECKS });
+  check('toolCallsExclude 没给 tools → 报出来', /需要非空 tools 数组/.test(noTools.join('\n')), noTools.join('\n'));
+  const emptyTools = validateTasks([{ id: 't', prompt: 'x', check: { type: 'toolCallsExclude', tools: [] } }], { knownChecks: AGENT_CHECKS });
+  check('【关键】toolCallsExclude 的 tools: [] 不合法（空列表等于什么都没排除）',
+    /需要非空 tools 数组/.test(emptyTools.join('\n')), emptyTools.join('\n'));
+  const blankTool = validateTasks([{ id: 't', prompt: 'x', check: { type: 'toolCallsExclude', tools: [' '] } }], { knownChecks: AGENT_CHECKS });
+  check('toolCallsExclude 的 tools 里有空项 → 报出来', /有空项/.test(blankTool.join('\n')), blankTool.join('\n'));
+  const okExclude = validateTasks([{ id: 't', prompt: 'x', check: { type: 'toolCallsExclude', tools: ['shell'] } }], { knownChecks: AGENT_CHECKS });
+  check('toolCallsExclude 的正例不报问题', okExclude.length === 0, okExclude.join('\n'));
+
+  /*
+   * `kb` — seeded memories. A task that asks about a fact nobody can see only means something if the
+   * fact is really seeded, so the shape is validated before an API call is spent on it.
+   */
+  const kbNotArray = validateTasks([{ id: 'k', prompt: 'x', kb: { groupName: 'g' }, check: { type: 'fileAbsent', path: 'a' } }], {});
+  check('kb 不是数组 → 报出来', /kb 不是数组/.test(kbNotArray.join('\n')), kbNotArray.join('\n'));
+  const kbMissing = validateTasks([{ id: 'k', prompt: 'x', kb: [{ groupName: 'g', title: 't' }], check: { type: 'fileAbsent', path: 'a' } }], {});
+  check('kb 条目缺 content → 报出来（否则种进去的是条空记忆，任务看着却是对的）',
+    /kb\[0\] 的 content 缺失或为空/.test(kbMissing.join('\n')), kbMissing.join('\n'));
+  const kbBlank = validateTasks([{ id: 'k', prompt: 'x', kb: [{ groupName: 'g', title: ' ', content: 'c' }], check: { type: 'fileAbsent', path: 'a' } }], {});
+  check('kb 条目里有空字符串 → 报出来', /kb\[0\] 的 title 缺失或为空/.test(kbBlank.join('\n')), kbBlank.join('\n'));
+  const kbOk = validateTasks([{ id: 'k', prompt: 'x', kb: [{ groupName: 'g', title: 't', content: 'c' }], check: { type: 'fileAbsent', path: 'a' } }], {});
+  check('kb 的正例不报问题（没有 kb 字段的任务照旧合法）', kbOk.length === 0, kbOk.join('\n'));
+
   const good = validateTasks([{ id: 'long-horizon-x', turns: ['a', 'b', 'c', 'd'], check: { type: 'fileContains', path: 'p', expect: ['x'] } }], { knownChecks: AGENT_CHECKS });
   check('正例不报问题（校验器不能什么都拦）', good.length === 0, good.join('\n'));
 
@@ -265,6 +293,32 @@ console.log('\n5. 仓库里的真实任务');
   check('委派任务仍然断言交付内容正确（不只看路径）',
     checksOf(delegation).some((c) => c.type === 'fileContains'),
     JSON.stringify(checksOf(delegation)));
+
+  /*
+   * The KB tasks, pinned by name for the same reason as the two above.
+   *
+   * Both of their claims are about the METHOD — did it query, did it avoid the raw file — and
+   * without these assertions the tasks could be edited into something that still passes while
+   * measuring nothing (the seeding could be dropped, or the exclusion list emptied).
+   */
+  const proactive = agentTasks.find((t) => t.id === 'kb-proactive-recall');
+  check('【关键】主动检索任务真的有种子记忆（答案不在工作区文件里，否则查不查都能答对）',
+    Array.isArray(proactive?.kb) && proactive.kb.length > 0, JSON.stringify(proactive?.kb));
+  check('【关键】主动检索任务断言真的调用了 kb_query（否则「不主动检索」这个故障抓不到）',
+    checksOf(proactive).some((c) => c.type === 'toolCallsInclude' && c.tool === 'kb_query'),
+    JSON.stringify(checksOf(proactive)));
+  check('主动检索任务同时断言答对了（调了但没用上等于白调）',
+    checksOf(proactive).some((c) => c.type === 'replyContains'),
+    JSON.stringify(checksOf(proactive)));
+
+  const noRaw = agentTasks.find((t) => t.id === 'kb-no-raw-sqlite');
+  check('【关键】禁止直查库的任务把 shell / fs_read / fs_write 都排除了',
+    checksOf(noRaw).some((c) => c.type === 'toolCallsExclude'
+      && ['shell', 'fs_read', 'fs_write'].every((n) => c.tools.includes(n))),
+    JSON.stringify(checksOf(noRaw)));
+  check('禁止直查库的任务也断言了真的经 kb_query 拿到答案',
+    checksOf(noRaw).some((c) => c.type === 'toolCallsInclude' && c.tool === 'kb_query'),
+    JSON.stringify(checksOf(noRaw)));
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

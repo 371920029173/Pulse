@@ -26,9 +26,21 @@
  *   - **只读任务不发警告。** 只读子任务是大多数，它们没有要求过隔离；每条回执都挂一条「未隔离」
  *     会让这条警告在真正需要它的那一次失效。
  *
+ *   - **子级的知识库不许是空的。** 副本只拉 tracked 文件，`.she/` 从来不在里面，所以隔离过的子级
+ *     原本打开的是一个刚建的空库 —— 提示词却写着「组结构知识库是默认记忆」，于是它对父级刚描述过的
+ *     项目回答「查不到记录」，而它自己分不清这到底是「项目没有这条」还是「我的记忆被重置了」。
+ *     现在快照父级库给它，并在交接单里说明快照的语义（写入不回父级）。
+ *   - **知识库文件只经 `kb_*` 工具访问。** 实测里模型会从会话历史里学会 `sqlite3 .she/kb.sqlite
+ *     "SELECT …"` 绕过引擎：直读不计访问、不走共振排序，直写跳过分裂/压缩/去重，还和正在跑的库
+ *     并发写。提示词要在模型读规则的地方把这条路封掉。
+ *   - **共享父级库的子任务不许写。** 隔离只在声明了 `scope` 的写任务上生效，所以只读子任务恰恰是
+ *     共享父级活动库的那个 —— 它拿到的记忆规则和父级一样，写进去的节点又没有来源标记。这段在真
+ *     server 上让子级去 `kb_upsert` 一次，然后直接读父级库文件确认那条记忆不存在，同时确认读还通
+ *     （只读不能变成失忆）。
+ *
  *   node scripts/subagent-isolation-check.mjs
  */
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, realpathSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -57,10 +69,13 @@ const check = (label, cond, detail) => {
   }
 };
 
-const { shouldIsolate, composeHandoffPrompt, createSubagentTools } =
+const { shouldIsolate, composeHandoffPrompt, createSubagentTools, getSystemPrompt } =
   await import(pathToFileURL(join(AGENT_DIR, 'dist', 'index.js')).href);
 const { addWorktree, changedFiles, isGitRepo, removeWorktree, transferLocalChanges } =
   await import(pathToFileURL(join(SERVER_DIR, 'dist', 'worktrees.js')).href);
+const { KBStore, GroupKBEngine } = await import(pathToFileURL(join(ROOT, 'packages', 'kb', 'dist', 'index.js')).href);
+const { loadConfig } = await import(pathToFileURL(join(ROOT, 'packages', 'shared', 'dist', 'index.js')).href);
+const KB_CFG = loadConfig(ROOT).kb;
 
 const dirs = [];
 const tempDir = (tag) => {
@@ -563,6 +578,11 @@ if (!live2.ok) {
     const detail2 = await (await live2.api(`/api/sessions/${child2.id}`)).json();
     check('【关键】子级确实在共享工作区里跑（这与上面那句警告必须一致）',
       canon(detail2?.directory ?? '') === canon(ws2), `${detail2?.directory} vs ${ws2}`);
+    // The KB rule is the same one section 7 asserts positively: a shared workspace means the
+    // parent's KB, so saying "snapshot" or "empty" here would be a lie the child cannot check.
+    const brief2 = String((detail2?.messages ?? []).find((m) => m.role === 'user')?.content ?? '');
+    check('共享工作区的子级不说「快照副本 / 空库」（共享就是共享父级的库）',
+      !/快照副本/.test(brief2) && !/你的知识库是\*\*空的\*\*/.test(brief2), brief2.slice(0, 300));
   }
 
   const wtRoot2 = join(dirname(ws2), '.she-worktrees');
@@ -571,6 +591,846 @@ if (!live2.ok) {
 }
 
 await live2.stop();
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 7. 知识库接缝：提示词只许走 kb_*，子任务的知识库是私有副本且跑完就清
+ *
+ * 上面几段钉的是「子级改的文件落在哪」。这一段钉的是「子级知道的东西从哪来」—— 两件事都属
+ * 「隔离」，但之前只验了前一件：一个被关进副本的子级如果连父级的记忆都看不到，它改出来的东西
+ * 就是在一个它认为「项目没有历史」的世界里做出的判断。
+ *
+ * 这一段的前半（提示词只许走 `kb_*`）是静态的，后半（副本放在哪、跑完在不在）走真 server。
+ * 「子级读得到父级记忆」和「子级写下的笔记被收割」在第 9 段断言 —— 那里模型 stub 会让子级
+ * 真的去调 `kb_query` / `kb_upsert`，比在这里读文件更接近用户看到的东西。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+console.log('\n7. 子任务知识库：私有副本、放在副本目录外、跑完就清');
+
+{
+  // The rule has to sit where the model reads it, in both languages: the Chinese KB block is what
+  // the KB rules are written in, the English one is what the tool list and core rules use.
+  const prompt = getSystemPrompt(ROOT);
+  check('【关键】提示词禁止用 shell / fs_* 直读直写知识库文件',
+    /知识库文件只许经/.test(prompt) && /不要用 `shell`/.test(prompt), null);
+  check('【关键】提示词说明理由（直读不计访问计数、绕过共振排序）',
+    /访问计数/.test(prompt) && /共振排序|结构共振排序/.test(prompt), null);
+  check('Core Rules 里也有一条把这条路封掉', /Reach the KB only through/.test(prompt), null);
+  check('工具清单里 kb_query 自己就写明「只此一条路」', /never poke the sqlite file/.test(prompt), null);
+}
+
+const KB_SEED_TITLE = '父级已知的事实';
+const KB_SEED_MARKER = 'MARKER-KB-SEED';
+
+const kbRoot = tempDir('kbroot');
+const ws3 = join(kbRoot, 'ws');
+mkdirSync(ws3, { recursive: true });
+git(ws3, ['init']);
+git(ws3, ['config', 'user.email', 'she-check@example.invalid']);
+git(ws3, ['config', 'user.name', 'she-check']);
+writeFileSync(join(ws3, '.gitignore'), '.she/\nappdir/\n', 'utf8');
+writeFileSync(join(ws3, 'README.md'), '# 示例项目\n', 'utf8');
+git(ws3, ['add', '-A']);
+git(ws3, ['commit', '-m', 'init']);
+check('前提：这个工作区是 git 仓库（否则不会开副本）', isGitRepo(ws3) === true, null);
+
+const parentKb = join(ws3, '.she', 'kb.sqlite');
+mkdirSync(join(ws3, '.she'), { recursive: true });
+{
+  // Seeded out-of-band so the check does not depend on a model choosing to write knowledge.
+  const store = new KBStore(parentKb);
+  const engine = new GroupKBEngine(store, { ...KB_CFG, dbPath: parentKb });
+  const group = engine.createGroup('project/seed');
+  engine.addMemory(group.id, 'fact', KB_SEED_TITLE, `${KB_SEED_MARKER}：父级库里的唯一线索。`);
+  store.close();
+}
+const kbCount = (p) => {
+  const s = new KBStore(p);
+  const n = s.getStats().totalMemories;
+  s.close();
+  return n;
+};
+check('前提：父级库里有 1 条记忆', kbCount(parentKb) === 1, String(kbCount(parentKb)));
+
+/**
+ * The child's knowledge-base copies that are still on disk, for one workspace.
+ *
+ * `SHE_APP_DIR` is set per live server by the harness, so this is the app directory of the server
+ * under test and not the operator's real one. The copies are expected to be gone by the time a
+ * spawn returns — that is the cleanup being asserted, not a detail of the path.
+ */
+const leftoverKbCopies = (wsRoot) => {
+  const dir = join(wsRoot, 'appdir', 'subagent-kb');
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter((n) => n.endsWith('.sqlite'));
+};
+
+/** The notes digest a child's harvest is written to, when it wrote anything. */
+const digestPath = (wsRoot, childId) => join(wsRoot, '.she', 'subagent-notes', `${childId}.md`);
+
+const CHILD_NOTE_TITLE = '子级查到的产物约定';
+const CHILD_NOTE_MARKER = 'MARKER-CHILD-NOTE';
+
+/*
+ * Parent delegates a writable task; the child reads the parent's memory, writes its own note, ends.
+ *
+ * Three claims have to be settled inside ONE run, and none of them can be observed from outside the
+ * child's process: the private copy has to be READABLE (otherwise the handoff's promise — "you can
+ * query what the parent knows" — is a lie about a project whose history the parent just described),
+ * the note the child writes has to LAND somewhere (a child with nowhere to put a finding carries it
+ * only in prose, if it remembers), and the copy has to be GONE by the time the spawn returns.
+ *
+ * Scripted rather than left to a model because the ORDER is part of the assertion: the read has to
+ * happen against the copy it was given, and the write has to happen before it ends.
+ */
+function makeKbHarvestLlm() {
+  const state = { parentCalls: 0, childCalls: 0 };
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      let body = {};
+      try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { /* ignore */ }
+      const msgs = body.messages ?? [];
+      // Same signal as everywhere else in this file: the handoff brief is what makes a request the child.
+      const isChild = msgs.some((m) => typeof m.content === 'string' && m.content.includes('## 交接单'));
+      state.parentCalls += isChild ? 0 : 1;
+      state.childCalls += isChild ? 1 : 0;
+
+      let message;
+      if (isChild && state.childCalls === 1) {
+        message = {
+          role: 'assistant',
+          content: '先查项目里既有的约定。',
+          tool_calls: [{
+            id: 'call_harvest_query',
+            type: 'function',
+            function: { name: 'kb_query', arguments: JSON.stringify({ query: KB_SEED_MARKER }) },
+          }],
+        };
+      } else if (isChild && state.childCalls === 2) {
+        message = {
+          role: 'assistant',
+          content: '有条结论值得留下来。',
+          tool_calls: [{
+            id: 'call_harvest_upsert',
+            type: 'function',
+            function: {
+              name: 'kb_upsert',
+              arguments: JSON.stringify({
+                groupName: 'project/child-finding',
+                title: CHILD_NOTE_TITLE,
+                content: `${CHILD_NOTE_MARKER}：这条笔记只应该出现在子级的副本里，并随回执交回父级。`,
+                kind: 'fact',
+              }),
+            },
+          }],
+        };
+      } else if (isChild) {
+        message = { role: 'assistant', content: '产出写在 notes/out.md 了，结论见上。' };
+      } else if (state.parentCalls === 1) {
+        message = {
+          role: 'assistant',
+          content: '我把它交出去做。',
+          tool_calls: [{
+            id: 'call_spawn_harvest',
+            type: 'function',
+            function: { name: 'task_spawn', arguments: JSON.stringify({ tasks: [SPAWN_TASK] }) },
+          }],
+        };
+      } else {
+        message = { role: 'assistant', content: '子任务回来了。' };
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{ message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }],
+        usage: { prompt_tokens: 9, completion_tokens: 9, total_tokens: 18 },
+      }));
+    });
+  });
+  return { server, state };
+}
+
+const KB_LLM_PORT = await pickSafePort(18331, [18332, 18333, 19334]);
+const KB_PORT = await pickSafePort(18291, [18292, 18303, 19305]);
+
+const kbStub = makeKbHarvestLlm();
+await new Promise((r) => kbStub.server.listen(KB_LLM_PORT, '127.0.0.1', r));
+const kbChildProc = spawn('node', [SERVER_ENTRY], {
+  cwd: SERVER_DIR,
+  env: {
+    ...process.env,
+    SHE_WORKSPACE: ws3,
+    SHE_PORT: String(KB_PORT),
+    SHE_APP_DIR: join(ws3, 'appdir'),
+    SHE_STATE_DIR: ws3,
+    SHE_LLM_PROVIDER: 'openai',
+    OPENAI_BASE_URL: `http://127.0.0.1:${KB_LLM_PORT}/v1`,
+    OPENAI_MODEL: 'stub',
+    OPENAI_API_KEY: 'stub-key',
+    SHE_SUBAGENT_TIMEOUT_MS: '30000',
+  },
+  stdio: ['ignore', 'pipe', 'pipe'],
+  windowsHide: true,
+});
+let kbOut3 = '';
+kbChildProc.stdout.on('data', (c) => { kbOut3 += c; });
+kbChildProc.stderr.on('data', (c) => { kbOut3 += c; });
+const kbBase3 = `http://127.0.0.1:${KB_PORT}`;
+const live3 = {
+  ok: await waitForHealth(kbBase3),
+  api: (path, init) => fetch(`${kbBase3}${path}`, { signal: AbortSignal.timeout(90_000), ...init }),
+  log: () => kbOut3,
+  stop: async () => {
+    try { kbChildProc.kill(); } catch { /* already gone */ }
+    try { kbStub.server.close(); } catch { /* already gone */ }
+    await new Promise((r) => setTimeout(r, 400));
+  },
+};
+
+if (!live3.ok) {
+  check('server 起得来（带父级知识库的工作区）', false, live3.log().slice(-500));
+} else {
+  const chat3 = await live3.api('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: `把「${TASK_LABEL}」交出去做`, stream: false }),
+  });
+  const body3 = await chat3.text();
+  check('这一轮真的跑成功了（模型是本地 stub，不是超时）',
+    chat3.ok && !/max_iterations/.test(body3), `${chat3.status} ${body3.slice(0, 400)}`);
+
+  const sessions3 = await (await live3.api('/api/sessions?all=1&scope=all')).json();
+  const child3 = (sessions3?.sessions ?? []).find((s) => s.title === TASK_LABEL);
+  const wtRoot3 = join(kbRoot, '.she-worktrees', 'ws');
+  const wtDirs3 = existsSync(wtRoot3) ? (await import('node:fs')).readdirSync(wtRoot3).filter((n) => n.startsWith('sub-')) : [];
+  const wtPath3 = wtDirs3.length === 1 ? join(wtRoot3, wtDirs3[0]) : null;
+  check('【前提】确实为它建了副本', Boolean(wtPath3), JSON.stringify(wtDirs3));
+
+  /*
+   * The snapshot is asserted through what the CHILD did, not by opening the copy.
+   *
+   * By this point the copy no longer exists — that IS the lifecycle under test — so reading the file
+   * here would prove nothing either way. The child's transcript is where the evidence survives: it
+   * queried the seeded marker and got the parent's note back, which is the only way to tell a seeded
+   * copy from an empty one, and it wrote a note without being refused.
+   */
+  if (child3) {
+    const detail3 = await (await live3.api(`/api/sessions/${child3.id}`)).json();
+    const childText3 = JSON.stringify(detail3);
+    check('【关键】子级 kb_query 查得到父级库里的那条记忆（副本不是空库）',
+      new RegExp(KB_SEED_TITLE).test(childText3), childText3.slice(0, 900));
+    check('【关键】子级往自己的副本里写是允许的（写不进去等于让它把结论忘掉）',
+      /Added memory/.test(childText3), childText3.slice(0, 900));
+  }
+
+  /*
+   * What the parent got back, read where the parent would read it.
+   *
+   * `task_spawn`'s answer is a tool RESULT, so it lives in the parent's transcript — the HTTP body
+   * only carries the assistant's final message. Asserting on the body would have tested nothing.
+   */
+  const parentId3 = sessions3?.active_id
+    ?? (sessions3?.sessions ?? []).find((s) => s.id !== child3?.id)?.id;
+  const parentText3 = JSON.stringify(
+    parentId3 ? await (await live3.api(`/api/sessions/${parentId3}`)).json() : {},
+  );
+  check('【关键】子级写下的笔记被收割进父级的回执（副本删了也看得到它留下了什么）',
+    parentText3.includes(CHILD_NOTE_TITLE), parentText3.slice(0, 1200));
+  check('回执说明副本已随之清理，值得留的要用 kb_upsert 搬进主库',
+    /副本已随子任务清理/.test(parentText3) && /kb_upsert/.test(parentText3), parentText3.slice(0, 1200));
+  check('【关键】父级库本身还是那 1 条 —— 收割是读取，不是替父级决定',
+    kbCount(parentKb) === 1, `父级库现有 ${kbCount(parentKb)} 条`);
+
+  if (child3) {
+    const digest3 = digestPath(ws3, child3.id);
+    check('【关键】全文另存了一份，父级能读到完整的笔记（不只是开头一段）',
+      existsSync(digest3) && readFileSync(digest3, 'utf8').includes(CHILD_NOTE_MARKER), digest3);
+  }
+  check('【关键】子级结束后副本被删掉（不留一个没人管的库在磁盘上）',
+    leftoverKbCopies(ws3).length === 0, JSON.stringify(leftoverKbCopies(ws3)));
+
+  if (child3) {
+    const detail3 = await (await live3.api(`/api/sessions/${child3.id}`)).json();
+    const brief3 = String((detail3?.messages ?? []).find((m) => m.role === 'user')?.content ?? '');
+    check('【关键】交接单如实说明知识库是父级库的私有副本（子级才不会把「查不到」误判成「项目没有记录」）',
+      /父级库的私有副本/.test(brief3), brief3.slice(0, 600));
+    check('【关键】交接单说明写下的笔记会被父级读一遍、副本随后删除（它才知道笔记是唯一的出口）',
+      /被父级读一遍/.test(brief3) && /副本随后删除/.test(brief3), brief3.slice(0, 600));
+  } else {
+    check('【关键】找得到子会话（交接单要在这里面查）', false, JSON.stringify((sessions3?.sessions ?? []).map((s) => s.title)));
+  }
+
+  /*
+   * The copy is only useful if the worktree stays disposable.
+   *
+   * The child's KB is opened by the server process and cached per path, so deleting the worktree
+   * afterwards keeps a live sqlite handle inside the directory — on Windows `rmdir` then fails with
+   * EBUSY and the copy can never be cleaned up. Asserting through the real route (rather than
+   * against the helper) is the point: the handle belongs to the server, and that is the process
+   * the UI's delete button runs in.
+   */
+  if (wtPath3) {
+    const del = await live3.api(`/api/worktrees?repo=${encodeURIComponent(ws3)}&path=${encodeURIComponent(wtPath3)}`, {
+      method: 'DELETE',
+    });
+    const delBody = await del.text();
+    let locked = '';
+    if (!del.ok || existsSync(wtPath3)) {
+      // Identify the file that actually kept the directory: on Windows the message is only
+      // "Invalid argument", which says nothing about which handle is open.
+      const { readdirSync: rd, rmSync: rm } = await import('node:fs');
+      const stuck = [];
+      const walk = (d) => {
+        for (const e of rd(d, { withFileTypes: true })) {
+          const p = join(d, e.name);
+          if (e.isDirectory()) { walk(p); continue; }
+          try { rm(p); } catch { stuck.push(p.replace(wtPath3, '')); }
+        }
+      };
+      try { walk(wtPath3); } catch { /* best effort */ }
+      locked = stuck.length ? ` 锁住: ${stuck.join(', ')}` : '';
+    }
+    check('【关键】子任务跑完后副本能被删掉（服务端没有把库句柄一直攥着）',
+      del.ok && !existsSync(wtPath3), `${del.status} ${delBody.slice(0, 300)} ${existsSync(wtPath3) ? '目录还在' : ''}${locked}`);
+  }
+}
+
+await live3.stop();
+try { git(ws3, ['worktree', 'prune']); } catch { /* best effort */ }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 8. 真 server：知识库禁止直连的规则真的接上了
+ *
+ * 第 7 段钉的是提示词里写了规则，这一段钉的是规则真的在服务端生效。两者必须分开验：一条只写在
+ * 提示词里的规则，模型一旦决定绕路就什么也拦不住 —— 真实运行里就出现过
+ * `sqlite3 .she/kb.sqlite "SELECT ..."`，绕过了共振排序和访问计数，还在服务端已经打开的库上多
+ * 抓了一个句柄。这里让 stub 模型直接发出这两种调用，看服务端回来的到底是什么。
+ *
+ * 走真 server 而不是直接调 createTools，是因为要验的正是「服务端有没有把库路径传下去」这一
+ * 根接线：传丢了，工具层就什么都不拦，而单元测试会照样全绿。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+console.log('\n8. 真 server：知识库禁止直连');
+
+const RAW_LLM_PORT = await pickSafePort(18341, [18342, 18343, 19344]);
+const RAW_PORT = await pickSafePort(18281, [18282, 18283, 19304]);
+
+const rawRoot = tempDir('rawroot');
+const ws4 = join(rawRoot, 'ws');
+mkdirSync(join(ws4, '.she'), { recursive: true });
+// A real (empty) database: the server opens it on boot, so bytes chosen to look like one
+// would fail startup with "file is not a database" and test nothing.
+{ const s = new KBStore(join(ws4, '.she', 'kb.sqlite')); s.close(); }
+writeFileSync(join(ws4, 'notes.txt'), 'ordinary file\n', 'utf8');
+
+/** Emits exactly the two calls the rule exists to stop, then stops calling tools. */
+function makeRawAccessLlm() {
+  const state = { calls: 0 };
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      state.calls++;
+      const message = state.calls === 1
+        ? {
+            role: 'assistant',
+            content: '我直接看一下库。',
+            tool_calls: [
+              { id: 'call_raw_1', type: 'function', function: { name: 'fs_read', arguments: JSON.stringify({ path: '.she/kb.sqlite' }) } },
+              { id: 'call_raw_2', type: 'function', function: { name: 'shell', arguments: JSON.stringify({ command: 'sqlite3 .she/kb.sqlite "SELECT * FROM memories"' }) } },
+            ],
+          }
+        : { role: 'assistant', content: '好，那我不直连了。' };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{ message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }],
+        usage: { prompt_tokens: 9, completion_tokens: 9, total_tokens: 18 },
+      }));
+    });
+  });
+  return { server, state };
+}
+
+const rawStub = makeRawAccessLlm();
+await new Promise((r) => rawStub.server.listen(RAW_LLM_PORT, '127.0.0.1', r));
+const rawChild = spawn('node', [SERVER_ENTRY], {
+  cwd: SERVER_DIR,
+  env: {
+    ...process.env,
+    SHE_WORKSPACE: ws4,
+    SHE_PORT: String(RAW_PORT),
+    SHE_APP_DIR: join(ws4, 'appdir'),
+    SHE_STATE_DIR: ws4,
+    SHE_LLM_PROVIDER: 'openai',
+    OPENAI_BASE_URL: `http://127.0.0.1:${RAW_LLM_PORT}/v1`,
+    OPENAI_MODEL: 'stub',
+    OPENAI_API_KEY: 'stub-key',
+  },
+  stdio: ['ignore', 'pipe', 'pipe'],
+  windowsHide: true,
+});
+let rawOut = '';
+rawChild.stdout.on('data', (c) => { rawOut += c; });
+rawChild.stderr.on('data', (c) => { rawOut += c; });
+const rawBase = `http://127.0.0.1:${RAW_PORT}`;
+const rawApi = (path, init) => fetch(`${rawBase}${path}`, { signal: AbortSignal.timeout(90_000), ...init });
+const started = await waitForHealth(rawBase);
+
+if (!started) {
+  check('server 起得来（带知识库的工作区）', false, rawOut.slice(-500));
+} else {
+  const chat4 = await rawApi('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: '看看知识库里有什么', stream: false }),
+  });
+  const body4 = await chat4.text();
+  check('这一轮真的跑成功了（模型是本地 stub，不是超时）',
+    chat4.ok && !/max_iterations/.test(body4), `${chat4.status} ${body4.slice(0, 400)}`);
+
+  const sessions4 = await (await rawApi('/api/sessions?all=1&scope=all')).json();
+  const sid4 = sessions4?.active_id ?? (sessions4?.sessions ?? [])[0]?.id;
+  const detail4 = sid4 ? await (await rawApi(`/api/sessions/${sid4}`)).json() : {};
+  const text4 = JSON.stringify(detail4);
+
+  check('【关键】fs_read 直读知识库被服务端拒掉（不是把二进制灌给模型）',
+    /知识库文件只能通过/.test(text4), text4.slice(0, 900));
+  check('【关键】拒绝文案指向 kb_query（只说「不行」等于没说）',
+    /kb_query/.test(text4) && /kb_upsert/.test(text4), text4.slice(0, 900));
+  check('【关键】shell 里 sqlite3 直查也是 DENIED，而不是让它跑起来',
+    /DENIED/.test(text4), text4.slice(0, 900));
+  check('拒绝发生在确认门之前（否则用户会被问「要不要写 kb.sqlite」）',
+    !/needs_confirm/.test(text4), text4.slice(0, 900));
+}
+
+rawChild.kill();
+try { rawStub.server.close(); } catch { /* already gone */ }
+await new Promise((r) => setTimeout(r, 400));
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 9. 真 server：共享 checkout 的子任务，记忆仍然是私有的
+ *
+ * 第 7 段钉的是隔离子任务的库（有副本、能被收割、跑完删掉），这一段钉**没有隔离副本**的那种
+ * 子任务 —— 它是委派里最常见的形状：没声明 `scope` 的只读任务不开副本，于是它和父级共用同一个
+ * 工作目录。
+ *
+ * 共用工作目录不等于共用自己的记忆。旧实现把这两件事当成一件事：只有隔离子任务拿得到副本，
+ * 其余子任务直接连父级的活动库，所以它们只能被设成只读 —— 父级的记忆离一次未经复核的编辑只有
+ * 一个调用的距离，而子级找到的结论无处可放。现在每个子任务都拿到自己的私有副本：写一定落得下
+ * （落在父级看不见的地方），而父级的库一定不动。
+ *
+ * 必须走真 server。要验的是「服务端有没有把私有副本接上去」这一根接线：接丢了，子级要么写进父
+ * 级库、要么被拒，而单元测试里那个 dbPath 是我自己传的，怎么传都绿。
+ *
+ * 断言分两半，缺一不可：父级库没被动过（安全性），以及**读还通、还能写**（没顺手把记忆变成失忆
+ * 或把它变成哑巴）。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+console.log('\n9. 真 server：共享 checkout 的子任务写在自己的副本里');
+
+const SHARED_LABEL = '记一条不该写的记忆';
+/** No `scope` on purpose — that is what keeps this child in the shared checkout. */
+const SHARED_TASK = {
+  description: SHARED_LABEL,
+  prompt: '把「子级自己的结论」记进知识库，然后回报你查到了父级库里哪条记忆。',
+};
+const CHILD_WRITE_TITLE = '子级偷偷写的记忆';
+const CHILD_WRITE_MARKER = 'MARKER-CHILD-WROTE';
+
+/**
+ * Parent delegates a read-only task; the child writes a note, then reads the parent's memory.
+ *
+ * The child is identified the same way section 5 does it — by the handoff brief in its first user
+ * message. Keying off call order instead would make the stub's behaviour depend on how many turns
+ * the parent happens to take, which is not what is under test.
+ *
+ * The write comes FIRST on purpose: if the private copy were not wired up, the parent's own database
+ * would take the node, and the count assertion below is what catches that.
+ */
+function makeSharedKbLlm() {
+  const state = { parentCalls: 0, childCalls: 0 };
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      let body = {};
+      try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { /* ignore */ }
+      const msgs = body.messages ?? [];
+      const isChild = msgs.some((m) => typeof m.content === 'string' && m.content.includes('## 交接单'));
+      state.parentCalls += isChild ? 0 : 1;
+      state.childCalls += isChild ? 1 : 0;
+
+      let message;
+      if (isChild && state.childCalls === 1) {
+        message = {
+          role: 'assistant',
+          content: '先把结论记进知识库。',
+          tool_calls: [{
+            id: 'call_child_upsert',
+            type: 'function',
+            function: {
+              name: 'kb_upsert',
+              arguments: JSON.stringify({
+                groupName: 'project/child-only',
+                title: CHILD_WRITE_TITLE,
+                content: `${CHILD_WRITE_MARKER}：父级的库里不应该出现这一条。`,
+                kind: 'fact',
+              }),
+            },
+          }],
+        };
+      } else if (isChild && state.childCalls === 2) {
+        message = {
+          role: 'assistant',
+          content: '再看看库里的既有知识。',
+          tool_calls: [{
+            id: 'call_child_query',
+            type: 'function',
+            function: { name: 'kb_query', arguments: JSON.stringify({ query: KB_SEED_MARKER }) },
+          }],
+        };
+      } else if (isChild) {
+        message = { role: 'assistant', content: '结论我写进交付物带回父级。' };
+      } else if (state.parentCalls === 1) {
+        message = {
+          role: 'assistant',
+          content: '我把它交出去。',
+          tool_calls: [{
+            id: 'call_spawn_shared',
+            type: 'function',
+            function: { name: 'task_spawn', arguments: JSON.stringify({ tasks: [SHARED_TASK] }) },
+          }],
+        };
+      } else {
+        message = { role: 'assistant', content: '子任务回来了。' };
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{ message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }],
+        usage: { prompt_tokens: 9, completion_tokens: 9, total_tokens: 18 },
+      }));
+    });
+  });
+  return { server, state };
+}
+
+const SHARED_LLM_PORT = await pickSafePort(18351, [18352, 18353, 19354]);
+const SHARED_PORT = await pickSafePort(18271, [18272, 18273, 19306]);
+
+const sharedRoot = tempDir('sharedkbroot');
+const ws5 = join(sharedRoot, 'ws');
+mkdirSync(ws5, { recursive: true });
+git(ws5, ['init']);
+git(ws5, ['config', 'user.email', 'she-check@example.invalid']);
+git(ws5, ['config', 'user.name', 'she-check']);
+writeFileSync(join(ws5, '.gitignore'), '.she/\nappdir/\n', 'utf8');
+writeFileSync(join(ws5, 'README.md'), '# 共享库示例\n', 'utf8');
+git(ws5, ['add', '-A']);
+git(ws5, ['commit', '-m', 'init']);
+// git on purpose: the workspace COULD isolate. The child stays shared because the task declares no
+// scope — that is the case under test, not "git was unavailable".
+check('前提：这个工作区是 git 仓库（共享是任务形态决定的，不是没得选）', isGitRepo(ws5) === true, null);
+
+const sharedKb = join(ws5, '.she', 'kb.sqlite');
+mkdirSync(join(ws5, '.she'), { recursive: true });
+{
+  const store = new KBStore(sharedKb);
+  const engine = new GroupKBEngine(store, { ...KB_CFG, dbPath: sharedKb });
+  const group = engine.createGroup('project/seed');
+  engine.addMemory(group.id, 'fact', KB_SEED_TITLE, `${KB_SEED_MARKER}：父级库里的唯一线索。`);
+  store.close();
+}
+check('前提：父级库里有 1 条记忆', kbCount(sharedKb) === 1, String(kbCount(sharedKb)));
+
+const sharedStub = makeSharedKbLlm();
+await new Promise((r) => sharedStub.server.listen(SHARED_LLM_PORT, '127.0.0.1', r));
+const sharedChild = spawn('node', [SERVER_ENTRY], {
+  cwd: SERVER_DIR,
+  env: {
+    ...process.env,
+    SHE_WORKSPACE: ws5,
+    SHE_PORT: String(SHARED_PORT),
+    SHE_APP_DIR: join(ws5, 'appdir'),
+    SHE_STATE_DIR: ws5,
+    SHE_LLM_PROVIDER: 'openai',
+    OPENAI_BASE_URL: `http://127.0.0.1:${SHARED_LLM_PORT}/v1`,
+    OPENAI_MODEL: 'stub',
+    OPENAI_API_KEY: 'stub-key',
+  },
+  stdio: ['ignore', 'pipe', 'pipe'],
+  windowsHide: true,
+});
+let sharedOut = '';
+sharedChild.stdout.on('data', (c) => { sharedOut += c; });
+sharedChild.stderr.on('data', (c) => { sharedOut += c; });
+const sharedBase = `http://127.0.0.1:${SHARED_PORT}`;
+const sharedApi = (path, init) => fetch(`${sharedBase}${path}`, { signal: AbortSignal.timeout(90_000), ...init });
+const sharedStarted = await waitForHealth(sharedBase);
+
+if (!sharedStarted) {
+  check('server 起得来（共享知识库的工作区）', false, sharedOut.slice(-500));
+} else {
+  const chat5 = await sharedApi('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: `把「${SHARED_LABEL}」交出去做`, stream: false }),
+  });
+  const body5 = await chat5.text();
+  check('这一轮真的跑成功了（模型是本地 stub，不是超时）',
+    chat5.ok && !/max_iterations/.test(body5), `${chat5.status} ${body5.slice(0, 400)}`);
+
+  const sessions5 = await (await sharedApi('/api/sessions?all=1&scope=all')).json();
+  const child5 = (sessions5?.sessions ?? []).find((s) => s.title === SHARED_LABEL);
+  check('【前提】找得到那个子会话', Boolean(child5),
+    JSON.stringify((sessions5?.sessions ?? []).map((s) => s.title)));
+
+  // The parent's database is the thing being protected, so it is read directly rather than through
+  // the transcript: a transcript assertion would only prove the tool *said* it did not write.
+  const after5 = kbCount(sharedKb);
+  check('【关键】父级库里还是只有那 1 条 —— 子任务的 kb_upsert 没有落到父级的库',
+    after5 === 1, `父级库现有 ${after5} 条`);
+
+  if (child5) {
+    const detail5 = await (await sharedApi(`/api/sessions/${child5.id}`)).json();
+    const text5 = JSON.stringify(detail5);
+    const brief5 = String((detail5?.messages ?? []).find((m) => m.role === 'user')?.content ?? '');
+    check('【关键】交接单说明库是父级库的私有副本（没有隔离副本的子级也有自己的记忆）',
+      /父级库的私有副本/.test(brief5), brief5.slice(0, 600));
+    check('【关键】写入被接受，落在它自己的副本里 —— 旧行为是直接拒掉，让它没地方放结论',
+      /Added memory/.test(text5), text5.slice(0, 900));
+    check('【关键】读没有被一起关掉 —— 父级库里的那条记忆仍然查得到',
+      new RegExp(KB_SEED_TITLE).test(text5), text5.slice(0, 900));
+    check('子任务没有为此拿到隔离副本（共享 checkout 是任务形态，不是隔离失败）',
+      !/未隔离/.test(text5), text5.slice(0, 900));
+    check('【关键】共享 checkout 的子任务跑完也不留副本（清理与隔离无关）',
+      leftoverKbCopies(ws5).length === 0, JSON.stringify(leftoverKbCopies(ws5)));
+  }
+}
+
+sharedChild.kill();
+try { sharedStub.server.close(); } catch { /* already gone */ }
+await new Promise((r) => setTimeout(r, 400));
+
+console.log('\n10. 真 server：子任务超时要交代它做到了哪一步');
+
+const TIMEOUT_LABEL = '会把仓库翻一遍的活';
+/** A distinct marker per call, so the parent's report can be checked against a call that really happened. */
+const TIMEOUT_MARKER = 'SHE_TIMEOUT_PROBE_';
+
+/**
+ * A child that never finishes.
+ *
+ * Drives the one path nothing else can reach. The reply to a timeout is built from a REAL child
+ * transcript — its actual last tool call, its own words, its worktree's changed list — and whether
+ * that reply is what the parent receives is a property of the server, not of the formatter. A unit
+ * test can only prove the formatter formats.
+ */
+function makeTimeoutLlm() {
+  const state = { parentCalls: 0, childCalls: 0 };
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      let body = {};
+      try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { /* ignore */ }
+      const msgs = body.messages ?? [];
+      const isChild = msgs.some((m) => typeof m.content === 'string' && m.content.includes('## 交接单'));
+      state.parentCalls += isChild ? 0 : 1;
+
+      let message;
+      if (isChild) {
+        state.childCalls++;
+        /*
+         * A DIFFERENT call every round, deliberately.
+         *
+         * Repeating one call with one argument is exactly what the loop's stuck-detection exists to
+         * catch, and it would end this child early with a real answer — the one outcome that must
+         * not happen here, because reaching the timeout is the point.
+         *
+         * `kb_query` rather than `shell` because a child in a shared checkout is a read-only child,
+         * and this keeps the fixture inside what such a child is allowed to do.
+         */
+        message = {
+          role: 'assistant',
+          content: `还在查第 ${state.childCalls} 处。`,
+          tool_calls: [{
+            id: `call_probe_${state.childCalls}`,
+            type: 'function',
+            function: { name: 'kb_query', arguments: JSON.stringify({ query: `${TIMEOUT_MARKER}${state.childCalls}` }) },
+          }],
+        };
+      } else if (state.parentCalls === 1) {
+        message = {
+          role: 'assistant',
+          content: '这活比看上去重，交给子智能体。',
+          tool_calls: [{
+            id: 'call_spawn_timeout',
+            type: 'function',
+            function: {
+              name: 'task_spawn',
+              arguments: JSON.stringify({
+                tasks: [{ description: TIMEOUT_LABEL, prompt: '把整个仓库翻一遍，逐条给我结论。' }],
+              }),
+            },
+          }],
+        };
+      } else {
+        message = { role: 'assistant', content: '子任务回来了，我看下它报了什么。' };
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{ message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }],
+        usage: { prompt_tokens: 9, completion_tokens: 9, total_tokens: 18 },
+      }));
+    });
+  });
+  return { server, state };
+}
+
+const TIMEOUT_LLM_PORT = await pickSafePort(18361, [18362, 18363, 19366]);
+const TIMEOUT_PORT = await pickSafePort(18291, [18292, 18293, 19307]);
+/** Seconds, not the default 180: the floor of the clamp is 30, and this check runs on every gate. */
+const TIMEOUT_ENV_SECONDS = 6;
+
+const timeoutRoot = tempDir('timeoutroot');
+const ws6 = join(timeoutRoot, 'ws');
+mkdirSync(ws6, { recursive: true });
+git(ws6, ['init']);
+git(ws6, ['config', 'user.email', 'she-check@example.invalid']);
+git(ws6, ['config', 'user.name', 'she-check']);
+writeFileSync(join(ws6, '.gitignore'), '.she/\nappdir/\n', 'utf8');
+writeFileSync(join(ws6, 'README.md'), '# 超时示例\n', 'utf8');
+git(ws6, ['add', '-A']);
+git(ws6, ['commit', '-m', 'init']);
+
+const timeoutStub = makeTimeoutLlm();
+await new Promise((r) => timeoutStub.server.listen(TIMEOUT_LLM_PORT, '127.0.0.1', r));
+const timeoutChild = spawn('node', [SERVER_ENTRY], {
+  cwd: SERVER_DIR,
+  env: {
+    ...process.env,
+    SHE_WORKSPACE: ws6,
+    SHE_PORT: String(TIMEOUT_PORT),
+    SHE_APP_DIR: join(ws6, 'appdir'),
+    SHE_STATE_DIR: ws6,
+    SHE_LLM_PROVIDER: 'openai',
+    OPENAI_BASE_URL: `http://127.0.0.1:${TIMEOUT_LLM_PORT}/v1`,
+    OPENAI_MODEL: 'stub',
+    OPENAI_API_KEY: 'stub-key',
+    /*
+     * The default budget is set from the environment rather than passed as `timeout_ms`, because
+     * the per-task parameter is clamped to a 30s floor — correct for the product, and far too slow
+     * for a check that runs on every gate. Both paths land on the same code (the resolved budget),
+     * so this still exercises the real timeout.
+     */
+    SHE_SUBAGENT_TIMEOUT_MS: String(TIMEOUT_ENV_SECONDS * 1000),
+  },
+  stdio: ['ignore', 'pipe', 'pipe'],
+  windowsHide: true,
+});
+let timeoutOut = '';
+timeoutChild.stdout.on('data', (c) => { timeoutOut += c; });
+timeoutChild.stderr.on('data', (c) => { timeoutOut += c; });
+const timeoutBase = `http://127.0.0.1:${TIMEOUT_PORT}`;
+const timeoutApi = (path, init) => fetch(`${timeoutBase}${path}`, { signal: AbortSignal.timeout(90_000), ...init });
+const timeoutStarted = await waitForHealth(timeoutBase);
+
+if (!timeoutStarted) {
+  check('server 起得来（超时场景）', false, timeoutOut.slice(-500));
+} else {
+  const startedAt = Date.now();
+  /*
+   * Poll the board WHILE the parent waits.
+   *
+   * This is the whole point of the heartbeat, and it can only be observed during the run: the claim
+   * is that someone watching can see progress, not that a card eventually said something. Reading
+   * it afterwards would pass even if the tick fired once at the end, or after the child died.
+   */
+  let live = '';
+  const poll = (async () => {
+    for (let i = 0; i < 60; i++) {
+      try {
+        const tasks = await (await timeoutApi('/api/tasks')).json();
+        const card = (tasks?.tasks ?? []).find((t) => t.label === TIMEOUT_LABEL && t.detail);
+        if (card?.detail) { live = card.detail; return; }
+      } catch { /* board request can lose a race with startup */ }
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  })();
+
+  const chatT = await timeoutApi('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: `把「${TIMEOUT_LABEL}」交出去做`, stream: false }),
+  });
+  await poll;
+  const elapsed = Date.now() - startedAt;
+  const bodyT = await chatT.text();
+
+  check('这一轮跑完了（模型是本地 stub，不是它自己出错）',
+    chatT.ok, `${chatT.status} ${bodyT.slice(0, 300)}`);
+  check(
+    '预算被真的执行了（这一轮只等了 ~6s，不是默认的 180s）',
+    elapsed < 45_000,
+    `实际等了 ${Math.round(elapsed / 1000)}s`,
+  );
+
+  const sessionsT = await (await timeoutApi('/api/sessions?all=1&scope=all')).json();
+  const childT = (sessionsT?.sessions ?? []).find((s) => s.title === TIMEOUT_LABEL);
+  check('【前提】超时的子任务仍然留下了一个会话（不是查无此人）',
+    Boolean(childT), JSON.stringify((sessionsT?.sessions ?? []).map((s) => s.title)));
+
+  /*
+   * Read the report where the parent would read it.
+   *
+   * The reply to `task_spawn` is a tool RESULT, so it lives in the parent's transcript — the HTTP
+   * body of `/api/chat` only carries the assistant's final message. Asserting on the body would
+   * have tested nothing: the first run of this section "passed" the budget check and failed every
+   * content check for exactly that reason.
+   */
+  let parentText = '';
+  for (const s of sessionsT?.sessions ?? []) {
+    if (childT && s.id === childT.id) continue;
+    const d = await (await timeoutApi(`/api/sessions/${s.id}`)).json();
+    parentText += JSON.stringify(d);
+  }
+  const where = `${parentText}\n${bodyT}`;
+
+  /*
+   * Each check below is one thing the parent had none of: what was done, what the child said, that
+   * the budget is a parameter, and where the full transcript is.
+   */
+  check('【关键】超时的回复交代了它做到哪一步，不再是「超时」两个字',
+    /预算用尽/.test(where) && /做到哪一步/.test(where), where.slice(0, 900));
+  check('【关键】报告引用的是子级真实发生过的调用',
+    new RegExp(`${TIMEOUT_MARKER}\\d+`).test(where), where.slice(0, 900));
+  check('报告带上它自己说的话（判断它理解到哪了的唯一线索）',
+    /它最后说的是/.test(where), where.slice(0, 900));
+  check('给出了加大预算这条路（timeout_ms），否则父级只能再赌一次同样的预算',
+    /timeout_ms/.test(where), where.slice(0, 900));
+  check('给出了不再阻塞本轮这条路（background）',
+    /background/.test(where), where.slice(0, 900));
+  check('子会话 id 在报告里 —— 完整过程是可以打开看的',
+    /子会话\s*sess_[0-9a-f]{6,}/i.test(where), where.slice(0, 900));
+
+  check('【关键】运行中就能看到它在干什么（心跳到了 UI 的卡片上）',
+    /已 \d+s/.test(live), `卡片 detail 读到的是「${live}」`);
+
+  if (childT) {
+    const detailT = await (await timeoutApi(`/api/sessions/${childT.id}`)).json();
+    const briefT = String((detailT?.messages ?? []).find((m) => m.role === 'user')?.content ?? '');
+    check('【关键】交接单里写了时间预算 —— 子级不是被中止那一刻才知道有时间限制',
+      /时间预算/.test(briefT) && new RegExp(`${TIMEOUT_ENV_SECONDS} 秒`).test(briefT), briefT.slice(0, 700));
+    check('交接单要求「做不完就提前交半成品」，而不是含糊的「抓紧点」',
+      /提前/.test(briefT), briefT.slice(0, 700));
+  }
+}
+
+timeoutChild.kill();
+try { timeoutStub.server.close(); } catch { /* already gone */ }
+await new Promise((r) => setTimeout(r, 400));
+
 cleanup();
 
 console.log('');

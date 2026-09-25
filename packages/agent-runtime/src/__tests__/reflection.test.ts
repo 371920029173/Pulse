@@ -145,6 +145,126 @@ describe('detectDrift — 约束', () => {
     });
     assert.equal(report.signals[0].kind, 'constraint_violated');
   });
+
+  /*
+   * The false positive this exists to prevent.
+   *
+   * A tool RESULT is material the agent read, not something it did. `kb_query` returns project
+   * history, and a memory explaining a past constraint contains the very token that constraint
+   * forbids — so a check that searched results reported drift for "touching" a file that was only
+   * ever mentioned inside a retrieved note. Reported from a real run: the agent looked up its own
+   * rules and was then accused of breaking them.
+   */
+  it('子级检索出来的历史文本不算「我动了它」（这是真实发生过的误报）', () => {
+    const report = detectDrift({
+      goal: '修好构建',
+      constraints: [{ text: '不要修改 packages/migrations 下的任何文件', hardness: 'hard' }],
+      actions: [
+        { tool: 'kb_query', args: '{"query":"migrations 的约定"}', summary: '历史约定：不要修改 packages/migrations 下的任何文件，上次就是这么出事的。' },
+      ],
+    });
+    assert.equal(report.level, 'none', `检索到的文本被当成了动作: ${JSON.stringify(report.signals)}`);
+  });
+
+  it('但调用参数里出现就是真的动了 —— 收窄范围不能把真阳性一起丢掉', () => {
+    const report = detectDrift({
+      goal: '修好构建',
+      constraints: [{ text: '不要修改 packages/migrations 下的任何文件', hardness: 'hard' }],
+      actions: [{ tool: 'fs_write', args: '{"path":"packages/migrations/003_add.sql"}' }],
+    });
+    assert.equal(report.level, 'drift');
+  });
+
+  /*
+   * 第二条实测误报：写在正文里的名字被当成了「动了它」。
+   *
+   * 约束是 `shell 为 Windows cmd：无 cat/which；避免外泄重定向`，被排除的对象被提成 `cat/which`，
+   * 然后四个动作全部命中 —— 而四个都不是在碰它：`preflight_record`（刚写下这条约束本身）、
+   * `task_spawn`（把约束转述给子级）、`plan_update`（note 里写「cat/which 告警判定为误报」）、
+   * `fs_write qa/eng/notes.md`（路径无辜，是正文里在解释这件事）。判据因此改成只读调用的
+   * **目标**（path / command / scope），不读正文：写下名字既没读它也没改它。
+   */
+  describe('约束只读「目标」，不读正文', () => {
+    const constraint = 'shell 为 Windows cmd：无 cat/which；避免外泄重定向（/dev/null 曾 DENIED）';
+    const judge = (tool: string, args: string) => detectDrift({
+      goal: '给两个文件里的导出符号做一份清单',
+      constraints: [{ text: constraint, hardness: 'hard' }],
+      actions: [{ tool, args }],
+    });
+
+    it('【实测】写下约束的 preflight_record 不算越界', () => {
+      const args = JSON.stringify({
+        stated_intent: '测试 SHE 的各类功能',
+        actual_goal: '得到一份基于实机证据的评估',
+        inferred_constraints: [constraint],
+      });
+      assert.equal(judge('preflight_record', args).level, 'none');
+    });
+
+    it('【实测】把约束转述给子级的 task_spawn 不算越界', () => {
+      const args = JSON.stringify({
+        tasks: [{
+          description: '符号清单核对（只读）',
+          prompt: '工作区 d:\\AGI\\_she-live-test（Windows cmd shell，无 cat/which）。任务：读取两个文件……',
+          deliverable: '一份清单',
+        }],
+      });
+      assert.equal(judge('task_spawn', args).level, 'none');
+    });
+
+    it('【实测】plan_update 的备注讨论这件事，不算越界', () => {
+      const args = JSON.stringify({
+        plan_id: 'plan_1',
+        step_id: 's9',
+        status: 'done',
+        note: 's9 完成：reflection_check 已跑（cat/which 告警判定为 KB 检索文本误报，未实际越界）',
+      });
+      assert.equal(judge('plan_update', args).level, 'none');
+    });
+
+    it('【实测】正文里解释这件事、路径无辜的 fs_write 不算越界', () => {
+      const args = JSON.stringify({
+        path: 'qa/eng/notes.md',
+        content: '# QA 记录：cmd 引号语义\n该沙箱无 cat / which，请用 type / where。',
+      });
+      assert.equal(judge('fs_write', args).level, 'none');
+    });
+
+    it('但 path 就是那个对象时照旧算越界（正文豁免不能变成整体豁免）', () => {
+      const args = JSON.stringify({ path: 'cat/which', content: '随便写点什么' });
+      assert.equal(judge('fs_write', args).level, 'drift');
+    });
+
+    it('shell 的命令行照旧查 —— 命令本身就是动作，没有「正文」这层', () => {
+      const args = JSON.stringify({ command: 'del /f cat/which' });
+      assert.equal(judge('shell', args).level, 'drift');
+    });
+
+    it('嵌套的交接单里，scope 不在豁免之列（声明要改什么仍然是行动）', () => {
+      const args = JSON.stringify({ tasks: [{ description: '改文件', scope: ['cat/which'], prompt: '随便' }] });
+      assert.equal(judge('task_spawn', args).level, 'drift');
+    });
+  });
+
+  it('报告里点名是哪一次调用 —— 无法核对的指控会被整体忽略，包括真阳性', () => {
+    const report = detectDrift({
+      goal: 'x',
+      constraints: [{ text: '不要碰 `cluster.ts`' }],
+      actions: [{ tool: 'shell', args: '{"command":"sed -i s/a/b/ cluster.ts"}' }],
+    });
+    assert.match(report.signals[0].detail, /shell/, `没说清来自哪次调用: ${report.signals[0].detail}`);
+  });
+
+  it('相关性判断仍然用检索到的内容 —— 那里的误报方向是反的，且代价更小', () => {
+    // Five calls that only mention the goal inside a retrieved memory still count as on-topic: the
+    // agent was evidently looking in the right place, and calling that "unrelated" is the noise the
+    // loose direction of this check is designed to avoid.
+    const report = detectDrift({
+      goal: '修好登录超时',
+      actions: Array.from({ length: 5 }, () => ({ tool: 'fs_read', args: '{"path":"src/a.ts"}', summary: '这段代码处理登录超时。' })),
+    });
+    assert.equal(report.level, 'none', JSON.stringify(report.signals));
+  });
 });
 
 describe('goalTerms / prohibitionObject', () => {
@@ -176,6 +296,39 @@ describe('goalTerms / prohibitionObject', () => {
       actions: [{ tool: 'shell', args: 'pnpm test auth' }],
     });
     assert.equal(report.level, 'none');
+  });
+
+  it('禁止句里的例外不算被禁止的对象', () => {
+    // 实测原文：约束把 kb_upsert 称作「唯一被点名的写入…（用户明确指定的例外）」，旧实现把整句
+    // 当禁止句读，于是 agent 自己那次合规的 kb_upsert 被判成越界（major，直接进错题本）。
+    const constraint = '「只读」限定在文件/命令层面：子代理不得用 `shell`、`fs_*`、`git` 等工具，'
+      + '不得修改工作区；唯一被点名的写入是 `kb_upsert` 写知识库（用户明确指定的例外）。';
+    const objects = prohibitionObject(constraint);
+    assert.ok(!objects.includes('kb_upsert'), JSON.stringify(objects));
+
+    const report = detectDrift({
+      goal: '验证子代理的知识库笔记能否被父级收割',
+      constraints: [constraint],
+      actions: [
+        { tool: 'kb_query', args: '{"query":"harvest-probe"}' },
+        { tool: 'kb_upsert', args: '{"group":"project/x","title":"t","content":"c"}' },
+      ],
+    });
+    assert.equal(report.signals.filter((s) => s.kind === 'constraint_violated').length, 0,
+      JSON.stringify(report.signals));
+  });
+
+  it('例外只免掉它自己那一句，同句里别的禁止仍然算数', () => {
+    const constraint = '不要改 cluster.ts，唯一允许的是只读查询——但不要动 migrations。';
+    const objects = prohibitionObject(constraint);
+    assert.ok(objects.some((o) => /cluster\.ts|migrations/.test(o)), JSON.stringify(objects));
+
+    const hit = detectDrift({
+      goal: '整理导出',
+      constraints: [constraint],
+      actions: [{ tool: 'fs_write', args: '{"path":"packages/kb/migrations/001.sql"}' }],
+    });
+    assert.ok(hit.signals.some((s) => s.kind === 'constraint_violated'), JSON.stringify(hit.signals));
   });
 });
 
@@ -417,6 +570,58 @@ describe('deriveReflections', () => {
       ],
     }));
     assert.match(notes[0].lesson, /检查参数拼写/);
+  });
+
+  /*
+   * 实测出来的那条假教训：`重复失败:kb_query`。
+   *
+   * 一轮里连查两次知识库、两次都「No results」，就被记成「同一工具失败 2 次」。可这不是失败 ——
+   * 空结果是**成功的回答**（`tool-result.ts` 的 `empty`），提示词还明确要求「换更短/更结构化的
+   * 查询词再试」。于是查得越认真，错题本里越像在犯错。错题本自己早就把这几个 kind 判为「不值得记」，
+   * 这里是同一个判据的第二次使用：一处定义，两处不许打架。
+   */
+  it('空结果不是失败：连查两次知识库不写「重复失败」', () => {
+    const notes = deriveReflections(sources({
+      failures: [
+        { tool: 'kb_query', kind: 'empty', detail: 'No results found in Group KB.' },
+        { tool: 'kb_query', kind: 'empty', detail: 'No results found in Group KB.' },
+      ],
+    }));
+    assert.deepEqual(notes, []);
+  });
+
+  it('网络类失败同样不写「重复失败」——那是天气，不是教训', () => {
+    const notes = deriveReflections(sources({
+      failures: [
+        { tool: 'kb_query', kind: 'timeout', detail: 'timed out' },
+        { tool: 'kb_query', kind: 'service', detail: 'ECONNRESET' },
+        { tool: 'kb_query', kind: 'precondition', detail: '还没有 batch' },
+      ],
+    }));
+    assert.deepEqual(notes, []);
+  });
+
+  it('真空结果和真失败混在一起时，只数真失败的那些', () => {
+    // 三次 kb_query 里两次空、一次参数错：只有一次是真的做错了，不该凑够「两次」。
+    const notes = deriveReflections(sources({
+      failures: [
+        { tool: 'kb_query', kind: 'empty', detail: 'No results found in Group KB.' },
+        { tool: 'kb_query', kind: 'empty', detail: 'No results found in Group KB.' },
+        { tool: 'kb_query', kind: 'invalid_args', detail: 'Error: 必须给 query' },
+      ],
+    }));
+    assert.deepEqual(notes, []);
+  });
+
+  it('没见过的失败类型照样记 —— 不认识的 kind 是要去看一眼，不是要丢掉', () => {
+    // 运行记录里的 kind 是字符串，可能来自更早的版本。丢掉未知类型等于丢掉唯一的记录。
+    const notes = deriveReflections(sources({
+      failures: [
+        { tool: 'shell', kind: 'some_future_kind', detail: 'a' },
+        { tool: 'shell', kind: 'some_future_kind', detail: 'b' },
+      ],
+    }));
+    assert.equal(notes[0].topic, '重复失败:shell');
   });
 
   it('撞上轮数上限写成「循环失控」', () => {

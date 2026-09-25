@@ -12,6 +12,8 @@
  *   3. A fact in the KB → NOT an entry, even when its text matches the query.
  *   4. A real Agent turn → the loop's own recording path, including a stuck loop.
  *   5. Pre-flight → the book's contents reach the analysis.
+ *   6. Retirement → an entry can be taken out of circulation with a reason, and a repeat
+ *      puts it back.
  *
  * Sections 4 and 5 are the ratchet: they fail if the agent stops handing failures to the book,
  * which is the only way this feature can be silently lost.
@@ -277,15 +279,18 @@ console.log('\n=== 接进真实 Agent ===');
     Array.isArray(toolsSeen) ? toolsSeen.map((d) => d.name).join(', ') : '没有拿到工具表');
 
   /*
-   * The tool is read-only: the model can ask, and has no way to write its own plausible
-   * lessons into the book. Asserting the ABSENCE of a write tool is the assertion; the
-   * presence of `errorbook_lookup` above is the other half.
+   * The tool set is read-only plus retirement, and both halves are the assertion.
+   *
+   * Read-only matters because a model that can write its own lessons fills the book with plausible
+   * things nobody ever observed. Retirement matters because without it the only way to get rid of a
+   * wrong entry is to stop reading the book — which throws away the true entries with the false one.
+   * What must NOT exist is a tool that CREATES an entry, so the set is asserted by name rather than
+   * by count: adding a third tool has to be a deliberate edit here, not something a count absorbs.
    */
   const bookTools = createErrorbookTools(book);
-  check('错题本只有查询工具，没有写入工具',
-    bookTools.definitions.length === 1
-    && bookTools.definitions[0].name === 'errorbook_lookup',
-    bookTools.definitions.map((d) => d.name).join(', '));
+  const toolNames = bookTools.definitions.map((d) => d.name).sort().join(', ');
+  check('错题本只有查询 + 退役两个工具，没有能创建条目的工具',
+    toolNames === 'errorbook_forget, errorbook_lookup', toolNames);
 
   const answer = await run(bookTools, 'errorbook_lookup', { tool: 'bad_command' });
   check('查得到刚刚那次失败，并且带上去路', /bad_command/.test(answer) && /去路/.test(answer),
@@ -294,6 +299,62 @@ console.log('\n=== 接进真实 Agent ===');
   check('两个条件都不给是用法错误，不是空结果',
     classifyToolResult('errorbook_lookup', nothing).kind === 'invalid_args',
     `${classifyToolResult('errorbook_lookup', nothing).kind}\n${nothing}`);
+}
+
+// ─── 5b. 退役：踩错的能撤掉，撤掉的复发会自己回来 ────────────────────────────
+
+/*
+ * The case this exists for is a false alarm that a user cannot argue with: a failing test that was
+ * failing on purpose, or a reflection that read a knowledge-base retrieval as a drifting tool call.
+ * Measured on a live run: four such entries, and no way to retire any of them.
+ *
+ * The assertion that matters is the pair. Retiring and hiding are only correct TOGETHER — an entry
+ * that can be hidden and never comes back is a way to lose a real lesson permanently, so the second
+ * half (a repeat clears the retirement) is what makes the first half safe.
+ */
+console.log('\n=== 退役一条错题 ===');
+
+{
+  const tools = createErrorbookTools(book);
+  /*
+   * A tool name nothing else in this file uses.
+   *
+   * The first version used `shell`, which section 2 has already written two entries under — and
+   * `lookup({ tool })` then returns a SET, so "the entry" was whichever sorted first. The failure
+   * it produced (`reopened: false` while the count went up) pointed at the fixture, not the code.
+   * One tool, one entry, no ordering to depend on.
+   */
+  const PROBE = 'retire_probe';
+  book.record({ tool: PROBE, kind: 'nonzero_exit', detail: 'test failed on purpose', sessionId: 's-retire' });
+  const before = book.lookup({ tool: PROBE });
+  check('前提：这本书里有一条该工具的失败记录', before.length === 1, JSON.stringify(before));
+  const entry = before[0];
+
+  const gone = await run(tools, 'errorbook_forget', { id: entry.id, reason: '有意为之的失败测试' });
+  check('退役成功并回执说明了原因', /有意为之/.test(gone), gone.slice(0, 300));
+  check('退役后查询不再返回它', book.lookup({ tool: PROBE }).length === 0,
+    JSON.stringify(book.lookup({ tool: PROBE })));
+  check('【关键】退役不是删除 —— 行还在，理由和信号都在', (() => {
+    const row = store.getMemory(entry.id);
+    return Boolean(row) && row.metadata?.errorForgotten === true
+      && row.metadata?.errorForgottenReason === '有意为之的失败测试';
+  })(), JSON.stringify(store.getMemory(entry.id)?.metadata));
+
+  // The half that makes retirement safe: it is not a permanent mute.
+  const again = book.record({ tool: PROBE, kind: 'nonzero_exit', detail: 'test failed on purpose', sessionId: 's-retire' });
+  const back = book.lookup({ tool: PROBE });
+  check('【关键】同样的失败再来一次，退役被撤销（静音是永久的就没人敢用）',
+    again?.reopened === true && back.some((e) => e.id === entry.id),
+    JSON.stringify({ reopened: again?.reopened, seen: back }));
+  check('撤销后计数继续累计，而不是从头开始',
+    (back.find((e) => e.id === entry.id)?.count ?? 0) >= 2, JSON.stringify(back));
+  check('撤销后元数据里的退役标记被清掉（否则查询会继续把它藏起来）',
+    store.getMemory(entry.id)?.metadata?.errorForgotten !== true,
+    JSON.stringify(store.getMemory(entry.id)?.metadata));
+
+  const missing = await run(tools, 'errorbook_forget', { id: 'no-such-id' });
+  check('退一条不存在的 id 是明确的失败，不是静默成功',
+    /没有 id 为/.test(missing), missing.slice(0, 200));
 }
 
 // ─── 6. 开工前会去查 ────────────────────────────────────────────────────────
@@ -342,8 +403,17 @@ console.log('\n=== 只在自己的子树下写东西 ===');
     (g) => g.name !== ERRORBOOK_ROOT && g.parentGroupId !== root?.id && g.name !== 'notes',
   );
   check('知识库里没有多出别的组', strays.length === 0, strays.map((g) => g.name).join(', '));
-  check('错题本没有自己的持久化文件（用的是 KB 原语）', errorRows().length === book.count(),
-    `rows=${errorRows().length} entries=${book.count()}`);
+  /*
+   * The claim is "the book has no persistence of its own": every entry is a KB row, and there is
+   * nothing in a file or a table that a reader would have to know about. Retired entries are rows
+   * too, and `book.count()` deliberately excludes them (they are no longer lessons), so they are
+   * added back here rather than dropped — a retired row that nothing accounted for would be a stray
+   * the book did not write.
+   */
+  const rows = errorRows();
+  const retired = rows.filter((m) => m.metadata?.errorForgotten === true).length;
+  check('错题本没有自己的持久化文件（用的是 KB 原语）', rows.length === book.count() + retired,
+    `rows=${rows.length} entries=${book.count()} retired=${retired}`);
 }
 
 store.close();

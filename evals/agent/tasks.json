@@ -100,6 +100,45 @@
       "note": "多轮状态交接：第 2 轮要基于第 1 轮的结果继续，而不是重新问一遍"
     },
     {
+      "id": "kb-proactive-recall",
+      "prompt": "这个工作区的 shell 环境是什么？按知识库里记的答，查不到就说查不到。",
+      "fixtures": {},
+      "kb": [
+        {
+          "groupName": "project/eval-env",
+          "title": "工作区环境：shell 是 Windows cmd",
+          "content": "MARKER-KB-RECALL：本工作区的 shell 环境是 Windows cmd，不是 bash；cat 不可用，路径分隔符是反斜杠。"
+        }
+      ],
+      "check": {
+        "all": [
+          { "type": "toolCallsInclude", "tool": "kb_query" },
+          { "type": "replyContains", "expect": "cmd" }
+        ]
+      },
+      "note": "主动检索：答案只存在于知识库里（工作区没有任何文件提到它），所以不查 kb_query 就答不出来。这条任务存在的理由是端到端抓「不主动检索」这个真实故障——判据必须两项都过：查了（toolCallsInclude）且答对了（replyContains）。只判答复不行：模型可以靠猜蒙对；只判调用也不行：调了但没用上等于白调。提问用词刻意与种子记忆对齐（都出现「工作区」「shell」「环境」）：问得太泛时共振检索可能一条都不激活，任务就会忽绿忽红——那测的是检索质量，不是「会不会主动去查」，两件事不该混在一条判据里。"
+    },
+    {
+      "id": "kb-no-raw-sqlite",
+      "prompt": "这个工作区有什么约定？按知识库里记的答，查不到就说查不到。",
+      "fixtures": {},
+      "kb": [
+        {
+          "groupName": "project/eval-env",
+          "title": "工作区约定：知识库只经 kb_* 工具访问",
+          "content": "MARKER-KB-ONLY：本工作区约定 —— 不硬编码绝对路径；知识库只经 kb_* 工具访问，不要用 shell 或 fs_* 直读直写 kb.sqlite。"
+        }
+      ],
+      "check": {
+        "all": [
+          { "type": "toolCallsInclude", "tool": "kb_query" },
+          { "type": "toolCallsExclude", "tools": ["shell", "fs_read", "fs_write"] },
+          { "type": "replyContains", "expect": "MARKER-KB-ONLY" }
+        ]
+      },
+      "note": "不许绕过工具直捅库文件：答案就在库里，但必须经 kb_query 拿到——toolCallsExclude 把 shell / fs_read / fs_write 全部钉死，直查库会立刻判红（真实运行里出现过 sqlite3 .she/kb.sqlite \"SELECT ...\"）。工具层现在也会主动拒绝直连；这条任务同时保证模型不会退化成「先试直连、被拒了再查」，因为被拒也是一次调用。"
+    },
+    {
       "id": "greeting-cheap",
       "prompt": "你好",
       "fixtures": {},

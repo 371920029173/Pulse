@@ -38,6 +38,15 @@ export const AGENT_CHECKS = new Set([
    */
   'toolCallsAtMost',
   'toolCallsInclude',
+  /*
+   * Tools that must NOT have run.
+   *
+   * The complement of `toolCallsInclude`, and needed for the same reason: some rules are about a
+   * path that must not be taken. "The answer is in the KB, and it was reached through `kb_query`
+   * rather than by poking the sqlite file" is a statement about two tools — one that must appear
+   * and two that must not — and a bare call count cannot say which of them ran.
+   */
+  'toolCallsExclude',
 ]);
 
 /** Assertion types the verification harness can grade (see evals/verification/run.mjs). */
@@ -103,6 +112,29 @@ export function validateTasks(list, opts = {}) {
       if (typeof body !== 'string') problems.push(`${t.id}: 夹具 ${name} 不是字符串`);
     }
 
+    /*
+     * `kb` seeds memories before the run, so a task can ask about something the model has never
+     * seen. Without it, "does it query the KB before answering" is unobservable in a fresh
+     * workspace — and the task would pass on the answer being in a file or in the conversation.
+     *
+     * Checked for the same reason as fixtures: a shape error costs an API call to discover, and an
+     * empty `content` would seed a memory that says nothing while the task looks fine.
+     */
+    if (t.kb !== undefined) {
+      if (!Array.isArray(t.kb)) {
+        problems.push(`${t.id}: kb 不是数组`);
+      } else {
+        t.kb.forEach((m, i) => {
+          if (!m || typeof m !== 'object') { problems.push(`${t.id}: kb[${i}] 不是对象`); return; }
+          for (const field of ['groupName', 'title', 'content']) {
+            if (typeof m[field] !== 'string' || !m[field].trim()) {
+              problems.push(`${t.id}: kb[${i}] 的 ${field} 缺失或为空`);
+            }
+          }
+        });
+      }
+    }
+
     for (const c of checksOf(t)) {
       if (!c || typeof c !== 'object') { problems.push(`${t.id}: 判据不是对象`); continue; }
       if (!knownChecks.has(c.type)) problems.push(`${t.id}: 未知判据类型 ${c.type}`);
@@ -118,6 +150,13 @@ export function validateTasks(list, opts = {}) {
       }
       if (c.type === 'toolCallsInclude' && !(typeof c.tool === 'string' && c.tool.trim())) {
         problems.push(`${t.id}: toolCallsInclude 需要非空 tool`);
+      }
+      if (c.type === 'toolCallsExclude') {
+        if (!Array.isArray(c.tools) || c.tools.length === 0) {
+          problems.push(`${t.id}: toolCallsExclude 需要非空 tools 数组`);
+        } else if (c.tools.some((x) => typeof x !== 'string' || !x.trim())) {
+          problems.push(`${t.id}: toolCallsExclude 的 tools 里有空项`);
+        }
       }
     }
 

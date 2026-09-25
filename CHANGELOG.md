@@ -131,6 +131,17 @@ store, and reads the rows back — it caught the query filter silently returning
 it matched the retrieval trace against `errors/` while the engine renders that path as
 `errors → shell`.
 
+**An entry in the error book can be retired, and retiring is not the same as silencing.** Some
+entries are wrong the moment they are written: a failing test that was failing *on purpose*, or a
+reflection that read a knowledge-base retrieval in the transcript as a drifting tool call. With no
+way to say so, the only thing a user could do was learn to skip the book — which turns off the true
+entries with the false one. `errorbook_forget` takes the node's id and a reason, records both on the
+node, and hides it from `errorbook_lookup` and from the pre-flight analysis. Retired rather than
+deleted, because the reason is the useful part if the same entry is written again: a **repeat of the
+same failure clears the retirement**, marks the node `reopened`, and counts up, so a retired entry
+that keeps happening comes back on its own instead of staying hidden. Writing is untouched —
+retirement is a statement about reading.
+
 **Plans are a graph, so a plan can be resumed instead of re-derived.** A plan was a flat list
 with five statuses, which meant two failures that both read as success. A step could be marked
 `done` while the step it needed was still pending — the plan then reported `4/4 完成` over work
@@ -418,6 +429,24 @@ with one chat, no way to open any of the twenty, and nothing resembling their hi
 to preserve the primary source, not to replace it with our parse of it), and the provenance is
 recorded on the session so "where did this come from" stays answerable.
 
+**A delegated child gets its own copy of the knowledge base — and its notes come back.** Isolation
+follows a declared `scope`, so a read-only child — the common case — was exactly the child pointed
+straight at the parent's live database, holding the same memory rules as the parent ("write back with
+`kb_upsert`"). Nothing reviewed those writes, and nothing distinguished them afterwards: `kb_upsert`
+carries no provenance field, so a child's node is indistinguishable from one the parent wrote,
+permanently. The first fix refused the write. The problem with refusing is that it leaves the child
+with nowhere to put a finding: the conclusion survives only if the child remembers to repeat it in
+prose, and a child that ran out of time never gets to. So every child — isolated or not — now runs
+against a **private copy** of the parent's database, and the copy is not a dead drop: when the child
+ends, the parent is handed what it wrote (titles plus the opening of each note, in the `task_spawn`
+reply), the full text is written to `.she/subagent-notes/<child-session>.md`, and the copy is deleted.
+Harvesting is a reading, not a merge — nothing reaches the parent's memory without the parent deciding
+— which is the same rule the child was told. The copy lives in the app directory rather than in the
+worktree, because a knowledge base is scaffolding and not work product: inside a worktree it showed up
+as an untracked `.she/` in the changed-files list the parent reads. A child that cannot get a copy
+(disk problem) still falls back to the parent's file with writes refused, and the handoff says which of
+the three situations it is in — a copy, someone else's read-only database, or an empty one.
+
 ### Changed
 
 
@@ -451,6 +480,75 @@ different typefaces at different weights.
 `start-desktop.cmd` were replaced by one cross-platform implementation. The `.bat`
 files were also fragile: PowerShell reads a `.ps1` as ANSI without a BOM, so one
 stray non-ASCII byte broke the script's *syntax*.
+
+**A delegated subtask reports what it is doing, and the reply after a timeout is an
+account rather than a verdict.** Two problems measured on a real run, both of which made
+`task_spawn` unusable for heavy work:
+
+*Reliability.* A subtask already trimmed to its smallest form ran into the fixed 180s
+ceiling and returned nothing at all. The budget is now a parameter — `timeout_ms` per task,
+clamped to 30s..30min — because the right number depends on the job (a wide search finishes
+in seconds, a full build does not), and the brief now states the deadline and asks for a
+partial conclusion before it expires. A child told the number can hand in what it has; a
+child that finds out by being killed cannot.
+
+*Visibility.* The reply was `子任务超时（180s）` and nothing else, so 180 seconds of work left
+no trace: the parent could not tell what had been done, and its only move was to dispatch the
+same task again and pay for it twice. The timeout reply now reports how far the child got
+(the last tool calls, in order, with their salient argument), the last thing it said in its
+own words, what it changed — and names both ways to give a heavy task room next time. Running
+children also emit a heartbeat every 5s, which the task card shows in place
+(`23 次调用 · shell pnpm test · 已 95s`). That reading is for whoever is *watching*: the parent
+agent is suspended inside the tool call and cannot be shown anything mid-flight, which is
+exactly why the timeout report has to exist as well as the heartbeat.
+
+**Two replies stop repeating themselves.** Both are called many times per task, so what they
+echo is what the task pays for again and again — measured on a real run: ~15 `plan_update`
+calls and ~10 `kb_query` calls, together the largest identified share of a 2.3M-token session.
+
+`plan_update` re-sent every step's note on every call. It now prints every step and its status
+(short, and it is what makes the plan readable as a whole) but the note only for the steps
+*that call* moved — including the ones it moved as a side effect, which is why the filter is
+derived by comparing the plan before and after rather than from the arguments: completing a
+step activates the next, starting one sends the previous active step back to `pending`, and
+`skip` drops everything downstream. Measured on an 8-step plan: 498 → 242 characters per
+update. Nothing is lost; `plan_list` still prints every note, and the tool description says so.
+
+`kb_query` returned each activated node's full text. Node lengths are bimodal — a convention
+or a port is tens of characters, an ingested document is thousands — and one query activating
+ten long nodes was ten documents re-sent on every lookup. Replies are now summarised to the
+first 200 characters, which leaves the common memory *complete* (so a hit does not cost a
+second call) and cuts only the long tail; `full: true` returns the original text when the exact
+wording matters. Truncation is stated, never silent: a summary presented as the text is worse
+than a long reply.
+
+`pnpm check:cost` measures both on every run and pins the half that a cost fix usually breaks —
+that what was cut is repetition and not information. It asserts the plan reply still lists every
+step with its status and that every note is still readable through `plan_list`; and that a
+shortened node still arrives with its title and id, that short memories come back verbatim, and
+that `full: true` restores the stored text byte for byte. Its own numbers, on a 12-step plan with
+full-length notes and a 9-node query: `plan_update` 898 → 354 characters per call (12 calls:
+10779 → 4242, −61%), `kb_query` 2363 default against 10432 with `full: true` (−77%). Both
+directions were checked by mutation — dropping either filter makes the check fail rather than the
+bill look better.
+
+Measuring the trim against the real artifacts rather than a fixture is what turned up the next
+thing, and it is worth writing down because it was invisible from the source. Replayed on the
+actual 10-step plan and the actual 88KB knowledge base from that run, `plan_update` saves 49%
+(18663 → 9532 characters over 10 updates — and the old replies *grew* with each update, 968 →
+2709, which is the signature of the repetition: re-printing every note accumulated so far, so the
+cost is quadratic in the number of steps). `kb_query` saves less than the fixture suggested — 31%,
+not 77% — and the reason is not node length. A broad query on this library activates 17–25 nodes,
+and each node carries an envelope (title, kind, score, group path, node id) that the summary does
+not touch: across 8 real queries the envelope was 21816 of 42441 characters, 51% of the reply at
+179 characters per hit. So a `budget` parameter that could ask for fewer hits would be worth more
+than a smaller preview — except it cannot, and the tool description said otherwise. `budget` bounds
+the *scan*; the only result cap is `MAX_RESULTS = 40` in the engine, and the engine's own comment
+notes that a larger budget "can only ever ADD results — never remove them". Measured: querying
+"shell 命令" returns 8478 characters at 25 hits, 7696 with `budget: 12`, and 3405 with `budget: 8`
+— the parameter cannot be used to shorten a reply, which is exactly how the old description ("Omit
+to scan without a result cap") invited a model to use it. The description now says what it limits,
+and a test fails if it drifts back.
 
 ### Security
 
@@ -515,6 +613,58 @@ now come only from their own settings, with safe defaults.
 
 ### Fixed
 
+
+**A running turn's transcript could be replaced from disk, so the reply — chain of thought included —
+only appeared once it had finished.** The live reply is tracked by its *position* in `messages`, and
+`App` re-binds history on every `activeSessionId` change. The first message of a fresh session is
+exactly such a change (the server creates the session and the window adopts its id), so
+`loadHistory` landed in the middle of the turn and replaced the transcript with a disk copy that
+cannot contain the turn still being generated — a turn is persisted only when it ends. After that
+swap the tracked index pointed at a message that was no longer ours, so every later chunk was
+dropped and nothing rendered until the turn was written to disk and read back. That is the reported
+symptom exactly: the chain appears only after generation. Three things changed. `loadHistory` now
+defers to a live turn of the same session (a real switch still loads — switching detaches the stream
+first, and that is what leaves `abortRef` null). The live patch re-opens its bubble from the
+accumulators when the tracked one is gone, so the stream outranks a stale disk copy instead of
+vanishing into it. And the follow poll — whose own comment already said a local stream must not be
+overwritten — now re-checks that on **every tick** rather than only when it was armed; it was
+pulling history every 2s into the window that was actively streaming. Separately, a
+`tool_call_start` frame with no `toolCall` was pushed into the transcript as `undefined` and
+crashed the whole view on `tc.id`, blanking the rest of the session; such a frame is ignored now.
+
+Verified against the real thing, not only in tests: the server streams `reasoning` incrementally on
+a plain turn and across a tool loop (measured frame arrival: 137 frames spread over 545ms, then 34
+over 201ms — not one burst at the end), and the real app in a browser grew the chain from 243 to
+1033 characters over ~1.2s with the header reading 思考中… throughout. The failure was never in the
+stream; it was in what the view did with a transcript that got swapped underneath it.
+
+**A constraint's exception was read as its prohibition, so the permitted call was reported as a
+violation.** A constraint is one sentence, and the half that says what is *allowed* was parsed as if
+it said what is forbidden. The constraint recorded in a live run — "子代理不得用 `shell`、`fs_*`、`git`
+等工具，不得修改工作区；唯一被点名的写入是 `kb_upsert` 写知识库（用户明确指定的例外）" — came back as a
+violation of `kb_upsert`, reported against the agent's own `kb_upsert` call: the call the constraint
+had just carved out. It was a major signal (weight 0.8), so it drove the turn to `drift` and was
+written into the error book as a lesson, where it would be read back before similar work. The
+failure mode is self-inflicted in the worst direction — the more carefully a constraint names its
+exception, the more reliably the check fires on the permitted action. Objects are now read from the
+prohibition clauses only (`prohibitionScope`): sentence punctuation splits clauses, a clause that
+grants an exception is dropped, and a comma alone does not split — "不得改动 a.ts、b.ts" is one
+prohibition listing two objects — so lists stay whole while "…，唯一允许的是 X" stays out of the
+forbidden set. A true violation still fires: `不要改 cluster.ts，唯一允许的是只读查询——但不要动
+migrations` still catches a write into `migrations/`. `pnpm check:reflection` covers both halves.
+
+**A message addressed to a session id that did not exist overwrote the conversation on disk.**
+`persistHistory` had no branch for an id the session store did not know, so it fell through to
+`sessions.syncActive` — which adopts whatever it is handed as the active session and writes into
+it. Measured on the live server: `POST /api/chat {"session_id":"sess_harvest_probe"}`, a probe
+against the running app, replaced the user's 786KB conversation with the probe's own transcript and
+left 290KB behind. The damage is invisible in the worst way: the surviving file is a valid, shorter
+conversation, so it reads as "the agent forgot" rather than as corruption, and the bytes are gone.
+The fallback was the whole cause — a writer with no home should get one, not take someone else's —
+so an addressed-but-unknown id now goes through `SessionStore.ensure(id)`, which creates that
+session if it is new and never touches `active_id`. `pnpm check:data` drives the HTTP endpoint with
+an unknown id and asserts the conversation being read — and every other session — is unchanged, and
+the guard was verified by mutation: restoring `syncActive` makes the new section fail.
 
 **A scheduled run replaced the user's conversation on the next restart.** A run created its own
 session — named after the task, with no parent — and `SessionStore.create` handed `active_id` to
@@ -869,6 +1019,88 @@ made a correct entry silently do nothing.
 **Route shadowing.** `PUT /api/schedule/window` was declared after
 `PUT /api/schedule/:id`, and routes match in order — so setting the working window was
 read as updating a task whose id was "window".
+
+**Topics that named themselves.** `SessionStore.update` re-derived the title from the first user
+message on every messages-only write, and those writes are constant: `persistHistory` runs on each
+turn's stream tick, on session activate, and when settings change. So any title that did not come
+from the session's own first message was overwritten by the next write. A delegated child, which the
+parent names, came back as the first line of its handoff brief — `## 交接单 - 交付物：…` — because
+that brief *is* the child's first user message and the child's own titled write happens before the
+next persist. A rename by the user survived only until the next message in that conversation. Both
+were invisible in normal use: for an ordinary chat the derived title already equals the stored one,
+so the corruption only showed on sessions named by something other than their own first message. A
+title is now derived only while the session is still unnamed; the end-to-end check that was supposed
+to cover the child case had been asserting immediately after the spawn, before any later persist.
+
+**A read-only subtask filled the PARENT's error book.** The `kbReadOnly` guard covered the tools —
+`kb_upsert` and `kb_link` refused — but the error book and the end-of-turn self-review write straight
+through the KB engine, so they went around the refusal. Measured on a live run: a delegated child
+(`sess_8d64da11747c`) filed three permanent entries into the parent's `kb.sqlite` — `plan_list ·
+unavailable` and `preflight_record · unavailable`, which it called because the prompt listed them
+even though its tool set did not contain them, and `目标漂移 · reflection`, which it derived by
+weighing five file reads against the parent's goal. The child's system prompt is now built against
+its own tool set (denied tools, their sections, and the same names inside project skill recipes are
+all stripped, so the prompt and the tool table cannot disagree again), `PreflightStore` gained
+`latestForSession` so a conversation is only ever measured against its own goal, and an agent whose
+KB belongs to someone else writes to the book not at all — it still reports what it found, it just
+does not leave a record in a memory it is borrowing.
+
+**`kb_query` answering "no results" twice was recorded as a tool that failed twice.** An empty result
+is a successful query whose answer is "nothing" — the classifier says so, the error book's own
+`isWorthRemembering` already excluded it, and the prompt tells the agent to re-ask with different
+words when it happens. The repeated-failure rule in `deriveReflections` read `ok === false` directly
+instead of asking that predicate, so diligent searching produced a durable lesson named
+`重复失败:kb_query` about a tool that had not failed once. Both rules now share one predicate, and an
+unrecognised failure kind is now kept rather than dropped — the kind arrives as a string from a run
+trace that outlived the version which wrote it.
+
+**A constraint was reported as violated by four calls that only wrote about it.** The constraint
+check read the whole argument blob as one string, so any call whose payload mentioned the excluded
+token looked like touching it, and the payload almost always does — the agent's job is to write down
+what it knows. A live run produced four false accusations from one constraint (`shell 为 Windows cmd：
+无 cat/which`), from `preflight_record` (which had just declared it), `task_spawn` (which quoted it to
+a child), `plan_update` (a note discussing it) and an innocent `fs_write` whose *path* was not it. The
+check now reads the TARGET of a call — `path`, `command`, `scope` — and never prose: `content`,
+`note`, `goal`, `prompt` and the other payload fields are stripped (recursively, so a nested handoff
+cannot smuggle them back). Writing a sentence that names a file neither reads nor edits it.
+
+**Deleting a memory left the graph pointing at it.** `KBStore.deleteMemory` removed the row and
+nothing else, so two kinds of leftover survived it, neither repaired by anything downstream. Edges
+kept a `source_id` / `target_id` for a node that no longer existed — the dangerous half, because
+resonance traversal follows an edge and then looks up its far end, and deleting an error-book entry
+is exactly when `co_occurrence` edges are left behind. And the entry's group still listed the id in
+`memory_ids`, so every count read from the group disagreed with the table. Found by deleting four
+rows out of a live database and then asking the file what it thought it had: five edges pointing at
+four memories that were gone, and the group they had been filed under still naming all four. Deleting
+one node now means one node.
+
+**A checked-off memo entry stopped existing for whoever was not looking at it.** The scratchpad is
+the one place both parties write, and both sides treated "done" as "gone": the panel hid completed
+entries behind a toggle that defaulted to off, and `memo_list` filtered them the same way. Measured on
+a live run, the agent had written notes, ticked them, and then asked `memo_list` a question — and the
+tool answered `备忘录为空。`. That is a false statement about the world, in the one voice the model
+trusts, and it has two costs: the agent re-notes what it already noted, or reports to the user that
+nothing was ever recorded. The panel had the matching failure — with every entry done, the filtered
+list is empty and it printed 还没有记录, which is exactly the sentence that makes a user conclude the
+agent never wrote anything. Completed entries are now shown by default (the toggle still folds them
+away), the count is still reported when they are folded, and both the panel and the tool distinguish
+"nothing to show" from "nothing here": `memo_list` says how many entries it is withholding and how to
+see them, and `includeDone: true` returns them verbatim.
+
+**A file starting with a UTF-8 BOM made the reading tools report the wrong column, and `grep` look
+past the first line.** PowerShell's `Set-Content`/`Out-File` write a BOM on Windows, so any file the
+agent creates through the shell — or that a user last saved in Notepad — can begin with U+FEFF. Node's
+`utf8` decoder does not remove it, which makes it an invisible character that is nonetheless real:
+`grep` with a `^`-anchored pattern missed the first line of a file the pattern plainly matched, and
+`fs_read` handed the model that character as content, so any column the model counted on line 1 was
+one past what the language server reports for the same file (LSP positions come from the parsed
+document, which has no BOM). One character of drift, silently, on every first-line diagnostic. The
+live workspace this was found in had a BOM on `src/main.ts`, `tsconfig.json`, `README.md` and both
+`logs/*.log`. Every other reader in the codebase already stripped it — `plan-tools`, `preflight`,
+`audit`, `run-trace`, `plugins`, `ingest-tools`, `checkpoints`, `memo-tools` — and the tools an agent
+actually inspects source with were the ones that did not. Only the leading character is dropped, so a
+U+FEFF used as a zero-width space mid-file stays; `fs_write` strips it too, so re-writing a BOM file
+unchanged is reported as unchanged instead of as a one-line edit.
 
 ### Testing
 

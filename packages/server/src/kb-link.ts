@@ -77,7 +77,7 @@ export function resolveWorkspaceKbPath(workspaceRoot: string, env: NodeJS.Proces
 export function copyKbFile(fromPath: string, toPath: string): void {
   const from = resolve(fromPath);
   const to = resolve(toPath);
-  if (!existsSync(from)) throw new Error(`???????: ${from}`);
+  if (!existsSync(from)) throw new Error(`知识库文件不存在: ${from}`);
   mkdirSync(dirname(to), { recursive: true });
   copyFileSync(from, to);
   for (const suf of ['-wal', '-shm']) {

@@ -95,6 +95,33 @@ describe('KBStore', () => {
     assert.equal(store.getMemory(mem.id), undefined);
   });
 
+  /*
+   * Deleting a memory is not one DELETE, and this is the assertion that keeps it that way.
+   *
+   * Nothing else repairs the two leftovers: an edge keeps naming a row that is gone (resonance
+   * traversal follows it and has nowhere to land), and the group keeps listing the id (so every
+   * count that reads the group disagrees with the table). Both were found in a live database after
+   * rows were removed from it — five edges pointing at four memories that no longer existed, and
+   * the group they had been filed under still naming all four.
+   */
+  it('should delete the edges and the group membership along with the memory', () => {
+    const group = store.createGroup({ name: '自省' });
+    const target = store.createMemory({ kind: 'tool_outcome', title: '还在的', content: 'C' });
+    const doomed = store.createMemory({ kind: 'tool_outcome', title: '要删的', content: 'C' });
+    // `createMemory` writes the node only; membership is the group's own list (see `engine.addMemory`).
+    store.updateGroup(group.id, { memoryIds: [doomed.id, target.id] });
+    const edge = store.createEdge({ kind: 'co_occurrence', sourceId: doomed.id, targetId: target.id });
+    store.updateGroup(group.id, { weakEdgeIds: [edge.id] });
+
+    store.deleteMemory(doomed.id);
+
+    assert.equal(store.getMemory(doomed.id), undefined);
+    assert.equal(store.getEdge(edge.id), undefined, '边还在，只是它的一端已经不存在了');
+    const after = store.getGroup(group.id)!;
+    assert.deepEqual(after.memoryIds, [target.id], '组里还留着那个已经不存在的 id');
+    assert.deepEqual(after.weakEdgeIds, [], '组里还留着那条已经被删掉的边');
+  });
+
   it('should find seed nodes structurally (no FTS)', () => {
     store.createMemory({ kind: 'text', title: 'TypeScript guide', content: 'Learn TypeScript basics' });
     store.createMemory({ kind: 'text', title: 'Python tutorial', content: 'Learn Python basics' });
@@ -179,6 +206,36 @@ describe('KBStore', () => {
     });
     assert.equal(edge.evidence, 'observed correlation');
     assert.deepEqual(edge.falsifiers, ['could be coincidence', 'small sample']);
+  });
+
+  /*
+   * The read a delegated child's notes are harvested with. It has to answer "what did YOU write",
+   * which is why it filters on `created_at` and not `updated_at`: group maintenance reassigns
+   * memories with `updateMemory`, which stamps `updated_at`, so an updated-since filter would report
+   * the parent's own older notes as the child's work and invite it to re-absorb what it already had.
+   */
+  it('should list only memories created at or after a timestamp', () => {
+    const before = store.createMemory({ kind: 'fact', title: '父级早就有的', content: 'old' });
+    // Backdated rather than relying on wall-clock ordering: `created_at` has millisecond
+    // resolution, and two writes in one test can land in the same millisecond.
+    store.updateMemory(before.id, { createdAt: Date.now() - 60_000 });
+    const cutoff = Date.now();
+    const after = store.createMemory({ kind: 'fact', title: '子任务写的', content: 'new' });
+
+    assert.deepEqual(store.memoriesCreatedSince(cutoff).map((m) => m.id), [after.id],
+      '只该有边界之后写的那条');
+  });
+
+  it('should not treat a moved memory as newly created', () => {
+    const moved = store.createMemory({ kind: 'fact', title: '被搬家过的', content: 'same text' });
+    store.updateMemory(moved.id, { createdAt: Date.now() - 60_000 });
+    const cutoff = Date.now();
+    // Group maintenance does exactly this: reassigns an existing memory to another group.
+    store.updateMemory(moved.id, { groupIds: ['g-other'] });
+
+    assert.ok(store.getMemory(moved.id)!.updatedAt >= cutoff, '前提：这次搬家确实发生在边界之后');
+    assert.deepEqual(store.memoriesCreatedSince(cutoff).map((m) => m.id), [],
+      '搬家不是「子任务写的」，算进去会让父级重新吸收自己早就有的结论');
   });
 });
 

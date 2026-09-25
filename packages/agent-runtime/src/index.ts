@@ -101,13 +101,32 @@ export { createIngestTools, chunkFileContent } from './ingest-tools.js';
 export type { IngestItem, IngestBatch } from './ingest-tools.js';
 export { MemoStore, createMemoTools } from './memo-tools.js';
 export type { MemoEntry } from './memo-tools.js';
-export { createSubagentTools, composeHandoffPrompt, shouldIsolate } from './subagent-tools.js';
+export {
+  createSubagentTools,
+  composeHandoffPrompt,
+  shouldIsolate,
+  readChildProgress,
+  formatTimeoutReport,
+  resolveSubagentTimeoutMs,
+  selectHarvestNotes,
+  renderKbHarvest,
+  DEFAULT_SUBAGENT_TIMEOUT_SECONDS,
+  MIN_SUBAGENT_TIMEOUT_SECONDS,
+  MAX_SUBAGENT_TIMEOUT_SECONDS,
+  HARVEST_INLINE_MAX,
+} from './subagent-tools.js';
 export type {
   SubagentRunner,
   SubagentRequest,
   SubagentResult,
   SubagentHandoff,
   SubagentWorktree,
+  SubagentRunHooks,
+  SubagentProgressEvent,
+  ChildProgress,
+  HarvestNote,
+  HarvestCandidate,
+  SubagentKbHarvest,
 } from './subagent-tools.js';
 export { makeScheduleTools, executeScheduleTool } from './schedule-tools.js';
 export type { ScheduleBridge, ScheduledTaskView, WindowView } from './schedule-tools.js';

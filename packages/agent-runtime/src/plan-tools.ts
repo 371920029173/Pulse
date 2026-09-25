@@ -201,6 +201,14 @@ export class PlanStore {
    * the conversation that created them.
    */
   private find(all: Plan[], id: string): Plan | undefined {
+    /*
+     * An empty id matches nothing.
+     *
+     * `startsWith('')` is true for every string, so without this guard a call that named no plan
+     * (and found no active one) silently resolved to whichever plan happened to be first in the
+     * file — a write to someone else's plan, from a caller that believed it was addressing none.
+     */
+    if (!id) return undefined;
     return all.find((p) => p.id === id || p.id.startsWith(id));
   }
 
@@ -504,24 +512,85 @@ function listLines(items: string[], empty: string): string[] {
   return items.map((i) => (i.startsWith('- ') ? i : `- ${i}`));
 }
 
-export function renderPlan(plan: Plan): string {
+export interface RenderPlanOptions {
+  /**
+   * Print a step's note ONLY for the ids in this set; every other step prints without one.
+   *
+   * `plan_update` runs once per step of progress — a dozen times on a long task — and the notes
+   * are the long part of the plan. Repeating all of them on every update was pure repeat billing:
+   * one measured run spent ~15 updates re-sending every note in the plan. The step LIST is short
+   * and is what lets the plan be read as a whole, so it stays; the notes are what is worth paying
+   * for only on the step the call actually touched.
+   *
+   * Nothing is lost: the notes are on disk and `plan_list` prints all of them. Undefined means
+   * "no filter" — `plan_create` / `plan_list` / the UI want the whole thing.
+   */
+  notesOnly?: ReadonlySet<string>;
+}
+
+/**
+ * Which steps a write's reply should print notes for: the ones the call actually moved.
+ *
+ * Derived by comparing the plan before the call against the plan after it, rather than from the
+ * arguments — because the changes worth reporting are the ones the caller did NOT ask for.
+ * Completing a step activates the next one, starting one sends the previously active step back to
+ * `pending`, and `skip` drops every step downstream. Each of those has an id that only the
+ * comparison can name, and a note printed next to an untouched step reads as a change that did
+ * not happen.
+ *
+ * A missing snapshot returns `undefined` — "print everything" — rather than an empty set. The
+ * filter exists to save tokens on a repeated echo, and a reply that silently drops a note because
+ * a read failed is a worse trade than a few hundred wasted tokens.
+ */
+function notesToPrint(
+  before: Plan | undefined,
+  after: Plan,
+  extra: readonly string[] = [],
+): Set<string> | undefined {
+  if (!before) return undefined;
+  const prev = new Map(before.steps.map((s) => [s.id, s]));
+  const touched = new Set<string>(extra);
+  for (const s of after.steps) {
+    const was = prev.get(s.id);
+    if (!was) {
+      touched.add(s.id); // a step appended by this call
+      continue;
+    }
+    if (
+      was.status !== s.status
+      || was.note !== s.note
+      || was.attempts !== s.attempts
+      || was.onFailure !== s.onFailure
+      || was.dependsOn.join('\u0000') !== s.dependsOn.join('\u0000')
+    ) {
+      touched.add(s.id);
+    }
+  }
+  return touched;
+}
+
+/** One step's line. Shared by every caller so the note filter cannot change the format. */
+function stepLine(s: PlanStep, opts?: RenderPlanOptions): string {
+  /*
+   * Dependencies and the failure policy are printed only when they are not the default. A
+   * plan of plain steps should read exactly as it did before, and a wall of `依赖: —` on
+   * every line is noise that makes the one line that matters harder to find.
+   */
+  const deps = s.dependsOn.length ? `  依赖: ${s.dependsOn.join('、')}` : '';
+  const policy = s.onFailure !== 'stop' ? `  失败策略: ${s.onFailure}` : '';
+  const tries = s.attempts > 0 ? `  已试 ${s.attempts} 次` : '';
+  const showNote = s.note && (!opts?.notesOnly || opts.notesOnly.has(s.id));
+  return `  ${STATUS_MARK[s.status]} ${s.id} ${s.title}${deps}${policy}${tries}${showNote ? `  — ${s.note}` : ''}`;
+}
+
+export function renderPlan(plan: Plan, opts?: RenderPlanOptions): string {
   const done = plan.steps.filter((s) => s.status === 'done').length;
   const lines = [
     `Plan ${plan.id} — ${plan.title}  (${done}/${plan.steps.length} 完成, 状态 ${plan.status})`,
   ];
   if (plan.sessionId) lines.push(`来自会话: ${plan.sessionId}`);
   if (plan.goal) lines.push(`目标: ${plan.goal}`);
-  for (const s of plan.steps) {
-    /*
-     * Dependencies and the failure policy are printed only when they are not the default. A
-     * plan of plain steps should read exactly as it did before, and a wall of `依赖: —` on
-     * every line is noise that makes the one line that matters harder to find.
-     */
-    const deps = s.dependsOn.length ? `  依赖: ${s.dependsOn.join('、')}` : '';
-    const policy = s.onFailure !== 'stop' ? `  失败策略: ${s.onFailure}` : '';
-    const tries = s.attempts > 0 ? `  已试 ${s.attempts} 次` : '';
-    lines.push(`  ${STATUS_MARK[s.status]} ${s.id} ${s.title}${deps}${policy}${tries}${s.note ? `  — ${s.note}` : ''}`);
-  }
+  for (const s of plan.steps) lines.push(stepLine(s, opts));
 
   /*
    * Where to continue, spelled out.
@@ -656,7 +725,13 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
         'Update one step of a plan. Status: pending | active | done | blocked | dropped. Completing a step auto-activates the next step whose dependencies are done, and only one step is in progress at a time. '
         + 'A step cannot be started or finished while a step it declares in `dependsOn` is not done — the call is refused with the ids that are in the way. '
         + 'When a step turns out to be impossible, mark it `blocked`: the plan\'s own `onFailure` then applies (skip drops every step that depended on it). '
-        + 'You may also pass `depends_on` / `on_failure` to declare or correct them. Always update the plan as you make progress.',
+        + 'You may also pass `depends_on` / `on_failure` to declare or correct them. Always update the plan as you make progress. '
+        /*
+         * States the reply's shape, because a caller that does not expect it reads a missing note
+         * as a lost note. The notes really are still there — one sentence here is cheaper than
+         * printing every one of them back on each of a dozen updates.
+         */
+        + 'The reply repeats every step and its status, but prints the step note only for the steps this call moved; the other notes are still stored, and `plan_list` prints them all.',
       parameters: {
         type: 'object',
         properties: {
@@ -692,6 +767,12 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
       }
       // Allow "active plan" shorthand.
       const targetId = planId || plans.active()?.id || '';
+      /*
+       * Read the plan BEFORE writing, so the reply can name the steps this call moved — including
+       * the ones it moved as a side effect (see `notesToPrint`). `get` re-reads from disk, so this
+       * is a real snapshot and not a second reference to the object about to be mutated.
+       */
+      const before = plans.get(targetId);
       const result = plans.setStepStatus(
         targetId,
         stepId,
@@ -708,7 +789,9 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
       const skipped = result.dropped.length
         ? `\n被一起跳过的步骤: ${result.dropped.join('、')}（它们声明依赖这一步）`
         : '';
-      return renderPlan(result.plan) + skipped;
+      return renderPlan(result.plan, {
+        notesOnly: notesToPrint(before, result.plan, [stepId, ...result.dropped]),
+      }) + skipped;
     },
   );
 
@@ -747,9 +830,10 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
       const steps = Array.isArray(a.steps) ? a.steps : [];
       if (!steps.length) return 'Error: steps are required';
       const targetId = String(a.plan_id ?? '') || plans.active()?.id || '';
+      const before = plans.get(targetId);
       const plan = plans.addSteps(targetId, steps);
       if (!plan) return `Error: plan not found (plan_id=${targetId})`;
-      return renderPlan(plan);
+      return renderPlan(plan, { notesOnly: notesToPrint(before, plan) });
     },
   );
 
@@ -762,7 +846,8 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
     async () => {
       const all = plans.list();
       if (!all.length) return 'No plans yet.';
-      return all.map(renderPlan).join('\n\n');
+      // `plan_list` is the place the full notes are printed, so it takes no filter.
+      return all.map((p) => renderPlan(p)).join('\n\n');
     },
   );
 

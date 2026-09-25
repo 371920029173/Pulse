@@ -187,6 +187,13 @@ function gradeOne(check, ctx) {
         ? { pass: true, detail: '' }
         : { pass: false, detail: `没有调用 ${check.tool}（实际调用：${toolSummary(toolsUsed)}）` };
     }
+    if (check.type === 'toolCallsExclude') {
+      const names = new Set(toolsUsed.map((t) => t.name));
+      const seen = check.tools.filter((t) => names.has(t));
+      return seen.length === 0
+        ? { pass: true, detail: '' }
+        : { pass: false, detail: `不该调用的工具被调用了: ${seen.join(', ')}（实际调用：${toolSummary(toolsUsed)}）` };
+    }
     return { pass: false, detail: `未知判据类型: ${check.type}` };
   } catch (err) {
     return { pass: false, detail: `判分异常: ${err.message.slice(0, 100)}` };
@@ -227,8 +234,20 @@ async function runTask(task) {
   mkdirSync(kbDir, { recursive: true });
   const store = new KBStore(join(kbDir, 'kb.sqlite'));
   const engine = new GroupKBEngine(store, { ...cfg.kb, dbPath: join(kbDir, 'kb.sqlite') });
+  /*
+   * Seed memories the task needs to be answerable.
+   *
+   * Some behaviours can only be tested against a fact the model has never seen: "does it query the
+   * KB before answering" is unobservable when the answer is already in the conversation or in a file
+   * it can just read — those tasks would pass while doing the opposite of what they claim.
+   */
+  for (const m of task.kb ?? []) {
+    const group = engine.createGroup(m.groupName);
+    engine.addMemory(group.id, m.kind ?? 'fact', m.title, m.content);
+  }
   const shell = new SandboxShell(dir, cfg.sandbox);
-  const tools = createTools(shell, dir, { allowAllCommands: true });
+  // Same wiring as the server, so the eval cannot pass while production refuses or vice versa.
+  const tools = createTools(shell, dir, { allowAllCommands: true, kbDbPath: join(kbDir, 'kb.sqlite') });
   /** Child agents started by `task_spawn`, disposed with the parent before the workspace is deleted. */
   const children = [];
   /*
@@ -246,7 +265,10 @@ async function runTask(task) {
    */
   const subagentRunner = {
     async run(req) {
-      const childTools = createTools(new SandboxShell(dir, cfg.sandbox), dir, { allowAllCommands: true });
+      const childTools = createTools(new SandboxShell(dir, cfg.sandbox), dir, {
+        allowAllCommands: true,
+        kbDbPath: join(dir, '.she', 'kb.sqlite'),
+      });
       const child = new Agent(cfg, engine, childTools, null, { isSubagent: true });
       // Kept so it can be disposed with the parent: a child that started a language server would
       // otherwise hold the temp directory open exactly like the parent does.

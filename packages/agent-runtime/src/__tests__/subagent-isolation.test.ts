@@ -82,6 +82,26 @@ describe('交接单', () => {
     const brief2 = composeHandoffPrompt({ description: '查一下', prompt: '看看。' }, { workdir: '/ws', isolated: false });
     assert.match(brief2, /交付物：查一下/);
   });
+
+  it('共享父级库时明说只读 —— 那是子级唯一能永久改父级状态的通路', () => {
+    const shared = composeHandoffPrompt(
+      { description: '查一下', prompt: '看看。' },
+      { workdir: '/ws', isolated: false, kb: 'shared' },
+    );
+    assert.match(shared, /父级的活动库/, '共享库不说清楚，子级会以为这是自己的记忆');
+    assert.match(shared, /只读/);
+    assert.match(shared, /交付物/, '拒了写入就必须给出替代动作');
+  });
+
+  it('私有副本与共享库的措辞不能混（两种记忆语义正好相反）', () => {
+    const snap = composeHandoffPrompt(
+      { description: 'x', prompt: 'y' },
+      { workdir: '/wt', isolated: true, kb: 'snapshot' },
+    );
+    assert.match(snap, /私有副本/);
+    assert.match(snap, /被父级读一遍/, '子级得知道笔记有人读，否则它不会花那一次调用');
+    assert.doesNotMatch(snap, /父级的活动库/);
+  });
 });
 
 /** A runner that records what it was asked for, and echoes a canned result. */

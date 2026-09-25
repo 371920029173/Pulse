@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   ErrorBook,
   ERRORBOOK_ROOT,
+  createErrorbookTools,
   isWorthRemembering,
   renderErrorbook,
 } from '../errorbook.js';
@@ -355,5 +356,89 @@ describe('renderErrorbook', () => {
 
   it('没有条目就是空串（调用方可以直接拼进提示词）', () => {
     assert.equal(renderErrorbook([]), '');
+  });
+});
+
+/**
+ * 退役：错题本记下的东西，有一部分根本不是 agent 的错误。
+ *
+ * 实测里的来源很具体：agent 按用户要求跑了一个「本来就应该失败」的测试，运行时把那次非零
+ * 退出判成它自己的错，此后每一次 `errorbook_lookup` 都在指控它 —— 而它没有任何办法说明白。
+ * 这一段钉的就是那条申诉通道的两半：退役之后不再被当成教训，以及它不能被用来永久静音。
+ */
+describe('ErrorBook 退役', () => {
+  it('退役后不再被查询和提示词看见，节点本身还留在库里', () => {
+    const engine = fakeEngine();
+    const book = newBook(engine);
+    const { entry } = book.record(report({ detail: 'intentional failure' }));
+    assert.equal(book.count(), 1);
+
+    const done = book.forget(entry.id, '这是有意跑的失败测试');
+    assert.equal(done?.already, false);
+    assert.equal(book.count(), 0, '退役的条目不再算作一条教训');
+    assert.deepEqual(book.lookup({ tool: 'shell' }), []);
+    assert.equal(engine.memories[0]!.metadata.errorForgotten, true, '节点还在：它是分类器判错的证据');
+    assert.match(String(engine.memories[0]!.content), /已退役/);
+  });
+
+  it('没给对 id 就是 undefined —— 不能默默退掉别的什么', () => {
+    const engine = fakeEngine();
+    const book = newBook(engine);
+    book.record(report());
+    assert.equal(book.forget('m-不存在'), undefined);
+    assert.equal(book.count(), 1, '失败的退役不该改变任何东西');
+  });
+
+  it('重复退役同一条如实说已经退役过，而不是再报一次成功', () => {
+    const engine = fakeEngine();
+    const book = newBook(engine);
+    const { entry } = book.record(report());
+    book.forget(entry.id, '第一次');
+    assert.equal(book.forget(entry.id, '第二次')?.already, true);
+  });
+
+  it('【关键】同样的失败再次发生时自动回来 —— 退役不是永久静音', () => {
+    const engine = fakeEngine();
+    const book = newBook(engine);
+    const { entry } = book.record(report({ detail: 'once' }));
+    book.forget(entry.id, '以为是有意的');
+    assert.equal(book.count(), 0);
+
+    const again = book.record(report({ detail: 'once' }));
+    assert.equal(again.reopened, true, '要知道它是被重新打开的');
+    assert.equal(again.entry.count, 2, '计数要接着走，不能从 1 重来');
+    assert.equal(book.count(), 1, '同一个问题再出现就该被重新看见');
+  });
+
+  it('工具：没给 id 时给出可操作的错误，而不是退掉最近一条', async () => {
+    const engine = fakeEngine();
+    const book = newBook(engine);
+    book.record(report());
+    const tools = createErrorbookTools(book);
+    const out = await tools.execute('errorbook_forget', {});
+    assert.match(out, /^Error: 必须给 id/);
+    assert.equal(book.count(), 1);
+  });
+
+  it('工具：id 不在书里时说清楚要先查，并保持原样', async () => {
+    const engine = fakeEngine();
+    const book = newBook(engine);
+    book.record(report());
+    const tools = createErrorbookTools(book);
+    const out = await tools.execute('errorbook_forget', { id: 'm404' });
+    assert.match(out, /没有 id 为 m404 的记录/);
+    assert.match(out, /errorbook_lookup/);
+    assert.equal(book.count(), 1);
+  });
+
+  it('工具：成功的退役回报 id、工具和理由', async () => {
+    const engine = fakeEngine();
+    const book = newBook(engine);
+    const { entry } = book.record(report());
+    const tools = createErrorbookTools(book);
+    const out = await tools.execute('errorbook_forget', { id: entry.id, reason: '有意测试' });
+    assert.match(out, new RegExp(entry.id));
+    assert.match(out, /有意测试/);
+    assert.equal(book.count(), 0);
   });
 });

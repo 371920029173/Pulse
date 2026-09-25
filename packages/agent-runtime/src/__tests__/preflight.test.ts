@@ -242,6 +242,41 @@ describe('PreflightStore', () => {
     const files = readdirSync(join(dir, '.she', 'preflight'));
     assert.equal(files.filter((f) => f.endsWith('.tmp')).length, 0, `残留临时文件: ${files.join(', ')}`);
   });
+
+  /*
+   * A record is a yardstick for ONE request, and the drift check weighs the actions of the turn
+   * that is running against it. `latest()` answers "newest in this workspace", which is a
+   * different question, and answering it produced a measured false accusation: a delegated child
+   * compared five file reads against the PARENT's goal ("得到一份基于实机证据的 SHE 功能评估"),
+   * reported drift as fact, and filed the lesson in the parent's error book. A new conversation in
+   * a busy workspace inherits the same way — it starts under the previous chat's goal.
+   */
+  const goalOf = (g: string) => buildRecord(analyzeRequest('x', ctx()), { stated_intent: 's', actual_goal: g });
+
+  it('latestForSession returns this conversation\'s own record, not the newest in the workspace', () => {
+    const parent = new PreflightStore(dir, 'sess-parent');
+    parent.save(goalOf('父级的目标'));
+    const child = new PreflightStore(dir, 'sess-child');
+    child.save(goalOf('子级的目标'));
+
+    assert.equal(child.latestForSession()?.actual_goal, '子级的目标');
+    assert.equal(parent.latestForSession()?.actual_goal, '父级的目标');
+  });
+
+  it('a conversation that never analysed anything gets no goal, not someone else\'s', () => {
+    new PreflightStore(dir, 'sess-parent').save(goalOf('父级的目标'));
+    assert.equal(new PreflightStore(dir, 'sess-fresh').latestForSession(), undefined);
+    // Nothing found must mean "no yardstick", and the drift check reports nothing without one.
+    // Guessing the newest record would make every fresh conversation inherit a stranger's goal.
+  });
+
+  it('a store with no session id reads a record that also has none', () => {
+    // A one-shot run writes and reads its own analysis inside one turn, and has no session id
+    // to match on — that pair has to keep working, or the check silently stops running there.
+    new PreflightStore(dir, null).save(goalOf('无会话记录'));
+    assert.equal(new PreflightStore(dir, null).latestForSession()?.actual_goal, '无会话记录');
+    assert.equal(new PreflightStore(dir, 'sess-other').latestForSession(), undefined);
+  });
 });
 
 describe('preflight tool', () => {

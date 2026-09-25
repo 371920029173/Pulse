@@ -294,4 +294,24 @@ registerDictionary('en', {
   // ── 本地鉴权 / local auth ──
   '本地服务要求访问令牌，但客户端没有提供。请设置 SHE_AUTH_TOKEN 重启服务，并在本机填入同一个令牌。':
     'The local service requires an access token and this client did not send one. Set SHE_AUTH_TOKEN and restart the server, then enter the same token on this machine.',
+
+  // ── 备忘录 / memo scratchpad ──
+  '备忘录': 'Memo',
+  '{n} 待办': '{n} to do',
+  '{n} 已完成': '{n} finished',
+  '隐藏已完成': 'Hide finished items',
+  '显示已完成': 'Show finished items',
+  '隐藏完成': 'Hide finished',
+  '显示完成': 'Show finished',
+  '还没有记录。你和智能体都可以往这里写。':
+    'Nothing here yet. Both you and the agent can write to this.',
+  // Says which kind of empty it is: the list is empty because items were FOLDED, not because none
+  // were ever written. Saying "nothing yet" here is what made a used scratchpad look untouched.
+  '{n} 条已完成被折叠了，点右上角「显示完成」展开。':
+    '{n} finished item(s) are folded away — use “Show finished” above to expand them.',
+  '记一条灵感或待办…（回车添加）': 'Jot an idea or a to-do… (Enter to add)',
+  '标为未完成': 'Mark as not finished',
+  '标为完成': 'Mark as finished',
+  '单击编辑': 'Click to edit',
+  '我': 'Me',
 });

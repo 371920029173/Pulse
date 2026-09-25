@@ -574,6 +574,16 @@ export function renderRecord(r: PreflightRecord): string {
  * than easier. Writes go through a temp file and a rename, so a crash mid-write cannot
  * leave a half-record that a reader then has to defend against.
  */
+/**
+ * How far back `latestForSession` looks.
+ *
+ * A conversation's own analysis is written by the turn that reads it back, so it is normally the
+ * newest file in the directory; the margin is for a workspace where several conversations write
+ * between two turns of this one. Beyond that the answer would be "unknown" anyway, and an
+ * unbounded parse of a directory that grows one file per turn is a cost with no matching benefit.
+ */
+const SESSION_SCAN_LIMIT = 200;
+
 export class PreflightStore {
   private dir: string;
   /**
@@ -642,6 +652,30 @@ export class PreflightStore {
 
   latest(): PreflightRecord | undefined {
     return this.list(1)[0];
+  }
+
+  /**
+   * The newest record written by THIS conversation, or `undefined`.
+   *
+   * `latest()` answers "what is the newest analysis in this workspace", which is the wrong
+   * question everywhere a record is used as a yardstick: an analysis speaks for the request it
+   * was written about, and nothing else. The measured failure was a delegated child reading the
+   * PARENT's record, so its self-review compared the child's actions against a goal it was never
+   * given — five shared-file reads, zero words from "得到一份基于实机证据的 SHE 功能评估", drift
+   * reported as fact, and the lesson written back into the parent's error book. The same mistake
+   * lands on a fresh conversation in a busy workspace: it would inherit the previous chat's goal.
+   *
+   * A record with no session id is matched to a store with no session id (a one-shot run writing
+   * and reading its own analysis in the same turn). Every other combination is a different
+   * conversation, and "no goal" is the honest answer — with no goal the drift check reports
+   * nothing at all, which is why this returns `undefined` rather than guessing the newest.
+   */
+  latestForSession(): PreflightRecord | undefined {
+    const mine = String(this.sessionId ?? '');
+    // Bounded rather than exhaustive: a conversation's own newest analysis is by definition a
+    // recent file (it is written by the turn that is running), and scanning a directory that
+    // grows by one file per turn forever to find it would cost more than the answer is worth.
+    return this.list(SESSION_SCAN_LIMIT).find((r) => String(r.sessionId ?? '') === mine);
   }
 }
 

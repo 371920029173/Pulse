@@ -223,20 +223,34 @@ export function useChat(sessionId?: string | null) {
      */
     let callOwnerIdx = -1;
 
-    const openBubble = () => {
-      setMessages((prev) => {
-        const updated = [...prev];
-        updated.push({ role: 'assistant', content: '', isStreaming: true, isThinking: true });
-        liveIdx = updated.length - 1;
-        return updated;
-      });
-    };
-
+    /**
+     * Patch the bubble for the round currently being filled, re-opening it if it went away.
+     *
+     * `liveIdx` is a POSITION in `messages`, and the transcript can be replaced underneath a live
+     * turn: `loadHistory` binds history whenever the session changes, and the follow poll pulls it
+     * every 2s. Neither can contain the turn that is still running — the turn is persisted only
+     * when it ends — so after such a replacement `liveIdx` pointed at a message that was no longer
+     * ours, the old code returned `prev`, and every later chunk was dropped on the floor. Nothing
+     * appeared until the turn finished and the transcript was read back from disk, which is exactly
+     * the complaint "the chain only shows up after generation".
+     *
+     * Re-opening from the accumulators is what makes the live view outrank a stale disk copy: the
+     * text received so far stays on screen and the rest keeps streaming into the same place.
+     */
     const patchLive = (patch: (m: ChatMessage) => ChatMessage) => {
       if (pausedRef.current) return;
       setMessages((prev) => {
         const updated = [...prev];
-        if (liveIdx < 0 || !updated[liveIdx] || updated[liveIdx].role !== 'assistant') return prev;
+        if (liveIdx < 0 || !updated[liveIdx] || updated[liveIdx].role !== 'assistant') {
+          updated.push({
+            role: 'assistant',
+            content: acc.text,
+            reasoning: acc.reasoning,
+            isStreaming: true,
+            isThinking: !acc.text,
+          });
+          liveIdx = updated.length - 1;
+        }
         updated[liveIdx] = patch(updated[liveIdx]);
         return updated;
       });
@@ -261,14 +275,12 @@ export function useChat(sessionId?: string | null) {
         const chunk = data as StreamChunk;
         switch (chunk.type) {
           case 'text': {
-            if (liveIdx < 0) openBubble();
             acc.text += chunk.content ?? '';
             patchLive((m) => ({ ...m, content: acc.text, isThinking: false, isStreaming: true }));
             break;
           }
 
           case 'reasoning': {
-            if (liveIdx < 0) openBubble();
             acc.reasoning += chunk.content ?? '';
             patchLive((m) => ({ ...m, reasoning: acc.reasoning, isThinking: !acc.text }));
             break;
@@ -277,6 +289,13 @@ export function useChat(sessionId?: string | null) {
           case 'tool_call_start': {
             // A tool call ends this round's prose; the next round gets a new bubble.
             // Attach the call to the round that requested it before sealing.
+            /*
+             * A frame with no `toolCall` used to be pushed into the list as `undefined`, and the
+             * transcript then crashed on `tc.id` — a blank page for the rest of the session. The
+             * server always sends one, but a malformed or half-written frame must not be able to
+             * white-screen the app.
+             */
+            if (!chunk.toolCall) break;
             const tc = chunk.toolCall as ToolCallData;
             toolCalls.push(tc);
             setMessages((prev) => {
@@ -582,6 +601,23 @@ export function useChat(sessionId?: string | null) {
    * (previous) conversation.
    */
   const loadHistory = useCallback(async (explicitSessionId?: string) => {
+    /*
+     * A live turn outranks the disk copy — for the same session, this window IS the truth.
+     *
+     * `App` re-binds history on every `activeSessionId` change, and the first message in a fresh
+     * session is exactly such a change (the server creates the session, the window adopts the id).
+     * That call used to land in the middle of the turn and replace `messages` with a transcript
+     * that could not possibly contain the turn still being generated. The visible result was that
+     * the conversation appeared to go blank and the answer only showed up at the end, once the
+     * turn had been persisted and something read it back.
+     *
+     * Skipping is safe because switching to a DIFFERENT conversation detaches the stream first
+     * (`detachStream`), and that leaves `abortRef` null — so a real switch still loads. Only a
+     * reload of the session this window is already streaming into is deferred.
+     */
+    const target = explicitSessionId || sidRef.current;
+    if (abortRef.current && target === sidRef.current) return;
+
     const data = await fetchJSON<{ messages: ServerHistoryMessage[] }>(
       withSid('/api/chat/history', explicitSessionId),
     );
@@ -822,10 +858,19 @@ export function useChat(sessionId?: string | null) {
     if (!sid || abortRef.current) return;
     const pull = async () => {
       if (sidRef.current !== sid) return;
+      /*
+       * Re-checked on every tick, not just when arming.
+       *
+       * The guard above answers "should we start following?"; this one answers "is this window
+       * still a follower?". Without it, a local stream started after the interval was armed had
+       * its transcript replaced from disk every 2 seconds — and since a running turn is not on
+       * disk yet, that erased the live reply and everything that had streamed into it.
+       */
+      if (abortRef.current) return;
       const data = await fetchJSON<{ messages: ServerHistoryMessage[] }>(
         withSid('/api/chat/history', sid),
       );
-      if (sidRef.current === sid) setMessages(normalizeHistory(data.messages ?? []));
+      if (sidRef.current === sid && !abortRef.current) setMessages(normalizeHistory(data.messages ?? []));
     };
     void (async () => {
       try {

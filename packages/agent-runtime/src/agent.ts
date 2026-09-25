@@ -145,6 +145,16 @@ export class Agent {
   private setScheduleWindow: ((w: WindowView | null) => Promise<void> | void) | null = null;
   /** True when this agent is itself a delegated child (see constructor opts). */
   private isSubagent = false;
+  /**
+   * True when the KB this agent holds belongs to someone else (see constructor opts).
+   *
+   * Kept on the instance, not only passed to the tool factory, because the tool factory is not the
+   * only writer: the error book and the end-of-turn self-review write through the engine directly.
+   * The measured leak was a read-only child filing three entries into the PARENT's book — two
+   * "unknown tool" (its own missing tools, see `getSystemPrompt`) and one false goal drift. A
+   * promise of "you may read, not write" that only the tool layer keeps is not a promise.
+   */
+  private kbReadOnly = false;
   /** Optional sink for TaskCards (server-owned board). */
   private onTaskEvent: ((e: { id: string; kind: string; label: string; phase: 'running' | 'done' | 'error'; detail?: string }) => void) | null = null;
   private taskIdByLabel = new Map<string, string>();
@@ -281,11 +291,24 @@ export class Agent {
        * people most want to read are the ones that were never recorded.
        */
       runTrace?: RunTraceStore;
+      /**
+       * This agent shares someone else's live KB and may only read it.
+       *
+       * Set for a delegated child that did NOT get an isolated worktree — it is pointed straight at
+       * the parent's database, so a `kb_upsert` would be a permanent, unreviewed edit to the
+       * parent's memory. Read-only children are the common case (isolation only follows a declared
+       * `scope`), which is exactly why this needed to be explicit rather than assumed.
+       *
+       * A child with its OWN snapshot (the worktree case) is not read-only: those writes land in
+       * the copy and die with it, so they cannot reach the parent either way.
+       */
+      kbReadOnly?: boolean;
     },
   ) {
     this.subagentRunner = opts?.subagentRunner ?? null;
     this.onTaskEvent = opts?.onTaskEvent ?? null;
     this.isSubagent = Boolean(opts?.isSubagent);
+    this.kbReadOnly = opts?.kbReadOnly === true;
     /*
      * The run trace is built here rather than in the field initialiser so the workspace root is
      * already available, and so a subagent gets one too: "who did which step" is a question the
@@ -353,7 +376,14 @@ export class Agent {
       if (this.fallbackProvider) this.fallbackLabel = `${fProvider}/${fModel}`;
     }
 
-    this.systemPrompt = getSystemPrompt(config.workspace.root, undefined, config.automationMode !== false);
+    this.systemPrompt = getSystemPrompt(
+      config.workspace.root,
+      undefined,
+      config.automationMode !== false,
+      // Both flags describe the same child: `subagent` trims the sections that instruct it to call
+      // tools it does not have, `kbReadOnly` says which half of the KB it may use.
+      { kbReadOnly: this.kbReadOnly, subagent: this.isSubagent },
+    );
     this.patches = new PendingPatchStore(config.workspace.root);
     this.checkpoints = new CheckpointStore(config.workspace.root);
     /*
@@ -384,6 +414,7 @@ export class Agent {
       onQueryResult: (result) => {
         this.toolEventSink?.({ type: 'kb_result', kbResult: result });
       },
+      readOnly: opts?.kbReadOnly === true,
     });
     for (const def of kbTools.definitions) {
       this.allToolDefs.push(def);
@@ -454,15 +485,22 @@ export class Agent {
      * are things only the agent can recognise from the inside.
      */
     const reflectionTools = createReflectionTools({
+      /*
+       * This conversation's own analysis, never the workspace's newest.
+       *
+       * `latest()` here is how a child ended up measured against the parent's goal (and how a
+       * fresh chat would be measured against the previous chat's): the record is the yardstick,
+       * so a record written for a different request turns the check into a false accusation.
+       */
       goal: () => {
-        const rec = new PreflightStore(config.workspace.root, this.sessionId).latest();
+        const rec = new PreflightStore(config.workspace.root, this.sessionId).latestForSession();
         return rec?.actual_goal || rec?.stated_intent || planTools.store.active()?.goal || null;
       },
       // Inferred constraints are passed as SOFT: pre-flight derived them from the request and the
       // workspace rather than from the user's words, and treating a derived preference as a hard
       // prohibition would report drift for ordinary work.
       constraints: () => {
-        const rec = new PreflightStore(config.workspace.root, this.sessionId).latest();
+        const rec = new PreflightStore(config.workspace.root, this.sessionId).latestForSession();
         return (rec?.inferred_constraints ?? []).map((text) => ({ text, hardness: 'soft' as const }));
       },
       actions: () => this.currentRunActions(),
@@ -517,6 +555,26 @@ export class Agent {
           if (e.phase === 'start' || !id) {
             id = `sub-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
             this.taskIdByLabel.set(e.description, id);
+          }
+          /*
+           * A tick updates the card and NOTHING else.
+           *
+           * The card is the right home for it: it is made to be replaced in place, so a reading
+           * every few seconds costs the reader nothing. A transcript line would not be — one status
+           * entry per tick would bury the conversation the subtask was spawned from, which is the
+           * opposite of the visibility this is for.
+           */
+          if (e.phase === 'heartbeat') {
+            const secs = Math.round((e.elapsedMs ?? 0) / 1000);
+            const card = {
+              id,
+              kind: 'subagent',
+              label: e.description,
+              phase: 'running' as const,
+              detail: `第 ${e.steps ?? 0} 步 · ${e.activity ?? '工作中'} · 已 ${secs}s`,
+            };
+            this.onTaskEvent?.(card);
+            return;
           }
           const phase = e.phase === 'start' ? 'running' as const : (e.ok ? 'done' as const : 'error' as const);
           const card = { id, kind: 'subagent', label: e.description, phase };
@@ -1423,6 +1481,15 @@ export class Agent {
    * The book is a durable store the user can lose access to for reasons that have nothing to do
    * with this turn (a locked database, a full disk, a KB being re-indexed). None of those should
    * turn a tool call that already returned into a crashed conversation.
+   *
+   * It is also not this agent's book to write when `kbReadOnly` is set: the store belongs to the
+   * conversation that owns the workspace, and an entry filed by a borrowed reader is a permanent,
+   * unreviewed edit to someone else's memory. That is the same rule `kb_upsert` follows, except
+   * the tool layer cannot enforce it — this path goes straight to the engine. Three entries written
+   * by one read-only child (two "unknown tool", one false drift) are what the rule is for: they are
+   * about the CHILD's session, they read as the parent's own mistakes, and the parent cannot tell
+   * where they came from. What the child genuinely learned belongs in its deliverable, which is
+   * reviewable; what went wrong is still in the run trace and its own transcript.
    */
   private recordMistake(report: {
     tool: string;
@@ -1431,6 +1498,7 @@ export class Agent {
     detail: string;
     remedy?: string | null;
   }): void {
+    if (this.kbReadOnly) return;
     try {
       this.errorBook.record({ ...report, sessionId: this.sessionId });
     } catch (err) {
@@ -1558,14 +1626,18 @@ export class Agent {
      * point the record may not exist yet — but what this link is for is the OTHER direction, the
      * analysis a previous turn wrote and this one inherited. The tool's own write is picked up by
      * the next run's link, and the record is on disk either way.
+     *
+     * Inherited means inherited BY THIS CONVERSATION. Linking the workspace's newest record would
+     * put another session's goal on this run's trace, which is a claim the trace would then be
+     * defending on the parent's behalf.
      */
     try {
-      const rec = new PreflightStore(this.config.workspace.root, this.sessionId).latest();
+      const rec = new PreflightStore(this.config.workspace.root, this.sessionId).latestForSession();
       if (rec) {
         recorder.preflight(rec);
         // The claim this run is being measured against, kept so the mirror's sample is the one
         // that was actually made for this work.
-        if (rec.sessionId === this.sessionId && typeof rec.confidence === 'number') {
+        if (typeof rec.confidence === 'number') {
           this.runPreflightConfidence = {
             confidence: rec.confidence,
             clamped: rec.confidenceClamped === true,
@@ -1705,10 +1777,19 @@ export class Agent {
         runReason: this.runFailure?.reason,
       });
 
+      // Same ownership rule as `recordMistake`: a borrowed book is read, not written. The review
+      // still runs and `lastReflection` still reports it, so the finding is visible to whoever is
+      // reading the run — it just does not become a permanent entry in someone else's memory.
       const written: string[] = [];
-      for (const note of notes) {
-        const { entry, recurring } = this.errorBook.recordReflection({ ...note, sessionId: this.sessionId });
-        written.push(recurring ? `${note.topic}（第 ${entry.count} 次）` : note.topic);
+      if (!this.kbReadOnly) {
+        for (const note of notes) {
+          const { entry, recurring, reopened } = this.errorBook.recordReflection({ ...note, sessionId: this.sessionId });
+          written.push(reopened
+            // A retirement that turned out to be wrong is worth naming: the agent chose not to hear
+            // about this, and the same thing came back anyway.
+            ? `${note.topic}（退役过又回来了，第 ${entry.count} 次）`
+            : recurring ? `${note.topic}（第 ${entry.count} 次）` : note.topic);
+        }
       }
 
       this.lastReflection = {
@@ -1727,10 +1808,16 @@ export class Agent {
     }
   }
 
-  /** The newest pre-flight record for this conversation, or null. A broken file is not an error. */
+  /** The newest pre-flight record for this conversation, or null. A broken file is not an error.
+   *
+   * Session-scoped on purpose: everything derived from this record — the goal the self-review
+   * measures against, the constraints it checks, the confidence sample — is a statement about a
+   * particular request. Reading the workspace's newest instead is how a child came to file the
+   * parent's goal as its own drift.
+   */
   private readPreflightRecord(): import('./preflight.js').PreflightRecord | null {
     try {
-      return new PreflightStore(this.config.workspace.root, this.sessionId).latest() ?? null;
+      return new PreflightStore(this.config.workspace.root, this.sessionId).latestForSession() ?? null;
     } catch {
       return null;
     }
@@ -1738,10 +1825,9 @@ export class Agent {
 
   private readPreflightConfidence(): { confidence: number; clamped: boolean; topic?: string } | null {
     const rec = this.readPreflightRecord();
-    // Only a record from THIS session counts: inheriting the previous conversation's confidence
-    // would score a claim this run never made.
-    if (!rec || rec.sessionId !== this.sessionId) return null;
-    if (typeof rec.confidence !== 'number') return null;
+    // Ownership is already settled by `readPreflightRecord` (see `latestForSession`); the test
+    // here is only whether this record carries a claim to measure.
+    if (!rec || typeof rec.confidence !== 'number') return null;
     return { confidence: rec.confidence, clamped: rec.confidenceClamped === true, topic: rec.actual_goal?.slice(0, 40) };
   }
 

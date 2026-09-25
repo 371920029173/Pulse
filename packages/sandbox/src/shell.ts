@@ -27,6 +27,26 @@ export const DESTRUCTIVE_PATTERNS: RegExp[] = [
 const IS_WINDOWS = platform() === 'win32';
 
 /**
+ * Canonical form of a path for identity comparison.
+ *
+ * Windows produces two spellings of the same file — the 8.3 short form from `os.tmpdir()`
+ * and the long form from `realpath` — and comparisons against the raw strings then say
+ * "different file" for the same file. `realpathSync.native` resolves both to one spelling;
+ * lowercasing on Windows removes the remaining case difference. A path that does not exist
+ * yet falls back to its absolute form, which is the best available answer.
+ */
+function canonicalPath(p: string): string {
+  const abs = resolve(p);
+  let real = abs;
+  try {
+    real = realpathSync.native ? realpathSync.native(abs) : realpathSync(abs);
+  } catch {
+    /* Not created yet — the absolute path is all there is to compare. */
+  }
+  return IS_WINDOWS ? real.toLowerCase() : real;
+}
+
+/**
  * Decode a console buffer.
  *
  * On a Chinese Windows install `cmd.exe` writes CP936 (GBK). Reading those
@@ -492,6 +512,18 @@ export class SandboxShell {
   private workspaceRoot: string;
   private config: SheConfig['sandbox'];
 
+  /*
+   * Files that must be reached through a tool, never through raw access.
+   *
+   * The knowledge base is a live SQLite database with an open connection, and the tool
+   * that owns it does more than read bytes: it ranks by resonance and updates access
+   * counters. `sqlite3 .she/kb.sqlite "SELECT ..."` was observed in real runs — it skips
+   * the ranking, writes nothing back, and holds a second handle on a file the server
+   * already has open. A prompt rule alone did not stop it, so the refusal is enforced
+   * here, where every path and command must pass.
+   */
+  private protectedPaths = new Map<string, string>();
+
   constructor(workspaceRoot: string, config?: Partial<SheConfig['sandbox']>) {
     this.workspaceRoot = resolve(workspaceRoot);
     this.config = {
@@ -608,11 +640,90 @@ export class SandboxShell {
     return this.config.allowedCommands.length > 0;
   }
 
+  /**
+   * Register a file (and, for a SQLite database, its `-wal` / `-shm` siblings) that the
+   * model must not touch with `shell` or `fs_*`.
+   *
+   * Registering is idempotent by target, so the same database can be protected by more
+   * than one caller without depending on the order they run in.
+   */
+  protectDatabase(dbPath: string, reason: string): void {
+    for (const target of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+      this.protectedPaths.set(canonicalPath(target), reason);
+    }
+  }
+
+  /**
+   * The reason a resolved path is off-limits, or null when it is fine to touch.
+   *
+   * Comparison is on the canonical path, so a symlink or a differently-spelled route to
+   * the same file does not get around it.
+   */
+  protectedReason(target: string): string | null {
+    return this.protectedPaths.get(canonicalPath(target)) ?? null;
+  }
+
+  /**
+   * The reason a raw command text is off-limits, or null when it is fine to run.
+   *
+   * This matches the file NAME rather than resolving the path, because a shell command's
+   * spelling of a path is not reliably resolvable (`cd`, quoting, `%VAR%`). A command that
+   * names the database is already doing what this guard exists to stop, and a false
+   * positive here costs the model one clear sentence, while a false negative costs it a
+   * second handle on the live database.
+   */
+  protectedReasonInCommand(command: string): string | null {
+    const haystack = command.toLowerCase();
+    for (const [target, reason] of this.protectedPaths) {
+      const name = basename(target).toLowerCase();
+      if (name && haystack.includes(name)) return reason;
+    }
+    return null;
+  }
+
+  /**
+   * The reason a requested (possibly relative) path is off-limits, or null.
+   *
+   * Never throws, so a caller can ask ahead of doing anything — the tool layer uses this to
+   * refuse BEFORE the confirmation gate, where a "yes" from the user would otherwise let
+   * the write through. A path that escapes the workspace returns null here and is refused
+   * by the escape check, which has the better message for that case.
+   */
+  protectedReasonFor(requestedPath: string): string | null {
+    try {
+      return this.protectedReason(resolveInsideWorkspace(this.workspaceRoot, requestedPath));
+    } catch {
+      return null;
+    }
+  }
+
   validatePath(requestedPath: string): string {
-    return resolveInsideWorkspace(this.workspaceRoot, requestedPath);
+    const resolvedPath = resolveInsideWorkspace(this.workspaceRoot, requestedPath);
+    const reason = this.protectedReason(resolvedPath);
+    if (reason) throw new Error(reason);
+    return resolvedPath;
   }
 
   async exec(command: string, options?: SandboxOptions): Promise<SandboxResult> {
+    /*
+     * Protected files first.
+     *
+     * Checked ahead of the allowlist and the denylist because it is the most specific
+     * answer available: a command that names the knowledge base has exactly one right
+     * way to be expressed, and that is not a shell command.
+     */
+    const protectedInCommand = this.protectedReasonInCommand(command);
+    if (protectedInCommand && !options?.allowDestructive) {
+      return {
+        denied: true,
+        exitCode: -1,
+        stdout: '',
+        stderr: `DENIED: ${protectedInCommand}`,
+        timedOut: false,
+        durationMs: 0,
+      };
+    }
+
     /*
      * Allowlist first.
      *

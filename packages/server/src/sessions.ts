@@ -111,6 +111,14 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+/**
+ * The title a session carries before anything has named it.
+ *
+ * It is a sentinel, not a default: `update` uses it to tell "nobody has named this yet" (derive
+ * one from the first message) from "this session has a name" (leave it alone).
+ */
+const UNTITLED = 'New chat';
+
 function defaultTitle(messages: LLMMessage[]): string {
   const firstUser = messages.find((m) => m.role === 'user' && typeof m.content === 'string');
   if (firstUser && typeof firstUser.content === 'string') {
@@ -317,6 +325,36 @@ export class SessionStore {
     return s;
   }
 
+  /**
+   * The session with this id, created if it is not there yet — without becoming the active one.
+   *
+   * Written for a measured data loss. `persistHistory` had no branch for an id it did not
+   * recognise, so it fell through to `syncActive` — which writes into whichever conversation is
+   * ACTIVE. A caller that addressed a session id the store did not have (a script, a stale page, a
+   * typo in `session_id`) therefore OVERWROTE the transcript of the chat the user was reading with
+   * its own four messages. Measured twice in one day: `POST /api/chat {"session_id":"sess_harvest_probe"}`
+   * replaced a 29-message conversation, and the file went from 786KB to 290KB.
+   *
+   * The id a client addressed is a session, whether or not anyone created it first: give it a home
+   * rather than writing over someone else's. It stays out of `active_id` for the same reason
+   * `background` sessions do — a session nobody asked to open must not replace the one on screen.
+   */
+  ensure(id: string, opts?: { title?: string; directory?: string }): ChatSession {
+    const existing = this.get(id);
+    if (existing) return existing;
+    const s: ChatSession = {
+      id,
+      title: opts?.title?.trim() || UNTITLED,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+      messages: [],
+      directory: opts?.directory || this.rootDir,
+    };
+    this.data.sessions.unshift(s);
+    this.save();
+    return s;
+  }
+
   get(id: string): ChatSession | undefined {
     return this.data.sessions.find((s) => s.id === id);
   }
@@ -324,7 +362,7 @@ export class SessionStore {
   create(title?: string, opts?: { directory?: string; parentId?: string; background?: boolean }): ChatSession {
     const s: ChatSession = {
       id: `sess_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
-      title: title?.trim() || 'New chat',
+      title: title?.trim() || UNTITLED,
       created_at: nowIso(),
       updated_at: nowIso(),
       messages: [],
@@ -443,7 +481,23 @@ export class SessionStore {
     if (typeof patch.directory === 'string' && patch.directory.trim()) s.directory = patch.directory;
     if (Array.isArray(patch.messages)) {
       s.messages = patch.messages;
-      if (!patch.title) s.title = defaultTitle(s.messages);
+      /*
+       * Only name an UNNAMED session. Overwriting unconditionally renamed anything a caller had
+       * deliberately titled, because this branch runs on every transcript persist — not just once.
+       *
+       * `persistHistory` writes messages (and nothing else) on every turn tick, on session
+       * activate, and when settings change. Re-deriving the title there meant:
+       *
+       *   - a delegated child lost the name its parent gave it and became the first line of its
+       *     handoff brief ("## 交接单 - 交付物：…"), because the brief is the child's first user
+       *     message and the child's own titled write happens earlier;
+       *   - a rename by the user survived only until the next message in that conversation.
+       *
+       * Both were invisible in normal use: for an ordinary chat the derived title already equals
+       * what was stored, so the corruption only showed on sessions whose title came from somewhere
+       * other than their own first message.
+       */
+      if (!patch.title && s.title === UNTITLED) s.title = defaultTitle(s.messages);
     }
     s.updated_at = nowIso();
     this.save();
@@ -474,12 +528,5 @@ export class SessionStore {
   getActive(): ChatSession | null {
     if (!this.data.active_id) return null;
     return this.get(this.data.active_id) ?? null;
-  }
-
-  /** Persist current agent history into active session (create one if needed). */
-  syncActive(messages: LLMMessage[]): ChatSession {
-    let s = this.getActive();
-    if (!s) s = this.create();
-    return this.update(s.id, { messages });
   }
 }

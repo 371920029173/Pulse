@@ -36,6 +36,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Constraint } from './preflight.js';
+import { isWorthRemembering } from './errorbook.js';
 
 // ─── Word extraction ────────────────────────────────────────────────────────
 
@@ -149,6 +150,62 @@ export interface DriftReport {
 const PROHIBITION = /(不要|不得|不准|不许|禁止|严禁|避免|别去|别动|别改|不可以|不能|do\s+not|don'?t|never|avoid|must\s+not|should\s+not)/i;
 
 /**
+ * Words that introduce an EXCEPTION to a prohibition, i.e. something the constraint permits.
+ *
+ * Why this exists: a constraint is one sentence, and the half that says what is ALLOWED used to be
+ * read as if it said what is forbidden. Measured on a live run, the constraint
+ *
+ *   「只读」限定在文件/命令层面：子代理不得用 shell、fs_*、git 等工具，不得修改工作区；
+ *   唯一被点名的写入是 kb_upsert 写知识库（用户明确指定的例外）。
+ *
+ * was reported as violated by the agent's own `kb_upsert` — the call the constraint had just
+ * carved out. The accusation was major (weight 0.8), so it drove the turn to `drift` and was
+ * written into the error book as a lesson. The failure mode is self-inflicted noise of the worst
+ * kind: the more carefully a constraint names its exception, the more reliably the check fires on
+ * the permitted action — and a check whose accusations cannot be trusted is one the agent learns
+ * to skip wholesale.
+ */
+const EXCEPTION = /^(例外|除外|唯一|除[^，。；]{0,12}外|允许|可以|不受|仅限|only|except|unless)/i;
+
+/**
+ * The part of a constraint that can create a violation: the clauses that state a prohibition.
+ *
+ * Split on sentence and clause punctuation, then drop the clauses that grant an exception. A comma
+ * alone does not end a clause — "不得改动 a.ts、b.ts" is one prohibition listing two objects — but a
+ * comma followed by an exception marker does, which is how "…，唯一允许的是 X" is kept out of the
+ * forbidden set without splitting lists apart.
+ *
+ * Returns '' when nothing is left, and an empty scope means NO object and therefore NO signal, the
+ * same rule as a constraint with no extractable object: a check that fires on "the constraint might
+ * have been broken" is one the agent learns to skip.
+ */
+function prohibitionScope(text: string): string {
+  const clauses: string[] = [];
+  let buffer: string[] = [];
+  let afterException = false;
+  const flush = () => {
+    if (buffer.length) clauses.push(buffer.join('，'));
+    buffer = [];
+  };
+  for (const raw of String(text ?? '').split(/[，,；;。!！?？\n]+/)) {
+    const piece = raw.trim();
+    if (!piece) continue;
+    const exception = EXCEPTION.test(piece);
+    /*
+     * An exception ends the statement it belongs to. What follows it is a new statement, read on
+     * its own — "…，唯一允许的是 X，但不要动 Y" still has to catch the `Y`.
+     */
+    if (exception || afterException) flush();
+    afterException = exception && !PROHIBITION.test(piece);
+    // An exception that states no prohibition of its own is the permitted half: kept out entirely.
+    if (afterException) continue;
+    buffer.push(piece);
+  }
+  flush();
+  return clauses.filter((c) => PROHIBITION.test(c)).join('；');
+}
+
+/**
  * The object a prohibition is about: what must not be touched.
  *
  * Returns null when nothing specific can be extracted, and that is the common case for a soft
@@ -158,13 +215,17 @@ const PROHIBITION = /(不要|不得|不准|不许|禁止|严禁|避免|别去|�
  * A backticked or quoted span wins when present, because that is how a person marks the exact token
  * they mean; otherwise the longest concrete-looking candidates are used, capped at two so a sentence
  * full of nouns does not turn into a keyword net.
+ *
+ * Read from `prohibitionScope`, not from the whole text: the clauses that grant an exception are not
+ * what the constraint forbids (see `EXCEPTION`).
  */
 export function prohibitionObject(text: string): string[] {
-  const src = String(text ?? '');
-  const quoted = [...src.matchAll(/[`"“']([^`"”']{2,})[`"”']/g)].map((m) => m[1].trim()).filter(Boolean);
+  const scoped = prohibitionScope(text);
+  if (!scoped) return [];
+  const quoted = [...scoped.matchAll(/[`"“']([^`"”']{2,})[`"”']/g)].map((m) => m[1].trim()).filter(Boolean);
   if (quoted.length) return quoted.slice(0, 2);
 
-  const rest = src.replace(PROHIBITION, ' ');
+  const rest = scoped.replace(PROHIBITION, ' ');
   const candidates: string[] = [];
   for (const m of rest.matchAll(/[A-Za-z0-9_@./\\:-]{3,}/g)) {
     const t = m[0].replace(/^[./\\:-]+|[./\\:-]+$/g, '');
@@ -185,8 +246,73 @@ function normalizeActions(actions: (DriftAction | string)[]): DriftAction[] {
   return actions.map((a) => (typeof a === 'string' ? { tool: '', summary: a } : a));
 }
 
+/**
+ * Argument keys that hold text the agent is WRITING ABOUT rather than a target it is acting on.
+ *
+ * The constraint check below asks "did an action touch the object this prohibition excludes", and
+ * it used to read the whole argument blob as one string. That made every call whose PAYLOAD happens
+ * to mention the excluded object a violation, and the payload almost always does, because the
+ * agent's job is to write down what it knows. Measured on a live run: the constraint
+ * `shell 为 Windows cmd：无 cat/which；避免外泄重定向` was reported as violated four times over
+ * — by `preflight_record` (which had just DECLARED the constraint), by the `task_spawn` brief that
+ * quoted it to a child, by a `plan_update` note reading "cat/which 告警判定为 KB 检索文本误报",
+ * and by `fs_write` of a QA note whose *path* was innocent. The agent spent reasoning on a false
+ * accusation, which is the one kind of noise that makes people switch a check off.
+ *
+ * So a violation is now read from the TARGET of the call — `path`, `command`, `scope` — and never
+ * from prose: a `content` that quotes the rule, a `note` that discusses it, a `goal` that states
+ * it. Dropping the payload can only lose violations where a call names the excluded object solely
+ * inside a body of text, and there is nothing to do about those anyway: writing a sentence that
+ * mentions `cluster.ts` neither reads nor edits it.
+ */
+const PROSE_ARGS = new Set([
+  'content', 'text', 'body', 'title', 'note', 'notes', 'message', 'summary', 'description',
+  'deliverable', 'detail', 'details', 'lesson', 'evidence', 'report', 'markdown', 'md', 'doc',
+  'document', 'prompt', 'question', 'answer', 'reason', 'rationale', 'assumptions', 'risks',
+  'findings', 'context', 'instructions', 'steps', 'constraints', 'inferred_constraints',
+  'stated_intent', 'actual_goal', 'goal',
+]);
+
+/** The same arguments with every prose field removed, recursively. Depth-capped against cycles. */
+function targetArgs(raw: unknown, depth = 0): unknown {
+  if (depth > 3 || raw === null || typeof raw !== 'object') return raw;
+  if (Array.isArray(raw)) return raw.map((v) => targetArgs(v, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (PROSE_ARGS.has(k.toLowerCase())) continue;
+    out[k] = targetArgs(v, depth + 1);
+  }
+  return out;
+}
+
+/** What the agent DID: the call it made. */
 function actionText(a: DriftAction): string {
-  return [a.tool, a.summary, a.args].filter(Boolean).join(' ');
+  return [a.tool, targetOf(a.args)].filter(Boolean).join(' ');
+}
+
+/** The action's arguments, prose stripped. Not JSON means the whole string IS the target. */
+function targetOf(args: string | undefined): string {
+  if (!args) return '';
+  try {
+    return JSON.stringify(targetArgs(JSON.parse(args)));
+  } catch {
+    return args;
+  }
+}
+
+/**
+ * Everything the action brought up, result included.
+ *
+ * Used where a false positive is cheaper than a false negative: judging whether recent work is
+ * still about the goal may legitimately count the material the agent pulled in, and a memory the
+ * agent retrieved on purpose is evidence it was looking in the right place.
+ *
+ * Deliberately the RAW arguments, not `targetArgs`: "was this on topic" is a question about the
+ * material the agent had in view, so a plan note or a written report is entirely fair evidence.
+ * Only the accusation below — "you touched this" — has to be read from the target alone.
+ */
+function actionContext(a: DriftAction): string {
+  return [a.tool, a.args, a.summary].filter(Boolean).join(' ');
 }
 
 /**
@@ -201,6 +327,7 @@ export function detectDrift(input: DriftInput): DriftReport {
   const terms = goalTerms(goal);
   const actions = normalizeActions(input.actions ?? []);
   const texts = actions.map(actionText);
+  const contexts = actions.map(actionContext);
 
   // ── constraints ──
   for (const c of input.constraints ?? []) {
@@ -209,14 +336,25 @@ export function detectDrift(input: DriftInput): DriftReport {
     if (!PROHIBITION.test(spec.text)) continue;
     const objects = prohibitionObject(spec.text);
     if (!objects.length) continue;
-    const hit = texts.find((t) => containsAny(t, objects));
+    /*
+     * Matched against what the agent did, and the matching action is named in the report.
+     *
+     * Naming it is not decoration: an accusation that does not say which call it came from cannot
+     * be checked by the reader, and one that cannot be checked gets ignored wholesale — including
+     * the true positives.
+     */
+    let hit: string | null = null;
+    let via = '';
+    for (let i = 0; i < texts.length && !hit; i++) {
+      const m = containsAny(texts[i], objects);
+      if (m) { hit = m; via = actions[i].tool || '动作'; }
+    }
     if (!hit) continue;
-    const object = containsAny(hit, objects)!;
     signals.push({
       kind: 'constraint_violated',
       major: hardness === 'hard',
       weight: hardness === 'hard' ? 0.8 : 0.4,
-      detail: `约束「${spec.text.trim()}」排除的对象「${object}」出现在了动作里`,
+      detail: `约束「${spec.text.trim()}」排除的对象「${hit}」出现在了 ${via} 的调用参数里`,
     });
   }
 
@@ -228,10 +366,10 @@ export function detectDrift(input: DriftInput): DriftReport {
    * would almost certainly have named the thing it is working on.
    */
   if (terms.length && actions.length >= 3) {
-    const recent = texts.slice(-3);
+    const recent = contexts.slice(-3);
     const matched = recent.map((t) => containsAny(t, terms));
     if (matched.every((m) => m === null)) {
-      const long = actions.length >= 5 && texts.slice(-5).every((t) => containsAny(t, terms) === null);
+      const long = actions.length >= 5 && contexts.slice(-5).every((t) => containsAny(t, terms) === null);
       signals.push({
         kind: 'goal_unrelated',
         major: long,
@@ -654,8 +792,17 @@ export function deriveReflections(src: ReflectionSources): ReflectionNote[] {
 
   // Repeated failure of one tool inside this turn. The error book already holds the individual
   // failures; what it cannot see from a single entry is that this turn kept hitting the same one.
+  //
+  // Only the failures the book itself would keep, by the book's own predicate. A third of the
+  // kinds are not mistakes at all — `empty` above all, where a `kb_query` that answered "no
+  // results" SUCCEEDED and the prompt explicitly tells the agent to re-ask with different words.
+  // Measured on a live run: two such answers in one turn became a durable lesson named
+  // `重复失败:kb_query` about a tool that had not failed once, and the agent spent a step arguing
+  // with it. Sharing the predicate is what keeps this rule and `recordMistake` from disagreeing
+  // about what counts as going wrong.
   const byTool = new Map<string, ReflectionFailure[]>();
   for (const f of src.failures ?? []) {
+    if (!isWorthRemembering(f.kind)) continue;
     byTool.set(f.tool, [...(byTool.get(f.tool) ?? []), f]);
   }
   for (const [tool, list] of byTool) {
