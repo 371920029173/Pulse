@@ -132,6 +132,7 @@ function summarizeToolArgs(name: string, rawArgs: string): string {
     fs_list: () => pick('path') || '.',
     grep: () => [pick('pattern'), pick('path')].filter(Boolean).join('  in  '),
     kb_query: () => pick('query'),
+    kb_get: () => pick('id'),
     kb_upsert: () => [pick('groupName'), pick('title')].filter(Boolean).join(' / '),
     kb_link: () => [pick('sourceId'), pick('kind'), pick('targetId')].filter(Boolean).join(' '),
     kb_ingest_scan: () => pick('path') || pick('root'),

@@ -172,7 +172,7 @@ export const SUBAGENT_DENIED_TOOLS = new RegExp(
   '\\b('
   + [
     'task_spawn',
-    'plan_create', 'plan_update', 'plan_list',
+    'plan_create', 'plan_update', 'plan_list', 'plan_get',
     'preflight_record',
     'reflection_check',
     'report_write',
@@ -370,6 +370,7 @@ export function getSystemPrompt(
   const kbBlock = `## 组结构知识库（始终自动，无需用户引导）
 组结构知识库是默认记忆，**与自动化开关无关，永远自动${kbReadOnly ? '读取' : '读写'}**：
 - 回答任何关于本项目 / 代码 / 历史决定 / 环境的问题前，先 \`kb_query\`（打招呼、闲聊、纯写作不用查）。
+- \`kb_query\` 默认只列前 5 条、每条约 200 字摘要；不够就调大 \`limit\`（最多 30），要原文用 \`kb_get\`(id) 或 \`full=true\`。
 ${kbWriteRules}- 检索是「结构共振 + 词法入口」混合，不是纯向量。**不要**因为「没找到关键词」就放弃，
   换更短 / 更结构化的查询词再试（例如用组名、文件名、模块名）。
 - **检索次数没有限制**。需要查多少次就查多少次：换词、沿着节点继续跳、按组逐个看，
@@ -398,10 +399,12 @@ ${
 
   // The tool list has to agree with what the child actually has, for the same reason as above.
   const kbToolLines = kbReadOnly
-    ? `- \`kb_query\`: Search the Group Memory KB via PulseSeed resonance. This is the only way in — never poke the sqlite file with \`shell\`.
+    ? `- \`kb_query\`: Search the Group Memory KB via PulseSeed resonance. This is the only way in — never poke the sqlite file with \`shell\`. Lists the top 5 hits with ~200-char snippets by default; \`limit\` (max 30) lists more, \`full: true\` returns complete text.
+- \`kb_get\`: Read one node in full by id (the [Node: …] from kb_query). Read-only.
 - \`kb_upsert\` / \`kb_link\`: **disabled for this subtask** — your memory is read-only. Report durable findings in your deliverable instead.
 - \`kb_edit\` / \`kb_retire\`: disabled too.`
-    : `- \`kb_query\`: Search the Group Memory KB via PulseSeed resonance. This (and the other \`kb_*\` tools) is the only way in — never poke the sqlite file with \`shell\`.
+    : `- \`kb_query\`: Search the Group Memory KB via PulseSeed resonance. This (and the other \`kb_*\` tools) is the only way in — never poke the sqlite file with \`shell\`. Lists the top 5 hits with ~200-char snippets by default; \`limit\` (max 30) lists more, \`full: true\` returns complete text.
+- \`kb_get\`: Read one node in full by id (the [Node: …] from kb_query).
 - \`kb_upsert\`: Store a new memory node in a named group. Same title + different content is refused unless you pass onExisting="update" (in place, old version kept) or "add".
 - \`kb_edit\`: Correct or extend an existing node in place by id; the previous version is kept in its history.
 - \`kb_retire\`: Retire a wrong or obsolete node (reason required, optional replacedBy). It leaves kb_query results unless includeRetired=true; restore=true undoes it.
@@ -418,7 +421,7 @@ ${
   const toolLines: string[] = [
     kbToolLines,
     '- `kb_ingest_scan` / `kb_ingest_list` / `kb_ingest_place`: absorb md/txt/json files into the knowledge tree.',
-    '- `plan_create` / `plan_update` / `plan_list`: your own durable progress tracking for multi-step work. Steps can declare `depends_on` and `on_failure`.',
+    '- `plan_create` / `plan_update` / `plan_list` / `plan_get`: your own durable progress tracking for multi-step work. Steps can declare `depends_on` and `on_failure`. `plan_update` replies only with what changed, the progress and the next step; `plan_get` prints one plan in full.',
     '- `preflight_record`: before non-trivial work, write down the literal request, the unstated constraints, the real goal and anything you must ask about first. Checks the request against the workspace.',
     '- `errorbook_lookup`: what has already gone wrong in this workspace — tool failures classified as your own mistake (bad arguments, a refused action, a missing path, a failed command), loops you repeated until you gave up, and lessons from earlier self-review (goal drift, over-confidence). Pass `tool` for one tool, or `query` for "have I been here before?".',
     '- `errorbook_forget`: retire ONE entry that is not a mistake you made — a test you ran knowing it would fail, an input that was meant to be rejected. Pass the `id` from `errorbook_lookup` and why. Retired entries stop being offered; the same failure reopening later brings them back.',
@@ -451,7 +454,7 @@ ${
 Plans live in the workspace file \`.she/plans.json\`, not inside one chat. \`plan_list\` returns every plan, including ones opened in another conversation. Switching chats does not retire them.
 
 - At the start of multi-step work, call \`plan_list\`. Continue an open plan only when the user's current message is about that work. A leftover plan is not a standing order.
-- \`plan_create\` before non-trivial work. \`plan_update\` as each step actually finishes — not when you intend to do it.
+- \`plan_create\` before non-trivial work. \`plan_update\` as each step actually finishes — not when you intend to do it. Its reply lists only what changed plus \`进度\` and \`下一步:\`; call \`plan_get\` when you need every step and note.
 - **Resuming means reading the "下一步:" line**, not re-deriving the state from the marks. It already accounts for which prerequisites are done. If it names a step, that is the step; there is no need to ask which one to start.
 - When a step can only start after another, declare it: \`plan_update\` with \`depends_on\`. A step whose prerequisites are not done is refused, so marking one done early does not work — the plan will not let you, and the refusal names the step in the way.
 - Declare what a step dying should do with \`on_failure\`: \`retry\` (default when you say so) means try another approach, \`skip\` drops the steps that needed it, \`ask\` means ask the user, \`stop\` means park the plan. Write the policy when you create the step, while you still know the answer.

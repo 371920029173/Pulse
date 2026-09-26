@@ -23,7 +23,9 @@ features, patch for fixes.
 ### Fixed
 
 - Scheduler: a task that comes due while its session is busy is queued and retried instead of failing; manual runs no longer consume a one-shot task's real fire; finished one-shot tasks are pruned after 7 days and hidden from `schedule_list` by default.
-- `reflection_check` no longer compares tool-call counts against plan steps.
+- `reflection_check` no longer compares tool-call counts against plan steps, and drift detection accepts actions that match the current plan step.
+- Knowledge base: writes aimed at an auto-split `part-N` group go to its parent; a full split group gets a sibling part instead of a nested level; group paths no longer repeat.
+- Shorter results for new calls: `plan_update` returns the changed step, progress and next step (new `plan_get` for the whole plan); `kb_query` lists the top 5 with summaries (new `kb_get` for full text). Past context is never rewritten, so prompt caching is unaffected.
 - Error book: intentional negative tests can be marked `expect_failure`; the header shows the real count; hints are specific.
 - LSP: columns are correct in files with a BOM, and the open-document cache no longer goes stale.
 - `grep` glob matching.

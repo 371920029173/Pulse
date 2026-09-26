@@ -66,6 +66,77 @@ function normalizeTitle(title: string): string {
   return title.trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
+// ─── Split parts ───
+//
+// `splitGroup` turns an overfull group into structural children named `${group.name}/part-N`.
+// Those parts are storage buckets, not topics: agents must write to the logical group, and a part
+// must never split again into `part-3/part-1` (that breaks the one-level co-membership hop).
+
+/** Minimal group shape the split-part helpers need, so store-like callers can use them too. */
+export interface SplitPartGroupLike {
+  id: string;
+  name: string;
+  parentGroupId: string | null;
+}
+
+/** True when `child` is a synthetic split part of `parent`, i.e. named `${parent.name}/part-<n>`. */
+export function isSplitPartOf(child: { name: string }, parent: { name: string }): boolean {
+  if (!child.name.startsWith(parent.name)) return false;
+  return /^\/part-\d+$/.test(child.name.slice(parent.name.length));
+}
+
+/**
+ * The logical group behind a synthetic split part, walking up through nested parts
+ * (`a/part-3/part-1` resolves to `a`). A normal group resolves to itself.
+ */
+export function resolveLogicalGroup<G extends SplitPartGroupLike>(
+  group: G,
+  getGroup: (id: string) => G | undefined,
+): G {
+  let cur = group;
+  const seen = new Set<string>([cur.id]);
+  while (cur.parentGroupId && !seen.has(cur.parentGroupId)) {
+    const parent = getGroup(cur.parentGroupId);
+    if (!parent || !isSplitPartOf(cur, parent)) break;
+    seen.add(parent.id);
+    cur = parent;
+  }
+  return cur;
+}
+
+/** Next unused `${baseName}/part-N` index. Checks every group: names are global lookup keys. */
+export function nextSplitPartIndex(baseName: string, allGroups: Array<{ name: string }>): number {
+  const prefix = `${baseName}/part-`;
+  let max = 0;
+  for (const g of allGroups) {
+    if (!g.name.startsWith(prefix)) continue;
+    const rest = g.name.slice(prefix.length);
+    if (/^\d+$/.test(rest)) max = Math.max(max, Number(rest));
+  }
+  return max + 1;
+}
+
+/**
+ * Collapse a root-to-leaf chain of group names for display. Group names are usually full paths
+ * already (`project/x/part-3` under `project/x` under `project`), so joining every level repeats
+ * them; an ancestor whose name the next kept descendant already starts with is dropped.
+ * Legacy short names (`arch` under `project`) are kept as separate segments.
+ */
+export function collapseGroupNameChain(names: string[]): string[] {
+  const out: string[] = [];
+  for (let i = names.length - 1; i >= 0; i--) {
+    const head = out[0];
+    if (head !== undefined && head.startsWith(`${names[i]}/`)) continue;
+    out.unshift(names[i]);
+  }
+  return out;
+}
+
+function splitPartNumber(name: string): number {
+  const m = /\/part-(\d+)$/.exec(name);
+  return m ? Number(m[1]) : 0;
+}
+
 const CODE_EXTENSIONS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
   '.py', '.rb', '.rs', '.go', '.java', '.c', '.cpp', '.h', '.hpp',
@@ -242,6 +313,12 @@ export class GroupKBEngine {
       const group = this.store.getGroup(groupId);
       if (!group) throw new Error(`Group not found: ${groupId}`);
 
+      // A split part never nests (`part-3/part-1`): its overflow spills into sibling parts.
+      if (group.parentGroupId) {
+        const logical = resolveLogicalGroup(group, (id) => this.store.getGroup(id));
+        if (logical.id !== group.id) return this.spillSplitPart(group, logical);
+      }
+
       const memories = group.memoryIds
         .map(id => this.store.getMemory(id))
         .filter((m): m is MemoryNode => m !== undefined);
@@ -257,6 +334,11 @@ export class GroupKBEngine {
       }
 
       const newGroups: Group[] = [];
+      // Collision-safe: never reuse a part number that already exists under this name.
+      const partBase = Math.max(
+        group.childGroupIds.length,
+        nextSplitPartIndex(group.name, this.store.getAllGroups()) - 1,
+      );
 
       for (let i = 0; i < buckets.length; i++) {
         const bucket = buckets[i];
@@ -264,7 +346,7 @@ export class GroupKBEngine {
 
         // Number parts by the parent's existing child count so repeated splits
         // produce unique names instead of part-1/part-2/part-3 repeating.
-        const partIndex = group.childGroupIds.length + i + 1;
+        const partIndex = partBase + i + 1;
         const subName = `${group.name}/part-${partIndex}`;
         const sub = this.store.createGroup({
           name: subName,
@@ -303,6 +385,101 @@ export class GroupKBEngine {
 
       return newGroups;
     });
+  }
+
+  /**
+   * Overflow of a split part. Direct members beyond the cap (the most recently added) move to
+   * sibling parts under the logical parent: first the newest later-numbered sibling part that
+   * still has room (an earlier spill), then new `${logical.name}/part-<next unused>` groups.
+   * Nothing nests.
+   */
+  private spillSplitPart(group: Group, logical: Group): Group[] {
+    const cap = Math.max(1, group.maxChildrenBeforeSplit);
+    const overflow = group.memoryIds.slice(cap);
+    if (overflow.length === 0) return [group];
+
+    // Number of the top-level part this group sits in (itself, or its ancestor for legacy nesting).
+    let top: Group = group;
+    for (let guard = 0; top.parentGroupId && top.parentGroupId !== logical.id && guard < 32; guard++) {
+      const up = this.store.getGroup(top.parentGroupId);
+      if (!up) break;
+      top = up;
+    }
+    const ownNumber = top.parentGroupId === logical.id ? splitPartNumber(top.name) : 0;
+    const siblings = logical.childGroupIds
+      .map((id) => this.store.getGroup(id))
+      .filter((g): g is Group => g !== undefined && g.id !== group.id
+        && g.childGroupIds.length === 0 && isSplitPartOf(g, logical)
+        && splitPartNumber(g.name) > ownNumber)
+      .sort((a, b) => splitPartNumber(b.name) - splitPartNumber(a.name));
+    let target: Group | undefined = siblings[0] && siblings[0].memoryIds.length < cap ? siblings[0] : undefined;
+    let nextIndex = nextSplitPartIndex(logical.name, this.store.getAllGroups());
+    const childIds = [...logical.childGroupIds];
+    const touched = new Map<string, Group>();
+    const pending = [...overflow];
+
+    while (pending.length > 0) {
+      if (!target || target.memoryIds.length >= cap) {
+        target = this.store.createGroup({
+          name: `${logical.name}/part-${nextIndex++}`,
+          parentGroupId: logical.id,
+          maxChildrenBeforeSplit: logical.maxChildrenBeforeSplit,
+        });
+        childIds.push(target.id);
+      }
+      const batch = pending.splice(0, cap - target.memoryIds.length);
+      this.store.updateGroup(target.id, {
+        memoryIds: [...target.memoryIds, ...batch],
+        stats: {
+          ...target.stats,
+          totalMemories: target.stats.totalMemories + batch.length,
+          directMemories: target.stats.directMemories + batch.length,
+        },
+      });
+      const targetId = target.id;
+      for (const memId of batch) {
+        const mem = this.store.getMemory(memId);
+        if (!mem) continue;
+        const gids = mem.groupIds.filter((g) => g !== group.id && g !== targetId);
+        gids.push(targetId);
+        this.store.updateMemory(memId, { groupIds: gids });
+      }
+      target = this.store.getGroup(targetId)!;
+      touched.set(target.id, target);
+    }
+
+    this.store.updateGroup(group.id, {
+      memoryIds: group.memoryIds.slice(0, cap),
+      stats: {
+        ...group.stats,
+        totalMemories: Math.max(0, group.stats.totalMemories - overflow.length),
+        directMemories: Math.max(0, group.stats.directMemories - overflow.length),
+      },
+    });
+    const added = childIds.length - logical.childGroupIds.length;
+    if (added > 0) {
+      this.store.updateGroup(logical.id, {
+        childGroupIds: childIds,
+        stats: { ...logical.stats, totalChildren: logical.stats.totalChildren + added },
+      });
+    }
+    return [...touched.values()];
+  }
+
+  /**
+   * The logical group behind a synthetic split part (`<parent>/part-N`, walked up through nested
+   * parts). A normal group resolves to itself; an unknown id to undefined.
+   */
+  resolveLogicalGroup(groupId: string): Group | undefined {
+    const group = this.store.getGroup(groupId);
+    if (!group) return undefined;
+    return resolveLogicalGroup(group, (id) => this.store.getGroup(id));
+  }
+
+  /** True when the group is a synthetic split part of some logical group. */
+  isSplitPart(groupId: string): boolean {
+    const logical = this.resolveLogicalGroup(groupId);
+    return logical !== undefined && logical.id !== groupId;
   }
 
   findGroupForMemory(memoryId: string): Group[] {
@@ -999,7 +1176,8 @@ export class GroupKBEngine {
             parts.unshift(cur.name);
             cur = cur.parentGroupId ? groupById.get(cur.parentGroupId) : undefined;
           }
-          return parts.join('/').toLowerCase();
+          // Names are usually full paths already: joining every level doubled them.
+          return collapseGroupNameChain(parts).join('/').toLowerCase();
         };
         for (const g of this.store.getAllGroups()) {
           const name = g.name.toLowerCase();
@@ -1381,7 +1559,7 @@ export class GroupKBEngine {
       path.unshift(parent.name);
       current = parent;
     }
-    return path.join(' \u2192 ');
+    return collapseGroupNameChain(path).join(' \u2192 ');
   }
 
   // ─── Ingestion ───

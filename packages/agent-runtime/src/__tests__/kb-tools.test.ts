@@ -180,3 +180,101 @@ describe('kb_query 的返回体积', () => {
     );
   });
 });
+
+/**
+ * `kb_query` 默认只列前 5 条（`limit` 可调，上限 30），长正文给摘要；原文靠 `kb_get` 按 id 取。
+ * 给模型的文本被裁短，但 UI 的激活轨迹（onQueryResult）仍拿到完整结果。
+ */
+describe('kb_query 的默认条数与 kb_get', () => {
+  const LONG = `开头${'很长的正文，'.repeat(100)}结尾标记`;
+
+  function engineOf(count: number, content: (i: number) => string = (i) => `内容${i}`, opts: Parameters<typeof createKBTools>[1] = {}) {
+    const mems = Array.from({ length: count }, (_, i) => ({ id: `n${i}`, title: `标题${i}`, content: content(i), kind: 'fact', metadata: {} }));
+    const engine = {
+      store: {
+        getAllGroups: () => [] as Array<{ id: string; name: string }>,
+        getMemory: (id: string) => mems.find((m) => m.id === id),
+      },
+      findGroupForMemory: (id: string) => (mems.some((m) => m.id === id) ? [{ id: 'g1', name: 'project/x' }] : []),
+      query: () => ({
+        nodes: mems,
+        traces: mems.map((_, i) => ({ finalScore: 1 - i / 100, activationLevel: 0.5, groupPath: ['project', 'x'] })),
+        groupsVisited: ['project/x'],
+        queryTimeMs: 1,
+        totalNodesScanned: count,
+      }),
+    };
+    return createKBTools(engine as unknown as GroupKBEngine, opts);
+  }
+  const hits = (out: string) => (out.match(/^\[\d+\] /gm) ?? []).length;
+
+  it('默认只列 5 条，并说明另有几条', async () => {
+    const out = await engineOf(12).execute('kb_query', { query: 'x' });
+    assert.equal(hits(out), 5, out);
+    assert.match(out, /^Found 12 nodes/);
+    assert.match(out, /列出前 5 条/);
+    assert.match(out, /另有 7 条未列出，调大 limit 可看/);
+    assert.match(out, /\[Node: n4\]/);
+    assert.doesNotMatch(out, /\[Node: n5\]/);
+  });
+
+  it('显式 limit 生效，上限 30，非法值回落到默认', async () => {
+    const tools = engineOf(40);
+    assert.equal(hits(await tools.execute('kb_query', { query: 'x', limit: 8 })), 8);
+    const capped = await tools.execute('kb_query', { query: 'x', limit: 999 });
+    assert.equal(hits(capped), 30);
+    assert.match(capped, /另有 10 条未列出/);
+    assert.equal(hits(await tools.execute('kb_query', { query: 'x', limit: 0 })), 5);
+    assert.equal(hits(await tools.execute('kb_query', { query: 'x', limit: 'abc' })), 5);
+  });
+
+  it('结果不超过 limit 时不提「另有」', async () => {
+    const out = await engineOf(3).execute('kb_query', { query: 'x' });
+    assert.equal(hits(out), 3);
+    assert.doesNotMatch(out, /另有|列出前/);
+  });
+
+  it('每条保留标题 / 分数 / 组 / 节点 id，长正文约 200 字摘要并指向 kb_get', async () => {
+    const out = await engineOf(2, () => LONG).execute('kb_query', { query: 'x' });
+    assert.match(out, /^\[1\] 标题0 \(fact\) score=1\.000/m);
+    assert.match(out, /group: project \| x/);
+    assert.match(out, /\[Node: n0\]/);
+    assert.ok(!out.includes('结尾标记'), '长正文不该整篇回显');
+    assert.match(out, /要原文用 kb_get\(id\) 或 full=true/);
+    const snippet = out.split('\n').find((l) => l.trim().startsWith('开头'))!;
+    assert.ok(snippet.trim().length <= 201, `摘要应约 200 字，实际 ${snippet.trim().length}`);
+  });
+
+  it('full=true 给全文', async () => {
+    const out = await engineOf(1, () => LONG).execute('kb_query', { query: 'x', full: true });
+    assert.ok(out.includes('结尾标记'));
+    assert.doesNotMatch(out, /kb_get\(id\)/);
+  });
+
+  it('kb_get 按 id 取全文，只读子任务也能用', async () => {
+    const tools = engineOf(1, () => LONG, { readOnly: true });
+    assert.ok(tools.definitions.some((d) => d.name === 'kb_get'));
+    const out = await tools.execute('kb_get', { id: 'n0' });
+    assert.ok(out.includes('结尾标记'), out.slice(0, 200));
+    assert.match(out, /^标题0 \(fact\)/);
+    assert.match(out, /group: project\/x/);
+    assert.match(out, /\[Node: n0\]/);
+    assert.doesNotMatch(out, /只读/, '读不该被只读开关挡掉');
+    assert.match(await tools.execute('kb_get', { id: '[Node: n0]' }), /结尾标记/, '直接粘 [Node: …] 也认');
+    assert.match(await tools.execute('kb_get', { id: 'nope' }), /^Error: Memory not found/);
+    assert.match(await tools.execute('kb_get', {}), /^Error: /);
+  });
+
+  it('工具描述提到默认条数、limit 与 kb_get', () => {
+    const def = engineOf(0).definitions.find((d) => d.name === 'kb_query')!;
+    assert.ok('limit' in (def.parameters.properties as object), '参数表里要有 limit');
+    assert.match(def.description, /limit/);
+    assert.match(def.description, /kb_get/);
+  });
+
+  it('UI 的 onQueryResult 仍拿到全部结果（只裁给模型的文本）', async () => {
+    let seen = 0;
+    await engineOf(12, undefined, { onQueryResult: (r) => { seen = r.nodes.length; } }).execute('kb_query', { query: 'x' });
+    assert.equal(seen, 12);
+  });
+});

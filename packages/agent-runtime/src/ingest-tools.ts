@@ -3,6 +3,7 @@ import { join, basename, extname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ToolDefinition } from '@she/shared';
 import { resolveInsideWorkspace } from '@she/sandbox';
+import { resolveLogicalGroup } from '@she/kb';
 
 /**
  * Knowledge ingestion into the group-structure KB.
@@ -42,6 +43,8 @@ const SUPPORTED_EXT = new Set(['.md', '.markdown', '.txt', '.json', '.jsonl', '.
 interface EngineLike {
   createGroup(name: string, parentId?: string): { id: string; name: string };
   addMemory(groupId: string, kind: 'text' | 'code' | 'fact' | 'tool_outcome' | 'preference', title: string, content: string): { id: string };
+  /** Write that keeps the group within its split limit; used when the engine provides it. */
+  addMemoryMaintained?(groupId: string, kind: 'text' | 'code' | 'fact' | 'tool_outcome' | 'preference', title: string, content: string): { id: string };
   addWeakEdge(a: string, b: string): unknown;
   query(q: string, opts?: { budget?: number }): { nodes: { id: string; title: string }[] };
 }
@@ -242,6 +245,16 @@ export function createIngestTools(
     return engine.createGroup('intake');
   };
 
+  /**
+   * Placement targets: logical groups only. A split part (`<group>/part-N`, made by an automatic
+   * split) is a storage bucket, not a topic, so it is listed as its logical parent (deduped).
+   */
+  const logicalGroupNames = (): string[] => {
+    const names = new Set<string>();
+    for (const g of store.getAllGroups()) names.add(resolveLogicalGroup(g, (id) => store.getGroup(id)).name);
+    return [...names];
+  };
+
   reg(
     {
       name: 'kb_ingest_scan',
@@ -359,8 +372,7 @@ export function createIngestTools(
       if (!batch) return `未找到 batch ${wanted}`;
       const pending = batch.items.filter((i) => i.status === 'pending');
 
-      const groups = store.getAllGroups();
-      const groupList = groups.map((g) => g.name).join(', ');
+      const groupList = logicalGroupNames().join(', ');
 
       return [
         `batch ${batch.id}（来源 ${batch.sourcePath}）`,
@@ -411,7 +423,7 @@ export function createIngestTools(
       let group = store.getAllGroups().find((g) => g.name === groupName);
       if (!group) {
         if (a.createIfMissing !== true) {
-          const existing = store.getAllGroups().map((g) => g.name).join(', ');
+          const existing = logicalGroupNames().join(', ');
           return `Error: 组 "${groupName}" 不存在。现有组：${existing}。若确实需要新建，请传 createIfMissing=true。`;
         }
         const segments = groupName.split('/').filter(Boolean);
@@ -429,6 +441,18 @@ export function createIngestTools(
         group = store.getGroup(currentId);
       }
 
+      // Never file into a split part: write to its logical group instead.
+      let targetName = groupName;
+      let redirected = '';
+      if (group) {
+        const logical = resolveLogicalGroup(group, (id) => store.getGroup(id));
+        if (logical.id !== group.id) {
+          redirected = ` (redirected from split part "${groupName}" to its logical group "${logical.name}")`;
+          targetName = logical.name;
+          group = logical;
+        }
+      }
+
       const title = String(a.title ?? '').trim() || item.title;
       const kindRaw = String(a.kind ?? 'text');
       const kind = (['text', 'code', 'fact', 'tool_outcome', 'preference'].includes(kindRaw)
@@ -436,7 +460,9 @@ export function createIngestTools(
         : 'text') as 'text' | 'code' | 'fact' | 'tool_outcome' | 'preference';
 
       const body = item.origin ? `${item.text}\n\n<!-- 来源: ${item.origin} -->` : item.text;
-      const mem = engine.addMemory(group!.id, kind, title, body);
+      const mem = engine.addMemoryMaintained
+        ? engine.addMemoryMaintained(group!.id, kind, title, body)
+        : engine.addMemory(group!.id, kind, title, body);
 
       if (typeof a.linkToNodeId === 'string' && a.linkToNodeId.trim()) {
         try {
@@ -445,11 +471,11 @@ export function createIngestTools(
       }
 
       item.status = 'placed';
-      item.placedGroup = groupName;
+      item.placedGroup = targetName;
       saveBatches(workspaceRoot, batches);
 
       const remaining = batch.items.filter((i) => i.status === 'pending').length;
-      return `已归位「${title}」→ 组 ${groupName} [Node: ${mem.id}]。本批剩余 ${remaining} 条。`;
+      return `已归位「${title}」→ 组 ${targetName} [Node: ${mem.id}]${redirected}。本批剩余 ${remaining} 条。`;
     },
   );
 

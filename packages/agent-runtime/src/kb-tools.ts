@@ -18,6 +18,17 @@ export interface KBToolSet {
  */
 const KB_PREVIEW_CHARS = 200;
 
+/**
+ * How many hits a `kb_query` reply lists unless `limit` asks for more, and the most it will list.
+ *
+ * The engine returns up to 40 hits; most lookups are answered by the first few, and every extra
+ * hit stays in the conversation and is paid for again on every later turn. The full ranked result
+ * still goes to the UI trace (`onQueryResult`); only the text handed to the model is capped, and
+ * the reply says how many it left out.
+ */
+const KB_DEFAULT_LIMIT = 5;
+const KB_MAX_LIMIT = 30;
+
 const VALID_KINDS = ['text', 'code', 'fact', 'tool_outcome', 'preference'] as const;
 type ValidKind = (typeof VALID_KINDS)[number];
 
@@ -95,7 +106,9 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
       name: 'kb_query',
       description: 'Query the Group Memory KB via PulseSeed structural resonance. Returns activated memory nodes with group paths and activation traces showing how each result was reached. '
         + `Node text is summarised to the first ${KB_PREVIEW_CHARS} characters by default — enough for a convention, a port or a command, and short of the whole of an ingested document. `
-        + 'Pass `full: true` when the exact wording is the point: quoting a memory, or checking a command, a number or a path character by character.',
+        + 'Pass `full: true` when the exact wording is the point: quoting a memory, or checking a command, a number or a path character by character. '
+        + `Lists the top ${KB_DEFAULT_LIMIT} hits by default (\`limit\` up to ${KB_MAX_LIMIT} for more); the reply says how many were left out. `
+        + 'To read one node in full, use `kb_get` with its id (the [Node: …] line).',
       parameters: {
         type: 'object',
         properties: {
@@ -104,9 +117,13 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
             type: 'number',
             description:
               'Optional. How much of the memory graph the pulse may explore. It bounds the SCAN, not '
-              + 'the reply: it cannot be used to ask for fewer results (a reply carries up to 40 of '
-              + 'whatever scores above the relevance floor), and a smaller value mostly just makes the '
-              + 'query cheaper. Lower it only when a query is slow.',
+              + 'the reply: it cannot be used to ask for fewer results (use `limit` for how many hits are '
+              + 'listed), and a smaller value mostly just makes the query cheaper. Lower it only when a '
+              + 'query is slow.',
+          },
+          limit: {
+            type: 'number',
+            description: `Optional. How many hits to list (default ${KB_DEFAULT_LIMIT}, max ${KB_MAX_LIMIT}). Raise it when the first hits are not enough.`,
           },
           full: {
             type: 'boolean',
@@ -136,12 +153,19 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
         return 'No results found in Group KB.';
       }
 
+      const rawLimit = Number(args.limit);
+      const limit = Number.isFinite(rawLimit) && rawLimit >= 1
+        ? Math.min(Math.floor(rawLimit), KB_MAX_LIMIT)
+        : KB_DEFAULT_LIMIT;
+      const shown = Math.min(limit, result.nodes.length);
+      const omitted = result.nodes.length - shown;
+
       const lines: string[] = [];
-      lines.push(`Found ${result.nodes.length} nodes across ${result.groupsVisited.length} groups (${result.queryTimeMs.toFixed(1)}ms, ${result.totalNodesScanned} scanned)`);
+      lines.push(`Found ${result.nodes.length} nodes across ${result.groupsVisited.length} groups (${result.queryTimeMs.toFixed(1)}ms, ${result.totalNodesScanned} scanned)${omitted > 0 ? `，列出前 ${shown} 条` : ''}`);
       lines.push('');
 
       let clipped = 0;
-      for (let i = 0; i < result.nodes.length; i++) {
+      for (let i = 0; i < shown; i++) {
         const node = result.nodes[i];
         const trace = result.traces[i];
         const score = trace?.finalScore !== undefined
@@ -156,7 +180,8 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
         if (full || node.content.length <= KB_PREVIEW_CHARS) {
           lines.push(`    ${node.content}`);
         } else {
-          lines.push(`    ${node.content.slice(0, KB_PREVIEW_CHARS)}…`);
+          // One line, whitespace collapsed: a snippet is for recognising the node, not for quoting.
+          lines.push(`    ${preview(node.content)}`);
           clipped++;
         }
         if (retired) {
@@ -172,12 +197,54 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
        * same sentence on every long node, and a reply that silently shortens a memory is worse
        * than a long one: the agent would quote the summary as if it were the text.
        */
+      if (omitted > 0 || clipped > 0) lines.push('');
+      if (omitted > 0) {
+        lines.push(`另有 ${omitted} 条未列出，调大 limit 可看（最多 ${KB_MAX_LIMIT}）`);
+      }
       if (clipped > 0) {
-        lines.push('');
         lines.push(
-          `（${clipped} 条正文超过 ${KB_PREVIEW_CHARS} 字，上面是摘要；要原文再查一次并带 full=true）`,
+          `（${clipped} 条正文超过 ${KB_PREVIEW_CHARS} 字，上面是摘要；要原文用 kb_get(id) 或 full=true）`,
         );
       }
+      return lines.join('\n');
+    },
+  );
+
+  /*
+   * Read one node by id. Read-only, so it is NOT guarded by `readOnly`: a read-only child needs
+   * it exactly as much as the parent does.
+   */
+  reg(
+    {
+      name: 'kb_get',
+      description: 'Read one memory node in full by id (the [Node: …] from kb_query): title, kind, version, group, retirement and the complete text. '
+        + 'Read-only. Use it after kb_query when a snippet is not enough, instead of re-running the query with full=true.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Node id, from the [Node: …] line of a kb_query result' },
+        },
+        required: ['id'],
+      },
+    },
+    async (args) => {
+      const id = String(args.id ?? args.nodeId ?? '').trim().replace(/^\[?Node:\s*/i, '').replace(/\]$/, '').trim();
+      if (!id) return 'Error: 必须给 id（kb_query 结果里的 [Node: …]）';
+      const mem: MemoryNode | undefined = engine['store'].getMemory(id);
+      if (!mem) return `Error: Memory not found: ${id}`;
+      const retired = retirementOf(mem);
+      const version = versionOf(mem);
+      const groups = typeof engine.findGroupForMemory === 'function'
+        ? engine.findGroupForMemory(id).map((g) => g.name).filter(Boolean)
+        : [];
+      const lines = [`${mem.title} (${mem.kind})${version > 1 ? ` v${version}` : ''}${retired ? ' [已退役]' : ''}`];
+      if (groups.length) lines.push(`group: ${groups.join(' | ')}`);
+      if (retired) {
+        lines.push(`退役原因：${retired.reason}${retired.replacedBy ? `；替代节点：${retired.replacedBy}` : ''}`);
+      }
+      lines.push(`[Node: ${mem.id}]`);
+      lines.push('');
+      lines.push(mem.content);
       return lines.join('\n');
     },
   );
@@ -211,7 +278,7 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
     },
     async (args) => {
       if (opts?.readOnly) return READ_ONLY_REFUSAL;
-      const groupName = args.groupName as string;
+      let groupName = args.groupName as string;
       const title = args.title as string;
       const content = args.content as string;
       const kind = (args.kind as string) ?? 'fact';
@@ -220,6 +287,18 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
       const nodeKind: ValidKind = VALID_KINDS.includes(kind as ValidKind) ? kind as ValidKind : 'fact';
 
       let group = engine['store'].getAllGroups().find((g: { name: string }) => g.name === groupName);
+
+      // `<group>/part-N` is a structural bucket made by an automatic split, not a topic: write to the
+      // logical group instead (writing into a part is what made parts overflow and nest).
+      let redirected = '';
+      if (group) {
+        const logical = engine.resolveLogicalGroup(group.id);
+        if (logical && logical.id !== group.id) {
+          redirected = ` (redirected from split part "${groupName}" to its logical group "${logical.name}")`;
+          groupName = logical.name;
+          group = logical;
+        }
+      }
 
       /*
        * Same title, same group: decide explicitly instead of piling up.
@@ -242,7 +321,7 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
             const patch: KBMemoryPatch = { content };
             if (args.kind !== undefined) patch.kind = nodeKind;
             const r = engine.reviseMemory(target.id, patch, 'kb_upsert onExisting=update');
-            return `Updated memory "${r.after.title}" in group "${groupName}" [Node: ${target.id}, Group: ${group.id}] —— ${describeChange(r)}`;
+            return `Updated memory "${r.after.title}" in group "${groupName}" [Node: ${target.id}, Group: ${group.id}] —— ${describeChange(r)}${redirected}`;
           }
           return [
             `未写入（已有同题节点）：组 "${groupName}" 里已有「${target.title}」[Node: ${target.id}]，内容与这次不同`
@@ -263,7 +342,7 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
       const alongside = sameTitle.length > 0
         ? `（同组已有同题有效节点 ${sameTitle.map((m) => m.id).join(', ')}，按 onExisting="add" 并存）`
         : '';
-      return `Added memory "${title}" to group "${groupName}" [Node: ${mem.id}, Group: ${group.id}]${alongside}`;
+      return `Added memory "${title}" to group "${groupName}" [Node: ${mem.id}, Group: ${group.id}]${alongside}${redirected}`;
     },
   );
 

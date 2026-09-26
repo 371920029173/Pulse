@@ -462,14 +462,12 @@ describe('plan tools', () => {
  * The reply to `plan_update` is sent once per step of progress, a dozen times on a long task, so
  * what it repeats is what the task pays for again and again.
  *
- * The contract these lock down: every step and its status are still printed (the plan has to stay
- * readable as a whole), the note is printed only for the steps THIS call moved, and nothing is
- * lost — `plan_list` still prints every note. The failure mode being guarded against is a filter
- * that quietly drops a note the caller needed, which is why the "unchanged step keeps its status
- * line" case is asserted rather than assumed.
+ * The contract these lock down: the reply lists only the steps THIS call moved (including side
+ * effects: auto-activation, a step sent back to pending, cascaded drops), plus progress and the
+ * next step; nothing is lost — `plan_get` / `plan_list` still print every step and every note.
  */
 describe('plan_update 的回显瘦身', () => {
-  it('只印这次改动过的步骤的备注，其余步骤的状态照印', async () => {
+  it('只列这次改动过的步骤，其余步骤不重复回显', async () => {
     const tools = createPlanTools(dir, 'sess-note');
     await tools.execute('plan_create', { title: '瘦身', steps: ['a', 'b', 'c'] });
     await tools.execute('plan_update', { step_id: 's1', status: 'done', note: '第一个发现' });
@@ -477,10 +475,13 @@ describe('plan_update 的回显瘦身', () => {
 
     assert.ok(out.includes('第二个发现'), `本次备注必须在: ${out}`);
     assert.ok(!out.includes('第一个发现'), `上次的备注不该重复回显: ${out}`);
-    // The line still shows — dropping it is what would make the reply unreadable as a plan.
-    assert.match(out, /\[x\] s1 a/);
-    assert.match(out, /\[x\] s2 b/);
-    assert.match(out, /\[>\] s3 c/, '完成时自动激活的下一步也要看得见');
+    // Compact reply: untouched steps are not repeated at all; plan_get has the whole plan.
+    assert.doesNotMatch(out, /s1 a/, `没动过的步骤不该回显: ${out}`);
+    assert.match(out, /\[x\] s2 b（active → done）/);
+    assert.match(out, /\[>\] s3 c（pending → active）/, '完成时自动激活的下一步也要看得见');
+    assert.match(out, /进度 2\/3/);
+    assert.match(out, /下一步: s3 c/);
+    assert.match(out, /plan_get/);
   });
 
   it('备注没有丢：plan_list 全量印出来', async () => {
@@ -511,6 +512,56 @@ describe('plan_update 的回显瘦身', () => {
     const added = await tools.execute('plan_add_steps', { plan_id: planId, steps: ['b'] });
     assert.ok(!added.includes('第一步的旧备注'), `旧备注不该在加步骤时再印一次: ${added}`);
     assert.match(added, /下一步: s2 b/);
+  });
+
+  it('长备注只回显一小截，plan_get 给全文', async () => {
+    const tools = createPlanTools(dir, 'sess-note5');
+    await tools.execute('plan_create', { title: '长备注', steps: ['a', 'b'] });
+    const long = `证据：${'很长的输出。'.repeat(40)}结尾标记`;
+    const out = await tools.execute('plan_update', { step_id: 's1', status: 'done', note: long });
+    assert.ok(!out.includes('结尾标记'), `长备注不该整段回显: ${out}`);
+    assert.match(out, /s1 a（active → done）  — 证据：/);
+    const full = await tools.execute('plan_get', {});
+    assert.ok(full.includes('结尾标记'), 'plan_get 要印全文备注');
+    assert.match(full, /\[x\] s1 a/);
+    assert.match(full, /\[>\] s2 b/);
+  });
+
+  it('进度不把 dropped 算进分母，并单独说明', async () => {
+    const tools = createPlanTools(dir, 'sess-note6');
+    await tools.execute('plan_create', { title: '放弃', steps: ['a', 'b', 'c'] });
+    await tools.execute('plan_update', { step_id: 's1', status: 'done' });
+    const out = await tools.execute('plan_update', { step_id: 's3', status: 'dropped', note: '不需要了' });
+    assert.match(out, /进度 1\/2（另有 1 步已放弃，不计入）/, out);
+    assert.match(out, /s3 c（pending → dropped）  — 不需要了/);
+    assert.match(out, /下一步: s2 b/);
+    assert.doesNotMatch(out, /s1 a/);
+  });
+
+  it('全部做完时说计划已收口', async () => {
+    const tools = createPlanTools(dir, 'sess-note7');
+    await tools.execute('plan_create', { title: '收口', steps: ['a'] });
+    const out = await tools.execute('plan_update', { step_id: 's1', status: 'done' });
+    assert.match(out, /进度 1\/1/);
+    assert.match(out, /计划已收口/);
+    assert.match(out, /（计划状态 done）/);
+  });
+
+  it('回显比整份计划短得多（多步、带备注的计划）', async () => {
+    const tools = createPlanTools(dir, 'sess-note8');
+    await tools.execute('plan_create', { title: '体积', steps: Array.from({ length: 10 }, (_, i) => `步骤${i + 1}`) });
+    for (let i = 1; i <= 8; i++) {
+      await tools.execute('plan_update', { step_id: `s${i}`, status: 'done', note: `第${i}步的发现：${'细节'.repeat(30)}` });
+    }
+    const out = await tools.execute('plan_update', { step_id: 's9', status: 'done', note: '第9步的发现' });
+    const full = await tools.execute('plan_get', {});
+    assert.ok(out.length * 3 < full.length, `回显 ${out.length} 字，全量 ${full.length} 字`);
+  });
+
+  it('plan_get 没有计划 / 找不到计划时给出说明，而不是抛异常', async () => {
+    const tools = createPlanTools(dir, 'sess-note9');
+    assert.equal(await tools.execute('plan_get', {}), 'No plans yet.');
+    assert.match(await tools.execute('plan_get', { plan_id: 'plan_nope' }), /^Error: plan not found/);
   });
 });
 

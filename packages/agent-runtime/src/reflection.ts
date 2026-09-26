@@ -331,6 +331,9 @@ function actionContext(a: DriftAction): string {
  * Pure and deterministic: everything it reports is a quote or a count, so the same inputs give the
  * same report and a test can pin the exact wording of a signal.
  */
+/** Tools that record or review the task rather than doing it. */
+const BOOKKEEPING = /^(plan_|reflection_|preflight_|errorbook_|memo_)/;
+
 export function detectDrift(input: DriftInput): DriftReport {
   const signals: DriftSignal[] = [];
   const goal = String(input.goal ?? '').trim();
@@ -375,11 +378,27 @@ export function detectDrift(input: DriftInput): DriftReport {
    * from the goal is a direction. Five escalates to major, because by then a real on-task stretch
    * would almost certainly have named the thing it is working on.
    */
-  if (terms.length && actions.length >= 3) {
-    const recent = contexts.slice(-3);
-    const matched = recent.map((t) => containsAny(t, terms));
+  /*
+   * What counts as "on topic" is the goal's words OR the current plan step's words.
+   *
+   * Measured on a live run: the goal "confirm the server restarted (pid 15884 replaced by 17856)"
+   * gave the terms `pid`, `15884`, `17856`, and five `netstat`/`lsp`/`kb` probes the plan step had
+   * asked for were reported as major drift because none of them spelled a pid. The plan step is
+   * the agent's own decomposition of the goal; work that matches it is on task by construction,
+   * and a step that is itself off goal is reported separately (`step_off_goal`) below.
+   *
+   * Bookkeeping calls (plan, reflection, preflight, error book, memo) are left out of the window:
+   * they are about the task by definition and say nothing about where the work is heading, so a
+   * run of them cannot be "unrelated" and must not push real actions out of the window either.
+   */
+  const stepTerms = goalTerms(String(input.currentStep ?? ''));
+  const anchors = [...terms, ...stepTerms.filter((t) => !terms.includes(t))];
+  const work = contexts.filter((_, i) => !BOOKKEEPING.test(actions[i].tool || ''));
+  if (terms.length && work.length >= 3) {
+    const recent = work.slice(-3);
+    const matched = recent.map((t) => containsAny(t, anchors));
     if (matched.every((m) => m === null)) {
-      const long = actions.length >= 5 && contexts.slice(-5).every((t) => containsAny(t, terms) === null);
+      const long = work.length >= 5 && work.slice(-5).every((t) => containsAny(t, anchors) === null);
       signals.push({
         kind: 'goal_unrelated',
         major: long,

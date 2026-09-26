@@ -601,10 +601,65 @@ export function renderPlan(plan: Plan, opts?: RenderPlanOptions): string {
    * in the way and what the plan said to do about it, so a stalled plan does not read as a
    * finished one.
    */
+  lines.push(nextLine(plan));
+  return lines.join('\n');
+}
+
+/** The "下一步:" line. Shared by the full render and the compact update reply so they cannot disagree. */
+function nextLine(plan: Plan): string {
   const next = nextStepOf(plan);
-  lines.push(next
+  return next
     ? `下一步: ${next.step.id} ${next.step.title}（${next.why}）`
-    : plan.status === 'done' ? '下一步: 无，计划已收口' : '下一步: 无（没有可开始的步骤）');
+    : plan.status === 'done' ? '下一步: 无，计划已收口' : '下一步: 无（没有可开始的步骤）';
+}
+
+/** How much of a note the compact `plan_update` reply echoes: the caller just wrote it, and the full text is on disk. */
+const UPDATE_NOTE_CHARS = 60;
+
+function shortNote(note: string): string {
+  const one = note.replace(/\s+/g, ' ').trim();
+  return one.length > UPDATE_NOTE_CHARS ? `${one.slice(0, UPDATE_NOTE_CHARS)}…` : one;
+}
+
+/**
+ * "进度 x/y": done over the steps still in scope.
+ *
+ * A dropped step is not work left to do, so it leaves the denominator (otherwise a plan that
+ * skipped a step could never read as complete), and it is named separately so the drop stays
+ * visible.
+ */
+export function planProgress(plan: Plan): string {
+  const done = plan.steps.filter((s) => s.status === 'done').length;
+  const dropped = plan.steps.filter((s) => s.status === 'dropped').length;
+  const total = plan.steps.length - dropped;
+  return `进度 ${done}/${total}${dropped ? `（另有 ${dropped} 步已放弃，不计入）` : ''}`;
+}
+
+/**
+ * The reply to `plan_update`: only what this call changed, the progress, and where to continue.
+ *
+ * The steps listed are the ones the call moved, including its side effects (the next step
+ * auto-activated, a previously active step sent back to pending, cascaded drops) — found by
+ * comparing the plan before and after, see `notesToPrint`. Untouched steps are not repeated:
+ * `plan_get` / `plan_list` print the whole plan with every note.
+ */
+export function renderPlanUpdate(before: Plan | undefined, after: Plan, touched: readonly string[] = []): string {
+  const prev = new Map((before?.steps ?? []).map((s) => [s.id, s] as const));
+  const moved = notesToPrint(before, after, touched) ?? new Set(touched);
+  const lines = [`已更新 ${after.id}「${after.title}」${after.status === 'open' ? '' : `（计划状态 ${after.status}）`}`];
+  for (const s of after.steps) {
+    if (!moved.has(s.id)) continue;
+    const was = prev.get(s.id);
+    const move = was && was.status !== s.status ? `${was.status} → ${s.status}` : s.status;
+    const deps = s.dependsOn.length ? `  依赖: ${s.dependsOn.join('、')}` : '';
+    const policy = s.onFailure !== 'stop' ? `  失败策略: ${s.onFailure}` : '';
+    const tries = s.attempts > 0 ? `  已试 ${s.attempts} 次` : '';
+    const note = s.note && s.note !== was?.note ? `  — ${shortNote(s.note)}` : '';
+    lines.push(`  ${STATUS_MARK[s.status]} ${s.id} ${s.title}（${move}）${deps}${policy}${tries}${note}`);
+  }
+  lines.push(planProgress(after));
+  lines.push(nextLine(after));
+  lines.push('（只列了这次变动的步骤；完整计划和全部备注用 plan_get 查看）');
   return lines.join('\n');
 }
 
@@ -731,7 +786,7 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
          * as a lost note. The notes really are still there — one sentence here is cheaper than
          * printing every one of them back on each of a dozen updates.
          */
-        + 'The reply repeats every step and its status, but prints the step note only for the steps this call moved; the other notes are still stored, and `plan_list` prints them all.',
+        + 'The reply is compact: only the step(s) this call moved (new status, plus a short note if one was set), overall progress and the next runnable step. It does NOT repeat the whole plan — call `plan_get` for every step with its full notes.',
       parameters: {
         type: 'object',
         properties: {
@@ -786,12 +841,12 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
         },
       );
       if (!result.ok) return `Error: ${result.reason}`;
-      const skipped = result.dropped.length
-        ? `\n被一起跳过的步骤: ${result.dropped.join('、')}（它们声明依赖这一步）`
-        : '';
-      return renderPlan(result.plan, {
-        notesOnly: notesToPrint(before, result.plan, [stepId, ...result.dropped]),
-      }) + skipped;
+      /*
+       * Compact reply: what moved, the progress, where to continue. The whole plan used to be
+       * re-sent on every update (a dozen times on a long task), which is pure repeat billing;
+       * `plan_get` prints it in full when that is actually needed.
+       */
+      return renderPlanUpdate(before, result.plan, [stepId, ...result.dropped]);
     },
   );
 
@@ -848,6 +903,29 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
       if (!all.length) return 'No plans yet.';
       // `plan_list` is the place the full notes are printed, so it takes no filter.
       return all.map((p) => renderPlan(p)).join('\n\n');
+    },
+  );
+
+  reg(
+    {
+      name: 'plan_get',
+      description:
+        'Print ONE plan in full: every step, its status, dependencies and full notes, plus the next step. '
+        + '`plan_update` only replies with what changed, so use this when you need the whole picture. '
+        + 'plan_id is optional and defaults to the active plan. Read-only.',
+      parameters: {
+        type: 'object',
+        properties: {
+          plan_id: { type: 'string', description: 'Plan id (optional; defaults to the active plan)' },
+        },
+      },
+    },
+    async (a) => {
+      const targetId = String(a.plan_id ?? '') || plans.active()?.id || '';
+      if (!targetId) return 'No plans yet.';
+      const plan = plans.get(targetId);
+      if (!plan) return `Error: plan not found (plan_id=${targetId})`;
+      return renderPlan(plan);
     },
   );
 

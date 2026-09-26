@@ -17,7 +17,9 @@ sends nothing anywhere else.
   stuck-loop guard and end a whole turn.
 - Go-to-definition and friends no longer land one column off on files that start with a UTF-8 BOM.
 - `reflection_check` stops flagging provenance notes ("来源：…", "see: …") as forbidden targets, and
-  its budget check now compares tool calls with tool calls (8 per active plan step).
+  its budget check now compares tool calls with tool calls (8 per active plan step). Drift detection
+  also counts an action as on track when it matches the current plan step, and bookkeeping calls
+  (plans, reflection, error book, memos) no longer count as drifting.
 - `grep` globs are real globs: `*`, `**`, `?`, `[abc]`, `{ts,tsx}`. `*.json*` used to match nothing, silently.
 
 **Automation**
@@ -43,6 +45,11 @@ sends nothing anywhere else.
 - Knowledge base entries can be edited and retired, and upserting an existing title no longer creates
   a silent duplicate, so an outdated conclusion stops showing up in search. For now this is available
   through the agent tools and the API only; the interface has no buttons for it yet.
+- Writing into an auto-split `part-N` group goes to its parent group instead, and a split group that
+  fills up again gets a sibling `part` rather than another nested level. Group paths no longer repeat.
+- Shorter tool results for new calls: `plan_update` returns only the changed step, progress and the
+  next step (`plan_get` shows the whole plan), and `kb_query` lists the top 5 with short summaries
+  (`kb_get` fetches the full text by id). History is never rewritten, so the prompt cache keeps hitting.
 
 **Housekeeping**
 - Default skills now live in a version-controlled `skills/` folder. `.she/` is gitignored, so a fresh
@@ -206,7 +213,7 @@ before a change is considered done. It is green locally and on Linux CI. See
 | **Accessibility is only statically checked** | Focusability, keyboard dismissal and button names are verified; contrast, screen readers and tab order are not |
 | **UI localization is incomplete** | 631 user-facing strings are still hardcoded Chinese; the infrastructure and a no-regression ratchet are in place |
 | **Long-horizon evals are still small** | Long tasks and run-to-run variance are now measured, but on few cases and one model |
-| **Token cost is still high on long turns** | History is sent whole and append-only so the prompt cache keeps hitting (~90% on DeepSeek); the volume itself is not reduced yet |
+| **Token cost is still high on long turns** | History is sent whole and append-only so the prompt cache keeps hitting (~90% on DeepSeek). New `plan_update` and `kb_query` results are shorter, but past context is never trimmed |
 
 Deliberately **not** planned: embeddings/vector search (a design choice, not a backlog item), and
 being a general-purpose IDE.
