@@ -1,5 +1,6 @@
-import type { ToolDefinition, EdgeKind, KBQueryResult } from '@she/shared';
-import type { GroupKBEngine } from '@she/kb';
+import type { ToolDefinition, EdgeKind, KBQueryResult, MemoryNode } from '@she/shared';
+import type { GroupKBEngine, KBMemoryPatch, KBReviseResult, KBRetirement } from '@she/kb';
+import { KB_RETIRED_KEY, KB_VERSION_KEY } from '@she/kb';
 
 export interface KBToolSet {
   definitions: ToolDefinition[];
@@ -16,6 +17,34 @@ export interface KBToolSet {
  * was ten documents re-sent on every lookup, which is the cost the summary is here to stop.
  */
 const KB_PREVIEW_CHARS = 200;
+
+const VALID_KINDS = ['text', 'code', 'fact', 'tool_outcome', 'preference'] as const;
+type ValidKind = (typeof VALID_KINDS)[number];
+
+/** Read straight from metadata so a node from any engine (or a test double) can be described. */
+function retirementOf(node: MemoryNode): KBRetirement | undefined {
+  const r = node.metadata?.[KB_RETIRED_KEY];
+  return r && typeof r === 'object' ? r as KBRetirement : undefined;
+}
+
+function versionOf(node: MemoryNode): number {
+  const v = node.metadata?.[KB_VERSION_KEY];
+  return typeof v === 'number' && v >= 1 ? v : 1;
+}
+
+function preview(text: string): string {
+  const one = text.replace(/\s+/g, ' ').trim();
+  return one.length > KB_PREVIEW_CHARS ? `${one.slice(0, KB_PREVIEW_CHARS)}…` : one;
+}
+
+/** "What changed" in one line, so an update is never reported as a bare "ok". */
+function describeChange(r: KBReviseResult): string {
+  const parts: string[] = [];
+  if (r.changed.includes('title')) parts.push(`标题「${r.before.title}」→「${r.after.title}」`);
+  if (r.changed.includes('content')) parts.push(`正文 ${r.before.content.length} → ${r.after.content.length} 字`);
+  if (r.changed.includes('kind')) parts.push(`类型 ${r.before.kind} → ${r.after.kind}`);
+  return `改动：${parts.join('，')}；旧版本（第 ${r.version - 1} 版）已保留在节点历史里，现为第 ${r.version} 版`;
+}
 
 export interface KBToolOptions {
   /**
@@ -84,6 +113,11 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
             description:
               'Return each node\'s complete text instead of a summary. Costs several times more, so use it when you need the exact wording rather than the gist.',
           },
+          includeRetired: {
+            type: 'boolean',
+            description:
+              'Also return retired memories (retired with kb_retire as wrong or obsolete), marked [已退役] with the reason and replacement. Off by default.',
+          },
         },
         required: ['query'],
       },
@@ -92,7 +126,8 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
       const query = args.query as string;
       const budget = args.budget as number | undefined;
       const full = args.full === true;
-      const result = engine.query(query, { budget });
+      const includeRetired = args.includeRetired === true;
+      const result = engine.query(query, includeRetired ? { budget, includeRetired } : { budget });
 
       // Surface the structured result so the UI trace panel can render it.
       opts?.onQueryResult?.(result);
@@ -112,7 +147,9 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
         const score = trace?.finalScore !== undefined
           ? trace.finalScore.toFixed(3)
           : trace?.activationLevel.toFixed(3);
-        lines.push(`[${i + 1}] ${node.title} (${node.kind}) score=${score}`);
+        const retired = retirementOf(node);
+        const version = versionOf(node);
+        lines.push(`[${i + 1}] ${node.title} (${node.kind}) score=${score}${version > 1 ? ` v${version}` : ''}${retired ? ' [已退役]' : ''}`);
         if (trace?.groupPath.length) {
           lines.push(`    group: ${trace.groupPath.join(' | ')}`);
         }
@@ -121,6 +158,9 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
         } else {
           lines.push(`    ${node.content.slice(0, KB_PREVIEW_CHARS)}…`);
           clipped++;
+        }
+        if (retired) {
+          lines.push(`    退役原因：${retired.reason}${retired.replacedBy ? `；替代节点：${retired.replacedBy}` : ''}`);
         }
         lines.push(`    [Node: ${node.id}]`);
       }
@@ -145,7 +185,12 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
   reg(
     {
       name: 'kb_upsert',
-      description: 'Add a memory node to the Group KB. Creates the target group if it does not exist.',
+      description: 'Add a memory node to the Group KB. Creates the target group if it does not exist. '
+        + 'Never overwrites silently: if an active node with the same title already exists in that group (or its subgroups), '
+        + 'identical content writes nothing, and different content is NOT written unless you choose: '
+        + 'onExisting="update" edits that node in place (the previous version is kept in its history), '
+        + 'onExisting="add" keeps both as separate nodes. The result always says which happened (added / updated / unchanged / not written). '
+        + 'To correct a node by id use kb_edit; to take a wrong or obsolete one out of retrieval use kb_retire.',
       parameters: {
         type: 'object',
         properties: {
@@ -153,6 +198,13 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
           title: { type: 'string', description: 'Title of the memory' },
           content: { type: 'string', description: 'Content of the memory' },
           kind: { type: 'string', enum: ['text', 'code', 'fact', 'tool_outcome', 'preference'], description: 'Kind of memory (default: fact)' },
+          onExisting: {
+            type: 'string',
+            enum: ['refuse', 'update', 'add'],
+            description: 'What to do when an active node with the same title already has DIFFERENT content: '
+              + '"refuse" (default) writes nothing and shows the existing node; "update" edits it in place, keeping the old version in history; '
+              + '"add" stores a second node alongside it.',
+          },
         },
         required: ['groupName', 'title', 'content'],
       },
@@ -163,20 +215,55 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
       const title = args.title as string;
       const content = args.content as string;
       const kind = (args.kind as string) ?? 'fact';
+      const onExisting = args.onExisting === 'update' || args.onExisting === 'add' ? args.onExisting : 'refuse';
+
+      const nodeKind: ValidKind = VALID_KINDS.includes(kind as ValidKind) ? kind as ValidKind : 'fact';
 
       let group = engine['store'].getAllGroups().find((g: { name: string }) => g.name === groupName);
-      if (!group) {
+
+      /*
+       * Same title, same group: decide explicitly instead of piling up.
+       *
+       * The live audit (#7) wrote a correction under the same title and got a second node next to
+       * the wrong one — both kept matching queries, and nothing told the agent a node was already
+       * there. Now the call reports what exists and the caller picks: update it in place (the old
+       * version is kept), add a second node on purpose, or retire the old one.
+       */
+      let sameTitle: MemoryNode[] = [];
+      if (group) {
+        sameTitle = engine.findByTitle(group.id, title);
+        const target = sameTitle[sameTitle.length - 1];
+        const kindDiffers = args.kind !== undefined && target !== undefined && target.kind !== nodeKind;
+        if (target && onExisting !== 'add') {
+          if (target.content === content && !kindDiffers) {
+            return `未写入（内容相同）：组 "${groupName}" 里已有同题节点「${target.title}」，内容一致 [Node: ${target.id}, Group: ${group.id}]`;
+          }
+          if (onExisting === 'update') {
+            const patch: KBMemoryPatch = { content };
+            if (args.kind !== undefined) patch.kind = nodeKind;
+            const r = engine.reviseMemory(target.id, patch, 'kb_upsert onExisting=update');
+            return `Updated memory "${r.after.title}" in group "${groupName}" [Node: ${target.id}, Group: ${group.id}] —— ${describeChange(r)}`;
+          }
+          return [
+            `未写入（已有同题节点）：组 "${groupName}" 里已有「${target.title}」[Node: ${target.id}]，内容与这次不同`
+              + (sameTitle.length > 1 ? `（同题有效节点共 ${sameTitle.length} 条）` : '') + '。',
+            `现有内容：${preview(target.content)}`,
+            '请明确选一种处理：',
+            '- 旧内容需要更正 / 补充 → 重新调用并带 onExisting="update"（原地更新，旧版本保留在历史里），或用 kb_edit 改这个节点；',
+            '- 两条确实是不同的记忆 → 换一个更具体的 title，或带 onExisting="add" 让两条并存；',
+            '- 旧结论是错的、不该再被检索到 → kb_retire 退役它（可带 replacedBy 指向新节点）。',
+          ].join('\n');
+        }
+      } else {
         group = engine.createGroup(groupName);
       }
 
-      const validKinds = ['text', 'code', 'fact', 'tool_outcome', 'preference'] as const;
-      const nodeKind = validKinds.includes(kind as (typeof validKinds)[number])
-        ? kind as (typeof validKinds)[number]
-        : 'fact' as const;
-
       // Maintained write: keeps the target group from growing unbounded.
       const mem = engine.addMemoryMaintained(group.id, nodeKind, title, content);
-      return `Added memory "${title}" to group "${groupName}" [Node: ${mem.id}, Group: ${group.id}]`;
+      const alongside = sameTitle.length > 0
+        ? `（同组已有同题有效节点 ${sameTitle.map((m) => m.id).join(', ')}，按 onExisting="add" 并存）`
+        : '';
+      return `Added memory "${title}" to group "${groupName}" [Node: ${mem.id}, Group: ${group.id}]${alongside}`;
     },
   );
 
@@ -206,6 +293,103 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
 
       const edge = engine.addTypedEdge(sourceId, targetId, kind, { evidence, falsifiers });
       return `Created ${kind} edge [${edge.id}]: ${sourceId} → ${targetId}`;
+    },
+  );
+
+  reg(
+    {
+      name: 'kb_edit',
+      description: 'Edit an existing memory node in place, by id (the [Node: …] from kb_query). '
+        + 'Keeps the id, groups and edges, and keeps the replaced version in the node\'s history, so nothing is lost. '
+        + 'Use it to correct or extend a memory instead of adding a second node that contradicts the first.',
+      parameters: {
+        type: 'object',
+        properties: {
+          nodeId: { type: 'string', description: 'Id of the node to edit' },
+          title: { type: 'string', description: 'New title (omit to keep)' },
+          content: { type: 'string', description: 'New full content (omit to keep). Replaces the text; include what should stay.' },
+          kind: { type: 'string', enum: ['text', 'code', 'fact', 'tool_outcome', 'preference'], description: 'New kind (omit to keep)' },
+          reason: { type: 'string', description: 'Why it changed — stored with the previous version' },
+        },
+        required: ['nodeId'],
+      },
+    },
+    async (args) => {
+      if (opts?.readOnly) return READ_ONLY_REFUSAL;
+      const nodeId = String(args.nodeId ?? '').trim();
+      if (!nodeId) return 'Error: 必须给 nodeId（kb_query 结果里的 [Node: …]）';
+      const patch: KBMemoryPatch = {};
+      if (args.title !== undefined) {
+        if (typeof args.title !== 'string' || !args.title.trim()) return 'Error: title 不能为空';
+        patch.title = args.title;
+      }
+      if (args.content !== undefined) {
+        if (typeof args.content !== 'string' || !args.content.trim()) {
+          return 'Error: content 不能为空 —— 要让这条记忆不再生效，用 kb_retire';
+        }
+        patch.content = args.content;
+      }
+      if (args.kind !== undefined) {
+        if (!VALID_KINDS.includes(args.kind as ValidKind)) return `Error: kind 只能是 ${VALID_KINDS.join(' / ')}`;
+        patch.kind = args.kind as ValidKind;
+      }
+      if (Object.keys(patch).length === 0) return 'Error: 至少给 title / content / kind 之一';
+      const reason = typeof args.reason === 'string' && args.reason.trim() ? args.reason.trim() : undefined;
+
+      const r = engine.reviseMemory(nodeId, patch, reason);
+      if (r.changed.length === 0) {
+        return `没有变化：节点「${r.before.title}」[Node: ${nodeId}] 已经是这个内容，未写入。`;
+      }
+      const stillRetired = engine.isRetired(r.after)
+        ? '\n注意：该节点仍处于退役状态，默认检索看不到它；要恢复用 kb_retire restore=true。'
+        : '';
+      return `Updated memory "${r.after.title}" [Node: ${nodeId}] —— ${describeChange(r)}${stillRetired}`;
+    },
+  );
+
+  reg(
+    {
+      name: 'kb_retire',
+      description: 'Retire a memory node that is wrong or obsolete. It stops appearing in kb_query (unless includeRetired=true) '
+        + 'but is not deleted: text, history and edges are kept. Requires a reason; pass replacedBy with the id of the node that '
+        + 'supersedes it, if any. restore=true brings a retired node back.',
+      parameters: {
+        type: 'object',
+        properties: {
+          nodeId: { type: 'string', description: 'Id of the node to retire (or restore)' },
+          reason: { type: 'string', description: 'Why it no longer holds. Required when retiring.' },
+          replacedBy: { type: 'string', description: 'Optional: id of the node that supersedes this one' },
+          restore: { type: 'boolean', description: 'Undo a retirement instead' },
+        },
+        required: ['nodeId'],
+      },
+    },
+    async (args) => {
+      if (opts?.readOnly) return READ_ONLY_REFUSAL;
+      const nodeId = String(args.nodeId ?? '').trim();
+      if (!nodeId) return 'Error: 必须给 nodeId（kb_query 结果里的 [Node: …]）';
+      const mem: MemoryNode | undefined = engine['store'].getMemory(nodeId);
+      if (!mem) return `Error: Memory not found: ${nodeId}`;
+      const current = engine.getRetirement(mem);
+
+      if (args.restore === true) {
+        if (!current) return `没有变化：节点「${mem.title}」[Node: ${nodeId}] 本来就是有效状态。`;
+        engine.restoreMemory(nodeId);
+        return `已恢复节点「${mem.title}」[Node: ${nodeId}]：重新参与检索（此前退役原因：${current.reason}）。`;
+      }
+
+      if (current) {
+        return `没有变化：节点「${mem.title}」[Node: ${nodeId}] 已经是退役状态（原因：${current.reason}`
+          + `${current.replacedBy ? `；替代节点：${current.replacedBy}` : ''}）。要改原因，先 restore=true 再重新退役。`;
+      }
+      const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
+      if (!reason) return 'Error: 退役必须写 reason（它为什么不再成立）';
+      const replacedBy = typeof args.replacedBy === 'string' && args.replacedBy.trim() ? args.replacedBy.trim() : undefined;
+
+      engine.retireMemory(nodeId, { reason, replacedBy });
+      return `已退役节点「${mem.title}」[Node: ${nodeId}]（原因：${reason}${replacedBy ? `；替代节点：${replacedBy}` : ''}）。`
+        + '默认检索不再返回它；原文、历史和边都保留，kb_query 带 includeRetired=true 仍可见；'
+        + `恢复：kb_retire nodeId=${nodeId} restore=true。`;
     },
   );
 

@@ -136,7 +136,8 @@ function listMdFiles(dir: string): string[] {
  * Skills bundled with the app, as opposed to the user's own.
  *
  * Resolved from this module's location: `packages/agent-runtime/dist/` → the
- * repo root's `.she/skills`. Set `SHE_BUNDLED_SKILLS` to override (useful for a
+ * repo root's `skills/` (version-controlled). `.she/` is gitignored, so a fresh clone
+ * used to ship with no skills at all; the old `.she/skills` is still read as a fallback. Set `SHE_BUNDLED_SKILLS` to override (useful for a
  * packaged build where the layout differs).
  */
 function bundledSkillsRoot(): string {
@@ -146,7 +147,8 @@ function bundledSkillsRoot(): string {
     // dist/system-prompt.js -> dist -> agent-runtime -> packages -> repo root
     const here = fileURLToPath(import.meta.url);
     const repoRoot = join(dirname(here), '..', '..', '..');
-    return join(repoRoot, '.she', 'skills');
+    const tracked = join(repoRoot, 'skills');
+    return existsSync(tracked) ? tracked : join(repoRoot, '.she', 'skills');
   } catch {
     return '';
   }
@@ -331,6 +333,7 @@ export function getSystemPrompt(
       '  2. 操作**不可逆且会丢数据**（删库、强推、覆盖未提交改动），且沙箱没有直接放行。',
       ...(subagent ? [] : [
         '- 计划（plan）是给**你自己**用的进度追踪，不是拿给用户审批的申请单。立完计划直接开始做。',
+        '- 计划没做完时**不要用纯文字回复来汇报进度**：一步做完就 `plan_update`，接着调工具做下一步，全部完成再汇总。中途停下来的回复会被系统自动续跑。',
         '- **但「不要停下来问」不等于「看见旧计划就开工」**：早先留下的 open 计划不是你现在的任务。',
         '  只有当用户这条消息确实在继续那件事（或明确说「继续」）时才接着做；否则当普通对话处理。',
       ]),
@@ -356,12 +359,13 @@ export function getSystemPrompt(
   // that cannot work, and it makes the refusal look like the child's own mistake.
   const kbReadOnly = opts?.kbReadOnly === true;
   const kbWriteRules = kbReadOnly
-    ? `**这个子任务的知识库是只读的** —— 它能查，但不能写：\`kb_upsert\` / \`kb_link\` 已停用，调用会被拒绝。
+    ? `**这个子任务的知识库是只读的** —— 它能查，但不能写：\`kb_upsert\` / \`kb_edit\` / \`kb_retire\` / \`kb_link\` 已停用，调用会被拒绝。
 - 你查到的结论由**父级**决定是否入库：把它写进你的交付物（报告 / 清单 / 摘要）带回父级。
   子任务自己写进去的节点没有来源标记，父级无法复核，也无法和它自己写的记忆区分。
 `
     : `- 发现决定、事实、接口约定、踩坑、环境信息时，主动 \`kb_upsert\` 写回（不要等用户说「入库」）。
 - 相关节点之间用 \`kb_link\` 建边；弱共现/时序**永不**升为因果。
+- 已有结论错了或过时：用 \`kb_edit\` 原地更正（旧版本自动保留），或 \`kb_retire\` 退役（写 reason，可带 replacedBy 指向新节点）；不要只追加一条「更正」节点而让旧结论继续被检索到。\`kb_upsert\` 遇到同题不同内容会拒写并给出现有节点，按提示选 onExisting。
 `;
   const kbBlock = `## 组结构知识库（始终自动，无需用户引导）
 组结构知识库是默认记忆，**与自动化开关无关，永远自动${kbReadOnly ? '读取' : '读写'}**：
@@ -395,9 +399,12 @@ ${
   // The tool list has to agree with what the child actually has, for the same reason as above.
   const kbToolLines = kbReadOnly
     ? `- \`kb_query\`: Search the Group Memory KB via PulseSeed resonance. This is the only way in — never poke the sqlite file with \`shell\`.
-- \`kb_upsert\` / \`kb_link\`: **disabled for this subtask** — your memory is read-only. Report durable findings in your deliverable instead.`
+- \`kb_upsert\` / \`kb_link\`: **disabled for this subtask** — your memory is read-only. Report durable findings in your deliverable instead.
+- \`kb_edit\` / \`kb_retire\`: disabled too.`
     : `- \`kb_query\`: Search the Group Memory KB via PulseSeed resonance. This (and the other \`kb_*\` tools) is the only way in — never poke the sqlite file with \`shell\`.
-- \`kb_upsert\`: Store a new memory node in a named group.
+- \`kb_upsert\`: Store a new memory node in a named group. Same title + different content is refused unless you pass onExisting="update" (in place, old version kept) or "add".
+- \`kb_edit\`: Correct or extend an existing node in place by id; the previous version is kept in its history.
+- \`kb_retire\`: Retire a wrong or obsolete node (reason required, optional replacedBy). It leaves kb_query results unless includeRetired=true; restore=true undoes it.
 - \`kb_link\`: Create a typed edge between two nodes.`;
 
   /*

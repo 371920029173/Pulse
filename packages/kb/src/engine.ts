@@ -14,6 +14,58 @@ import type {
 import { KBStore } from './store.js';
 import type { CreateEdgeInput } from './store.js';
 
+/**
+ * Metadata key marking a memory as retired (see `retireMemory`).
+ *
+ * A flag in `metadata` rather than a delete or a new column, the same shape the error book uses for
+ * a forgotten entry: a retired conclusion is still evidence of what was once believed, and an
+ * existing kb.sqlite needs no migration — a node without the key is simply active.
+ */
+export const KB_RETIRED_KEY = 'kbRetired';
+/** Metadata key holding earlier versions of an edited memory (see `reviseMemory`). */
+export const KB_HISTORY_KEY = 'kbHistory';
+/** Metadata key holding the version number of an edited memory. Absent means version 1. */
+export const KB_VERSION_KEY = 'kbVersion';
+/** How many earlier versions an edited memory keeps. The newest are kept. */
+export const KB_HISTORY_MAX = 10;
+
+export interface KBRetirement {
+  /** Epoch ms. */
+  at: number;
+  reason: string;
+  /** The node that supersedes this one, when there is one. */
+  replacedBy?: string;
+}
+
+export interface KBRevision {
+  /** Epoch ms the version was REPLACED (not created). */
+  at: number;
+  version: number;
+  kind: MemoryNode['kind'];
+  title: string;
+  content: string;
+  reason?: string;
+}
+
+export interface KBMemoryPatch {
+  title?: string;
+  content?: string;
+  kind?: MemoryNode['kind'];
+}
+
+export interface KBReviseResult {
+  before: MemoryNode;
+  after: MemoryNode;
+  /** Which fields actually changed; empty means nothing was written. */
+  changed: Array<'title' | 'content' | 'kind'>;
+  /** Version number of `after`. */
+  version: number;
+}
+
+function normalizeTitle(title: string): string {
+  return title.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 const CODE_EXTENSIONS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
   '.py', '.rb', '.rs', '.go', '.java', '.c', '.cpp', '.h', '.hpp',
@@ -377,6 +429,138 @@ export class GroupKBEngine {
       const newGroupIds = memory.groupIds.filter(g => g !== fromGroupId);
       if (!newGroupIds.includes(toGroupId)) newGroupIds.push(toGroupId);
       this.store.updateMemory(memoryId, { groupIds: newGroupIds });
+    });
+  }
+
+  // ─── Governance: edit / retire ───
+
+  /** True when the memory carries a retirement marker. */
+  isRetired(mem: MemoryNode): boolean {
+    return this.getRetirement(mem) !== undefined;
+  }
+
+  getRetirement(mem: MemoryNode): KBRetirement | undefined {
+    const r = mem.metadata?.[KB_RETIRED_KEY];
+    return r && typeof r === 'object' ? r as KBRetirement : undefined;
+  }
+
+  /** Earlier versions, oldest first. Empty for a memory that was never edited. */
+  getHistory(mem: MemoryNode): KBRevision[] {
+    const h = mem.metadata?.[KB_HISTORY_KEY];
+    return Array.isArray(h) ? h as KBRevision[] : [];
+  }
+
+  getVersion(mem: MemoryNode): number {
+    const v = mem.metadata?.[KB_VERSION_KEY];
+    return typeof v === 'number' && v >= 1 ? v : 1;
+  }
+
+  /**
+   * Memories with this title in a group or any of its descendants.
+   *
+   * Descendants too: `addMemoryMaintained` splits a full group into structural subgroups, so a node
+   * written into `project/x` last week may now live one level down. Looking only at the direct
+   * members would miss it and a "same title" check would quietly create a duplicate.
+   * Titles compare case-insensitively with whitespace collapsed. Retired nodes are skipped unless
+   * asked for.
+   */
+  findByTitle(groupId: string, title: string, opts?: { includeRetired?: boolean }): MemoryNode[] {
+    const want = normalizeTitle(title);
+    const out: MemoryNode[] = [];
+    const seenGroups = new Set<string>();
+    const seenMems = new Set<string>();
+    const stack = [groupId];
+    while (stack.length) {
+      const gid = stack.pop()!;
+      if (seenGroups.has(gid)) continue;
+      seenGroups.add(gid);
+      const group = this.store.getGroup(gid);
+      if (!group) continue;
+      for (const mem of this.store.getMemoriesByGroup(gid)) {
+        if (seenMems.has(mem.id)) continue;
+        seenMems.add(mem.id);
+        if (normalizeTitle(mem.title) !== want) continue;
+        if (!opts?.includeRetired && this.isRetired(mem)) continue;
+        out.push(mem);
+      }
+      stack.push(...group.childGroupIds);
+    }
+    return out.sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /**
+   * Edit a memory in place, keeping the version it replaces.
+   *
+   * The node keeps its id, groups and edges — links that point at it stay valid, which is the
+   * point of editing rather than adding a correction node next to a wrong one. The replaced
+   * version goes into `metadata.kbHistory` (newest `KB_HISTORY_MAX` kept), so an edit is never
+   * a silent overwrite. A patch that changes nothing writes nothing.
+   */
+  reviseMemory(id: string, patch: KBMemoryPatch, reason?: string): KBReviseResult {
+    return this.store.transaction(() => {
+      const before = this.store.getMemory(id);
+      if (!before) throw new Error(`Memory not found: ${id}`);
+
+      const changed: KBReviseResult['changed'] = [];
+      if (patch.title !== undefined && patch.title !== before.title) changed.push('title');
+      if (patch.content !== undefined && patch.content !== before.content) changed.push('content');
+      if (patch.kind !== undefined && patch.kind !== before.kind) changed.push('kind');
+      const version = this.getVersion(before);
+      if (changed.length === 0) return { before, after: before, changed, version };
+
+      const revision: KBRevision = {
+        at: Date.now(),
+        version,
+        kind: before.kind,
+        title: before.title,
+        content: before.content,
+        ...(reason ? { reason } : {}),
+      };
+      const history = [...this.getHistory(before), revision].slice(-KB_HISTORY_MAX);
+      const after = this.store.updateMemory(id, {
+        title: patch.title ?? before.title,
+        content: patch.content ?? before.content,
+        kind: patch.kind ?? before.kind,
+        metadata: { ...before.metadata, [KB_HISTORY_KEY]: history, [KB_VERSION_KEY]: version + 1 },
+      });
+      return { before, after, changed, version: version + 1 };
+    });
+  }
+
+  /**
+   * Take a memory out of retrieval without deleting it.
+   *
+   * A retired node is skipped by `query` unless `includeRetired` is passed, keeps its text,
+   * history and edges, and comes back with `restoreMemory`. `replacedBy` names the node that
+   * supersedes it, so whoever finds the retired one later is pointed at the current answer.
+   */
+  retireMemory(id: string, opts: { reason: string; replacedBy?: string }): MemoryNode {
+    return this.store.transaction(() => {
+      const mem = this.store.getMemory(id);
+      if (!mem) throw new Error(`Memory not found: ${id}`);
+      const reason = (opts.reason ?? '').trim();
+      if (!reason) throw new Error('A reason is required to retire a memory');
+      if (opts.replacedBy !== undefined) {
+        if (opts.replacedBy === id) throw new Error('A memory cannot replace itself');
+        if (!this.store.getMemory(opts.replacedBy)) throw new Error(`Replacement memory not found: ${opts.replacedBy}`);
+      }
+      const retirement: KBRetirement = {
+        at: Date.now(),
+        reason,
+        ...(opts.replacedBy ? { replacedBy: opts.replacedBy } : {}),
+      };
+      return this.store.updateMemory(id, { metadata: { ...mem.metadata, [KB_RETIRED_KEY]: retirement } });
+    });
+  }
+
+  /** Undo `retireMemory`. A memory that is not retired is returned unchanged. */
+  restoreMemory(id: string): MemoryNode {
+    return this.store.transaction(() => {
+      const mem = this.store.getMemory(id);
+      if (!mem) throw new Error(`Memory not found: ${id}`);
+      if (!this.isRetired(mem)) return mem;
+      const { [KB_RETIRED_KEY]: _retired, ...rest } = mem.metadata ?? {};
+      return this.store.updateMemory(id, { metadata: rest });
     });
   }
 
@@ -768,14 +952,19 @@ export class GroupKBEngine {
    */
   query(
     queryText: string,
-    options?: { budget?: number },
+    options?: { budget?: number; includeRetired?: boolean },
   ): KBQueryResult {
     const startTime = performance.now();
+    // Retired memories are out of retrieval unless asked for (see `retireMemory`). They are
+    // dropped as entry points and as results; nothing else about the scoring changes.
+    const includeRetired = options?.includeRetired === true;
+    const hidden = (mem: MemoryNode): boolean => !includeRetired && this.isRetired(mem);
     const budget = options?.budget ?? this.config.activationBudget;
     const psConfig = this.config.pulseSeed;
 
     // ── Channel A: traditional lexical ranking ──
-    const lexicalHits = this.store.bm25Search(queryText, { limit: Math.max(3, Math.min(80, budget)) });
+    const lexicalHits = this.store.bm25Search(queryText, { limit: Math.max(3, Math.min(80, budget)) })
+      .filter((h) => !hidden(h.mem));
     const lexicalById = new Map<string, number>(lexicalHits.map((h) => [h.mem.id, h.score]));
 
     // ── Channel B: structural resonance ──
@@ -841,7 +1030,7 @@ export class GroupKBEngine {
     const seeds: MemoryNode[] = [];
     const seenSeed = new Set<string>();
     for (const node of [...anchorNodes, ...groupAnchors, ...lexicalHits.map((h) => h.mem)]) {
-      if (seenSeed.has(node.id)) continue;
+      if (seenSeed.has(node.id) || hidden(node)) continue;
       seenSeed.add(node.id);
       seeds.push(node);
     }
@@ -922,7 +1111,7 @@ export class GroupKBEngine {
 
     for (const nodeId of candidateIds) {
       const mem = this.store.getMemory(nodeId);
-      if (!mem) continue;
+      if (!mem || hidden(mem)) continue;
 
       const activation = activationMap.get(nodeId) ?? 0;
       const lexical = lexicalById.get(nodeId) ?? 0;

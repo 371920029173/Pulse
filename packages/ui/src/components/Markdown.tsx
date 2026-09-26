@@ -83,6 +83,49 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
   );
 }
 
+/*
+ * Block-level syntax the renderer understands. Each is also a paragraph terminator: before tables,
+ * ordered lists, quotes and rules were recognised, a GFM table was joined into one paragraph and
+ * shown as a single line of pipes, and "1. ... 2. ..." ran together the same way.
+ */
+const RE_FENCE = /^\s*```/;
+const RE_HEADING = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
+const RE_BULLET = /^\s*[-*+]\s+/;
+const RE_ORDERED = /^\s*(\d{1,9})[.)]\s+/;
+const RE_QUOTE = /^\s*>\s?/;
+const RE_RULE = /^\s*([-*_])(\s*\1){2,}\s*$/;
+const RE_TABLE_SEP = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+
+function splitRow(line: string): string[] {
+  let t = line.trim();
+  if (t.startsWith('|')) t = t.slice(1);
+  if (t.endsWith('|') && !t.endsWith('\\|')) t = t.slice(0, -1);
+  const cells: string[] = [];
+  let cur = '';
+  let inCode = false;
+  for (let j = 0; j < t.length; j++) {
+    const c = t[j];
+    if (c === '\\' && t[j + 1] === '|') { cur += '|'; j++; continue; }
+    if (c === '`') inCode = !inCode;
+    if (c === '|' && !inCode) { cells.push(cur.trim()); cur = ''; continue; }
+    cur += c;
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+function isTableStart(lines: string[], i: number): boolean {
+  return i + 1 < lines.length && lines[i].includes('|') && RE_TABLE_SEP.test(lines[i + 1]) && lines[i + 1].includes('-');
+}
+
+function startsBlock(lines: string[], i: number): boolean {
+  const l = lines[i];
+  return RE_FENCE.test(l) || RE_HEADING.test(l) || RE_RULE.test(l) || RE_BULLET.test(l)
+    || RE_ORDERED.test(l) || RE_QUOTE.test(l) || isTableStart(lines, i);
+}
+
+type Align = 'left' | 'center' | 'right' | undefined;
+
 export function Markdown({ text }: { text: string }) {
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const blocks: React.ReactNode[] = [];
@@ -92,11 +135,11 @@ export function Markdown({ text }: { text: string }) {
   while (i < lines.length) {
     const line = lines[i];
 
-    if (line.startsWith('```')) {
-      const lang = line.slice(3).trim();
+    if (RE_FENCE.test(line)) {
+      const lang = line.trim().slice(3).trim();
       const buf: string[] = [];
       i++;
-      while (i < lines.length && !lines[i].startsWith('```')) {
+      while (i < lines.length && !RE_FENCE.test(lines[i])) {
         buf.push(lines[i]);
         i++;
       }
@@ -105,28 +148,86 @@ export function Markdown({ text }: { text: string }) {
       continue;
     }
 
-    const hm = /^(#{1,3})\s+(.+)$/.exec(line);
+    const hm = RE_HEADING.exec(line);
     if (hm) {
       const level = hm[1].length;
-      const Tag = (level === 1 ? 'h1' : level === 2 ? 'h2' : 'h3') as 'h1' | 'h2' | 'h3';
-      blocks.push(React.createElement(Tag, { key: k++, className: styles['h' + level] }, inlineParse(hm[2])));
+      const Tag = `h${level}` as 'h1';
+      blocks.push(React.createElement(Tag, { key: k++, className: styles['h' + Math.min(level, 3)] }, inlineParse(hm[2])));
       i++;
       continue;
     }
 
-    if (/^[-*]\s+/.test(line)) {
-      const items: string[] = [];
-      while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^[-*]\s+/, ''));
+    if (RE_RULE.test(line)) {
+      blocks.push(<hr key={k++} className={styles.hr} />);
+      i++;
+      continue;
+    }
+
+    if (isTableStart(lines, i)) {
+      const head = splitRow(line);
+      const aligns: Align[] = splitRow(lines[i + 1]).map((c) => {
+        const l = c.startsWith(':');
+        const r = c.endsWith(':');
+        return l && r ? 'center' : r ? 'right' : l ? 'left' : undefined;
+      });
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i].trim() && lines[i].includes('|')) {
+        rows.push(splitRow(lines[i]));
         i++;
       }
       blocks.push(
-        <ul key={k++} className={styles.ul}>
-          {items.map((it, idx) => (
-            <li key={idx}>{inlineParse(it)}</li>
-          ))}
-        </ul>,
+        <div key={k++} className={styles.tableWrap}>
+          <table className={styles.table}>
+            <thead>
+              <tr>{head.map((c, j) => <th key={j} style={{ textAlign: aligns[j] }}>{inlineParse(c)}</th>)}</tr>
+            </thead>
+            <tbody>
+              {rows.map((r, ri) => (
+                <tr key={ri}>
+                  {head.map((_, j) => <td key={j} style={{ textAlign: aligns[j] }}>{inlineParse(r[j] ?? '')}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
       );
+      continue;
+    }
+
+    if (RE_QUOTE.test(line)) {
+      const buf: string[] = [];
+      while (i < lines.length && RE_QUOTE.test(lines[i])) {
+        buf.push(lines[i].replace(RE_QUOTE, ''));
+        i++;
+      }
+      blocks.push(
+        <blockquote key={k++} className={styles.quote}>
+          <Markdown text={buf.join('\n')} />
+        </blockquote>,
+      );
+      continue;
+    }
+
+    if (RE_BULLET.test(line) || RE_ORDERED.test(line)) {
+      const ordered = !RE_BULLET.test(line);
+      const re = ordered ? RE_ORDERED : RE_BULLET;
+      const first = ordered ? Number(RE_ORDERED.exec(line)![1]) : 1;
+      const items: string[] = [];
+      while (i < lines.length && lines[i].trim()) {
+        if (re.test(lines[i])) {
+          items.push(lines[i].replace(re, ''));
+        } else if (/^\s{2,}\S/.test(lines[i]) && items.length && !startsBlock(lines, i)) {
+          items[items.length - 1] += ' ' + lines[i].trim();
+        } else {
+          break;
+        }
+        i++;
+      }
+      const lis = items.map((it, idx) => <li key={idx}>{inlineParse(it)}</li>);
+      blocks.push(ordered
+        ? <ol key={k++} className={styles.ol} start={first === 1 ? undefined : first}>{lis}</ol>
+        : <ul key={k++} className={styles.ul}>{lis}</ul>);
       continue;
     }
 
@@ -137,13 +238,7 @@ export function Markdown({ text }: { text: string }) {
 
     const para: string[] = [line];
     i++;
-    while (
-      i < lines.length &&
-      lines[i].trim() &&
-      !lines[i].startsWith('```') &&
-      !/^#{1,3}\s+/.test(lines[i]) &&
-      !/^[-*]\s+/.test(lines[i])
-    ) {
+    while (i < lines.length && lines[i].trim() && !startsBlock(lines, i)) {
       para.push(lines[i]);
       i++;
     }

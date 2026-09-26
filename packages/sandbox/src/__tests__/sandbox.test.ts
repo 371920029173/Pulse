@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { SandboxShell, DESTRUCTIVE_PATTERNS, decodeConsoleOutput, workspaceEscapeReason } from '../shell.js';
-import { createTools } from '../tools.js';
+import { createTools, globToRegExp } from '../tools.js';
 
 let tempDir: string;
 let shell: SandboxShell;
@@ -421,6 +421,19 @@ describe('知识库文件禁止直连', () => {
     const plain = createTools(shell, tempDir);
     const result = await plain.execute('fs_read', { path: 'hello.txt' });
     assert.ok(result.includes('hello world'));
+  });
+});
+
+describe('grep glob filter', () => {
+  it('handles multi-star and brace globs instead of silently matching nothing', () => {
+    assert.equal(globToRegExp('*.json*').test('runs.jsonl'), true);
+    assert.equal(globToRegExp('*.json*').test('a.json'), true);
+    assert.equal(globToRegExp('*.json*').test('a.js'), false);
+    assert.equal(globToRegExp('*.{ts,tsx}').test('App.tsx'), true);
+    assert.equal(globToRegExp('*test*').test('plan.test.ts'), true);
+    assert.equal(globToRegExp('src/**/*.ts').test('src/a/b/c.ts'), true);
+    assert.equal(globToRegExp('src/**/*.ts').test('src/c.ts'), true);
+    assert.equal(globToRegExp('*.ts').test('a.tsx'), false);
   });
 });
 

@@ -62,7 +62,8 @@ const uiSrc = join(ROOT, 'packages', 'ui', 'dist');
 if (!existsSync(join(uiSrc, 'index.html'))) throw new Error('ui dist missing');
 cpSync(uiSrc, join(RUNTIME, 'ui'), { recursive: true });
 
-const skillsSrc = join(ROOT, '.she', 'skills');
+// `skills/` is the version-controlled copy; `.she/skills` is the legacy location.
+const skillsSrc = existsSync(join(ROOT, 'skills')) ? join(ROOT, 'skills') : join(ROOT, '.she', 'skills');
 if (existsSync(skillsSrc)) cpSync(skillsSrc, join(RUNTIME, 'skills'), { recursive: true });
 else mkdirSync(join(RUNTIME, 'skills'), { recursive: true });
 

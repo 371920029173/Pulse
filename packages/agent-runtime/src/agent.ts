@@ -15,9 +15,12 @@ import { getSystemPrompt, readSkillProfile } from './system-prompt.js';
 import type { ToolSet } from '@she/sandbox';
 import { PendingPatchStore, CheckpointStore, resolveInsideWorkspace } from '@she/sandbox';
 import { createKBTools } from './kb-tools.js';
-import { createPlanTools } from './plan-tools.js';
+import { createPlanTools, planAutopilot } from './plan-tools.js';
 import { createPreflightTools, PreflightStore } from './preflight.js';
-import { ErrorBook, createErrorbookTools, isWorthRemembering, formatErrorEntry } from './errorbook.js';
+import {
+  ErrorBook, createErrorbookTools, isWorthRemembering, formatErrorEntry,
+  EXPECT_FAILURE_ARG, isIntentionalFailure, withExpectFailureParam,
+} from './errorbook.js';
 import type { ErrorbookEngineLike, ErrorbookStoreLike, ErrorbookKind } from './errorbook.js';
 import { classifyToolResult, annotateToolResult, isToolFailure, type ToolResultVerdict } from './tool-result.js';
 import {
@@ -59,6 +62,9 @@ import {
 } from './guardrail.js';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+
+/** Tool calls one plan step may take before the reflection check calls the plan over budget. */
+export const TOOL_CALLS_PER_PLAN_STEP = 8;
 
 const log = createLogger('agent');
 
@@ -121,7 +127,11 @@ export class Agent {
   }
   private executors: Map<string, (args: Record<string, unknown>) => Promise<string>> = new Map();
   private systemPrompt: string;
-  private lastPending: { ticket: ConfirmTicketInfo; toolCallId: string; name: string; args: Record<string, unknown> } | null = null;
+  private lastPending: {
+    ticket: ConfirmTicketInfo; toolCallId: string; name: string; args: Record<string, unknown>;
+    /** The model marked this call `expect_failure`; carried so the confirmed run is not recorded either. */
+    expectFailure?: boolean;
+  } | null = null;
   private lastPatch: PendingPatchInfo | null = null;
   private patches: PendingPatchStore;
   private checkpoints: CheckpointStore;
@@ -131,6 +141,9 @@ export class Agent {
    * without stopping the agent.
    */
   private pendingInterjections: string[] = [];
+
+  /** This conversation's plan store, read by the plan autopilot at the end of each model reply. */
+  private planStore?: ReturnType<typeof createPlanTools>['store'];
 
   /**
    * Sink for tool-originated stream events during the current turn. Set on
@@ -406,7 +419,9 @@ export class Agent {
     this.confidenceMirror = new ConfidenceMirror(config.workspace.root);
 
     for (const def of sandboxTools.definitions) {
-      this.allToolDefs.push(def);
+      // `shell` is where intentional failures (a test run to watch it fail) happen, so it advertises
+      // the error book's `expect_failure` switch; every tool honours it (see `recordMistake` callers).
+      this.allToolDefs.push(def.name === 'shell' ? withExpectFailureParam(def) : def);
       this.executors.set(def.name, (args) => sandboxTools.execute(def.name, args));
     }
 
@@ -439,6 +454,7 @@ export class Agent {
 
     // Long-horizon affordances: durable plans, report artifacts, and asking.
     const planTools = createPlanTools(config.workspace.root, this.sessionId);
+    this.planStore = planTools.store;
     for (const def of planTools.definitions) {
       this.allToolDefs.push(def);
       this.executors.set(def.name, (args) => planTools.execute(def.name, args));
@@ -507,7 +523,17 @@ export class Agent {
       currentStep: () => planTools.store.active()?.steps.find((s) => s.status === 'active')?.title ?? null,
       budget: () => {
         const plan = planTools.store.active();
-        return { used: this.runEvents.filter((e) => e.kind === 'tool').length, limit: plan?.steps.length };
+        /*
+         * Same unit on both sides. This used to compare tool CALLS (35) against plan STEPS (9) and
+         * report an overrun on almost every real plan, since one step routinely takes several calls.
+         * The budget is now calls too: a generous allowance per live step, so it only fires when
+         * the work has clearly outgrown the plan it was given.
+         */
+        const live = plan ? plan.steps.filter((s) => s.status !== 'dropped').length : 0;
+        return {
+          used: this.runEvents.filter((e) => e.kind === 'tool').length,
+          limit: plan && live ? live * TOOL_CALLS_PER_PLAN_STEP : undefined,
+        };
       },
       calibration: () => this.confidenceMirror.report(),
     });
@@ -774,6 +800,21 @@ export class Agent {
      */
     let recoveryAttempted = false;
 
+    /*
+     * ─── Plan autopilot ───
+     *
+     * In automation mode a reply without tool calls no longer ends the turn while this chat's plan
+     * still has runnable steps: the loop resumes it (see `planAutopilot` for when it hands back).
+     * Two rounds in a row that leave every step status unchanged stop it, so a model that keeps
+     * answering in prose cannot spin. SHE_PLAN_AUTOPILOT=0 turns it off; SHE_PLAN_AUTOPILOT_MAX caps
+     * the resumes per turn (default 40).
+     */
+    const autopilotOn = this.config.automationMode !== false && process.env.SHE_PLAN_AUTOPILOT !== '0';
+    const autopilotMax = Number(process.env.SHE_PLAN_AUTOPILOT_MAX) > 0 ? Number(process.env.SHE_PLAN_AUTOPILOT_MAX) : 40;
+    let autopilotRounds = 0;
+    let autopilotLastSig = '';
+    let autopilotStalls = 0;
+
     while (iterations < maxIterations) {
       if (signal?.aborted) {
         this.history = repairApiMessages(this.history);
@@ -885,6 +926,23 @@ export class Agent {
       messages.push(response);
 
       if (!response.tool_calls?.length) {
+        if (autopilotOn && autopilotRounds < autopilotMax && this.planStore) {
+          const reply = typeof response.content === 'string' ? response.content : '';
+          const decision = planAutopilot(this.planStore.mine(), { turnStartedAt, reply });
+          if (decision.proceed && decision.nudge) {
+            autopilotStalls = decision.signature === autopilotLastSig ? autopilotStalls + 1 : 0;
+            autopilotLastSig = decision.signature;
+            if (autopilotStalls < 2) {
+              autopilotRounds++;
+              const nudge: LLMMessage = { role: 'user', content: decision.nudge };
+              this.history.push(nudge);
+              messages.push(nudge);
+              onChunk?.({ type: 'status', content: '计划还没做完，自动继续下一步' });
+              continue;
+            }
+            onChunk?.({ type: 'status', content: '连续两次计划没有进展，自动续跑停下' });
+          }
+        }
         this.flushInterjections();
         return response;
       }
@@ -1036,6 +1094,9 @@ export class Agent {
               log.warn(`丢弃模型自带的 _confirm_ticket（工具 ${name}）：确认只能由用户发起`);
               delete args._confirm_ticket;
             }
+            // The error book's switch, not the tool's argument: read from the raw arguments when
+            // recording, and stripped here so a strict tool never sees a key it does not know.
+            delete args[EXPECT_FAILURE_ARG];
             /*
              * Stage file writes only when a human actually has to review them.
              *
@@ -1168,6 +1229,7 @@ export class Agent {
                     toolCallId: tc.id,
                     name,
                     args,
+                    expectFailure: isIntentionalFailure(tc.function.arguments),
                   };
                   // The UI needs the real ticket to render the confirm card.
                   onChunk?.({
@@ -1251,7 +1313,12 @@ export class Agent {
          * `grep` burned me before?" is not a question it can ask the history — but it can ask
          * the book.
          */
-        if (verdict && isWorthRemembering(verdict.kind)) {
+        /*
+         * Not when the model declared the failure in advance (`expect_failure: true`): a test run
+         * to watch it fail is the plan working, and recording it would make every later lookup
+         * accuse the agent of it. The model still gets the annotated result as usual.
+         */
+        if (verdict && isWorthRemembering(verdict.kind) && !isIntentionalFailure(tc.function.arguments)) {
           this.recordMistake({
             tool: name,
             kind: verdict.kind,
@@ -2100,7 +2167,9 @@ export class Agent {
   }
 
   private async confirmToolBody(
-    pending: { ticket: ConfirmTicketInfo; toolCallId: string; name: string; args: Record<string, unknown> },
+    pending: {
+      ticket: ConfirmTicketInfo; toolCallId: string; name: string; args: Record<string, unknown>; expectFailure?: boolean;
+    },
     ticketId: string,
     onChunk?: (chunk: StreamChunk) => void,
   ): Promise<LLMMessage> {
@@ -2156,7 +2225,7 @@ export class Agent {
     if (confirmedEvent) this.runEvents.push(confirmedEvent);
     // Recorded like any other failure: a command the user approved and that then failed is
     // among the most worth remembering.
-    if (isWorthRemembering(verdict.kind)) {
+    if (isWorthRemembering(verdict.kind) && !pending.expectFailure) {
       this.recordMistake({
         tool: pending.name,
         kind: verdict.kind,

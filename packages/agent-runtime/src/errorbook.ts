@@ -190,6 +190,105 @@ export function isWorthRemembering(kind: ErrorbookKind | string): boolean {
   }
 }
 
+/**
+ * The reserved argument that marks a tool call as EXPECTED to fail.
+ *
+ * `errorbook_forget` cleans up after the fact; this stops the entry being written at all. The
+ * measured case is the same one — a test run on purpose to watch it fail, a deliberately bad input
+ * to check a refusal — and without it every such probe landed in the book as the agent's own
+ * mistake and had to be retired by hand. It is an ARGUMENT on the call rather than a mode on the
+ * turn because it is a claim about one call: the next, unplanned failure in the same turn is still
+ * recorded. The agent loop reads it, strips it before the tool runs, and skips the book.
+ */
+export const EXPECT_FAILURE_ARG = 'expect_failure';
+
+/**
+ * True when a tool call's arguments carry `expect_failure: true`.
+ *
+ * Takes the raw JSON string as well as a parsed object, because the loop has the raw string in
+ * hand at the point it records and a call whose arguments do not parse is simply not flagged.
+ * Only a real `true` (or the string "true") counts: a model that writes `expect_failure: "no"`
+ * has not declared anything.
+ */
+export function isIntentionalFailure(args: unknown): boolean {
+  let obj: unknown = args;
+  if (typeof args === 'string') {
+    try { obj = JSON.parse(args); } catch { return false; }
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+  const v = (obj as Record<string, unknown>)[EXPECT_FAILURE_ARG];
+  return v === true || v === 'true';
+}
+
+/**
+ * A copy of `def` that advertises `expect_failure` in its schema.
+ *
+ * Only added where a deliberate failure is routine (`shell`, which runs tests); any other tool
+ * still honours the argument if the model sends it, but advertising it on every tool would cost
+ * tokens on every request for a rarely-used switch. The original definition is not mutated.
+ */
+export function withExpectFailureParam(def: ToolDefinition): ToolDefinition {
+  const params = (def.parameters ?? { type: 'object', properties: {} }) as {
+    type?: string; properties?: Record<string, unknown>; required?: string[];
+  };
+  return {
+    ...def,
+    parameters: {
+      ...params,
+      properties: {
+        ...(params.properties ?? {}),
+        [EXPECT_FAILURE_ARG]: {
+          type: 'boolean',
+          description: 'Set true ONLY when this call is meant to fail (an intentional failing test, a deliberately '
+            + 'rejected input). The failure is then not recorded in the error book. Leave it out otherwise.',
+        },
+      },
+    } as ToolDefinition['parameters'],
+  };
+}
+
+/**
+ * The concrete "do this instead" for a policy refusal, or null when the refusal is not one of the
+ * known kinds.
+ *
+ * The classifier's remedy is a pure function of the KIND (it feeds the stuck-loop signature), so for
+ * every `permission` it can only say "the sandbox refused; don't retry" — true, and useless as a
+ * lesson six sessions later. The book is read later and out of context, so it stores the specific
+ * route instead, derived from the refusal text the sandbox and guardrail actually produce
+ * (`sandbox/shell.ts`, `sandbox/tools.ts`, `guardrail.ts`). Matched on the tool's own wording,
+ * most specific first; the remedy is still a pure function of the failure, so a repeat of the same
+ * refusal keeps the same entry.
+ */
+export function policyRemedy(report: { tool?: string; call?: string; detail: string }): string | null {
+  const d = String(report.detail ?? '');
+  if (/只能通过 kb_\*? ?工具|知识库文件/.test(d)) {
+    return '知识库只能走 kb_* 工具：查用 kb_query，写用 kb_upsert / kb_link。'
+      + '不要用 shell（sqlite3 等）或 fs_* 直接读写库文件（.she/kb.sqlite 及其 -wal/-shm）。';
+  }
+  if (/检测到敏感内容|已拒绝写入/.test(d)) {
+    return '交付文件里不要写入密钥/令牌等敏感值：改用环境变量或占位符（如 ${API_KEY}），真值由用户自己填。';
+  }
+  if (/escapes workspace|工作区外|只允许工作区内|命令包含 \.\.\//i.test(d)) {
+    return '只在工作区内操作：用相对工作区根的路径，不要用 ../、绝对路径、cd 或重定向跳到工作区外；'
+      + '需要外部文件就请用户把它复制进工作区。';
+  }
+  if (/重定向（> 或 <）|重定向目标/.test(d)) {
+    return '白名单模式下不要用 > / < 重定向：写文件用 fs_write，读文件用 fs_read。';
+  }
+  if (/\$\(\) 或反引号/.test(d)) {
+    return '白名单模式下不要用 $() 或反引号嵌套命令：拆成几次独立的 shell 调用，前一次的输出自己读完再用。';
+  }
+  if (/不在白名单内/.test(d)) {
+    return '这个命令不在白名单里：改用白名单内的命令，或用内置工具代替（读文件 fs_read、列目录 fs_list、'
+      + '搜索 grep、写文件 fs_write、看仓库 git_status / git_diff / git_log）；确实需要就向用户说明，由用户放行。';
+  }
+  if (/destructive command blocked/i.test(d)) {
+    return '破坏性命令（rm -rf、del /s、git reset --hard、format 等）被策略拦截：改单个文件用 fs_write，'
+      + '确需删除或回滚就向用户说明要删什么、为什么，由用户确认后执行。';
+  }
+  return null;
+}
+
 /** Metadata marker, so a node can be recognised as an entry without guessing from the group. */
 const MARKER = 'errorbook';
 
@@ -297,7 +396,10 @@ export class ErrorBook {
       kind: report.kind,
       call: oneLine(report.call ?? '', MAX_CALL),
       detail: oneLine(report.detail, MAX_DETAIL),
-      remedy: report.remedy ?? null,
+      // A refusal gets the specific sanctioned route (see `policyRemedy`); anything else keeps the
+      // classifier's advice.
+      remedy: (report.kind === 'permission' || report.kind === 'unknown' ? policyRemedy(report) : null)
+        ?? report.remedy ?? null,
       sessionId: report.sessionId ?? null,
     });
   }
@@ -551,7 +653,19 @@ export class ErrorBook {
    * intersects the retrieval hits with this book's own entries.
    */
   lookup(opts: { tool?: string; query?: string; limit?: number } = {}): ErrorEntry[] {
+    return this.lookupPage(opts).entries;
+  }
+
+  /**
+   * `lookup`, plus how many entries matched before the limit.
+   *
+   * The tool's header used to print the length of the LIMITED list as "错题本有 N 条", so a book with
+   * six entries and the default limit of five claimed to hold five. `total` is the true match count,
+   * so a caller can say "显示 5 / 共 6" and the reader knows there is more to ask for.
+   */
+  lookupPage(opts: { tool?: string; query?: string; limit?: number } = {}): { entries: ErrorEntry[]; total: number } {
     const limit = Math.max(1, opts.limit ?? 5);
+    const page = (all: ErrorEntry[]) => ({ entries: all.slice(0, limit), total: all.length });
     if (opts.tool) {
       const wanted = toolGroupName(opts.tool);
       const group = `${ERRORBOOK_ROOT}/${wanted}`;
@@ -566,11 +680,10 @@ export class ErrorBook {
        * "no" about entries it is holding is worse than one that answers wrongly, because the agent
        * concludes the mistake was never made.
        */
-      return this.ranked()
+      return page(this.ranked()
         .filter((r) => r.entry.group === group || r.entry.tool === wanted)
         .map((r) => r.entry)
-        .sort((a, b) => b.count - a.count)
-        .slice(0, limit);
+        .sort((a, b) => b.count - a.count));
     }
 
     if (opts.query) {
@@ -591,10 +704,11 @@ export class ErrorBook {
        */
       const res = this.engine.query(opts.query, { budget: limit * 4 });
       const ids = new Set(res.nodes.map((n) => n.id));
-      return this.allEntries().filter((e) => ids.has(e.id)).slice(0, limit);
+      // `total` here is bounded by the retrieval budget: it counts the matches retrieval returned.
+      return page(this.allEntries().filter((e) => ids.has(e.id)));
     }
 
-    return this.allEntries().slice(0, limit);
+    return page(this.allEntries());
   }
 
   /** Everything recorded, for a status line. Cheap: the book is small by design. */
@@ -718,13 +832,16 @@ export function createErrorbookTools(book: ErrorBook): ErrorbookToolSet {
         return 'Error: 必须给 tool 或 query 之一（两个都不给就等于问「全部错误」，那不是一次查询）';
       }
       const limit = typeof a.limit === 'number' && a.limit > 0 ? Math.trunc(a.limit) : 5;
-      const entries = book.lookup(tool ? { tool, limit } : { query, limit });
+      const { entries, total } = book.lookupPage(tool ? { tool, limit } : { query, limit });
       if (!entries.length) {
         return tool
           ? `错题本里没有 ${tool} 的记录。`
           : '错题本里没有匹配的记录。';
       }
-      const header = `错题本有 ${entries.length} 条：`;
+      // The TRUE total, and say so when the list below is cut short by `limit`.
+      const header = total > entries.length
+        ? `错题本有 ${total} 条（显示 ${entries.length} / 共 ${total}，调大 limit 可看全部）：`
+        : `错题本有 ${total} 条：`;
       const body = entries.map((e) => {
         const lines = [
           `- [${e.id}] ${e.tool} · ${e.kind}（${e.count} 次，最近 ${e.lastSeenAt}）`,
@@ -748,7 +865,9 @@ export function createErrorbookTools(book: ErrorBook): ErrorbookToolSet {
         + 'from `errorbook_lookup` and say why. The entry stays on disk but stops being offered, so it will '
         + 'not distort what you conclude about this project. If the same failure happens again later it '
         + 'reopens by itself — use this for things you know are by design, not for things you would rather '
-        + 'not hear.',
+        + 'not hear. To keep a planned failure out of the book in the first place, add `"expect_failure": true` '
+        + 'to the arguments of the call you expect to fail (any tool; `shell` advertises it) — it is then not '
+        + 'recorded at all.',
       parameters: {
         type: 'object',
         properties: {

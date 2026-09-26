@@ -16,7 +16,7 @@ Local reproducible baselines for SHE agent-cloud.
 Raw: `.she/perf-smoke.json`
 
 - `at`: `2026-09-12T01:54:43.014Z`
-- `base`: `http://127.0.0.1:4577`
+- `base`: `http://127.0.0.1:5577`（或 `SHE_PORT`）
 - `results`: `[{'name': 'GET /api/health', 'n': 20, 'min': 0.25, 'p50': 0.37, 'p95': 0.77, 'max': 0.77, 'avg': 0.4}, {'name': 'GET /api/settings', 'n': 20, 'min': 0.23, 'p50': 0.25, 'p95': 0.38, 'max': 0.38, 'avg': 0.26}, {'name': 'GET /api/kb/tree', 'n': 20, 'min': 0.25, 'p50': 0.36, 'p95': 0.68, 'max': 0.68, 'avg': 0.37}, {'name': 'GET /api/fs/tree', 'n': 20, 'min': 1.19, 'p50': 1.3, 'p95': 1.64, 'max': 1.64, 'avg': 1.34}, {'name': 'POST /api/kb/query', 'n': 20, 'min': 0.9, 'p50': 1.07, 'p95': 1.39, 'max': 1.39, 'avg': 1.07}, {'name': 'GET /api/adapters/agi35v2', 'n': 20, 'min': 0.25, 'p50': 0.32, 'p95': 0.63, 'max': 0.63, 'avg': 0.34}, {'name': 'GET /api/fs/checkpoints', 'n': 20, 'min': 0.14, 'p50': 0.17, 'p95': 0.22, 'max': 0.22, 'avg': 0.17}]`
 - `burst`: `{'n': 50, 'totalMs': 9.81, 'rps': 5097.3}`
 

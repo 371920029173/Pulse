@@ -396,7 +396,7 @@ export function ThemeStudio({ onClose, userTheme }: {
               <p className={styles.hint}>
                 {t('在地址栏手动加上')} <code>?theme=off</code> {t('并回车，即可停用（内容保留）。')}
                 <br />
-                {t('或执行')} <code>curl -X POST localhost:4577/api/theme/disable</code>
+                {t('或执行')} <code>curl -X POST localhost:5577/api/theme/disable</code>
               </p>
               <p className={styles.hint}>
                 {t('这两条都不依赖界面，所以界面看不见时也能用。')}

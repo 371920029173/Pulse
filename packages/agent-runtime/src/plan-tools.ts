@@ -1154,3 +1154,62 @@ export function createPlanTools(workspaceRoot: string, sessionId?: string | null
 
   return { definitions, execute, store: plans };
 }
+
+// ─── Plan autopilot ─────────────────────────────────────────────────────────
+
+export interface AutopilotDecision {
+  /** True when the turn should keep going instead of handing control back to the user. */
+  proceed: boolean;
+  /** The message that resumes the work, when `proceed`. */
+  nudge?: string;
+  /** Step statuses, so the caller can tell a round that moved the plan from one that did not. */
+  signature: string;
+  /** Why it stopped, for the status line. */
+  reason?: string;
+}
+
+/**
+ * Should a turn that just ended keep working its plan?
+ *
+ * The loop ends whenever the model answers without a tool call, and in practice a model does that
+ * halfway through a plan to report progress ("第 3 步完成，接下来做第 4 步"). With nobody there to say
+ * "继续", automation stops at every step, which is what made it turn-based rather than autonomous.
+ * This decides, deterministically, when that stop is premature.
+ *
+ * It only ever continues THIS conversation's plan, and only one the current turn has touched: an
+ * old open plan is not a standing order (see the system prompt), so it never restarts work on its
+ * own. It stops, handing back to the user, when:
+ *   - no step can run (everything done, or the rest waits on something unfinished);
+ *   - a step is blocked with `on_failure` `ask` or `stop`, which by declaration needs a person;
+ *   - the reply ends in a question, i.e. the model is asking the user something.
+ */
+export function planAutopilot(
+  plan: Plan | undefined,
+  opts: { turnStartedAt: number; reply: string },
+): AutopilotDecision {
+  const signature = plan ? plan.steps.map((s) => `${s.id}:${s.status}`).join(',') : '';
+  if (!plan || plan.status !== 'open') return { proceed: false, signature, reason: '没有进行中的计划' };
+  if (Date.parse(plan.updatedAt) < opts.turnStartedAt) {
+    return { proceed: false, signature, reason: '计划不是这一轮在推进的' };
+  }
+  const parked = plan.steps.find((s) => s.status === 'blocked' && (s.onFailure === 'ask' || s.onFailure === 'stop'));
+  if (parked) return { proceed: false, signature, reason: `步骤「${parked.title}」卡住了，需要你来定` };
+  const done = new Set(plan.steps.filter((s) => s.status === 'done').map((s) => s.id));
+  const runnable = plan.steps.filter(
+    (s) => s.status === 'active' || (s.status === 'pending' && s.dependsOn.every((d) => done.has(d))),
+  );
+  if (!runnable.length) return { proceed: false, signature, reason: '没有可以继续的步骤' };
+  if (/[?？]\s*$/.test(String(opts.reply ?? '').trim())) {
+    return { proceed: false, signature, reason: '在等你回答问题' };
+  }
+  const left = plan.steps.filter((s) => s.status === 'pending' || s.status === 'active').length;
+  const next = runnable.find((s) => s.status === 'active') ?? runnable[0]!;
+  return {
+    proceed: true,
+    signature,
+    nudge: `[自动续跑] 计划「${plan.title}」还有 ${left} 步没做完，下一步是「${next.title}」。`
+      + '直接继续执行，不要停下来等我确认；每做完一步就 plan_update。'
+      + '只有需要我提供只有我知道的信息、或要做不可逆的操作时，才停下来问我。',
+  };
+}
+

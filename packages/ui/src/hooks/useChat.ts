@@ -133,6 +133,8 @@ function normalizeHistory(raw: ServerHistoryMessage[]): ChatMessage[] {
       };
     }
 
+    // The plan autopilot resumes a turn with a `[自动续跑]` user message; it is the system talking, not the user.
+    if (m.role === 'user' && content.startsWith('[自动续跑]')) return { role: 'system', content: '计划还没做完，自动继续下一步' };
     if (m.role === 'user' || m.role === 'system') return { role: m.role, content };
     return { role: 'assistant', content, reasoning };
   });
@@ -878,6 +880,8 @@ export function useChat(sessionId?: string | null) {
         if (sidRef.current !== sid || !st.running || abortRef.current) return;
         setIsLoading(true);
         await pull();
+        const startPolling = () => {
+        if (sidRef.current !== sid || abortRef.current) return;
         followRef.current = setInterval(() => {
           void (async () => {
             if (sidRef.current !== sid) {
@@ -898,9 +902,47 @@ export function useChat(sessionId?: string | null) {
             } catch { /* keep the interval */ }
           })();
         }, 2000);
+        };
+        if (sidRef.current !== sid || abortRef.current) return;
+        /*
+         * Re-attach to the live stream instead of only polling history.
+         *
+         * History holds finished messages, so polling it showed the current round's chain of
+         * thought only once that round ended. The attach stream replays the partial round and
+         * keeps streaming; polling stays as the fallback for a server without the route.
+         */
+        const controller = new AbortController();
+        abortRef.current = controller;
+        const acc = { text: '', reasoning: '' };
+        activeAccRef.current = acc;
+        const handlers = attachStreamHandlers(acc, [], { value: null });
+        const finish = async () => {
+          if (abortRef.current !== controller) return;
+          abortRef.current = null;
+          try {
+            const data = await fetchJSON<{ messages: ServerHistoryMessage[] }>(withSid('/api/chat/history', sid));
+            if (sidRef.current === sid && !abortRef.current) setMessages(normalizeHistory(data.messages ?? []));
+          } catch { /* keep what streamed */ }
+          if (sidRef.current === sid) setIsLoading(false);
+        };
+        streamSSE(
+          withSid('/api/chat/attach', sid),
+          { session_id: sid },
+          {
+            onData: handlers.onData,
+            onDone: () => { void finish(); },
+            onError: () => {
+              if (abortRef.current !== controller) return;
+              abortRef.current = null;
+              startPolling();
+            },
+          },
+          controller.signal,
+          { idleTimeoutMs: 0 },
+        );
       } catch { /* server unreachable; the transcript we already loaded stands */ }
     })();
-  }, []);
+  }, [attachStreamHandlers]);
   armFollowRef.current = armFollow;
 
   return {

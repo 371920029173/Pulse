@@ -67,7 +67,8 @@ export const tools = [
 ];
 
 tools[0].run = async (args, ctx) => {
-  const port = Number(args.port) || 5577;
+  // The port the running server actually uses, not a hardcoded guess (4577 is in a Windows reserved range).
+  const port = Number(args.port) || Number(process.env.SHE_PORT) || 5577;
   const envRel = String(args.envFile ?? '.env').trim() || '.env';
   const lines = ['环境体检', ''];
   const problems = [];
@@ -105,7 +106,18 @@ tools[0].run = async (args, ctx) => {
   // ── env ───────────────────────────────────────────────────────────────────
   lines.push(`配置 (${envRel}):`);
   const envPath = join(ctx.workspaceRoot, envRel);
-  if (!existsSync(envPath)) {
+  /*
+   * A missing .env is only a problem in a SHE checkout. In an ordinary project workspace the
+   * configuration lives with the SHE install and is already loaded into this process, so telling
+   * the user to "copy .env.example" there was a false alarm (the file does not even exist).
+   */
+  const isSheCheckout = existsSync(join(ctx.workspaceRoot, '.env.example'));
+  const loadedFromProcess = REQUIRED_ENV.every((item) => process.env[item.key] || (item.alt && process.env[item.alt]));
+  if (!existsSync(envPath) && (!isSheCheckout || loadedFromProcess)) {
+    lines.push(isSheCheckout
+      ? '  - 文件不存在，但所需配置已由正在运行的 SHE 加载，无需处理'
+      : '  - 当前工作区不是 SHE 源码目录，配置来自 SHE 安装目录，跳过');
+  } else if (!existsSync(envPath)) {
     lines.push('  ✗ 文件不存在');
     problems.push(`${envRel} 不存在 —— 从 .env.example 复制一份`);
   } else {

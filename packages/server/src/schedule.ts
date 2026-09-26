@@ -81,6 +81,13 @@ export interface ScheduledTask {
   /** True while a run is in flight. Not persisted across restarts, by design. */
   running?: boolean;
   runCount: number;
+  /**
+   * A `once` task's own trigger has fired. Separate from `runCount` because a manual
+   * "run now" used to count as the fire: testing a task set for 2099 consumed it and
+   * disabled it, so the real 2099 run would never have happened. Absent on old files,
+   * where `runCount > 0` is the best available answer.
+   */
+  firedOnce?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -96,8 +103,7 @@ function isDue(task: ScheduledTask, now: Date, lastStart: Date | null): boolean 
   if (t.kind === 'once') {
     const at = new Date(t.at);
     if (Number.isNaN(at.getTime())) return false;
-    // A once-task that already ran is done; `runCount` is the record of that.
-    return now.getTime() >= at.getTime() && task.runCount === 0;
+    return now.getTime() >= at.getTime() && !onceFired(task);
   }
   if (t.kind === 'interval') {
     if (!lastStart) return true;
@@ -115,6 +121,14 @@ function isDue(task: ScheduledTask, now: Date, lastStart: Date | null): boolean 
   }
   return true;
 }
+
+/** Has a once-task's own trigger already fired? (Manual runs do not count.) */
+function onceFired(task: ScheduledTask): boolean {
+  return task.firedOnce ?? task.runCount > 0;
+}
+
+/** Finished one-shot tasks older than this are pruned from the list. */
+export const FINISHED_ONCE_RETENTION_DAYS = 7;
 
 /** Minutes since midnight for 'HH:MM', or null when malformed. */
 function minutesOfDay(hhmm: string): number | null {
@@ -332,6 +346,23 @@ export class ScheduleStore {
     return true;
   }
 
+  /**
+   * Drop one-shot tasks that fired, are disabled, and finished more than `days` ago.
+   * Without this every probe and reminder stayed in the list forever. Returns the count.
+   */
+  pruneFinished(now: Date, days = FINISHED_ONCE_RETENTION_DAYS): number {
+    const cutoff = now.getTime() - days * 86_400_000;
+    const before = this.data.tasks.length;
+    this.data.tasks = this.data.tasks.filter((t) => {
+      if (t.trigger.kind !== 'once' || t.enabled || t.running || !onceFired(t)) return true;
+      const finished = t.lastFinishedAt ? new Date(t.lastFinishedAt).getTime() : NaN;
+      return !(Number.isFinite(finished) && finished < cutoff);
+    });
+    const removed = before - this.data.tasks.length;
+    if (removed > 0) this.persist();
+    return removed;
+  }
+
   /** Record the outcome of a run. Called by the scheduler. */
   recordRun(id: string, patch: Partial<ScheduledTask>): void {
     const task = this.ref(id);
@@ -352,14 +383,40 @@ function randomId(): string {
 
 // ─── Scheduler ───
 
+/**
+ * The conversation a task writes into is in the middle of a turn.
+ *
+ * Not a failure of the task. It used to be treated as one: the run threw within milliseconds
+ * ("这一轮对话还在进行中"), was recorded as an error, counted as a run, and a `once` task
+ * then disabled itself — so a reminder that happened to fire while the user was chatting was
+ * silently lost. The runner throws this instead, and the scheduler queues the task and starts
+ * it as soon as the conversation is free, without spending the run.
+ */
+export class SessionBusyError extends Error {
+  constructor(message = '目标会话正在进行一轮对话') {
+    super(message);
+    this.name = 'SessionBusyError';
+  }
+}
+
+/** How often a queued (busy-deferred) task re-checks whether its conversation is free. */
+const BUSY_RETRY_MS = 3_000;
+
 export interface SchedulerDeps {
   store: ScheduleStore;
   /** Runs one task's prompt. Provided by the server so this stays testable. */
   run: (task: ScheduledTask) => Promise<void>;
   /** Global window. `null` means no restriction. */
   workingWindow: () => WorkingWindow | null;
+  /**
+   * Why the task's conversation cannot take a turn right now, or null when it can.
+   * Checked before a start so a busy conversation queues the task instead of failing it.
+   */
+  busy?: (task: ScheduledTask) => string | null;
   /** Injectable clock, so the tests do not have to wait for real time. */
   now?: () => Date;
+  /** Delay before a queued task re-checks; injectable for tests. 0 disables the fast retry. */
+  busyRetryMs?: number;
   tickSeconds?: number;
 }
 
@@ -371,6 +428,15 @@ export class Scheduler {
   private readonly tickSeconds: number;
   /** Tasks whose run has not finished yet. */
   private readonly inFlight = new Set<string>();
+  /**
+   * Tasks that came due (or were started by hand) while their conversation was busy.
+   * They run as soon as it is free, whether or not their trigger is still "due" by then —
+   * an interval or manual run must not be lost just because the busy turn outlasted it.
+   */
+  private readonly queued = new Set<string>();
+  /** Queued tasks that were started by hand, so the eventual run is still a manual one. */
+  private readonly queuedManual = new Set<string>();
+  private retryTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly deps: SchedulerDeps) {
     this.now = deps.now ?? (() => new Date());
@@ -390,6 +456,28 @@ export class Scheduler {
     if (!this.timer) return;
     clearInterval(this.timer);
     this.timer = null;
+    if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
+  }
+
+  /** Tasks waiting for their conversation to become free. */
+  waiting(): string[] {
+    return [...this.queued];
+  }
+
+  /** Queue a task behind the running turn and arrange a prompt re-check. */
+  private queueBusy(task: ScheduledTask, reason: string): void {
+    const first = !this.queued.has(task.id);
+    this.queued.add(task.id);
+    this.deps.store.recordRun(task.id, {
+      lastStatus: 'deferred',
+      lastDeferredReason: `${reason}，已排队，本轮结束后自动执行`,
+    });
+    if (first) log.info(`任务「${task.name}」已排队：${reason}`);
+    const delay = this.deps.busyRetryMs ?? BUSY_RETRY_MS;
+    if (delay > 0 && !this.retryTimer) {
+      this.retryTimer = setTimeout(() => { this.retryTimer = null; void this.tick(); }, delay);
+      this.retryTimer.unref?.();
+    }
   }
 
   /** Tasks currently running. */
@@ -413,9 +501,15 @@ export class Scheduler {
     const task = this.deps.store.get(id);
     if (!task) return { started: false, reason: '任务不存在' };
     if (this.inFlight.has(id)) return { started: false, reason: '该任务正在执行' };
+    const busy = this.deps.busy?.(task);
+    if (busy) {
+      this.queueBusy(task, busy);
+      this.queuedManual.add(id);
+      return { started: true, reason: `${busy}，已排队，本轮结束后自动执行` };
+    }
     // Deliberately not awaited: the caller is an HTTP route that should return
     // promptly, and the run can take minutes.
-    void this.runTask(task);
+    void this.runTask(task, true);
     return { started: true };
   }
 
@@ -432,6 +526,8 @@ export class Scheduler {
     this.ticking = true;
     try {
       const now = this.now();
+      const pruned = this.deps.store.pruneFinished(now);
+      if (pruned > 0) log.info(`已清理 ${pruned} 个完成超过 ${FINISHED_ONCE_RETENTION_DAYS} 天的一次性任务`);
       for (const task of this.deps.store.list()) {
         if (!task.enabled) continue;
         if (this.inFlight.has(task.id)) {
@@ -440,8 +536,9 @@ export class Scheduler {
         }
         if (task.overlap === 'skip' && task.running) continue;
 
+        const wasQueued = this.queued.has(task.id);
         const lastStart = task.lastStartedAt ? new Date(task.lastStartedAt) : null;
-        if (!isDue(task, now, lastStart)) continue;
+        if (!wasQueued && !isDue(task, now, lastStart)) continue;
 
         // Window check happens only at START time, and a blocked start is
         // deferred rather than lost.
@@ -456,7 +553,20 @@ export class Scheduler {
           continue;
         }
 
-        void this.runTask(task);
+        const busy = this.deps.busy?.(task);
+        if (busy) {
+          this.queueBusy(task, busy);
+          continue;
+        }
+
+        const manual = this.queuedManual.delete(task.id);
+        this.queued.delete(task.id);
+        void this.runTask(task, manual);
+      }
+      // A queued task that was disabled or deleted meanwhile must not linger.
+      for (const id of [...this.queued]) {
+        const t = this.deps.store.get(id);
+        if (!t || !t.enabled) { this.queued.delete(id); this.queuedManual.delete(id); }
       }
     } finally {
       this.ticking = false;
@@ -470,8 +580,9 @@ export class Scheduler {
     return global;
   }
 
-  private async runTask(task: ScheduledTask): Promise<void> {
+  private async runTask(task: ScheduledTask, manual = false): Promise<void> {
     this.inFlight.add(task.id);
+    const previousStart = this.deps.store.get(task.id)?.lastStartedAt;
     const startedAt = this.now();
     this.deps.store.recordRun(task.id, {
       lastStatus: 'running',
@@ -483,11 +594,25 @@ export class Scheduler {
     log.info(`开始执行定时任务「${task.name}」`);
 
     let error: string | undefined;
+    let requeued = false;
     try {
       await this.deps.run(task);
     } catch (err) {
+      if (err instanceof SessionBusyError) {
+        /*
+         * Lost the race: the conversation became busy between the check and the start.
+         * Undo the start bookkeeping so nothing is spent — no run counted, a once-task stays
+         * enabled, and an interval keeps its old anchor — then queue it like any busy task.
+         */
+        this.inFlight.delete(task.id);
+        this.deps.store.recordRun(task.id, { running: false, lastStartedAt: previousStart });
+        this.queueBusy(task, err.message);
+        requeued = true;
+      }
       error = (err as Error).message;
     } finally {
+      // The busy path above already undid the start; nothing was spent.
+      if (!requeued) {
       const finishedAt = this.now();
       const durationMs = finishedAt.getTime() - startedAt.getTime();
       const limitMs = task.softLimitMinutes ? task.softLimitMinutes * 60_000 : null;
@@ -501,8 +626,11 @@ export class Scheduler {
         lastError: error,
         lastOverran: overran,
         runCount: (this.deps.store.get(task.id)?.runCount ?? 0) + 1,
-        // A once-task disables itself after it has actually run.
-        ...(task.trigger.kind === 'once' ? { enabled: false } : {}),
+        // A once-task disables itself after its OWN trigger fired. A manual run leaves the
+        // scheduled fire intact (and pins `firedOnce` so the bumped runCount is not misread).
+        ...(task.trigger.kind === 'once'
+          ? (manual ? { firedOnce: onceFired(task) } : { enabled: false, firedOnce: true })
+          : {}),
       });
 
       /*
@@ -518,6 +646,7 @@ export class Scheduler {
       }
       if (error) log.warn(`任务「${task.name}」失败: ${error}`);
       else log.info(`任务「${task.name}」完成，用时 ${Math.round(durationMs / 1000)}s`);
+      }
     }
   }
 
@@ -543,7 +672,7 @@ export function describeNextRun(task: ScheduledTask, window: WorkingWindow | nul
   }
   const t = task.trigger;
   if (t.kind === 'once') {
-    return task.runCount > 0 ? '已完成' : `等待 ${new Date(t.at).toLocaleString()}`;
+    return onceFired(task) ? '已完成' : `等待 ${new Date(t.at).toLocaleString()}`;
   }
   if (t.kind === 'interval') {
     if (!lastStart) return `每 ${t.everyMinutes} 分钟（将尽快执行）`;

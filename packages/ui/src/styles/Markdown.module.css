@@ -74,3 +74,38 @@
   text-decoration: none;
 }
 .link:hover { text-decoration: underline; }
+.ol {
+  margin: 0.35em 0 0.75em;
+  padding-left: 1.6em;
+}
+.ol li { margin: 0.2em 0; }
+.hr {
+  border: none;
+  border-top: 1px solid var(--border, rgba(255,255,255,0.08));
+  margin: 0.9em 0;
+}
+.quote {
+  margin: 0.5em 0 0.8em;
+  padding: 0.1em 0 0.1em 0.9em;
+  border-left: 3px solid var(--border, rgba(255,255,255,0.16));
+  color: var(--text-secondary);
+}
+.tableWrap {
+  margin: 0.55em 0 0.85em;
+  overflow-x: auto;
+}
+.table {
+  border-collapse: collapse;
+  font-size: 0.93em;
+  min-width: 50%;
+}
+.table th, .table td {
+  border: 1px solid var(--border, rgba(255,255,255,0.1));
+  padding: 5px 10px;
+  vertical-align: top;
+  text-align: left;
+}
+.table th {
+  font-weight: 620;
+  background: var(--bg-tertiary, rgba(255,255,255,0.05));
+}

@@ -9,6 +9,47 @@ sends nothing anywhere else.
 
 ---
 
+## 本次更新：修复了一些已知问题并进行大幅升级与优化
+
+**Reliability**
+- `lsp_diagnostics` no longer hangs for 15 s on a file that was already opened for go-to-definition
+  (the diagnostics pushed on open were cached under the wrong content). That hang used to trip the
+  stuck-loop guard and end a whole turn.
+- Go-to-definition and friends no longer land one column off on files that start with a UTF-8 BOM.
+- `reflection_check` stops flagging provenance notes ("来源：…", "see: …") as forbidden targets, and
+  its budget check now compares tool calls with tool calls (8 per active plan step).
+- `grep` globs are real globs: `*`, `**`, `?`, `[abc]`, `{ts,tsx}`. `*.json*` used to match nothing, silently.
+
+**Automation**
+- Plans now drive the agent: while a plan has unfinished steps it keeps going on its own, and stops
+  when a step needs the user, when it asks a question, or after two rounds without progress
+  (`SHE_PLAN_AUTOPILOT=0` turns this off).
+- A scheduled task that fires while its conversation is busy is queued and runs as soon as the turn
+  ends, instead of failing in 8 ms and — for a one-shot task — disabling itself.
+- "Run now" on a one-shot task no longer consumes its real scheduled fire. Finished one-shot tasks
+  are pruned after 7 days and hidden from `schedule_list` by default.
+
+**Interface and knowledge**
+- Markdown in chat renders tables (with alignment, horizontal scroll for wide ones), numbered lists,
+  block quotes, rules and all heading levels. Tables used to collapse into one line of pipes.
+- Leaving a chat mid-turn and coming back re-attaches to the live stream, so reasoning keeps
+  streaming instead of appearing all at once when the step ends.
+- Several workspaces can share one knowledge base (Settings, then the shared-KB section), and two
+  knowledge bases can be merged.
+- Importing from Cursor, Claude and Codex keeps a copy of the original context under `.she/imports/`.
+- Error book: a call made to fail on purpose can pass `"expect_failure": true` and stays out of the
+  book; the list header shows the real total ("显示 5 / 共 6"); entries blocked by policy say what to
+  do for that specific reason.
+- Knowledge base entries can be edited and retired, and upserting an existing title no longer creates
+  a silent duplicate, so an outdated conclusion stops showing up in search. For now this is available
+  through the agent tools and the API only; the interface has no buttons for it yet.
+
+**Housekeeping**
+- Default skills now live in a version-controlled `skills/` folder. `.she/` is gitignored, so a fresh
+  clone previously had no skills at all.
+- Stale `4577` port defaults (inside a Windows excluded port range) were changed to `5577`, and
+  `env_check` no longer tells you to copy `.env.example` when your environment is already set.
+
 ## Download
 
 **[Latest release →](https://github.com/371920029173/Pulse/releases/latest)**
@@ -100,6 +141,9 @@ config, and multiple models can be registered so you are not locked to one vendo
 - **Sessions** — isolated conversations, history, closed-vs-deleted, checkpoint undo, message rewind,
   and state files that quarantine instead of clearing when unreadable
 - **Multi-agent** — discussion rooms with configurable roles per room
+- **Skills** — Markdown playbooks under `skills/` (`_common`, `dev`, `liberal`, `general`, `custom`),
+  picked by the active profile. A file with the same name in a workspace's `.she/skills/` overrides
+  the bundled one
 - **Integrations** — MCP servers, plugins (install from a catalog, scaffold, edit source), Feishu
   remote control over a long connection (no exposed port)
 - **Interface** — Electron desktop (multi-window) and web; syntax highlighting, diffs, collapsible
@@ -147,7 +191,7 @@ Most docs are written in Chinese; the code and comments are English.
 
 ## Project status
 
-`pnpm check:all` runs the build, 990 unit tests, three evaluators and 35 check scripts, and must pass
+`pnpm check:all` runs the build, the unit tests of every package, three evaluators and the check scripts, and must pass
 before a change is considered done. It is green locally and on Linux CI. See
 [docs/testing.md](docs/testing.md) for the per-check breakdown.
 
@@ -161,8 +205,8 @@ before a change is considered done. It is green locally and on Linux CI. See
 | **Small evaluation sets** | 16 retrieval cases, 10 agent tasks, 5 verification tasks, one model |
 | **Accessibility is only statically checked** | Focusability, keyboard dismissal and button names are verified; contrast, screen readers and tab order are not |
 | **UI localization is incomplete** | 631 user-facing strings are still hardcoded Chinese; the infrastructure and a no-regression ratchet are in place |
-| **No before/after diff for direct writes** | Diffs exist for staged edits; a write that goes straight through shows only its content |
-| **Long-horizon tasks (>10 rounds) uncovered** | So is variance across repeated eval runs |
+| **Long-horizon evals are still small** | Long tasks and run-to-run variance are now measured, but on few cases and one model |
+| **Token cost is still high on long turns** | History is sent whole and append-only so the prompt cache keeps hitting (~90% on DeepSeek); the volume itself is not reduced yet |
 
 Deliberately **not** planned: embeddings/vector search (a design choice, not a backlog item), and
 being a general-purpose IDE.

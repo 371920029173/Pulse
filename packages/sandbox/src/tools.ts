@@ -291,6 +291,14 @@ export function createTools(
       const re = new RegExp(pattern);
       const matches: string[] = [];
       const skipDir = new Set(['node_modules', '.git', 'dist', '.she']);
+      /*
+       * A real glob, not a suffix guess. The old filter stripped a leading "*." and compared suffixes,
+       * so "*.json*" became ".json*" and matched nothing, silently: a search that returns zero for a
+       * pattern it never understood reads as "no such file". A pattern with a "/" matches the path
+       * relative to the root; otherwise it matches the file name, like ripgrep's -g.
+       */
+      const globRe = globFilter ? globToRegExp(globFilter) : null;
+      const globOnPath = !!globFilter && globFilter.includes('/');
 
       async function walk(dir: string): Promise<void> {
         let entries;
@@ -307,10 +315,7 @@ export function createTools(
             await walk(full);
             continue;
           }
-          if (globFilter) {
-            const g = globFilter.replace(/^\*\./, '.').replace(/^\*/, '');
-            if (g.startsWith('.') && !ent.name.endsWith(g)) continue;
-          }
+          if (globRe && !globRe.test(globOnPath ? relative(root, full).split('\\').join('/') : ent.name)) continue;
           let text: string;
           try {
             text = withoutBom(await readFile(full, 'utf8'));
@@ -657,4 +662,29 @@ async function execute(name: string, args: Record<string, unknown>): Promise<str
   return { definitions, execute };
 }
 
-
+/**
+ * Translate a shell-style glob into an anchored RegExp: `*` (not across "/"), `**` (across "/"),
+ * `?`, `[abc]` and `{a,b}`. Case-insensitive, because the tool runs on Windows too.
+ */
+export function globToRegExp(glob: string): RegExp {
+  let re = '';
+  let inBrace = 0;
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i]!;
+    if (c === '*') {
+      if (glob[i + 1] === '*') {
+        i++;
+        if (glob[i + 1] === '/') { i++; re += '(?:.*/)?'; } else re += '.*';
+      } else re += '[^/]*';
+    } else if (c === '?') re += '[^/]';
+    else if (c === '[') {
+      const end = glob.indexOf(']', i + 1);
+      if (end === -1) re += '\\[';
+      else { re += '[' + glob.slice(i + 1, end).replace(/^!/, '^').replace(/\\/g, '\\\\') + ']'; i = end; }
+    } else if (c === '{') { inBrace++; re += '(?:'; }
+    else if (c === '}' && inBrace) { inBrace--; re += ')'; }
+    else if (c === ',' && inBrace) re += '|';
+    else re += c.replace(/[.+^$()|\\]/g, '\\$&');
+  }
+  return new RegExp('^' + re + '$', 'i');
+}

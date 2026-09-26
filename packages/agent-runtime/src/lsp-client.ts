@@ -254,6 +254,17 @@ export class LspServer {
   private ensureOpen(filePath: string, language: string, text: string): void {
     if (this.opened.has(fileKey(filePath))) return;
     this.opened.add(fileKey(filePath));
+    /*
+     * Record which text the open-time publish describes.
+     *
+     * Servers publish diagnostics once when a file is opened. A file first opened by a
+     * structural query (definition/hover) had that publish cached against '' because nothing
+     * had set `pendingText`, so a later `diagnosticsFor` with the same text missed the cache,
+     * sent a no-op `didChange`, and waited for a publish that never came: typescript-language-
+     * server does not re-publish unchanged diagnostics. Every call timed out after 15s, and
+     * three identical timeouts tripped the stuck-loop guard and ended the whole turn.
+     */
+    this.pendingText.set(fileKey(filePath), text);
     this.notify('textDocument/didOpen', {
       textDocument: { uri: pathToFileURL(filePath).href, languageId: language, version: 1, text },
     });

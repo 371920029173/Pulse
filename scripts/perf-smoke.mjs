@@ -4,7 +4,7 @@ import { performance } from 'node:perf_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const BASE = process.env.SHE_API || 'http://127.0.0.1:4577';
+const BASE = process.env.SHE_API || `http://127.0.0.1:${process.env.SHE_PORT || 5577}`;
 // Relative to the current directory, so the output lands in whichever clone is
 // being benchmarked instead of a fixed path on one machine.
 const OUT = process.env.SHE_PERF_OUT || path.resolve(process.cwd(), '.she', 'perf-smoke.json');

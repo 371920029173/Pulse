@@ -235,6 +235,16 @@ const RULES: Rule[] = [
     re: /已拒绝写入|检测到敏感内容/,
     from: 'guardrail.ts `交付文件里检测到敏感内容，已拒绝写入`',
   },
+  /*
+   * `fs_*` aimed at the knowledge-base file is refused with `Error: 知识库文件只能通过 kb_* 工具访问…`
+   * (the `shell` spelling arrives as `DENIED:` and is already a refusal). It is policy, not an unknown
+   * failure: the same call will be refused again and the fix is a different tool.
+   */
+  {
+    kind: 'permission',
+    re: /只能通过 kb_\* 工具访问/,
+    from: 'sandbox tools.ts KB_DIRECT_ACCESS_REASON (fs_* on the KB database)',
+  },
   {
     kind: 'invalid_args',
     re: /required|必填|不能为空|缺少|必须给|至少要给|不合法|非法|必须是|没有说明交付物|no usable tasks|createIfMissing/i,

@@ -168,6 +168,15 @@ const PROHIBITION = /(不要|不得|不准|不许|禁止|严禁|避免|别去|�
 const EXCEPTION = /^(例外|除外|唯一|除[^，。；]{0,12}外|允许|可以|不受|仅限|only|except|unless)/i;
 
 /**
+ * Provenance notes inside a constraint: "来源：e4fa0b5e", "(source: 250c9a40)", "参见：…".
+ *
+ * They say where the rule came from, not what it forbids. Left in, the id was picked up as the
+ * prohibition's OBJECT (it is the most concrete-looking token in the sentence), and the agent's
+ * own `kb_link` to that very node was reported as a violation, measured twice on live runs.
+ */
+const PROVENANCE = /[（(]?\s*(?:来源|出处|参见|参考|引自|依据|source|ref|see)\s*[:：][^，,；;。!！?？\n)）]*[)）]?/gi;
+
+/**
  * The part of a constraint that can create a violation: the clauses that state a prohibition.
  *
  * Split on sentence and clause punctuation, then drop the clauses that grant an exception. A comma
@@ -180,6 +189,7 @@ const EXCEPTION = /^(例外|除外|唯一|除[^，。；]{0,12}外|允许|可以
  * have been broken" is one the agent learns to skip.
  */
 function prohibitionScope(text: string): string {
+  text = String(text ?? '').replace(PROVENANCE, ' ');
   const clauses: string[] = [];
   let buffer: string[] = [];
   let afterException = false;
@@ -396,7 +406,7 @@ export function detectDrift(input: DriftInput): DriftReport {
       kind: 'budget_overrun',
       major: false,
       weight: 0.5,
-      detail: `已用 ${input.stepsUsed} 步，超过预算的 ${input.stepBudget} 步`,
+      detail: `已用 ${input.stepsUsed} 次工具调用，超过预算的 ${input.stepBudget} 次`,
     });
   }
 

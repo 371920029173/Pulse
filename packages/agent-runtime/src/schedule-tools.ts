@@ -171,8 +171,12 @@ export function makeScheduleTools(bridge: ScheduleBridge, sessionId: string | nu
     },
     {
       name: 'schedule_list',
-      description: '查看已经安排的定时任务（含下次运行时间、是否被顺延、上次结果）。',
-      parameters: { type: 'object', properties: {}, required: [] },
+      description: '查看已经安排的定时任务（含下次运行时间、是否被顺延、上次结果）。已经跑完的一次性任务默认只计数不列出，includeFinished=true 可见；它们在完成 7 天后自动清理。',
+      parameters: {
+        type: 'object',
+        properties: { includeFinished: { type: 'boolean', description: '同时列出已跑完的一次性任务（默认 false）' } },
+        required: [],
+      },
     },
     {
       name: 'schedule_cancel',
@@ -261,8 +265,11 @@ export async function executeScheduleTool(
       }
 
       case 'schedule_list': {
-        const tasks = bridge.list();
-        if (tasks.length === 0) return text('目前没有安排任何定时任务。');
+        const all = bridge.list();
+        if (all.length === 0) return text('目前没有安排任何定时任务。');
+        const isFinished = (t: ScheduledTaskView) => !t.enabled && t.nextRun === '已停用' && t.runCount > 0 && /一次/.test(t.when);
+        const tasks = args.includeFinished === true ? all : all.filter((t) => !isFinished(t));
+        const hiddenFinished = all.length - tasks.length;
         const lines = tasks.map((t) => {
           const bits = [
             `${t.enabled ? '启用' : '停用'} | ${t.name} | ${t.when} | id=${t.id}`,
@@ -277,7 +284,9 @@ export async function executeScheduleTool(
         const head = w
           ? `允许工作的时间段：${w.start}–${w.end}${w.days?.length ? `（周 ${w.days.join('/')}）` : ''}；当前${bridge.withinWindow() ? '可开工' : '不在时间段内'}。`
           : '允许工作的时间段：不限制。';
-        return text(`${head}\n\n${lines.join('\n')}`);
+        const tail = hiddenFinished > 0 ? `\n（另有 ${hiddenFinished} 个已跑完的一次性任务未列出，includeFinished=true 可见）` : '';
+        const body = lines.length > 0 ? lines.join('\n') : '没有进行中的定时任务。';
+        return text(`${head}\n\n${body}${tail}`);
       }
 
       case 'schedule_cancel': {

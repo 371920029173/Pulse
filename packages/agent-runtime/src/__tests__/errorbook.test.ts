@@ -6,7 +6,12 @@ import {
   createErrorbookTools,
   isWorthRemembering,
   renderErrorbook,
+  isIntentionalFailure,
+  withExpectFailureParam,
+  policyRemedy,
+  EXPECT_FAILURE_ARG,
 } from '../errorbook.js';
+import { classifyToolResult } from '../tool-result.js';
 import type { ErrorbookEngineLike, ErrorbookStoreLike } from '../errorbook.js';
 
 /**
@@ -440,5 +445,141 @@ describe('ErrorBook 退役', () => {
     assert.match(out, new RegExp(entry.id));
     assert.match(out, /有意测试/);
     assert.equal(book.count(), 0);
+  });
+});
+
+/**
+ * 有意的失败一开始就不该进错题本：调用参数里带 `expect_failure: true`，agent 循环就跳过记录。
+ * `errorbook_forget` 是事后补救；这是事前声明。
+ */
+describe('ErrorBook 有意失败（expect_failure）', () => {
+  it('只认真正的 true：原始 JSON 串和已解析对象都行', () => {
+    assert.equal(isIntentionalFailure('{"command":"npm test","expect_failure":true}'), true);
+    assert.equal(isIntentionalFailure({ command: 'x', expect_failure: true }), true);
+    assert.equal(isIntentionalFailure({ expect_failure: 'true' }), true);
+    assert.equal(isIntentionalFailure('{"command":"npm test"}'), false);
+    assert.equal(isIntentionalFailure({ expect_failure: false }), false);
+    assert.equal(isIntentionalFailure({ expect_failure: 'no' }), false);
+    assert.equal(isIntentionalFailure('{not json'), false, '解析不了的参数不算声明');
+    assert.equal(isIntentionalFailure(null), false);
+    assert.equal(isIntentionalFailure('[true]'), false);
+  });
+
+  it('给 shell 的 schema 加上开关，不改原定义、不动 required', () => {
+    const def = {
+      name: 'shell',
+      description: 'run',
+      parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+    };
+    const out = withExpectFailureParam(def);
+    const props = (out.parameters as { properties: Record<string, { type: string; description: string }> }).properties;
+    assert.equal(props[EXPECT_FAILURE_ARG].type, 'boolean');
+    assert.match(props[EXPECT_FAILURE_ARG].description, /error book/);
+    assert.ok(props.command, '原有参数要保留');
+    assert.deepEqual((out.parameters as { required: string[] }).required, ['command']);
+    assert.equal(EXPECT_FAILURE_ARG in def.parameters.properties, false, '不能改到原定义');
+  });
+
+  it('工具描述里说明了这个开关', () => {
+    const tools = createErrorbookTools(newBook(fakeEngine()));
+    const forget = tools.definitions.find((d) => d.name === 'errorbook_forget')!;
+    assert.match(forget.description, /expect_failure/);
+  });
+});
+
+/** 表头要报真实总数；列表被 limit 截断时要说「显示 N / 共 M」。 */
+describe('errorbook_lookup 表头计数', () => {
+  const fill = (n: number) => {
+    const book = newBook(fakeEngine());
+    for (let i = 1; i <= n; i++) book.record(report({ detail: `failure ${i}` }));
+    return book;
+  };
+
+  it('【回归】6 条真实记录，默认只列 5 条，表头却要说 6', async () => {
+    const book = fill(6);
+    const out = await createErrorbookTools(book).execute('errorbook_lookup', { tool: 'shell' });
+    assert.match(out, /^错题本有 6 条（显示 5 \/ 共 6/);
+    assert.equal(out.split('\n').filter((l) => l.startsWith('- [')).length, 5);
+    assert.deepEqual(book.lookupPage({ tool: 'shell' }).total, 6);
+  });
+
+  it('没截断就不提「显示」', async () => {
+    const out = await createErrorbookTools(fill(5)).execute('errorbook_lookup', { tool: 'shell' });
+    assert.match(out, /^错题本有 5 条：/);
+    assert.ok(!/显示/.test(out));
+  });
+
+  it('limit 调大就全列出来', async () => {
+    const out = await createErrorbookTools(fill(6)).execute('errorbook_lookup', { tool: 'shell', limit: 10 });
+    assert.match(out, /^错题本有 6 条：/);
+    assert.equal(out.split('\n').filter((l) => l.startsWith('- [')).length, 6);
+  });
+
+  it('query 查询同样报总数', async () => {
+    const engine = fakeEngine();
+    const book = newBook(engine);
+    const ids = [1, 2, 3].map((i) => book.record(report({ detail: `q ${i}` })).entry.id);
+    engine.setQueryNodes(ids.map((id) => ({ id, title: 't', content: 'c', kind: 'tool_outcome', path: 'errors,shell' })));
+    const page = book.lookupPage({ query: 'q', limit: 2 });
+    assert.equal(page.entries.length, 2);
+    assert.equal(page.total, 3);
+  });
+});
+
+/** 越权/策略拒绝的「去路」要点名该走的路，而不是泛泛一句「沙箱拒绝了」。 */
+describe('ErrorBook 策略拒绝的去路', () => {
+  const KB_REFUSAL = 'DENIED: 知识库文件只能通过 kb_* 工具访问：直读直写会跳过共振排序、不计访问计数，'
+    + '还可能锁住服务端已打开的库文件。查用 kb_query，写用 kb_upsert / kb_link。';
+
+  it('直接碰知识库文件：点名 kb_* 工具', () => {
+    const book = newBook(fakeEngine());
+    const { entry } = book.record(report({
+      kind: 'permission', call: '{"command":"sqlite3 .she/kb.sqlite \\"select 1\\""}', detail: KB_REFUSAL,
+      remedy: '沙箱按策略拒绝了这次调用。',
+    }));
+    assert.match(String(entry.remedy), /kb_query/);
+    assert.match(String(entry.remedy), /kb_upsert/);
+    assert.match(String(entry.remedy), /sqlite3/);
+    assert.equal(book.lookup({ tool: 'shell' })[0].remedy, entry.remedy, '存下来的也是具体的去路');
+  });
+
+  it('fs_* 碰知识库文件（Error: 前缀）也归为策略拒绝，并给同样的去路', () => {
+    const detail = 'Error: 知识库文件只能通过 kb_* 工具访问：直读直写会跳过共振排序。';
+    const v = classifyToolResult('fs_read', detail);
+    assert.equal(v.kind, 'permission');
+    const { entry } = newBook(fakeEngine()).record({ tool: 'fs_read', kind: v.kind, detail, remedy: v.remedy });
+    assert.match(String(entry.remedy), /kb_query/);
+  });
+
+  it('跳出工作区：要求留在工作区内', () => {
+    for (const detail of ['Error: Path escapes workspace: ../../etc/passwd', 'DENIED: cd 目标在工作区外: C:\\Windows',
+      'DENIED: 路径在工作区外: 命令包含 ../']) {
+      assert.match(String(policyRemedy({ detail })), /只在工作区内操作/, detail);
+    }
+  });
+
+  it('白名单、重定向、命令替换、破坏性命令、敏感内容各有各的去路', () => {
+    const cases: [string, RegExp][] = [
+      ['DENIED: 命令「curl」不在白名单内（当前允许: git, npm）。', /fs_read/],
+      ['DENIED: 命令包含重定向（> 或 <）。白名单只校验命令名', /fs_write/],
+      ['DENIED: 命令包含 $() 或反引号，其中可能藏有未授权的命令', /拆成几次独立的 shell 调用/],
+      ['DENIED: destructive command blocked by sandbox policy', /由用户确认/],
+      ['Error: 交付文件里检测到敏感内容，已拒绝写入（1 处）。', /环境变量或占位符/],
+    ];
+    const seen = new Set<string>();
+    for (const [detail, re] of cases) {
+      const r = policyRemedy({ detail });
+      assert.match(String(r), re, detail);
+      seen.add(String(r));
+    }
+    assert.equal(seen.size, cases.length, '每种拒绝的去路都不一样');
+  });
+
+  it('认不出的拒绝保留分类器的去路；非拒绝的失败不受影响', () => {
+    const book = newBook(fakeEngine());
+    const odd = book.record(report({ kind: 'permission', detail: 'DENIED: something new', remedy: '由用户决定是否放行' }));
+    assert.equal(odd.entry.remedy, '由用户决定是否放行');
+    const exit = book.record(report({ detail: 'exit code: 3 工作区外' }));
+    assert.equal(exit.entry.remedy, '读 stderr', 'nonzero_exit 的输出里碰巧有关键词也不能改去路');
   });
 });

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { createLogger, loadConfig, resolveEnvFile, mergeMissingEnvFile, updateEnvFile, THINKING_LEVELS, getConfigRecovery, getConfigFileInUse, lastGoodConfigPath, lastGoodConfigMetaPath } from '@she/shared';
 import type { SheConfig, StreamChunk, EdgeKind, SkillProfile } from '@she/shared';
 import { KBStore, GroupKBEngine, mergeKnowledgeBases } from '@she/kb';
+import type { KBMemoryPatch } from '@she/kb';
 import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLink } from './kb-link.js';
 import { SandboxShell, createTools, ConfirmTicketStore } from '@she/sandbox';
 import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, selectHarvestNotes } from '@she/agent-runtime';
@@ -21,7 +22,7 @@ import {
   loadTheme, saveTheme, clearTheme, setThemeEnabled, revertTheme,
   validateCss, themeBytes, themePaths, THEME_MAX_BYTES,
 } from './theme.js';
-import { ScheduleStore, Scheduler, describeNextRun, nextWindowStart, withinWindow } from './schedule.js';
+import { ScheduleStore, Scheduler, SessionBusyError, describeNextRun, nextWindowStart, withinWindow } from './schedule.js';
 import type { ScheduledTask, WorkingWindow } from './schedule.js';
 import { Router, HttpError, sendJSON, sendError, sendSSEEvent, startSSE, endSSE, parseBody, readRawBody, corsHeaders } from './router.js';
 import { SessionStore, chooseStartupSession } from './sessions.js';
@@ -1455,6 +1456,8 @@ async function runScheduledTask(task: ScheduledTask): Promise<void> {
   }
 
   const agent = agentForSession(sid);
+  // A busy conversation queues the task rather than failing it (see SessionBusyError).
+  if (agent.isRunning()) throw new SessionBusyError();
   const turnStart = Date.now();
   const usageBefore = agent.getTokenUsage();
   try {
@@ -1465,11 +1468,20 @@ async function runScheduledTask(task: ScheduledTask): Promise<void> {
     recordTurnMetrics(agent, turnStart, usageBefore, true);
     auditGuardrail(agent, sid, '定时任务');
   } catch (err) {
+    if (err instanceof TurnInProgressError) throw new SessionBusyError();
     recordTurnMetrics(agent, turnStart, usageBefore, false);
     throw err;
   } finally {
     persistHistory(sid);
   }
+}
+
+/** Why a task's conversation cannot take a turn now; null when it can. */
+function scheduledTaskBusy(task: ScheduledTask): string | null {
+  const sid = task.sessionId;
+  if (!sid) return null;
+  const agent = agents.get(sid);
+  return agent?.isRunning() ? '目标会话正在进行一轮对话' : null;
 }
 
 /** The agent for a session id, creating it if needed. Not request-scoped. */
@@ -2029,6 +2041,7 @@ function registerRoutes(router: Router): void {
       withinWindow: withinWindow(now, window),
       nextWindowStart: nextWindowStart(now, window)?.toISOString() ?? null,
       running: schedulerInstance?.running() ?? [],
+      queued: schedulerInstance?.waiting() ?? [],
       tasks: schedule.list().map((t) => ({
         ...t,
         nextRun: describeNextRun(t, workingWindow(), now),
@@ -2144,7 +2157,53 @@ function registerRoutes(router: Router): void {
     if (!result.started) {
       throw new HttpError(409, result.reason ?? '无法启动');
     }
-    sendJSON(res, { ok: true, started: true });
+    sendJSON(res, { ok: true, started: true, ...(result.reason ? { queued: true, note: result.reason } : {}) });
+  });
+
+  /**
+   * In-flight turn state per session, so a window that left and came back can re-attach live.
+   *
+   * History is persisted per finished message, so a window that returns mid-turn and only polls
+   * `/api/chat/history` sees the current round's reasoning only once that round ends: the chain of
+   * thought appeared in one lump after thinking finished instead of streaming. `/api/chat/attach`
+   * replays the current round's partial reasoning/text and then forwards every new chunk.
+   */
+  const liveTurns = new Map<string, { reasoning: string; text: string; subs: Set<(c: StreamChunk | null) => void> }>();
+  function liveTap(sid: string, chunk: StreamChunk): void {
+    const t = liveTurns.get(sid);
+    if (!t) return;
+    if (chunk.type === 'reasoning') t.reasoning += chunk.content ?? '';
+    else if (chunk.type === 'text') t.text += chunk.content ?? '';
+    else if (chunk.type === 'tool_call_start' || chunk.type === 'done') { t.reasoning = ''; t.text = ''; }
+    for (const sub of t.subs) { try { sub(chunk); } catch { /* one bad listener must not stop the turn */ } }
+  }
+  function liveEnd(sid: string): void {
+    const t = liveTurns.get(sid);
+    if (!t) return;
+    liveTurns.delete(sid);
+    for (const sub of t.subs) { try { sub(null); } catch { /* ignore */ } }
+  }
+
+  router.post('/api/chat/attach', async (req, res) => {
+    const body = await parseBody<{ session_id?: string }>(req).catch(() => ({ session_id: undefined }));
+    const sid = sessionIdOf(req, body);
+    const t = liveTurns.get(sid);
+    startSSE(res);
+    if (!t) {
+      sendSSEEvent(res, { type: 'done', content: '' });
+      endSSE(res);
+      return;
+    }
+    if (t.reasoning) sendSSEEvent(res, { type: 'reasoning', content: t.reasoning });
+    if (t.text) sendSSEEvent(res, { type: 'text', content: t.text });
+    const sub = (c: StreamChunk | null) => {
+      if (c) { sendSSEEvent(res, c); return; }
+      t.subs.delete(sub);
+      sendSSEEvent(res, { type: 'done', content: '' });
+      endSSE(res);
+    };
+    t.subs.add(sub);
+    res.on('close', () => { t.subs.delete(sub); });
   });
 
   router.post('/api/chat', async (req, res) => {
@@ -2201,10 +2260,12 @@ function registerRoutes(router: Router): void {
       // Token usage is a per-agent cumulative counter, so the turn's cost is the
       // delta across it rather than the running total.
       const usageBefore = agent.getTokenUsage();
+      liveTurns.set(sid, { reasoning: '', text: '', subs: new Set() });
       try {
         let lastPersist = 0;
         const reply = await agent.chat(message, (chunk: StreamChunk) => {
           sendSSEEvent(res, chunk);
+          liveTap(sid, chunk);
           const now = Date.now();
           if (now - lastPersist > 2000) {
             lastPersist = now;
@@ -2222,6 +2283,7 @@ function registerRoutes(router: Router): void {
       } finally {
         // Persist even when the provider failed, so the user's turn is never lost.
         persistHistory(sid);
+        liveEnd(sid);
       }
       return;
     }
@@ -4615,9 +4677,9 @@ router.get('/api/fs/tree', (req, res) => {
   });
 
   router.post('/api/kb/query', async (req, res) => {
-    const body = await parseBody<{ query: string; budget?: number }>(req);
+    const body = await parseBody<{ query: string; budget?: number; includeRetired?: boolean }>(req);
     if (!body.query) throw new HttpError(400, 'Missing required field: query');
-    const result = engine.query(body.query, { budget: body.budget });
+    const result = engine.query(body.query, { budget: body.budget, includeRetired: body.includeRetired === true });
     sendJSON(res, result);
   });
 
@@ -4686,6 +4748,64 @@ router.get('/api/fs/tree', (req, res) => {
     const kind = validKinds.includes(body.kind as any) ? body.kind as any : 'text';
     const mem = engine.addMemory(body.groupId, kind, body.title, body.content);
     sendJSON(res, mem, 201);
+  });
+
+  /*
+   * KB governance: read one memory with its retirement marker and edit history, edit it in place
+   * (the replaced version is kept in its history), retire it out of retrieval, restore it.
+   * The same engine calls the agent's kb_edit / kb_retire tools make.
+   */
+  router.get('/api/kb/memories/:id', (_req, res, params) => {
+    const memory = store.getMemory(params.id);
+    if (!memory) throw new HttpError(404, `Memory not found: ${params.id}`);
+    sendJSON(res, {
+      memory,
+      retired: engine.getRetirement(memory) ?? null,
+      version: engine.getVersion(memory),
+      history: engine.getHistory(memory),
+    });
+  });
+
+  router.put('/api/kb/memories/:id', async (req, res, params) => {
+    const body = await parseBody<{ title?: string; content?: string; kind?: string; reason?: string }>(req);
+    if (!store.getMemory(params.id)) throw new HttpError(404, `Memory not found: ${params.id}`);
+    const patch: KBMemoryPatch = {};
+    if (body.title !== undefined) {
+      if (!String(body.title).trim()) throw new HttpError(400, 'title must not be empty');
+      patch.title = String(body.title);
+    }
+    if (body.content !== undefined) {
+      if (!String(body.content).trim()) throw new HttpError(400, 'content must not be empty (retire the memory instead)');
+      patch.content = String(body.content);
+    }
+    if (body.kind !== undefined) {
+      const validKinds = ['text', 'code', 'fact', 'tool_outcome', 'preference'] as const;
+      if (!validKinds.includes(body.kind as any)) throw new HttpError(400, `Invalid kind: ${body.kind}`);
+      patch.kind = body.kind as any;
+    }
+    if (Object.keys(patch).length === 0) throw new HttpError(400, 'Nothing to change: pass title, content or kind');
+    const reason = typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim() : undefined;
+    const r = engine.reviseMemory(params.id, patch, reason);
+    sendJSON(res, { ok: true, changed: r.changed, version: r.version, memory: r.after });
+  });
+
+  router.post('/api/kb/memories/:id/retire', async (req, res, params) => {
+    const body = await parseBody<{ reason?: string; replacedBy?: string }>(req);
+    if (!store.getMemory(params.id)) throw new HttpError(404, `Memory not found: ${params.id}`);
+    const reason = String(body.reason ?? '').trim();
+    if (!reason) throw new HttpError(400, 'Missing required field: reason');
+    const replacedBy = typeof body.replacedBy === 'string' && body.replacedBy.trim() ? body.replacedBy.trim() : undefined;
+    if (replacedBy && (replacedBy === params.id || !store.getMemory(replacedBy))) {
+      throw new HttpError(400, `Invalid replacedBy: ${replacedBy}`);
+    }
+    const memory = engine.retireMemory(params.id, { reason, replacedBy });
+    sendJSON(res, { ok: true, memory, retired: engine.getRetirement(memory) ?? null });
+  });
+
+  router.post('/api/kb/memories/:id/restore', (_req, res, params) => {
+    if (!store.getMemory(params.id)) throw new HttpError(404, `Memory not found: ${params.id}`);
+    const memory = engine.restoreMemory(params.id);
+    sendJSON(res, { ok: true, memory });
   });
 
   router.post('/api/kb/edges', async (req, res) => {
@@ -5150,6 +5270,7 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
     schedulerInstance = new Scheduler({
       store: schedule,
       run: runScheduledTask,
+      busy: scheduledTaskBusy,
       workingWindow,
       tickSeconds: config.schedule.tickSeconds,
     });

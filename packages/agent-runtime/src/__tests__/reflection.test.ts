@@ -656,3 +656,26 @@ describe('deriveReflections', () => {
     assert.match(renderReflection({ topic: '目标漂移', lesson: '重读目标', evidence: 'e', severity: 8 }), /\[目标漂移\]/);
   });
 });
+
+describe('reflection false positives from live audit', () => {
+  it('a provenance id inside a constraint is not the excluded object', () => {
+    const report = detectDrift({
+      goal: '整理知识库链接',
+      constraints: ['不要修改工作区文件；来源：e4fa0b5e'],
+      actions: [{ tool: 'kb_link', args: JSON.stringify({ from: '6369f703', to: 'e4fa0b5e' }) }],
+    });
+    assert.equal(report.signals.some((s) => s.kind === 'constraint_violated'), false);
+  });
+
+  it('parenthesised provenance is dropped too, the real object still fires', () => {
+    const report = detectDrift({
+      goal: '修复登录',
+      constraints: ['不要改 legacy.ts（source: 250c9a40）'],
+      actions: [{ tool: 'fs_write', args: JSON.stringify({ path: 'legacy.ts' }) }],
+    });
+    const hit = report.signals.find((s) => s.kind === 'constraint_violated');
+    assert.ok(hit?.detail.includes('对象「legacy.ts」'), hit?.detail);
+    assert.ok(!hit?.detail.includes('对象「250c9a40」'));
+  });
+});
+

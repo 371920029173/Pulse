@@ -125,10 +125,30 @@ function resolveInWorkspace(root: string, p: string): { ok: true; abs: string } 
   return { ok: true, abs };
 }
 
+/**
+ * Drop a leading UTF-8 byte-order mark.
+ *
+ * Node's `utf8` decoder keeps U+FEFF as the first character, and a language server counts it
+ * as column 0 of line 1. Everything the model sees has it removed (`fs_read` strips it, editors
+ * hide it), so a `line:column` the model reads off a file was one short of the server's on line 1
+ * of any BOM file: `lsp_definition` at 1:15 found nothing and 1:16 worked, and diagnostics on
+ * line 1 came back one column to the right. Stripping it from the text we OPEN with makes the
+ * server's coordinates the model's coordinates, in both directions (positions sent and results
+ * mapped back). Files the server reads from disk itself are unaffected: tsserver's own
+ * `sys.readFile` already drops the BOM.
+ *
+ * Only the first character: a U+FEFF anywhere else is content.
+ */
+export function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
 function readOrError(abs: string): { ok: true; text: string } | { ok: false; error: string } {
   try {
     if (!statSync(abs).isFile()) return { ok: false, error: `不是文件: ${abs}` };
-    return { ok: true, text: readFileSync(abs, 'utf8') };
+    // BOM stripped here, the one place LSP text is read, so didOpen/didChange and the
+    // 1-based positions from the model agree (see `stripBom`).
+    return { ok: true, text: stripBom(readFileSync(abs, 'utf8')) };
   } catch (err) {
     return { ok: false, error: `无法读取 ${abs}: ${(err as Error).message}` };
   }
