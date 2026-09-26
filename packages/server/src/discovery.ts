@@ -560,7 +560,7 @@ export function materializeConversation(
     messages,
     note: conv.source === 'cursor'
       ? 'Extracted from Cursor state.vscdb (original DB is not copied). Use this file as the conversation record.'
-      : 'Adapted export for SHE. Prefer reading this file over any chat paste.',
+      : 'Adapted export for Pulse. Prefer reading this file over any chat paste.',
   };
 
   let dest = join(dir, base + '.json');

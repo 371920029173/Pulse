@@ -1,5 +1,6 @@
 ﻿import type { LLMProvider, LLMMessage, ToolDefinition, ToolCall, StreamChunk } from '@she/shared';
 import { repairApiMessages } from '../protocol.js';
+import { lengthNoticeChunk, interruptedNoticeChunk } from './stream-failure.js';
 
 interface AnthropicContentBlock {
   type: 'text' | 'tool_use';
@@ -175,6 +176,10 @@ export class AnthropicProvider implements LLMProvider {
     let currentToolName = '';
     let currentToolArgs = '';
     let broke = false;
+    /** `message_stop` arrived; without it a cleanly-ended body was still cut short. */
+    let sawStop = false;
+    /** `stop_reason: max_tokens` — the reply hit the output ceiling. */
+    let hitMaxTokens = false;
 
     try {
     while (true) {
@@ -190,7 +195,7 @@ export class AnthropicProvider implements LLMProvider {
         if (!trimmed.startsWith('data: ')) continue;
         const payload = trimmed.slice(6);
 
-        let event: { type: string; delta?: { type?: string; text?: string; partial_json?: string }; content_block?: { type?: string; id?: string; name?: string } };
+        let event: { type: string; delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string }; content_block?: { type?: string; id?: string; name?: string } };
         try {
           event = JSON.parse(payload);
         } catch {
@@ -229,7 +234,10 @@ export class AnthropicProvider implements LLMProvider {
           currentToolId = '';
           currentToolName = '';
           currentToolArgs = '';
+        } else if (event.type === 'message_delta' && event.delta?.stop_reason === 'max_tokens') {
+          hitMaxTokens = true;
         } else if (event.type === 'message_stop') {
+          sawStop = true;
           onChunk({ type: 'done' });
         }
       }
@@ -250,6 +258,14 @@ export class AnthropicProvider implements LLMProvider {
 
     // An unfinished tool call has no complete arguments. Do not run it.
     if (broke) currentToolId = '';
+
+    if (!broke && hitMaxTokens) {
+      onChunk(lengthNoticeChunk(currentToolId ? 1 : 0));
+      currentToolId = '';
+    } else if (!broke && !sawStop && (contentAccum || toolCalls.length)) {
+      // The body ended without `message_stop`: a truncation that threw nothing.
+      onChunk(interruptedNoticeChunk('连接在收到结束标记前关闭'));
+    }
 
     const result: LLMMessage = { role: 'assistant', content: contentAccum };
     if (toolCalls.length > 0) result.tool_calls = toolCalls;

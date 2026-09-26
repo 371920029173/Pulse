@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { fetchJSON } from '../lib/api';
 import { toast } from '../lib/toast';
+import { t } from '../lib/i18n';
 import styles from '../styles/McpPanel.module.css';
 
 interface McpServer {
@@ -14,6 +15,9 @@ interface McpServer {
   toolCount: number | null;
   error?: string;
   latencyMs?: number;
+  /** Tools actually registered to the agent by the server-side MCP bridge. */
+  injected?: number;
+  injectError?: string;
 }
 
 /**
@@ -64,7 +68,9 @@ export function McpPanel() {
       body: { enabled },
     });
     setServers((prev) => prev.map((x) => (x.name === name ? { ...x, enabled } : x)));
-  }, []);
+    // The bridge reconnected on the server; re-read so the injected count is current.
+    void load();
+  }, [load]);
 
   const remove = useCallback(async (name: string) => {
     await fetchJSON(`/api/mcp/servers/${encodeURIComponent(name)}`, { method: 'DELETE' });
@@ -141,10 +147,13 @@ export function McpPanel() {
                 <span className={`${styles.dot} ${dotClass}`} />
                 <span className={styles.name}>{s.name}</span>
                 <span className={`${styles.source} ${s.source === 'she' ? styles.sourceShe : ''}`}>
-                  {s.source === 'she' ? 'SHE' : 'Cursor'}
+                  {s.source === 'she' ? 'Pulse' : 'Cursor'}
                 </span>
                 <span className={styles.spacer} />
                 {s.toolCount !== null ? <span className={styles.tools}>{s.toolCount} 工具</span> : null}
+                {s.enabled !== false ? (
+                  <span className={styles.tools} title={t('实际注册给智能体的工具数')}>{t('已注入 {n}', { n: s.injected ?? 0 })}</span>
+                ) : null}
                 {s.latencyMs !== undefined ? <span className={styles.latency}>{s.latencyMs}ms</span> : null}
               </div>
 
@@ -154,6 +163,13 @@ export function McpPanel() {
 
               {s.reachable === false && s.error ? (
                 <div className={styles.errline}>{s.error}</div>
+              ) : null}
+
+              {s.enabled !== false && s.reachable && s.toolCount !== null && s.toolCount !== (s.injected ?? 0) ? (
+                <div className={styles.errline}>
+                  {t('⚠ 探测到 {probe} 个工具，但只有 {injected} 个注册给了智能体', { probe: s.toolCount, injected: s.injected ?? 0 })}
+                  {s.injectError ? ` \u2014 ${s.injectError}` : ''}
+                </div>
               ) : null}
 
               <div className={styles.itemActions}>

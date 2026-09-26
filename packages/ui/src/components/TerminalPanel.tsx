@@ -16,7 +16,7 @@ interface ConfirmTicket {
 
 export function TerminalPanel({ open, onToggle, height = 220 }: { open: boolean; onToggle: () => void; height?: number }) {
   const [lines, setLines] = useState<TermLine[]>([
-    { id: 'boot', kind: 'sys', text: 'SHE 终端 — 命令在工作区沙箱内执行；危险命令需确认。' },
+    { id: 'boot', kind: 'sys', text: 'Pulse 终端 — 命令在工作区沙箱内执行；危险命令需确认。' },
   ]);
   const [input, setInput] = useState('');
   const [cwd, setCwd] = useState('.');

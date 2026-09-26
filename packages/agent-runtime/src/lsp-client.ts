@@ -169,9 +169,12 @@ export class LspServer {
   private readonly diagnosedContent = new Map<string, { text: string; diagnostics: Diagnostic[] }>();
   /** Text whose publish is still outstanding, keyed the same way. */
   private readonly pendingText = new Map<string, string>();
-  private readonly diagnosticWaiters = new Map<string, (d: Diagnostic[]) => void>();
+  private readonly diagnosticWaiters = new Map<string, (d: Diagnostic[] | null) => void>();
+  /** Per-document version; LSP wants a monotonically increasing int32. */
+  private readonly versions = new Map<string, number>();
   private ready = false;
   private disposed = false;
+  private exited = false;
   /**
    * Whether the server has finished loading the project.
    *
@@ -195,6 +198,15 @@ export class LspServer {
 
   get isReady(): boolean { return this.ready; }
 
+  /** False once the process has exited or been stopped; the manager then respawns it. */
+  get isAlive(): boolean { return !!this.proc && !this.exited && !this.disposed; }
+
+  private nextVersion(key: string): number {
+    const v = (this.versions.get(key) ?? 1) + 1;
+    this.versions.set(key, v);
+    return v;
+  }
+
   /** Start the server and complete the `initialize` handshake. */
   async start(): Promise<void> {
     if (this.proc) return;
@@ -213,6 +225,9 @@ export class LspServer {
     });
     this.proc.on('exit', (code) => {
       this.ready = false;
+      this.exited = true;
+      for (const [, w] of this.diagnosticWaiters) w(null);
+      this.diagnosticWaiters.clear();
       for (const [, p] of this.pending) {
         clearTimeout(p.timer);
         p.reject(new Error(`语言服务器 ${this.spec.id} 已退出（code ${code}）`));
@@ -265,6 +280,7 @@ export class LspServer {
      * three identical timeouts tripped the stuck-loop guard and ended the whole turn.
      */
     this.pendingText.set(fileKey(filePath), text);
+    this.versions.set(fileKey(filePath), 1);
     this.notify('textDocument/didOpen', {
       textDocument: { uri: pathToFileURL(filePath).href, languageId: language, version: 1, text },
     });
@@ -329,25 +345,45 @@ export class LspServer {
     const cached = this.diagnosedContent.get(key);
     if (cached && cached.text === text) return cached.diagnostics;
 
-    // Content changed (or first check): re-sync and wait for a fresh publish.
-    this.notify('textDocument/didChange', {
-      textDocument: { uri: pathToFileURL(filePath).href, version: Date.now() },
-      contentChanges: [{ text }],
-    });
+    const uri = pathToFileURL(filePath).href;
     // Remember which text the next publish corresponds to, so a result can be
     // cached against the content it actually describes.
     this.pendingText.set(key, text);
+    // Content changed (or first check): re-sync and wait for a fresh publish.
+    // Version must be a small increasing int; Date.now() overflows LSP's int32.
+    this.notify('textDocument/didChange', {
+      textDocument: { uri, version: this.nextVersion(key) },
+      contentChanges: [{ text }],
+    });
+    const first = await this.waitForPublish(key, 5_000);
+    if (first !== null || !this.isAlive) return first;
 
+    /*
+     * No publish after the edit. typescript-language-server does not re-publish when the
+     * diagnostic set is unchanged (clean before, clean after), so an edit that keeps a file
+     * clean used to wait the full 15s and report "no answer". Reopening the document always
+     * triggers a publish, which gives us a real answer for the new text.
+     */
+    this.notify('textDocument/didClose', { textDocument: { uri } });
+    this.versions.set(key, 1);
+    this.notify('textDocument/didOpen', {
+      textDocument: { uri, languageId: language, version: 1, text },
+    });
+    return this.waitForPublish(key, 10_000);
+  }
+
+  private waitForPublish(key: string, ms: number): Promise<Diagnostic[] | null> {
     return new Promise<Diagnostic[] | null>((resolve) => {
       const timer = setTimeout(() => {
-        this.diagnosticWaiters.delete(key);
+        if (this.diagnosticWaiters.get(key) === done) this.diagnosticWaiters.delete(key);
         resolve(null);
-      }, 15_000);
+      }, ms);
       timer.unref?.();
-      this.diagnosticWaiters.set(key, (d) => {
+      const done = (d: Diagnostic[] | null) => {
         clearTimeout(timer);
         resolve(d);
-      });
+      };
+      this.diagnosticWaiters.set(key, done);
     });
   }
 

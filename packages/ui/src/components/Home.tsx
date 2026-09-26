@@ -144,7 +144,7 @@ export function Home({ onEnter, appearance, dock }: Props) {
             <span className={styles.markLetter}>b</span>
           </div>
           <div className={styles.heroText}>
-            <h1 className={styles.wordmark}>bot</h1>
+            <h1 className={styles.wordmark}>Pulse</h1>
             <p className={styles.tagline}>Structured Hierarchy Engine</p>
           </div>
         </header>

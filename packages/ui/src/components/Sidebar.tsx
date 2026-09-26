@@ -166,7 +166,7 @@ export function Sidebar({
           title="回到主页"
         >
           <span className={styles.logoIcon} aria-hidden><span className={styles.logoPulse} /></span>
-          <span className={styles.logoText}>bot</span>
+          <span className={styles.logoText}>Pulse</span>
         </button>
         <span className={styles.logoVersion}>v2</span>
         {/* Desktop only: open another independent window (own conversation). */}

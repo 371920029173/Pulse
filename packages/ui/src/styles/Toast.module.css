@@ -21,3 +21,8 @@
   from { opacity: 0; transform: translate(-50%, 12px) scale(0.96); }
   to { opacity: 1; transform: translate(-50%, 0) scale(1); }
 }
+
+/* Light theme: more transparent frosted glass (dark theme unchanged). */
+:global(html[data-theme="light"]) .toast {
+  background: color-mix(in srgb, var(--bg-tertiary) 68%, transparent);
+}

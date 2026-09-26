@@ -390,10 +390,22 @@ describe('知识库文件禁止直连', () => {
     assert.ok(result.includes('kb_upsert'), result);
   });
 
-  it('反斜杠写法同样被拒（换个拼法不是绕过的理由）', async () => {
+  it('反斜杠写法：Windows 上是同一个文件必须拒，POSIX 上它不是同一个文件', async () => {
     const { tools } = await withKb(tempDir);
     const result = await tools.execute('fs_read', { path: '.she\\kb.sqlite' });
-    assert.ok(result.includes('kb_query'), result);
+    if (process.platform === 'win32') {
+      // Windows 把 `\` 当分隔符：`.she\kb.sqlite` 就是那个库，换个拼法不是绕过的理由。
+      assert.ok(result.includes('kb_query'), result);
+      return;
+    }
+    /*
+     * POSIX 上 `\` 是合法的文件名字符，所以这是另一个（而且并不存在的）文件。把它当成知识库
+     * 拒掉才是错的 —— 模型读一个普通文件名不该被指向 kb_query。这里钉住的正是"不过度拒绝"。
+     *
+     * 这条分支是 CI 发现的：这个用例原先只按 Windows 的语义写，在 Linux 上必然红。
+     */
+    assert.ok(!result.includes('kb_query'), result);
+    assert.match(result, /ENOENT|no such file/i);
   });
 
   it('shell 里 sqlite3 直查被拒，而不是让它跑起来', async () => {

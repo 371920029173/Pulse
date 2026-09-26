@@ -13,7 +13,7 @@
  *     history, because those are the states that were wrong before
  */
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { Chat } from '../components/Chat';
 import { Sidebar } from '../components/Sidebar';
 import type { ChatMessage } from '../hooks/useChat';
@@ -94,15 +94,18 @@ describe('Chat 消息渲染', () => {
     expect(screen.getByText(/连接失败测试用错误/)).toBeTruthy();
   });
 
-  it('思维链全文在页面上，不因长度被收成一行', () => {
+  it('思维链默认折叠：只显示首行，点开后全文在页面上', () => {
     const chain = '第一行思维链标记AAA\n' + '后续很长的推理'.repeat(40);
     const { container } = render(<Chat {...chatProps({
       messages: [msg({ role: 'assistant', content: '', reasoning: chain })],
     })} />);
-    const text = container.textContent ?? '';
-    expect(text).toContain('第一行思维链标记AAA');
-    expect(text).toContain('后续很长的推理'.repeat(40));
-    expect(text).not.toContain('空回复');
+    const before = container.textContent ?? '';
+    expect(before).toContain('第一行思维链标记AAA');
+    expect(before).not.toContain('后续很长的推理'.repeat(40));
+    expect(before).not.toContain('空回复');
+    const header = container.querySelector('[data-surface="reasoning"] button') as HTMLButtonElement;
+    fireEvent.click(header);
+    expect(container.textContent ?? '').toContain('后续很长的推理'.repeat(40));
   });
 });
 

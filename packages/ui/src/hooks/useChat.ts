@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import { fetchJSON, streamSSE } from '../lib/api';
+import { t } from '../lib/i18n';
 
 export interface ToolCallData {
   id: string;
@@ -48,7 +49,28 @@ export interface ChatMessage {
   isThinking?: boolean;
   /** Work-group speaker. Absent in a 1:1 chat. */
   speaker?: { name: string; hue: number };
+  /**
+   * A notice the user must not miss (reply cut off, connection dropped, turn failed).
+   * `action: 'continue'` renders a 继续 button that appends a continuation turn.
+   */
+  notice?: { kind: 'length' | 'network' | 'provider' | 'local'; action?: 'continue' };
+  /**
+   * Identity of the live bubble a streaming round writes into. Client-only, never persisted.
+   *
+   * Positions in `messages` are not stable (history can be swapped in underneath a turn) and the
+   * old mutable `liveIdx` was read lazily inside state updaters — see `attachStreamHandlers`.
+   */
+  streamRound?: string;
 }
+
+/**
+ * What the 继续 button sends. A NEW user turn, appended — never an edit of the cut-off reply,
+ * which would change the already-sent prefix and cost the provider's prefix cache.
+ */
+export const continuePrompt = (): string => t('继续（从上一条回答中断的地方接着写，不要重复已经写过的内容）');
+
+/** Distinct prefix per handler set, so round keys from two streams never collide. */
+let streamHandlerSeq = 0;
 
 export interface StreamChunk {
   type:
@@ -76,6 +98,11 @@ export interface StreamChunk {
   toolCallId?: string;
   /** Present when type === 'tool_result': the tool that produced it. */
   toolName?: string;
+  /** Present on a `status` that must stay visible; see ChatMessage.notice. */
+  notice?: ChatMessage['notice'];
+  /** Present on `error`: where it failed (provider / network / local) and its Chinese label. */
+  kind?: string;
+  label?: string;
 }
 
 export interface KBQueryResultData {
@@ -214,16 +241,35 @@ export function useChat(sessionId?: string | null) {
      * was appended to a single bubble and the terminal `done` chunk overwrote it
      * with only the last round's text, which is why replies appeared to vanish.
      */
-    let liveIdx = -1;
     /**
-     * Index of the assistant message a tool call belongs to.
+     * Key of the bubble for the round currently being filled (null = no round open).
+     *
+     * Every value an updater needs is captured at DISPATCH time, never read from mutable state
+     * inside the updater. This is the fix for a real silent truncation (2026-09-26, a long reply
+     * that stopped at 「……你手里的东西恰好是」 while the stored message was complete): the last
+     * few `text` frames and the `done` frame arrived in ONE `read()`. React computed the first
+     * update eagerly but queued the rest, and those read `acc.text` / `liveIdx` only when it
+     * rendered — after `sealBubble` had already reset both. The tail was written into a fresh,
+     * empty bubble that renders as nothing, and the visible reply simply ended mid-sentence.
+     */
+    let roundKey: string | null = null;
+    let roundSeq = 0;
+    const handlerId = ++streamHandlerSeq;
+    const newKey = () => `r${handlerId}:${++roundSeq}`;
+    const findKey = (list: ChatMessage[], key: string | null) => {
+      if (!key) return -1;
+      for (let i = list.length - 1; i >= 0; i--) if (list[i].streamRound === key) return i;
+      return -1;
+    };
+    /**
+     * Key of the assistant message a tool call belongs to.
      *
      * `tool_call_start` is emitted while the bubble for that round is still the
      * live one, so the call is attached to it there. Without this the collected
      * tool calls were never attached to any message and stayed invisible until a
      * reload rebuilt them from history.
      */
-    let callOwnerIdx = -1;
+    let callOwnerKey: string | null = null;
 
     /**
      * Patch the bubble for the round currently being filled, re-opening it if it went away.
@@ -239,37 +285,65 @@ export function useChat(sessionId?: string | null) {
      * Re-opening from the accumulators is what makes the live view outrank a stale disk copy: the
      * text received so far stays on screen and the rest keeps streaming into the same place.
      */
-    const patchLive = (patch: (m: ChatMessage) => ChatMessage) => {
+    const patchLive = (fields: Partial<ChatMessage>) => {
+      // The round opens even while paused, so `sealBubble` still lands its text.
+      if (!roundKey) roundKey = newKey();
       if (pausedRef.current) return;
+      const key = roundKey;
+      const text = acc.text;
+      const reasoning = acc.reasoning;
       setMessages((prev) => {
         const updated = [...prev];
-        if (liveIdx < 0 || !updated[liveIdx] || updated[liveIdx].role !== 'assistant') {
+        const idx = findKey(updated, key);
+        if (idx < 0) {
           updated.push({
             role: 'assistant',
-            content: acc.text,
-            reasoning: acc.reasoning,
+            content: text,
+            reasoning,
             isStreaming: true,
-            isThinking: !acc.text,
+            isThinking: !text,
+            streamRound: key,
+            ...fields,
           });
-          liveIdx = updated.length - 1;
+        } else {
+          updated[idx] = { ...updated[idx], ...fields };
         }
-        updated[liveIdx] = patch(updated[liveIdx]);
         return updated;
       });
     };
 
-    /** Freeze the current bubble so the next round starts a new one. */
+    /**
+     * Freeze the current bubble so the next round starts a new one.
+     *
+     * The round's final text is written here too (captured now, not at render time), so the
+     * bubble always ends with everything that arrived — even if the last frames were not rendered
+     * yet, or rendering was paused.
+     */
     const sealBubble = () => {
-      setMessages((prev) => {
-        const updated = [...prev];
-        if (liveIdx >= 0 && updated[liveIdx]?.role === 'assistant') {
-          updated[liveIdx] = { ...updated[liveIdx], isStreaming: false, isThinking: false };
-        }
-        return updated;
-      });
+      const key = roundKey;
+      const text = acc.text;
+      const reasoning = acc.reasoning;
+      roundKey = null;
       acc.text = '';
       acc.reasoning = '';
-      liveIdx = -1;
+      if (!key) return;
+      setMessages((prev) => {
+        const idx = findKey(prev, key);
+        if (idx < 0) {
+          if (!text && !reasoning) return prev;
+          return [...prev, { role: 'assistant', content: text, reasoning, streamRound: key }];
+        }
+        const updated = [...prev];
+        const m = updated[idx];
+        updated[idx] = {
+          ...m,
+          content: text.length >= (m.content?.length ?? 0) ? text : m.content,
+          reasoning: reasoning || m.reasoning,
+          isStreaming: false,
+          isThinking: false,
+        };
+        return updated;
+      });
     };
 
     return {
@@ -278,13 +352,13 @@ export function useChat(sessionId?: string | null) {
         switch (chunk.type) {
           case 'text': {
             acc.text += chunk.content ?? '';
-            patchLive((m) => ({ ...m, content: acc.text, isThinking: false, isStreaming: true }));
+            patchLive({ content: acc.text, isThinking: false, isStreaming: true });
             break;
           }
 
           case 'reasoning': {
             acc.reasoning += chunk.content ?? '';
-            patchLive((m) => ({ ...m, reasoning: acc.reasoning, isThinking: !acc.text }));
+            patchLive({ reasoning: acc.reasoning, isThinking: !acc.text });
             break;
           }
 
@@ -300,17 +374,21 @@ export function useChat(sessionId?: string | null) {
             if (!chunk.toolCall) break;
             const tc = chunk.toolCall as ToolCallData;
             toolCalls.push(tc);
+            // Captured now: `sealBubble` below clears `roundKey` before this updater runs.
+            const liveKey = roundKey;
+            const ownerKey = liveKey ?? newKey();
+            callOwnerKey = ownerKey;
             setMessages((prev) => {
               const updated = [...prev];
-              const target = liveIdx >= 0 ? liveIdx : updated.length - 1;
+              const liveAt = findKey(updated, liveKey);
+              const target = liveAt >= 0 ? liveAt : updated.length - 1;
               const msg = updated[target];
               if (msg && msg.role === 'assistant') {
-                updated[target] = { ...msg, toolCalls: [...(msg.toolCalls ?? []), tc] };
-                callOwnerIdx = target;
+                updated[target] = { ...msg, toolCalls: [...(msg.toolCalls ?? []), tc], streamRound: msg.streamRound ?? ownerKey };
+                if (msg.streamRound && msg.streamRound !== ownerKey) callOwnerKey = msg.streamRound;
               } else {
                 // No prose preceded the call (tool-only round): give it a home.
-                updated.push({ role: 'assistant', content: '', toolCalls: [tc], isStreaming: true });
-                callOwnerIdx = updated.length - 1;
+                updated.push({ role: 'assistant', content: '', toolCalls: [tc], isStreaming: true, streamRound: ownerKey });
               }
               return updated;
             });
@@ -336,11 +414,12 @@ export function useChat(sessionId?: string | null) {
               const partial = currentToolCallRef.value as ToolCallData;
               setMessages((prev) => {
                 const updated = [...prev];
-                const msg = updated[callOwnerIdx];
+                const at = findKey(updated, callOwnerKey);
+                const msg = updated[at];
                 if (msg?.toolCalls?.length) {
                   const calls = [...msg.toolCalls];
                   calls[calls.length - 1] = partial;
-                  updated[callOwnerIdx] = { ...msg, toolCalls: calls };
+                  updated[at] = { ...msg, toolCalls: calls };
                 }
                 return updated;
               });
@@ -353,11 +432,12 @@ export function useChat(sessionId?: string | null) {
               const finalCall = currentToolCallRef.value as ToolCallData;
               setMessages((prev) => {
                 const updated = [...prev];
-                const msg = updated[callOwnerIdx];
+                const at = findKey(updated, callOwnerKey);
+                const msg = updated[at];
                 if (msg?.toolCalls?.length) {
                   const calls = [...msg.toolCalls];
                   calls[calls.length - 1] = finalCall;
-                  updated[callOwnerIdx] = { ...msg, toolCalls: calls };
+                  updated[at] = { ...msg, toolCalls: calls };
                 }
                 return updated;
               });
@@ -426,7 +506,8 @@ export function useChat(sessionId?: string | null) {
           if ((data as any)?.task) {
             window.dispatchEvent(new CustomEvent('she:task', { detail: (data as any).task }));
           }if (chunk.content) {
-              setMessages((prev) => [...prev, { role: 'system', content: chunk.content! }]);
+              const notice = chunk.notice;
+              setMessages((prev) => [...prev, notice ? { role: 'system', content: chunk.content!, notice } : { role: 'system', content: chunk.content! }]);
             }
             break;
 
@@ -436,6 +517,32 @@ export function useChat(sessionId?: string | null) {
             // current bubble. Never overwrite accumulated text with the chunk's
             // content — that silently discarded everything but the final round.
             sealBubble();
+            /*
+             * The route's closing `done` carries the turn's final reply. Use it only to APPEND a
+             * missing tail to the last reply bubble (when that bubble is a strict prefix of it):
+             * whatever was lost on the way to the screen is restored, and nothing shown is ever
+             * rewritten.
+             */
+            if (chunk.content) {
+              const full = chunk.content;
+              setMessages((prev) => {
+                for (let i = prev.length - 1; i >= 0; i--) {
+                  const m = prev[i];
+                  if (m.role === 'system') continue;
+                  // Only the final round's own bubble: past a tool row or the user's message
+                  // the text belongs to someone else.
+                  if (m.role !== 'assistant') return prev;
+                  const have = m.content ?? '';
+                  if (have && full.length > have.length && full.startsWith(have)) {
+                    const updated = [...prev];
+                    updated[i] = { ...m, content: full, isStreaming: false, isThinking: false };
+                    return updated;
+                  }
+                  return prev;
+                }
+                return prev;
+              });
+            }
             break;
 
           case 'error':
@@ -448,7 +555,10 @@ export function useChat(sessionId?: string | null) {
              * key — produced no message at all: the turn simply stopped, and the pending tool card
              * stayed at `result === undefined`, rendering as an endless "执行中" animation.
              */
-            setMessages((prev) => appendStreamError(prev, chunk.error ?? 'Unknown error'));
+            setMessages((prev) => appendStreamError(
+              prev,
+              chunk.label ? `${chunk.label}：${chunk.error ?? ''}` : (chunk.error ?? t('未知错误')),
+            ));
             setIsLoading(false);
             break;
         }
@@ -495,10 +605,19 @@ export function useChat(sessionId?: string | null) {
     const toolCalls: ToolCallData[] = [];
     const currentToolCallRef = { value: null as Partial<ToolCallData> | null };
 
+    const handlers = attachStreamHandlers(acc, toolCalls, currentToolCallRef);
     streamSSE(
       withSid('/api/chat'),
       { message: text, stream: true, session_id: sidRef.current },
-      attachStreamHandlers(acc, toolCalls, currentToolCallRef),
+      {
+        ...handlers,
+        onDone: () => {
+          handlers.onDone();
+          // The turn is over: stop claiming to be the live view, so a later history load for
+          // this session is no longer skipped and the transcript can be reconciled with disk.
+          if (abortRef.current === controller) abortRef.current = null;
+        },
+      },
       controller.signal,
       { idleTimeoutMs: 0 },
     );

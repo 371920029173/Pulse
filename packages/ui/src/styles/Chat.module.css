@@ -1249,29 +1249,6 @@
   100% { transform: scale(1); }
 }
 
-/* ---- thinking-level buttons ---- */
-.thinkBtn {
-  border: none;
-  border-radius: 999px;
-  min-width: 26px;
-  padding: 4px 8px;
-  font-size: 11px;
-  cursor: pointer;
-  background: transparent;
-  color: var(--text-tertiary);
-  transition:
-    background 200ms var(--ease-out),
-    color 200ms var(--ease-out),
-    transform 220ms var(--ease-spring);
-}
-
-.thinkBtn:hover {
-  color: var(--text-primary);
-  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
-}
-
-.thinkBtn:active { transform: scale(0.93); }
-
 /* ============================================================
    Rounded, less angular bubbles
    ============================================================ */
@@ -1340,8 +1317,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .emptyIcon,
-  .modeBtnActive,
-  .thinkBtnActive {
+  .modeBtnActive {
     animation: none !important;
   }
 }
@@ -1725,4 +1701,48 @@
 
 @media (prefers-reduced-motion: reduce) {
   .peerChip, .peerActive { animation: none !important; transition: none !important; }
+}
+
+/* A notice the user must not miss: reply cut off, connection dropped, turn failed. */
+.bubbleNotice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--warning, #d9a441) 60%, transparent);
+  color: var(--text-primary, inherit);
+}
+
+.bubbleNotice[data-notice='provider'],
+.bubbleNotice[data-notice='local'] {
+  border-color: color-mix(in srgb, var(--danger, #e5484d) 60%, transparent);
+}
+
+.noticeContinueBtn {
+  flex: none;
+  padding: 3px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.noticeContinueBtn:hover {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+/* Light theme: more transparent frosted glass (dark theme unchanged). */
+:global(html[data-theme="light"]) .header,
+:global(html[data-theme="light"]) .inputArea {
+  background: color-mix(in srgb, var(--bg-secondary) 52%, transparent);
+}
+:global(html[data-theme="light"]) .jumpLatest {
+  background: color-mix(in srgb, var(--bg-secondary) 64%, transparent);
+}
+:global(html[data-theme="light"]) .modeSwitch,
+:global(html[data-theme="light"]) .thinkSlider {
+  background: color-mix(in srgb, var(--bg-tertiary) 48%, transparent);
 }

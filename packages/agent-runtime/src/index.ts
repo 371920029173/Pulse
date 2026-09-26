@@ -1,5 +1,13 @@
 export { OpenAIProvider } from './providers/openai.js';
 export { AnthropicProvider } from './providers/anthropic.js';
+export {
+  classifyLlmFailure,
+  failureLabel,
+  retryStatusText,
+  LENGTH_NOTICE_TEXT,
+  StreamInterruptedError,
+  type LlmFailureKind,
+} from './providers/stream-failure.js';
 export { Agent, TurnInProgressError } from './agent.js';
 export { getSystemPrompt } from './system-prompt.js';
 export { createKBTools } from './kb-tools.js';
@@ -51,6 +59,8 @@ export {
   ERRORBOOK_ROOT,
 } from './errorbook.js';
 export type { ErrorbookKind, ErrorEntry, FailureReport, ErrorbookEngineLike, ReflectionReport } from './errorbook.js';
+export { retireKnownFalsePositives, matchKnownFalsePositive, migrationsMarkerPath, KNOWN_FALSE_POSITIVES, FALSE_POSITIVE_REGISTRY_VERSION } from './errorbook-migrations.js';
+export type { KnownFalsePositive, RetireKnownFalsePositivesResult } from './errorbook-migrations.js';
 export {
   ConfidenceMirror,
   detectDrift,
@@ -108,6 +118,9 @@ export {
   readChildProgress,
   formatTimeoutReport,
   resolveSubagentTimeoutMs,
+  subagentWrapUpDelayMs,
+  composeWrapUpNudge,
+  SUBAGENT_WRAP_UP_RATIO,
   selectHarvestNotes,
   renderKbHarvest,
   DEFAULT_SUBAGENT_TIMEOUT_SECONDS,

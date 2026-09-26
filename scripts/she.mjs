@@ -111,18 +111,18 @@ const err = (t) => console.log(paint('31', t));
 // reason the PowerShell version kept it out of the script.
 const M = { /* defaults assigned below */ };
 Object.assign(M, {
-  title: 'SHE - Structured Hierarchy Engine',
-  statusTitle: 'SHE status',
+  title: 'Pulse',
+  statusTitle: 'Pulse status',
   serverRunning: 'Backend running',
   serverStopped: 'Backend not running',
   windowRunning: 'Desktop window running',
   windowStopped: 'Desktop window not running',
   processes: 'processes',
-  stopping: '[stop] Closing SHE',
+  stopping: '[stop] Closing Pulse',
   stoppedBackend: 'Backend stopped',
   backendNotRunning: 'Backend not running (port free)',
   stoppedWindows: 'Desktop window closed',
-  notProjectDir: '[ERROR] Not a SHE project directory',
+  notProjectDir: '[ERROR] Not a Pulse project directory',
   notProjectHint: 'Put this script in the project scripts/ folder.',
   needNode: '[ERROR] Node.js not found. Install Node 20+: https://nodejs.org',
   needPnpm: '[ERROR] pnpm not found. Run: npm install -g pnpm',

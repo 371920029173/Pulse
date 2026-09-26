@@ -68,7 +68,15 @@ export class LspManager {
     if (!spec) return null;
 
     const existing = this.servers.get(spec.id);
-    if (existing !== undefined) return existing;
+    // A server whose process died (crash, OOM, killed) would time out on every call.
+    // Drop it and start a fresh one instead.
+    if (existing && !existing.isAlive) {
+      log.warn(`[lsp] ${spec.id} 进程已退出，重新启动`);
+      this.servers.delete(spec.id);
+      void existing.stop().catch(() => undefined);
+    } else if (existing !== undefined) {
+      return existing;
+    }
 
     if (!this.resolved.has(spec.id)) {
       this.resolved.set(spec.id, resolveServer(spec, this.workspaceRoot));
@@ -380,7 +388,7 @@ export async function executeLspTool(
         if (diags === null) {
           return textResult(
             '未能获取诊断（语言服务器未在超时前响应）。这不代表文件没有问题——'
-            + '请用 read 检查改动，或稍后重试。',
+            + '不要重复调用 lsp_diagnostics，请改用 shell 运行类型检查（如 `npx tsc --noEmit`）或项目的测试来验证改动。',
             false,
           );
         }

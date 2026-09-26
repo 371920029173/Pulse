@@ -27,19 +27,18 @@ import {
 // ─── ASCII Logo ───
 
 const LOGO = `
-  ╔═══════════════════════════════════════╗
-  ║                                       ║
-  ║   ███████╗██╗  ██╗███████╗  ██╗   ██╗ ║
-  ║   ██╔════╝██║  ██║██╔════╝  ██║   ██║ ║
-  ║   ███████╗███████║█████╗    ██║   ██║ ║
-  ║   ╚════██║██╔══██║██╔══╝    ╚██╗ ██╔╝ ║
-  ║   ███████║██║  ██║███████╗   ╚████╔╝  ║
-  ║   ╚══════╝╚═╝  ╚═╝╚══════╝    ╚═══╝   ║
-  ║                                       ║
-  ║   Structured Hierarchy Engine         ║
-  ║   Local coding agent · PulseSeed KB   ║
-  ║                                       ║
-  ╚═══════════════════════════════════════╝`;
+  ╔═══════════════════════════════════════════════╗
+  ║                                               ║
+  ║   ██████╗ ██╗   ██╗██╗     ███████╗███████╗   ║
+  ║   ██╔══██╗██║   ██║██║     ██╔════╝██╔════╝   ║
+  ║   ██████╔╝██║   ██║██║     ███████╗█████╗     ║
+  ║   ██╔═══╝ ██║   ██║██║     ╚════██║██╔══╝     ║
+  ║   ██║     ╚██████╔╝███████╗███████║███████╗   ║
+  ║   ╚═╝      ╚═════╝ ╚══════╝╚══════╝╚══════╝   ║
+  ║                                               ║
+  ║   Local coding agent · PulseSeed KB           ║
+  ║                                               ║
+  ╚═══════════════════════════════════════════════╝`;
 
 const VERSION = '0.1.0';
 
@@ -206,7 +205,7 @@ async function initKB(config: SheConfig): Promise<{ store: KBStoreInterface; eng
 function printHelp(): void {
   console.log(boldCyan(LOGO));
   console.log('');
-  console.log(bold(`  SHE v${VERSION}`) + dim(' — Structured Hierarchy Engine'));
+  console.log(bold(`  Pulse v${VERSION}`) + dim(' — local coding agent'));
   console.log(dim('  A local coding agent with PulseSeed knowledge base retrieval.\n'));
 
   console.log(bold('  USAGE'));
@@ -246,7 +245,7 @@ function printHelp(): void {
 
 async function runDoctor(): Promise<void> {
   console.log('');
-  console.log(indent(box(bold('SHE Doctor') + dim(' — System Health Check'), cyan('diagnostic')), 2));
+  console.log(indent(box(bold('Pulse Doctor') + dim(' — System Health Check'), cyan('diagnostic')), 2));
   console.log('');
 
   const checks: { label: string; ok: boolean; detail: string }[] = [];
@@ -574,7 +573,7 @@ async function runChat(): Promise<void> {
 
   console.log(boldCyan(LOGO));
   console.log('');
-  console.log(bold(`  SHE v${VERSION}`) + dim(' — interactive mode'));
+  console.log(bold(`  Pulse v${VERSION}`) + dim(' — interactive mode'));
   console.log(dim('  Type /help for in-chat commands, /exit to quit.\n'));
 
   const sp = spinner('Initializing agent...');
@@ -774,7 +773,7 @@ async function runServer(): Promise<void> {
 
   console.log('');
   console.log(indent(box([
-    `${bold('SHE API Server')}`,
+    `${bold('Pulse API Server')}`,
     '',
     `${dim('Host:')}  ${config.server.host}`,
     `${dim('Port:')}  ${config.server.port}`,

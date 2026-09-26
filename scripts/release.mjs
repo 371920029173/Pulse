@@ -78,7 +78,7 @@ function gitDirty() {
 }
 
 console.log('\n============================================');
-console.log(`  SHE 发布打包  v${VERSION}`);
+console.log(`  Pulse 发布打包  v${VERSION}`);
 console.log('============================================');
 
 /* ─── 1. The gate ─── */

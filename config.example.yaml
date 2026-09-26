@@ -1,4 +1,4 @@
-# SHE v2 Agent Configuration
+# Pulse Agent Configuration
 #
 # Everything here is optional — the defaults in code are used for anything omitted,
 # and `.env` overrides the values below. Copy this file to `she.config.yaml` (either

@@ -231,3 +231,8 @@
   cursor: pointer;
 }
 .destOpt input { cursor: pointer; }
+
+/* Light theme: more transparent frosted glass (dark theme unchanged). */
+:global(html[data-theme="light"]) .panel {
+  background: color-mix(in srgb, var(--bg-secondary) 80%, transparent);
+}

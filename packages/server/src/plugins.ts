@@ -391,7 +391,7 @@ export class PluginManager {
     const manifest: PluginManifest = {
       name: clean,
       version: '0.1.0',
-      description: description || '一个 SHE 插件',
+      description: description || '一个 Pulse 插件',
       author: '',
       enabled: true,
       permissions: ['read'],

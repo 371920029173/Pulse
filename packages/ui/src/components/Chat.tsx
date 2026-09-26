@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState, useCallback, useMemo, memo } from 'react';
 import type { ChatMessage, ToolCallData, ConfirmTicket, PendingPatch } from '../hooks/useChat';
+import { continuePrompt } from '../hooks/useChat';
 import { DiffPanel } from './DiffPanel';
 import { ComposerPanel } from './ComposerPanel';
 import { Markdown } from './Markdown';
@@ -505,13 +506,14 @@ async function copyText(text: string) {
 /**
  * The model's chain of thought.
  *
- * Open by default, and the full text is in the page — not a 70-character
- * preview. A reload used to start collapsed, so a chain of several thousand
- * characters showed up as one faint line and read as "the thinking was not
- * displayed". There is no inner height cap: the transcript already scrolls.
+ * Collapsed by default: the header shows the live label, the first line and
+ * the length, so the chain is visibly there. One click shows the full text,
+ * with no inner height cap (the transcript already scrolls).
  */
 function ReasoningBlock({ text, streaming }: { text: string; streaming?: boolean }) {
-  const [open, setOpen] = useState(true);
+  // Collapsed by default (user setting). The header still shows the live
+  // label, first line and length, and one click opens the full text.
+  const [open, setOpen] = useState(false);
   /**
    * Once the reader opens or closes this block by hand, that choice wins.
    *
@@ -523,7 +525,6 @@ function ReasoningBlock({ text, streaming }: { text: string; streaming?: boolean
   const wasStreaming = useRef(Boolean(streaming));
 
   useEffect(() => {
-    if (streaming && !wasStreaming.current && !userToggled.current) setOpen(true);
     wasStreaming.current = Boolean(streaming);
   }, [streaming]);
 
@@ -593,10 +594,13 @@ const MessageBubble = memo(function MessageBubble({
   onRewind,
   toolResults,
   renderedCallIds,
+  onContinue,
 }: {
   msg: ChatMessage;
   index: number;
   onRewind?: (index: number) => void;
+  /** Present only on the latest turn's notice that offers 继续. */
+  onContinue?: () => void;
   /** tool_call_id -> result text, so a call can show what it returned. */
   toolResults?: Map<string, string>;
   /** Tool-call ids whose own card is on screen (suppresses the duplicate row). */
@@ -622,6 +626,31 @@ const MessageBubble = memo(function MessageBubble({
     );
   }
   if (msg.role === 'system') {
+    /*
+     * A notice (reply cut off at the length ceiling, connection dropped, turn failed) is styled
+     * so it cannot be mistaken for routine status, and offers 继续 when the reply can be resumed.
+     */
+    if (msg.notice) {
+      return (
+        <div className={`${styles.messageRow} ${styles.messageRowAssistant}`}>
+          <div className={`${styles.bubbleWrap}`}>
+            <div
+              className={`${styles.bubble} ${styles.bubbleSystem} ${styles.bubbleNotice}`}
+              data-surface="bubble"
+              data-notice={msg.notice.kind}
+              role="status"
+            >
+              <span>{msg.content}</span>
+              {msg.notice.action === 'continue' && onContinue ? (
+                <button type="button" className={styles.noticeContinueBtn} title={t('接着上一条回答往下写（追加新的一轮，不改动已有内容）')} onClick={onContinue}>
+                  {t('继续')}
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className={`${styles.messageRow} ${styles.messageRowAssistant}`}>
         <div className={`${styles.bubbleWrap}`}>
@@ -1025,6 +1054,14 @@ export function Chat({
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
   }, [input, isLoading, onSend, onInterject]);
 
+  /** 继续 on a cut-off reply: appends a continuation turn, never edits the reply already sent. */
+  const handleContinue = useCallback(() => { onSend(continuePrompt()); }, [onSend]);
+  /** Only a notice after the latest user message offers 继续 — an older one would resume the wrong reply. */
+  const lastUserIdx = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === 'user') return i;
+    return -1;
+  }, [messages]);
+
   /** Live shortcut map: reloaded when the settings dialog changes bindings. */
   const shortcutsRef = useRef<ShortcutMap>(loadShortcuts());
   useEffect(() => {
@@ -1187,6 +1224,7 @@ export function Chat({
                 onRewind={onRewindTo}
                 toolResults={toolResults}
                 renderedCallIds={renderedCallIds}
+                onContinue={msg.notice?.action === 'continue' && i > lastUserIdx && !isLoading ? handleContinue : undefined}
               />
             ))}
           </>

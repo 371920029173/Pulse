@@ -1,11 +1,11 @@
 # Windows packaging (electron-builder)
 
 ## What you get
-- `release/desktop/bot-Setup-*.exe` — NSIS installer (choose folder, Start Menu + Desktop shortcut)
-- `release/desktop/bot-Portable-*.exe` — single-file portable
+- `release/desktop/Pulse-*-win-x64.exe` — NSIS installer (choose folder, Start Menu + Desktop shortcut)
+- `release/desktop/Pulse-Portable-*.exe` — single-file portable
 
 ## Brand
-Product name / icon: **bot** (blue `b` mark). Native Windows title bar (`frame: true`).
+Product name / icon: **Pulse** (blue `b` mark). Native Windows title bar (`frame: true`).
 
 ## Build
 ```bat

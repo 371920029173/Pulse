@@ -247,7 +247,7 @@ const RULES: Rule[] = [
   },
   {
     kind: 'invalid_args',
-    re: /required|必填|不能为空|缺少|必须给|至少要给|不合法|非法|必须是|没有说明交付物|no usable tasks|createIfMissing/i,
+    re: /required|必填|不能为空|缺少|必须给|至少要给|不合法|非法|必须是|只能是|至少给|必须写|没有说明交付物|no usable tasks|createIfMissing/i,
     from: 'plan-tools.ts / memo-tools.ts / kb-tools.ts / errorbook.ts / subagent-tools.ts argument checks',
   },
   {
@@ -266,6 +266,17 @@ const RULES: Rule[] = [
     kind: 'precondition',
     re: /没有可用的|当前没有|no matching pending|尚未|还没有/i,
     from: 'preflight.ts `当前没有可分析的用户请求`, report/batch tools `没有可用的 batch`',
+  },
+  /*
+   * An external MCP server answered a tool call with `isError` (or a JSON-RPC error). Last on
+   * purpose: the server's own text is tried against every rule above first, so "no such file"
+   * from the filesystem server still reads as `not_found`. What is left is a failure reported by
+   * a remote service, which is what `service` describes.
+   */
+  {
+    kind: 'service',
+    re: /^MCP server .+ reported an error/i,
+    from: 'server mcp-bridge.ts `mcpToolError` (MCP tool result with isError / JSON-RPC error)',
   },
 ];
 

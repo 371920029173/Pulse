@@ -11,10 +11,12 @@ import { KBStore, GroupKBEngine, mergeKnowledgeBases } from '@she/kb';
 import type { KBMemoryPatch } from '@she/kb';
 import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLink } from './kb-link.js';
 import { SandboxShell, createTools, ConfirmTicketStore } from '@she/sandbox';
-import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, selectHarvestNotes } from '@she/agent-runtime';
+import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, subagentWrapUpDelayMs, composeWrapUpNudge, selectHarvestNotes } from '@she/agent-runtime';
 import type { SubagentRunner, SubagentResult, SubagentKbHarvest } from '@she/agent-runtime';
 import { PlanStore, MemoStore, nextStepOf } from '@she/agent-runtime';
 import { RunTraceStore, ConfidenceMirror, REFLECTION_DIR } from '@she/agent-runtime';
+import { retireKnownFalsePositives } from '@she/agent-runtime';
+import { classifyLlmFailure, failureLabel } from '@she/agent-runtime';
 import type { StepStatus } from '@she/agent-runtime';
 import { metrics } from './metrics.js';
 import { PRODUCT_VERSION } from './version.js';
@@ -27,10 +29,11 @@ import type { ScheduledTask, WorkingWindow } from './schedule.js';
 import { Router, HttpError, sendJSON, sendError, sendSSEEvent, startSSE, endSSE, parseBody, readRawBody, corsHeaders } from './router.js';
 import { SessionStore, chooseStartupSession } from './sessions.js';
 import type { ChatSession, ImportedConversation } from './sessions.js';
-import { ClusterStore, runClusterWave, initClusterIdentitySkills, ROLE_PRESETS, generateRoleSkill } from './cluster.js';
+import { ClusterStore, runClusterWave, stopClusterRun, initClusterIdentitySkills, ROLE_PRESETS, generateRoleSkill } from './cluster.js';
 import type { ClusterRole } from './cluster.js';
 import { listMcpServers, probeMcpServer, writeMcpServer, removeMcpServer, setMcpServerEnabled } from './mcp.js';
 import { PluginManager, KNOWN_PERMISSIONS, type PluginManifest } from './plugins.js';
+import { McpBridge } from './mcp-bridge.js';
 import { FeishuBridge, type FeishuConfig } from './feishu.js';
 
 import { AuditLog } from './audit.js';
@@ -421,6 +424,9 @@ function remountKnowledgeBase(dbPath: string): void {
   store = new KBStore(dbPath);
   engine = new GroupKBEngine(store, config.kb);
   log.info(`Knowledge base mounted: ${dbPath}`);
+  // Once per KB per registry version: retire error-book entries that a since-fixed
+  // reflection_check wrote (errorbook-migrations.ts). Logs and returns; never throws.
+  retireKnownFalsePositives(engine as never, store as never, { workspaceRoot: config.workspace.root, kbPath: dbPath, log });
 }
 
 /** Knowledge bases for sessions that work in some other directory. */
@@ -719,6 +725,18 @@ const plugins = new PluginManager({
 });
 
 /**
+ * MCP bridge: long-lived sessions to every enabled MCP server, whose tools are merged into each
+ * agent's toolset exactly like plugin tools (synchronous cached `definitions()`, rebuilt only by
+ * `mcp.refresh()`). See mcp-bridge.ts; MCP tools run outside the sandbox, so `makeAgent` routes
+ * them through the confirm-ticket gate unless the workspace allows all commands.
+ */
+const mcp = new McpBridge({
+  workspaceRoot: () => config.workspace.root,
+  log: (m) => log.info(m),
+  reservedNames: () => plugins.definitions().map((d) => d.name),
+});
+
+/**
  * Build a delegated child agent.
  *
  * Deliberately constructed WITHOUT a subagent runner: a child that can spawn
@@ -950,6 +968,15 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
 
       const job = (async (): Promise<SubagentResult> => {
         let timedOut = false;
+        /*
+         * 软截止：硬杀之前先让子任务收尾。interject 会排队，等当前工具组结束后再并入对话，
+         * 所以不会插在工具调用和它的结果之间。子任务提前结束时清掉计时器。
+         */
+        const wrapUpAt = subagentWrapUpDelayMs(budgetMs);
+        const wrapUpTimer = setTimeout(() => {
+          try { child.interject(composeWrapUpNudge((budgetMs - wrapUpAt) / 1000)); } catch { /* ignore */ }
+        }, wrapUpAt);
+        wrapUpTimer.unref?.();
         try {
           const out = await Promise.race([
             child.chat(brief),
@@ -960,6 +987,7 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
              */
             new Promise<null>((r) => setTimeout(() => { timedOut = true; r(null); }, budgetMs).unref?.()),
           ]);
+          clearTimeout(wrapUpTimer);
           if (timedOut) {
             try { child.stop(); } catch { /* ignore */ }
           }
@@ -1216,10 +1244,24 @@ function makeAgent(cfg: SheConfig, sessionId?: string | null): Agent {
    * Built-ins are matched first on execute, so a plugin can never intercept
    * `shell` or `fs_write` (PluginManager also refuses the name collision).
    */
+  /*
+   * MCP tools are appended last and never shadow a built-in or plugin name (the bridge prefixes
+   * them `mcp_<server>_` and refuses collisions; the filter below is belt and braces). Unlike
+   * built-ins they are NOT trusted: an MCP server is its own process outside the sandbox, so each
+   * call goes through the same confirm-ticket gate as a dangerous built-in (`needs_confirm` ->
+   * user approves -> re-run with the ticket), unless the workspace runs with allowAllCommands.
+   */
+  const taken = new Set([...base.definitions, ...plugins.definitions()].map((d) => d.name));
   const merged = {
-    definitions: [...base.definitions, ...plugins.definitions()],
+    definitions: [...base.definitions, ...plugins.definitions(), ...mcp.definitions().filter((d) => !taken.has(d.name))],
     execute: (name: string, args: Record<string, unknown>): Promise<string> => {
       if (base.definitions.some((d) => d.name === name)) return base.execute(name, args);
+      if (mcp.owns(name) && !taken.has(name)) {
+        return mcp.execute(name, args, {
+          requireConfirm: !local.sandbox.allowAllCommands,
+          workspaceRoot: local.workspace.root,
+        });
+      }
       return plugins.execute(name, args, local.workspace.root);
     },
   };
@@ -2278,7 +2320,9 @@ function registerRoutes(router: Router): void {
         endSSE(res);
       } catch (err) {
         recordTurnMetrics(agent, turnStart, usageBefore, false);
-        sendSSEEvent(res, { type: 'error', error: (err as Error).message });
+        // Say where it failed (模型端错误 / 网络问题 / 本地错误), not just the raw message.
+        const kind = classifyLlmFailure(err);
+        sendSSEEvent(res, { type: 'error', error: (err as Error).message, kind, label: failureLabel(kind) });
         endSSE(res);
       } finally {
         // Persist even when the provider failed, so the user's turn is never lost.
@@ -3727,7 +3771,7 @@ router.get('/api/fs/tree', (req, res) => {
         },
         title: () => {
           const sid = activeAgentId ?? sessions.getActive()?.id ?? null;
-          return (sid && sessions.get(sid)?.title) || 'SHE';
+          return (sid && sessions.get(sid)?.title) || 'Pulse';
         },
       });
     }
@@ -3890,13 +3934,27 @@ router.get('/api/fs/tree', (req, res) => {
   });
 
   // ── MCP servers: discovery, live probe, enable/disable ──
+  /*
+   * After any config change the bridge reconnects and live agents are rebuilt, the same way plugin
+   * changes are applied, so an open conversation gets (or loses) the server's tools without a restart.
+   */
+  const refreshMcp = async (): Promise<void> => {
+    try {
+      await mcp.refresh();
+    } catch (e) {
+      log.warn(`MCP refresh failed: ${(e as Error).message}`);
+    }
+    rebuildAgents();
+  };
+  const mcpInject = (name: string) => mcp.injectStatus(name);
+
   router.get('/api/mcp/servers', async (_req, res) => {
-    const servers = await listMcpServers(config.workspace.root);
+    const servers = await listMcpServers(config.workspace.root, mcpInject);
     sendJSON(res, { servers });
   });
 
   router.post('/api/mcp/servers/:name/probe', async (req, res, params) => {
-    const status = await probeMcpServer(config.workspace.root, params.name);
+    const status = await probeMcpServer(config.workspace.root, params.name, mcpInject);
     if (!status) throw new HttpError(404, `未找到 MCP 服务: ${params.name}`);
     sendJSON(res, status);
   });
@@ -3912,17 +3970,20 @@ router.get('/api/fs/tree', (req, res) => {
       args: Array.isArray(body.args) ? body.args.map(String) : [],
       env: body.env,
     });
-    sendJSON(res, { ok: true, servers: await listMcpServers(config.workspace.root) }, 201);
+    await refreshMcp();
+    sendJSON(res, { ok: true, servers: await listMcpServers(config.workspace.root, mcpInject) }, 201);
   });
 
-  router.delete('/api/mcp/servers/:name', (req, res, params) => {
+  router.delete('/api/mcp/servers/:name', async (req, res, params) => {
     const ok = removeMcpServer(config.workspace.root, params.name);
+    if (ok) await refreshMcp();
     sendJSON(res, { ok });
   });
 
   router.put('/api/mcp/servers/:name/enabled', async (req, res, params) => {
     const body = await parseBody<{ enabled?: boolean }>(req);
     const ok = setMcpServerEnabled(config.workspace.root, params.name, body.enabled !== false);
+    if (ok) await refreshMcp();
     sendJSON(res, { ok });
   });
 
@@ -5142,6 +5203,21 @@ router.get('/api/fs/tree', (req, res) => {
       groupPath: `${rootName}/cluster/${day}`,
       messages: room.messages.length,
     }, 201);
+  });
+
+  /*
+   * Stop the room's running wave.
+   *
+   * The UI's stop button aborts its own stream, which only detaches the view: with
+   * auto-continuation a room keeps running rounds server-side until someone tells it to stop, so
+   * without this route the wave could not actually be stopped from the panel at all.
+   *
+   * `stopped: false` is a normal answer (the round happened to finish first), not an error — but an
+   * unknown room still 404s, so "no such room" and "nothing running" stay distinguishable.
+   */
+  router.post('/api/cluster/rooms/:id/stop', (_req, res, params) => {
+    if (!cluster.get(params.id)) throw new HttpError(404, 'Room not found');
+    sendJSON(res, { stopped: stopClusterRun(params.id) });
   });
 
   router.post('/api/cluster/rooms/:id/run', async (req, res, params) => {

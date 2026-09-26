@@ -314,4 +314,10 @@ registerDictionary('en', {
   '标为完成': 'Mark as finished',
   '单击编辑': 'Click to edit',
   '我': 'Me',
+
+  // ── MCP ──
+  '已注入 {n}': 'Injected {n}',
+  '实际注册给智能体的工具数': 'Tools actually registered to the agent',
+  '⚠ 探测到 {probe} 个工具，但只有 {injected} 个注册给了智能体':
+    '⚠ Probe found {probe} tools, but only {injected} are registered to the agent',
 });

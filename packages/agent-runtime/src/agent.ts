@@ -11,6 +11,7 @@ import { createLogger, resolveModel, resolveSubagentModel, describeModel } from 
 import type { GroupKBEngine } from '@she/kb';
 import { OpenAIProvider } from './providers/openai.js';
 import { AnthropicProvider } from './providers/anthropic.js';
+import { classifyLlmFailure, failureLabel } from './providers/stream-failure.js';
 import { getSystemPrompt, readSkillProfile } from './system-prompt.js';
 import type { ToolSet } from '@she/sandbox';
 import { PendingPatchStore, CheckpointStore, resolveInsideWorkspace } from '@she/sandbox';
@@ -2441,11 +2442,18 @@ export class Agent {
     this.history = repairApiMessages(this.history);
     this.flushInterjections();
     const detail = err instanceof Error ? err.message : String(err);
-    const text = `（这一轮没有完成：${detail}）\n\n可以直接再说一次，或回复「继续」。`;
+    /*
+     * Name where it failed — 模型端错误 / 网络问题 / 本地错误 — because the advice differs: a
+     * provider error may need a different key or model, a network one just another try, a local
+     * one a bug report. The text is appended as a new assistant row (history stays append-only).
+     */
+    const kind = classifyLlmFailure(err);
+    const label = failureLabel(kind);
+    const text = `（这一轮没有完成——${label}：${detail}）\n\n可以直接再说一次，或回复「继续」。`;
     const msg: LLMMessage = { role: 'assistant', content: text };
     this.history.push(msg);
     onChunk?.({ type: 'text', content: text });
-    onChunk?.({ type: 'status', content: '这一轮失败，但对话可以继续' });
+    onChunk?.({ type: 'status', content: `这一轮失败（${label}），但对话可以继续`, notice: { kind, action: 'continue' } });
     log.warn(`turn failed, transcript kept usable: ${detail}`);
     /*
      * Record the failure where the trace can see it, rather than only in the transcript.

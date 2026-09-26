@@ -229,6 +229,14 @@ export interface StreamChunk {
     toolCallId?: string;
     /** Present when type === 'tool_result' — name of the tool that ran. */
     toolName?: string;
+  /**
+   * Present on a `status` chunk that the user must not miss: the reply stopped early or the turn
+   * failed. `kind` says WHERE it went wrong (模型端 / 网络 / 本地, or the output-length ceiling),
+   * and `action: 'continue'` tells the UI to offer a 继续 button that appends a continuation turn.
+   *
+   * Carried on `status` rather than a new chunk type so an older UI still shows the text.
+   */
+  notice?: { kind: 'length' | 'network' | 'provider' | 'local'; action?: 'continue' };
   /** Present when type === 'usage' */
   usage?: {
     prompt_tokens?: number;

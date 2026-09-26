@@ -447,7 +447,7 @@ export function ClusterPanel({
                   value={goal}
                   onChange={(e) => setGoal(e.target.value)}
                   rows={3}
-                  placeholder="下发本波目标，例如：为 SHE 写一份夜间巡检脚本的用户说明"
+                  placeholder="下发本波目标，例如：为 Pulse 写一份夜间巡检脚本的用户说明"
                 />
                 <div className={styles.actions}>
                   <button

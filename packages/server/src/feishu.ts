@@ -239,7 +239,7 @@ export class FeishuBridge {
       this.note(openId, text, false, '配对模式：未接管对话');
       await this.reply(
         msg.message_id,
-        `配对模式：你的 open_id 是\n${openId}\n\n把它填进 SHE 的「授权账号 open_id」并保存，然后重新连接，我就能帮你干活了。（当前不会执行任何指令）`,
+        `配对模式：你的 open_id 是\n${openId}\n\n把它填进 Pulse 的「授权账号 open_id」并保存，然后重新连接，我就能帮你干活了。（当前不会执行任何指令）`,
       );
       return;
     }
@@ -327,7 +327,7 @@ function extractText(msg: NonNullable<FeishuMessageEvent['message']>): string {
 
 function helpText(title: string): string {
   return [
-    `SHE 远程遥控`,
+    `Pulse 远程遥控`,
     `当前对话：${title}`,
     '',
     '直接发消息即可，会送进桌面端正在进行的对话。',

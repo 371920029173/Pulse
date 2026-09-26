@@ -165,7 +165,23 @@ const PROHIBITION = /(不要|不得|不准|不许|禁止|严禁|避免|别去|�
  * the permitted action — and a check whose accusations cannot be trusted is one the agent learns
  * to skip wholesale.
  */
-const EXCEPTION = /^(例外|除外|唯一|除[^，。；]{0,12}外|允许|可以|不受|仅限|only|except|unless)/i;
+const EXCEPTION = /^(只(?:用|能用|使用|许用|准用|走|通过|调用)|仅(?:用|使用|通过)|use\s+only|例外|除外|唯一|除[^，。；]{0,12}外|允许|可以|不受|仅限|only|except|unless)/i;
+
+/**
+ * Where a WHITELIST starts inside a clause: "只用 kb_* 工具", "仅通过 X", "only use X".
+ *
+ * A whitelist names what IS allowed, so it is the permitted half of the constraint, the same as an
+ * exception. Measured on a live run, the constraint
+ *
+ *   不得直读 .she/kb.sqlite，只用 kb_* 工具
+ *
+ * was reported as violated six times by the agent's own `kb_upsert`: "只用" was not an exception
+ * marker, so the whitelist stayed in the prohibition and `kb_` became the forbidden object. The more
+ * obediently the agent used the named tools, the more often it was accused. Used both as an
+ * exception marker (see `EXCEPTION`) and as a split point, so "不得直读 X 只用 Y" without a comma
+ * is read the same way.
+ */
+const WHITELIST_START = /(?=只(?:用|能用|使用|许用|准用|走|通过|调用)|仅(?:用|使用|通过)|\buse\s+only\b|\bonly\s+use\b)/i;
 
 /**
  * Provenance notes inside a constraint: "来源：e4fa0b5e", "(source: 250c9a40)", "参见：…".
@@ -197,7 +213,7 @@ function prohibitionScope(text: string): string {
     if (buffer.length) clauses.push(buffer.join('，'));
     buffer = [];
   };
-  for (const raw of String(text ?? '').split(/[，,；;。!！?？\n]+/)) {
+  for (const raw of String(text ?? '').split(/[，,；;。!！?？\n]+/).flatMap((p) => p.split(WHITELIST_START))) {
     const piece = raw.trim();
     if (!piece) continue;
     const exception = EXCEPTION.test(piece);
@@ -393,7 +409,17 @@ export function detectDrift(input: DriftInput): DriftReport {
    */
   const stepTerms = goalTerms(String(input.currentStep ?? ''));
   const anchors = [...terms, ...stepTerms.filter((t) => !terms.includes(t))];
-  const work = contexts.filter((_, i) => !BOOKKEEPING.test(actions[i].tool || ''));
+  const work = contexts.filter((_, i) => {
+    const tool = (actions[i].tool || '').toLowerCase();
+    // A label with no tool is a description the model wrote, not a record of a call. Measured
+    // live: labels like "review" / "wrap up" were scored as five unrelated actions and reported
+    // as drift 1.00 while every real call was on the goal. Nothing to judge, so not in the window.
+    if (!tool) return false;
+    // Bookkeeping is out of the window, unless the goal itself is about that tool (a run whose
+    // job is to test reflection_check is doing its work when it calls reflection_check).
+    if (BOOKKEEPING.test(tool) && !terms.includes(tool)) return false;
+    return true;
+  });
   if (terms.length && work.length >= 3) {
     const recent = work.slice(-3);
     const matched = recent.map((t) => containsAny(t, anchors));
@@ -410,7 +436,14 @@ export function detectDrift(input: DriftInput): DriftReport {
 
   // ── the current step ──
   const step = String(input.currentStep ?? '').trim();
-  if (terms.length && step.length >= 4 && !containsAny(step, terms)) {
+  /*
+   * A step worded differently from the goal is weak evidence on its own: the model paraphrases
+   * ("check the self-check's verdicts" for a goal naming reflection_check), and no word overlap
+   * across a paraphrase proves nothing. So it is suppressed when the recent real calls ARE on the
+   * goal. Alone it is still only a reminder (watch), never drift.
+   */
+  const recentOnGoal = work.slice(-3).some((t) => containsAny(t, terms) !== null);
+  if (terms.length && step.length >= 4 && !containsAny(step, terms) && !recentOnGoal) {
     signals.push({
       kind: 'step_off_goal',
       major: false,
@@ -898,7 +931,7 @@ export function createReflectionTools(deps: ReflectionToolDeps): ReflectionToolS
           actions: {
             type: 'array',
             items: { type: 'string' },
-            description: '要检查的动作，每项一句话（如「shell: 跑了 pnpm test」）。省略则用本轮实际执行过的工具调用。',
+            description: '可选，一句话描述要核对的动作，只作参考；漂移判断以本轮实际执行过的工具调用为准。',
           },
         },
         required: [],
@@ -912,7 +945,9 @@ export function createReflectionTools(deps: ReflectionToolDeps): ReflectionToolS
       return '还没有记录过目标：先调用 preflight_record 写下实际目标，再来自检。';
     }
     const passedActions = Array.isArray(args.actions) ? (args.actions as unknown[]).map(String) : null;
-    const actions = passedActions?.map((s) => ({ tool: '', summary: s })) ?? deps.actions();
+    // Judge the calls that actually ran; a list the model writes is a description, not a record.
+    const recorded = deps.actions();
+    const actions = recorded.length ? recorded : (passedActions ?? []).map((s) => ({ tool: '', summary: s }));
     const step = typeof args.current_step === 'string' && args.current_step.trim()
       ? args.current_step.trim()
       : deps.currentStep();
@@ -931,6 +966,9 @@ export function createReflectionTools(deps: ReflectionToolDeps): ReflectionToolS
       `检查了 ${actions.length} 个动作${step ? `，当前步骤「${step.slice(0, 80)}」` : ''}`,
       renderDrift(drift) || '漂移检查：无漂移（动作与目标的关键词仍然一致）。',
     ];
+    if (passedActions?.length && recorded.length) {
+      parts.push(`你传入的 ${passedActions.length} 条动作描述只作参考；漂移按本轮实际执行过的工具调用来判断（自己写的描述不是调用记录）。`);
+    }
     const cal = deps.calibration();
     const calText = renderCalibration(cal);
     if (calText) parts.push(calText);

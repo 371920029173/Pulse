@@ -933,7 +933,7 @@ export function App() {
               onClick={() => setSidebarCollapsed(false)}
               title="展开侧栏"
             >»</button>
-            <span className={styles.railLabel}>SHE</span>
+            <span className={styles.railLabel}>Pulse</span>
           </div>
         ) : null}
 

@@ -485,10 +485,12 @@ body {
   --fill-control-hover: rgb(0 0 0 / 0.09);
   --fill-control-strong: rgb(0 0 0 / 0.07);
 
-  /* Frosted glass — light: breathe more; wallpaper must read through panels */
-  --glass-bg: rgba(255, 255, 255, 0.22);
-  --glass-bg-strong: rgba(255, 255, 255, 0.36);
-  --glass-titlebar: rgba(255, 255, 255, 0.16);
+  /* Frosted glass — light: breathe more; wallpaper must read through panels.
+     Lowered again (0.22 / 0.36 / 0.16 → 0.12 / 0.22 / 0.08): white glass at the old alpha
+     read as a solid sheet. Text stays dark on a blurred backdrop, so contrast holds. */
+  --glass-bg: rgba(255, 255, 255, 0.12);
+  --glass-bg-strong: rgba(255, 255, 255, 0.22);
+  --glass-titlebar: rgba(255, 255, 255, 0.08);
   --glass-border: rgba(15, 23, 42, 0.08);
   --glass-blur: 40px;
   --glass-saturate: 180%;
@@ -788,8 +790,11 @@ html[data-bg="image"][data-theme="light"] [data-surface="tool"],
 html[data-bg="video"][data-theme="light"] [data-surface="tool"],
 html[data-bg="image"][data-theme="light"] [data-surface="reasoning"],
 html[data-bg="video"][data-theme="light"] [data-surface="reasoning"] {
-  background-color: rgba(255, 255, 255, 0.90) !important;
+  /* Was 0.90 — practically opaque, so the frosted glass did not read as glass. 0.68 over the
+     0.72 light scrim still keeps dark text well above AA; a light halo replaces the dark one. */
+  background-color: rgba(255, 255, 255, 0.68) !important;
   color: #1f2328;
+  text-shadow: 0 1px 1px rgb(255 255 255 / 0.45);
 }
 
 html[data-bg="image"][data-theme="light"] aside,
@@ -798,7 +803,7 @@ html[data-bg="image"][data-theme="light"] header,
 html[data-bg="video"][data-theme="light"] header,
 html[data-bg="image"][data-theme="light"] footer,
 html[data-bg="video"][data-theme="light"] footer {
-  background-color: rgba(255, 255, 255, 0.76) !important;
+  background-color: rgba(255, 255, 255, 0.52) !important; /* was 0.76 */
 }
 
 /* Text needs a slight halo only where it sits directly on the photo. */

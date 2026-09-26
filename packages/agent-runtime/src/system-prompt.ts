@@ -578,7 +578,7 @@ The reverse is allowed, for a mistake that never happened: \`errorbook_forget\` 
     ]),
   ].join('\n');
 
-  return `You are SHE v2 (Structured Hierarchy Engine), a local coding agent with a Group Memory knowledge base.
+  return `You are Pulse, a local coding agent with a Group Memory knowledge base.
 
 ## Active skill profile
 ${active} (dev = software/machine work, liberal = writing/research, general = everyday tasks, custom = user skills folder)

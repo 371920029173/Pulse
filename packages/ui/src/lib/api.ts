@@ -228,7 +228,11 @@ export function streamSSE(
       if (settled) return;
       settled = true;
       if (!sawTerminal) {
-        callbacks.onError?.(new Error(t('连接中断，回复可能不完整。可点停止后重试。')));
+        /*
+         * The body ended without `done` / `error` / `[DONE]`. That is never a finished reply, so it
+         * must be said out loud — a silent end is indistinguishable from "the model stopped here".
+         */
+        callbacks.onError?.(new Error(t('与本地服务的连接中断（没有收到结束信号），回复可能不完整。这一轮可能仍在后台进行，稍后会自动同步。')));
         return;
       }
       callbacks.onDone?.();

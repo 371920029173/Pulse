@@ -10,6 +10,7 @@ interface ClusterMessage {
   content: string;
   created_at: string;
   parallel_group?: string;
+  reasoning?: string;
 }
 
 interface ClusterMember {
@@ -77,6 +78,7 @@ export function useClusterChat(roomId: string | null) {
         return {
           role: 'assistant' as const,
           content: m.content,
+          reasoning: m.reasoning || undefined,
           speaker: { name: m.name, hue: member?.hue ?? hueOf(m.name) },
         };
       });
@@ -182,12 +184,17 @@ export function useClusterChat(roomId: string | null) {
             if (chunk.type === 'room' && chunk.room) {
               setRoom(chunk.room);
               setMessages(toChat(chunk.room));
+              // Indices into the old array are meaningless now.
+              liveIndex.clear();
               return;
             }
             if (!chunk.member) return;
 
             // Track member state for the header strip.
             if (chunk.memberState === 'running') {
+              // A member speaking again (the summary, or an automatic follow-up round) gets a new
+              // bubble instead of being appended to the one from its previous turn.
+              liveIndex.delete(chunk.member);
               setActiveMembers((prev) => (prev.includes(chunk.member!) ? prev : [...prev, chunk.member!]));
             } else if (chunk.memberState === 'done') {
               setActiveMembers((prev) => prev.filter((m) => m !== chunk.member));
@@ -250,9 +257,16 @@ export function useClusterChat(roomId: string | null) {
   const stop = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
+    // Aborting the stream only detaches this view; the wave (and its automatic follow-up rounds)
+    // runs on the server until it is told to stop.
+    if (roomId) {
+      void fetchJSON(`/api/cluster/rooms/${roomId}/stop`, { method: 'POST', body: {} })
+        .then(() => load(roomId))
+        .catch(() => { /* the room may already be idle */ });
+    }
     setIsLoading(false);
     setStatus('已中断');
-  }, []);
+  }, [roomId, load]);
 
   const refresh = useCallback(() => {
     if (roomId) void load(roomId);

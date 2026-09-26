@@ -454,7 +454,7 @@ export function Dock() {
             <div className={styles.disclosure}>
               <b>关于插件安全</b>
               <div>
-                插件代码和 SHE 在同一个进程里运行，所以 manifest 里的「权限」是
+                插件代码和 Pulse 在同一个进程里运行，所以 manifest 里的「权限」是
                 <b>声明</b>，<b>不是限制</b> —— 它告诉你插件打算碰什么，但拦不住它做别的。
                 装之前请看清上面列出的权限，来源不明的插件不要装。
               </div>

@@ -4,6 +4,12 @@ Notable changes per release. This project follows [semantic versioning](https://
 the major version changes when stored state or the plugin API breaks, minor for
 features, patch for fixes.
 
+## Unreleased
+
+### Fixed
+
+- **MCP tools are now actually registered to the agent.** Previously MCP servers were only probed (started, tools counted, stopped), so the panel showed "reachable, N tools" while the agent had none of them. A new bridge (`packages/server/src/mcp-bridge.ts`) keeps one stdio session per enabled server and exposes its tools as `mcp_<server>_<tool>` (sorted, stable between turns, rebuilt only when the MCP config changes). MCP servers run outside the sandbox, so each call needs the same user confirmation as a dangerous built-in unless allow-all is on. The MCP panel shows how many tools were injected and warns when that differs from the probe.
+
 ## 0.3.0
 
 修复了一些已知问题并进行大幅升级与优化. Most items come from a live end-to-end audit of the agent against its own workspace.
@@ -12,7 +18,7 @@ features, patch for fixes.
 
 **Knowledge base editing and retirement.** `kb_upsert` no longer silently creates a second node for an existing title; entries can be edited or retired. Tools and API only for now, no UI buttons yet.
 
-**Plan autopilot.** Plans advance on their own until done (cap 40 steps, `SHE_PLAN_AUTOPILOT=0` turns it off), and the bundled skills explain how to plan.
+**Plan autopilot.** Plans advance on their own until done (with a 40-step cap, `SHE_PLAN_AUTOPILOT=0` turns it off), and the bundled skills explain how to plan.
 
 **Version-controlled skills.** Bundled skills now live in `skills/` (previously the gitignored `.she/skills`, still used as a fallback) and are staged into the desktop build.
 

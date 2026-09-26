@@ -90,9 +90,10 @@ let updates = 0;
   updates = replies.length;
 
   const last = replies[replies.length - 1];
+  // The reply echoes only the step just changed, with its note clipped: the model wrote it one call ago.
   check(
     '【关键】本次改动的那条备注在',
-    last.includes(noteOf(12)),
+    last.includes(noteOf(12).slice(0, 30)),
     last,
   );
   check(
@@ -109,12 +110,15 @@ let updates = 0;
    * The plan must still be readable AS a plan: the thing that makes it a checkpoint is the list
    * of steps and where they stand. Trimming that would be trimming information.
    */
-  const stepLines = last.split('\n').filter((l) => /^\s*\[[ x>!-]\]\s+s\d+\s/.test(l));
-  check('【关键】12 步一条不少，状态照印（省的不是这张表）', stepLines.length === 12, `got ${stepLines.length}`);
-  check('其中已完成 12 步都标成 [x]', stepLines.every((l) => l.includes('[x]')), stepLines.join('\n'));
+  check('每次回复都带进度（回复仍能说明计划走到哪）', replies.every((r) => /12/.test(r) && /下一步: /.test(r)), last);
   check('「下一步」仍然给出（收口时说明已收口）', /下一步: /.test(last), last);
 
+  // The full table lives in plan_list / plan_get, not in every update reply.
   const listed = await tools.execute('plan_list', {});
+  const stepLines = listed.split('\n').filter((l) => /^\s*\[[ x>!-]\]\s+s\d+\s/.test(l));
+  check('【关键】12 步一条不少，状态照印（在 plan_list 里）', stepLines.length === 12, `got ${stepLines.length}`);
+  check('其中已完成 12 步都标成 [x]', stepLines.every((l) => l.includes('[x]')), stepLines.join('\n'));
+
   const allNotesKept = Array.from({ length: 12 }, (_, i) => i + 1).every((i) => listed.includes(noteOf(i)));
   check('【关键】12 条备注全部还在 plan_list 里（没有任何一条被删）', allNotesKept, listed.slice(0, 400));
   check('盘上的 note 就是原文（不是渲染文本）', (tools.store.get(planId).steps[11].note ?? '').includes('顺手记下端口'), null);
@@ -128,8 +132,8 @@ console.log('\n2. plan_update 实测数字');
   console.log(`  单次平均：${Math.round(echoedTotal / updates)} → ${Math.round(trimmedTotal / updates)} 字符`);
   check('确实更短（不是「差不多」）', trimmedTotal < echoedTotal * 0.7, `${trimmedTotal} vs ${echoedTotal}`);
   check(
-    '但也没有短成一条错误信息（步骤表还在，回复仍可当计划读）',
-    trimmedTotal > updates * 200,
+    '但也没有短成一条错误信息（回复仍说明改了哪步、下一步是什么）',
+    trimmedTotal > updates * 40,
     `avg ${Math.round(trimmedTotal / updates)} 字符/次`,
   );
 }
@@ -168,8 +172,10 @@ let contentChars = 0;
 
   const kbTools = createKBTools(engine);
   const viaEngine = engine.query(MARKER);
-  const plain = await kbTools.execute('kb_query', { query: MARKER });
-  const full = await kbTools.execute('kb_query', { query: MARKER, full: true });
+  // limit: 30 so every hit is listed; the default-top-5 behaviour is checked separately below.
+  const plain = await kbTools.execute('kb_query', { query: MARKER, limit: 30 });
+  const full = await kbTools.execute('kb_query', { query: MARKER, full: true, limit: 30 });
+  const byDefault = await kbTools.execute('kb_query', { query: MARKER });
 
   kbReturned = viaEngine.nodes.length;
   kbLong = viaEngine.nodes.filter((n) => n.content.length > 200).length;
@@ -179,6 +185,9 @@ let contentChars = 0;
 
   check('前提：这次查询真的命中了多条（否则下面的对照没意义）', kbReturned >= 3, `命中 ${kbReturned} 条`);
   check('前提：其中确实有长文（摘要有东西可摘）', kbLong >= 1, `长文 ${kbLong} 条`);
+  if (kbReturned > 5) {
+    check('默认只列前 5 条，并说明还有多少没列', /另有 \d+ 条未列出/.test(byDefault), byDefault.slice(-200));
+  }
 
   /*
    * The half that must not break. Every node stays visible — title AND id — because the id is

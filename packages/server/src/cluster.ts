@@ -6,6 +6,14 @@ import { OpenAIProvider } from '@she/agent-runtime';
 import { AnthropicProvider } from '@she/agent-runtime';
 import type { LLMProvider } from '@she/shared';
 import { loadStateFile, saveStateFile } from './state-file.js';
+import {
+  clusterAutoSettings,
+  createGroupPlanTools,
+  decideContinuation,
+  isSubstantiveRound,
+  planSignature,
+  renderContinuationNote,
+} from './cluster-auto.js';
 
 const log = createLogger('cluster');
 
@@ -50,6 +58,8 @@ export interface ClusterMessage {
   content: string;
   created_at: string;
   parallel_group?: string;
+  /** Display-only chain of thought. Never fed back into any prompt (see transcriptFor). */
+  reasoning?: string;
 }
 
 export interface ClusterRoom {
@@ -398,6 +408,7 @@ export class ClusterStore {
       name: msg.name,
       content: msg.content,
       parallel_group: msg.parallel_group,
+      ...(msg.reasoning ? { reasoning: msg.reasoning } : {}),
     };
     room.messages.push(full);
     room.updated_at = full.created_at;
@@ -517,6 +528,9 @@ export function renderClaimAudit(findings: RoomClaimFinding[]): string {
   ].join('\n');
 }
 
+/** Plan tool calls one member may make in one turn before it has to speak. */
+const MAX_PLAN_TOOL_STEPS = 6;
+
 async function memberSpeak(opts: {
   config: SheConfig;
   room: ClusterRoom;
@@ -526,13 +540,17 @@ async function memberSpeak(opts: {
   parallelGroup?: string;
   store: ClusterStore;
   onEvent?: (ev: StreamChunk & { member?: string; phase?: string; name?: string }) => void;
+  /** The room's shared plan tools; absent when SHE_CLUSTER_PLAN=0. */
+  planTools?: ReturnType<typeof createGroupPlanTools>;
+  signal?: AbortSignal;
+  providerFactory?: (config: SheConfig) => LLMProvider;
 }): Promise<ClusterMessage> {
-  const { config, room, member, userGoal, phase, parallelGroup, store, onEvent } = opts;
-  const provider = createProvider(config);
+  const { config, room, member, userGoal, phase, parallelGroup, store, onEvent, planTools, signal } = opts;
+  const provider = (opts.providerFactory ?? createProvider)(config);
   const roster = room.members
     .map((m) => `- ${m.name}（${m.title}，阶段 ${m.phase}）${m.id === member.id ? ' ← 这是你' : ''}`)
     .join('\n');
-  const system = `你在 SHE 自动化讨论群里发言。
+  const system = `你在 Pulse 自动化讨论群里发言。
 你是：${member.name}（${member.title}）
 阶段：${phase}
 
@@ -545,6 +563,8 @@ ${roster || '（当前没有其他成员）'}
 - 只做自己职责内的事；需要别人做的事，点名册上的名字。
 - 不要假装已经执行了未发生的命令。
 - 可以引用群里前人发言。并行时你们同时写，看不到彼此这一轮还没写完的内容。
+- 分派任务用「@名字 + 任务」点名；全部做完时领导写【收工】；需要用户拍板时用问号结尾提问。
+- 群里有共享计划（plan_create / plan_update / plan_add_steps / plan_get）：领导建计划并在步骤标题里写负责人，成员做完自己那步就 plan_update。
 
 ## 角色 skill
 ${member.skill}`;
@@ -565,15 +585,40 @@ ${transcriptFor(room)}
   ];
 
   let text = '';
+  let reasoning = '';
+  // What the member did to the shared plan, kept in its message so the rest of the room sees it.
+  const toolNotes: string[] = [];
+  const onChunk = (chunk: StreamChunk) => {
+    if ((chunk.type === 'text' || chunk.type === 'reasoning') && chunk.content) {
+      if (chunk.type === 'text') text += chunk.content;
+      else reasoning += chunk.content;
+      onEvent?.({ ...chunk, member: member.id, name: member.name, phase });
+    }
+  };
+  const tools = planTools?.definitions.length ? planTools.definitions : undefined;
   try {
-    const reply = await provider.chat(messages, undefined, (chunk) => {
-      if ((chunk.type === 'text' || chunk.type === 'reasoning') && chunk.content) {
-        if (chunk.type === 'text') text += chunk.content;
-        onEvent?.({ ...chunk, member: member.id, name: member.name, phase });
+    let reply = await provider.chat(messages, tools, onChunk, signal);
+    // A short plan-only tool loop. Messages are appended, never rewritten (prefix cache).
+    for (let step = 0; planTools && tools && reply.tool_calls?.length && step < MAX_PLAN_TOOL_STEPS; step++) {
+      messages.push(reply);
+      for (const call of reply.tool_calls ?? []) {
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(call.function.arguments || '{}') as Record<string, unknown>;
+        } catch {
+          /* malformed arguments: the tool reports what is missing */
+        }
+        const out = await planTools.execute(call.function.name, args);
+        messages.push({ role: 'tool', content: out, tool_call_id: call.id });
+        if (call.function.name !== 'plan_get') toolNotes.push(`〔${call.function.name}〕${out.trim().slice(0, 800)}`);
+        onEvent?.({ type: 'status', content: `${member.name} ${call.function.name}`, member: member.id, phase } as any);
       }
-    });
+      reply = await provider.chat(messages, tools, onChunk, signal);
+    }
     if (!text && reply.content) text = reply.content;
   } catch (err) {
+    // A stop request is not a provider failure: no fallback, let the wave unwind.
+    if (signal?.aborted) throw err;
     // fallback provider once
     const fb = config.llm.fallback;
     if (fb && (fb.apiKey || fb.baseUrl)) {
@@ -589,22 +634,47 @@ ${transcriptFor(room)}
               config.llm.temperature,
               config.llm.thinkingLevel || 'medium',
             );
-      const reply = await fbProvider.chat(messages);
+      // The fallback starts from the base prompt: it never saw this member's tool loop.
+      const reply = await fbProvider.chat(messages.slice(0, 2), undefined, undefined, signal);
       text = reply.content || '';
     } else {
       throw err;
     }
   }
 
-  const content = (text || '(空回应)').trim();
+  const content = [text.trim(), ...toolNotes].filter(Boolean).join('\n\n') || '(空回应)';
   const saved = store.append(room.id, {
     role: member.id,
     name: member.name,
     content,
     parallel_group: parallelGroup,
+    // Kept so the end-of-wave room refresh does not wipe the chain the reader just watched stream.
+    reasoning: reasoning.trim() || undefined,
   });
   onEvent?.({ type: 'status', content: `${member.name} 完成`, member: member.id, phase, memberState: 'done' } as any);
   return saved!;
+}
+
+/**
+ * Runs in flight in this process, by room, so a stop request or a new user message can interrupt
+ * the one that is going (auto-continuation can keep a room busy for many rounds).
+ */
+const activeRuns = new Map<string, { controller: AbortController; done: Promise<void> }>();
+
+/** Stop the room's running wave, if any. Returns whether there was one. */
+export function stopClusterRun(roomId: string): boolean {
+  const run = activeRuns.get(roomId);
+  if (!run) return false;
+  run.controller.abort();
+  return true;
+}
+
+/** Thrown inside a wave when it was stopped; unwinds to a clean idle room, not an error. */
+class ClusterInterrupted extends Error {
+  constructor() {
+    super('已中断');
+    this.name = 'ClusterInterrupted';
+  }
 }
 
 /**
@@ -616,6 +686,13 @@ ${transcriptFor(room)}
  *
  * Roles with count 0 are simply absent from `room.members`, so the wave adapts
  * to whatever the user configured.
+ *
+ * In automation mode the wave does not end at the summary when the summary hands out work. After
+ * each round `decideContinuation` reads what was just said (the leader's `@名字` assignments, members
+ * promising more, the group plan's runnable steps) and, if something is outstanding, runs another
+ * round with only those members plus the leader's summary. It stops on 【收工】, on a question to
+ * the user, on a plan step parked on ask/stop, after SHE_CLUSTER_AUTO_MAX rounds, after
+ * SHE_CLUSTER_AUTO_STALL rounds with nothing new, or when the user stops it / sends a new message.
  */
 export async function runClusterWave(opts: {
   config: SheConfig;
@@ -623,12 +700,48 @@ export async function runClusterWave(opts: {
   roomId: string;
   goal: string;
   onEvent?: (ev: StreamChunk & { member?: string; phase?: string; name?: string }) => void;
+  /** Aborting it stops the wave (same as `stopClusterRun`). */
+  signal?: AbortSignal;
+  /** Test seam: build the model client. */
+  providerFactory?: (config: SheConfig) => LLMProvider;
 }): Promise<ClusterRoom> {
   const room = opts.store.get(opts.roomId);
   if (!room) throw new Error('room not found');
-  if (room.status === 'running') throw new Error('room already running');
+  if (room.status === 'running') {
+    const prev = activeRuns.get(opts.roomId);
+    if (prev) {
+      // A new message interrupts the running (possibly auto-continuing) wave instead of bouncing off it.
+      prev.controller.abort();
+      await Promise.race([prev.done, new Promise((r) => setTimeout(r, 30_000))]);
+      if (activeRuns.has(opts.roomId)) throw new Error('room already running');
+    }
+    // No run in this process: the status was left behind by a process that is gone.
+  }
   if (!opts.config.llm.apiKey) throw new Error('LLM API key missing — set in Settings');
   if (!room.members.length) throw new Error('该工作群没有任何角色（每个角色数量都是 0）');
+
+  const controller = new AbortController();
+  const onOuterAbort = () => controller.abort();
+  if (opts.signal?.aborted) controller.abort();
+  opts.signal?.addEventListener('abort', onOuterAbort, { once: true });
+  let finish!: () => void;
+  const done = new Promise<void>((r) => { finish = r; });
+  activeRuns.set(opts.roomId, { controller, done });
+  try {
+    return await runRounds(opts, controller.signal);
+  } finally {
+    activeRuns.delete(opts.roomId);
+    opts.signal?.removeEventListener('abort', onOuterAbort);
+    finish();
+  }
+}
+
+async function runRounds(
+  opts: Parameters<typeof runClusterWave>[0],
+  signal: AbortSignal,
+): Promise<ClusterRoom> {
+  const settings = clusterAutoSettings(opts.config);
+  const planTools = settings.planTools ? createGroupPlanTools(opts.config.workspace.root, opts.roomId) : undefined;
 
   opts.store.reloadMemberSkills(opts.config.workspace.root, opts.roomId);
   opts.store.setStatus(opts.roomId, 'running');
@@ -640,12 +753,18 @@ export async function runClusterWave(opts: {
 
   const snapshot = () => opts.store.get(opts.roomId)!;
   const membersOf = (phase: ClusterPhase) => snapshot().members.filter((m) => m.phase === phase);
+  const userCount = () => snapshot().messages.filter((m) => m.role === 'user').length;
+  const usersAtStart = userCount();
+  const checkStop = () => {
+    if (signal.aborted) throw new ClusterInterrupted();
+  };
 
   const speak = async (
     member: ClusterMember,
     phaseLabel: string,
     parallelGroup?: string,
   ) => {
+    checkStop();
     try {
       await memberSpeak({
         config: opts.config,
@@ -656,8 +775,12 @@ export async function runClusterWave(opts: {
         parallelGroup,
         store: opts.store,
         onEvent: opts.onEvent,
+        planTools,
+        signal,
+        providerFactory: opts.providerFactory,
       });
     } catch (err) {
+      checkStop();
       const msg = err instanceof Error ? err.message : String(err);
       opts.store.append(opts.roomId, {
         role: member.id,
@@ -674,62 +797,71 @@ export async function runClusterWave(opts: {
     }
   };
 
+  // Snapshot once per wave so parallel speakers share a context and do not
+  // wait on each other's replies. Lead split and the final summary stay
+  // single-speaker because they have to read what the wave just said.
+  const runParallel = async (members: ClusterMember[], phaseLabel: string) => {
+    if (!members.length) return;
+    checkStop();
+    const parallelId = randomUUID().slice(0, 8);
+    opts.onEvent?.({
+      type: 'status',
+      content: `并行：${members.map((m) => m.name).join(' / ')}`,
+      phase: phaseLabel,
+    } as any);
+    const snap = snapshot();
+    const settled = await Promise.allSettled(
+      members.map((m) =>
+        memberSpeak({
+          config: opts.config,
+          room: snap,
+          member: m,
+          userGoal: opts.goal,
+          phase: phaseLabel,
+          parallelGroup: parallelId,
+          store: opts.store,
+          onEvent: opts.onEvent,
+          planTools,
+          signal,
+          providerFactory: opts.providerFactory,
+        }),
+      ),
+    );
+    checkStop();
+    // One speaker throwing used to reject the whole wave, so the other
+    // members' finished work never reached review. Record the failure and
+    // let the rest of the room continue.
+    for (let i = 0; i < settled.length; i++) {
+      const item = settled[i];
+      if (item.status !== 'rejected') continue;
+      const member = members[i];
+      const msg = item.reason instanceof Error ? item.reason.message : String(item.reason);
+      opts.store.append(opts.roomId, {
+        role: member.id,
+        name: member.name,
+        content: `（发言失败：${msg}）`,
+        parallel_group: parallelId,
+      });
+      opts.onEvent?.({
+        type: 'status',
+        content: `${member.name} 失败：${msg}`,
+        member: member.id,
+        phase: phaseLabel,
+      } as any);
+    }
+  };
+
   try {
+    let roundStartIdx = snapshot().messages.length;
+    let roundStartedAt = Date.now();
+    let planSigAtRoundStart = planSignature(planTools?.current());
+
     // ── 1. lead phase (first lead member splits the work) ──
     const leads = membersOf('lead');
     const lead = leads[0];
     if (lead) {
       await speak(lead, '拆解与分工');
     }
-
-    // Snapshot once per wave so parallel speakers share a context and do not
-    // wait on each other's replies. Lead split and the final summary stay
-    // single-speaker because they have to read what the wave just said.
-    const runParallel = async (members: ClusterMember[], phaseLabel: string) => {
-      if (!members.length) return;
-      const parallelId = randomUUID().slice(0, 8);
-      opts.onEvent?.({
-        type: 'status',
-        content: `并行：${members.map((m) => m.name).join(' / ')}`,
-        phase: phaseLabel,
-      } as any);
-      const snap = snapshot();
-      const settled = await Promise.allSettled(
-        members.map((m) =>
-          memberSpeak({
-            config: opts.config,
-            room: snap,
-            member: m,
-            userGoal: opts.goal,
-            phase: phaseLabel,
-            parallelGroup: parallelId,
-            store: opts.store,
-            onEvent: opts.onEvent,
-          }),
-        ),
-      );
-      // One speaker throwing used to reject the whole wave, so the other
-      // members' finished work never reached review. Record the failure and
-      // let the rest of the room continue.
-      for (let i = 0; i < settled.length; i++) {
-        const item = settled[i];
-        if (item.status !== 'rejected') continue;
-        const member = members[i];
-        const msg = item.reason instanceof Error ? item.reason.message : String(item.reason);
-        opts.store.append(opts.roomId, {
-          role: member.id,
-          name: member.name,
-          content: `（发言失败：${msg}）`,
-          parallel_group: parallelId,
-        });
-        opts.onEvent?.({
-          type: 'status',
-          content: `${member.name} 失败：${msg}`,
-          member: member.id,
-          phase: phaseLabel,
-        } as any);
-      }
-    };
 
     await runParallel(membersOf('work'), '并行产出');
 
@@ -767,10 +899,79 @@ export async function runClusterWave(opts: {
       await speak(summarizer, '汇总与下一步');
     }
 
+    // ── 5. automation mode: keep going while the summary left work assigned ──
+    let autoRound = 0;
+    let stalls = 0;
+    let stopReason = '';
+    while (settings.enabled) {
+      checkStop();
+      if (userCount() > usersAtStart) { stopReason = '用户发来了新消息'; break; }
+      const all = snapshot().messages;
+      const roundMsgs = all.slice(roundStartIdx);
+      const plan = planTools?.current();
+      const planSig = planSignature(plan);
+      if (autoRound > 0) {
+        const progressed = planSig !== planSigAtRoundStart
+          || isSubstantiveRound(roundMsgs, all.slice(0, roundStartIdx), snapshot().members);
+        stalls = progressed ? 0 : stalls + 1;
+        if (stalls >= settings.stallRounds) { stopReason = `连续 ${stalls} 轮没有新的实质产出`; break; }
+      }
+      const decision = decideContinuation({
+        roundMessages: roundMsgs,
+        members: snapshot().members,
+        plan,
+        roundStartedAt,
+      });
+      if (!decision.proceed) { stopReason = decision.reason; break; }
+      if (autoRound >= settings.maxRounds) {
+        stopReason = `已达到自动续跑上限 ${settings.maxRounds} 轮（SHE_CLUSTER_AUTO_MAX）`;
+        break;
+      }
+
+      autoRound++;
+      roundStartIdx = snapshot().messages.length;
+      roundStartedAt = Date.now();
+      planSigAtRoundStart = planSig;
+      const phaseLabel = `自动续跑 第 ${autoRound} 轮`;
+      // Appended, never edited in: the transcript every member reads only ever grows.
+      opts.store.append(opts.roomId, {
+        role: 'system',
+        name: '系统',
+        content: renderContinuationNote(autoRound, settings.maxRounds, decision, plan),
+      });
+      opts.onEvent?.({ type: 'status', content: `${phaseLabel}：${decision.reason}`, phase: phaseLabel } as any);
+
+      const ids = new Set(decision.targets.map((m) => m.id));
+      const current = snapshot().members.filter((m) => ids.has(m.id));
+      await runParallel(current.filter((m) => m.phase === 'work'), '并行产出');
+      await runParallel(current.filter((m) => m.phase === 'review'), '并行审查');
+      const closer = membersOf('lead');
+      const roundSummarizer = closer[1] ?? closer[0];
+      if (roundSummarizer) await speak(roundSummarizer, '汇总与下一步');
+    }
+
+    if (autoRound > 0 && stopReason) {
+      opts.store.append(opts.roomId, {
+        role: 'system',
+        name: '系统',
+        content: `【系统·自动续跑结束】共续跑 ${autoRound} 轮，停止原因：${stopReason}。`,
+      });
+    }
+    if (stopReason && settings.enabled) {
+      opts.onEvent?.({ type: 'status', content: `自动续跑结束：${stopReason}`, phase: '本轮完成' } as any);
+    }
+
     opts.store.setStatus(opts.roomId, 'idle');
     opts.onEvent?.({ type: 'done' });
     return snapshot();
   } catch (err) {
+    if (err instanceof ClusterInterrupted || signal.aborted) {
+      opts.store.setStatus(opts.roomId, 'idle');
+      opts.store.append(opts.roomId, { role: 'system', name: '系统', content: '（已中断）' });
+      opts.onEvent?.({ type: 'status', content: '已中断', phase: '已中断' } as any);
+      opts.onEvent?.({ type: 'done' });
+      return snapshot();
+    }
     const msg = err instanceof Error ? err.message : String(err);
     opts.store.setStatus(opts.roomId, 'error', msg);
     opts.store.append(opts.roomId, { role: 'system', name: '系统', content: `运行失败：${msg}` });
@@ -790,7 +991,7 @@ export async function generateRoleSkill(
 ): Promise<string> {
   if (!config.llm.apiKey) throw new Error('LLM API key missing');
   const provider = createProvider(config);
-  const prompt = `为 SHE 工作群的「${role.name}」角色写一份 skill（Markdown）。
+  const prompt = `为 Pulse 工作群的「${role.name}」角色写一份 skill（Markdown）。
 职责概述：${role.title}
 ${requirement ? `用户补充要求：${requirement}` : ''}
 
@@ -813,7 +1014,7 @@ export async function initClusterIdentitySkills(config: SheConfig, workspaceRoot
 
   await Promise.all(
     DEFAULT_ROLES.map(async (m) => {
-      const prompt = `为 SHE 自动化讨论群生成角色 skill（Markdown）。角色：${m.name}（${m.key}）职责：${m.title}。
+      const prompt = `为 Pulse 自动化讨论群生成角色 skill（Markdown）。角色：${m.name}（${m.key}）职责：${m.title}。
 要求：中文；含「职责 / 输入 / 输出格式 / 禁忌 / 与其他角色交接」；300-600字；并行时不抢他人职责；不要代码块围栏外的废话。`;
       const reply = await provider.chat([
         { role: 'system', content: '你只输出 Markdown skill 正文。' },

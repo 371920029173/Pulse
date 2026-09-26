@@ -295,7 +295,7 @@ async function ensureBackend() {
         }
       }
       if (!fs.existsSync(nodeBin) || !fs.existsSync(entry)) {
-        problems.push('安装包缺少 runtime（node.exe 或 server），请重装 bot');
+        problems.push('安装包缺少 runtime（node.exe 或 server），请重装 Pulse');
       } else {
         spawnSupervised(nodeBin, [entry], 'server', {
           cwd: serverDir,
@@ -394,7 +394,7 @@ function statusPage(title, body) {
 
 function loadingPage() {
   return statusPage(
-    '<span class="spin"></span>SHE 正在启动…',
+    '<span class="spin"></span>Pulse 正在启动…',
     `<p class="hint">正在拉起后端服务（首次启动约需数秒）。</p>
      <p class="hint">日志：<code>.she/desktop.log</code></p>`,
   );
@@ -402,7 +402,7 @@ function loadingPage() {
 
 function errorPage(problems) {
   return statusPage(
-    'SHE 启动失败',
+    'Pulse 启动失败',
     `<p class="hint">后端没有起来，所以界面无法工作。原因：</p>
      <ul>${problems.map((p) => `<li>${p}</li>`).join('')}</ul>
      <p class="hint">排查：查看 <code>.she/desktop.log</code> 与
@@ -417,7 +417,7 @@ function createWindow() {
     height: 920,
     minWidth: 1100,
     minHeight: 700,
-    title: 'bot',
+    title: 'Pulse',
     backgroundColor: '#111318',
     show: false,
     autoHideMenuBar: true,
@@ -545,10 +545,10 @@ function createTray() {
         )
       : img,
   );
-  tray.setToolTip('bot');
+  tray.setToolTip('Pulse');
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: 'Show bot', click: () => showMainWindow() },
+      { label: 'Show Pulse', click: () => showMainWindow() },
       { label: 'New Window', click: () => openNewWindow() },
       { label: 'Hide', click: () => mainWindow && mainWindow.hide() },
       { type: 'separator' },

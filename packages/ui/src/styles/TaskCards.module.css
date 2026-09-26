@@ -78,3 +78,8 @@
 @media (prefers-reduced-motion: reduce) {
   .card { animation: none; }
 }
+
+/* Light theme: more transparent frosted glass (dark theme unchanged). */
+:global(html[data-theme="light"]) .card {
+  background: color-mix(in srgb, var(--bg-secondary) 66%, transparent);
+}

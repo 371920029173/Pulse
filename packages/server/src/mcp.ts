@@ -21,7 +21,15 @@ export interface McpServerStatus extends McpServerConfig {
   toolCount: number | null;
   error?: string;
   latencyMs?: number;
+  /** Tools from this server actually registered to the agent (see mcp-bridge.ts). */
+  injected: number;
+  /** Why fewer tools were registered than the server offers. */
+  injectError?: string;
 }
+
+/** Lookup of what the bridge registered for a server; absent means "no bridge, nothing injected". */
+export type McpInjectLookup = (name: string) => { injected: number; injectError?: string };
+const NO_INJECT: McpInjectLookup = () => ({ injected: 0 });
 
 const SHE_MCP_FILE = '.she/mcp.json';
 
@@ -223,21 +231,21 @@ function redactMcpEnv(cfg: McpServerConfig): McpServerConfig {
 }
 
 /** List every discovered server together with a live probe result. */
-export async function listMcpServers(workspaceRoot: string): Promise<McpServerStatus[]> {
+export async function listMcpServers(workspaceRoot: string, inject: McpInjectLookup = NO_INJECT): Promise<McpServerStatus[]> {
   const servers = discoverMcpServers(workspaceRoot);
   const results = await Promise.all(
     servers.map(async (s) => {
       const probe = await probeServer(s);
-      return { ...redactMcpEnv(s), reachable: probe.reachable, toolCount: probe.toolCount, error: probe.error, latencyMs: probe.latencyMs };
+      return { ...redactMcpEnv(s), reachable: probe.reachable, toolCount: probe.toolCount, error: probe.error, latencyMs: probe.latencyMs, ...inject(s.name) };
     }),
   );
   return results;
 }
 
 /** Probe a single named server. */
-export async function probeMcpServer(workspaceRoot: string, name: string): Promise<McpServerStatus | null> {
+export async function probeMcpServer(workspaceRoot: string, name: string, inject: McpInjectLookup = NO_INJECT): Promise<McpServerStatus | null> {
   const cfg = discoverMcpServers(workspaceRoot).find((s) => s.name === name);
   if (!cfg) return null;
   const probe = await probeServer(cfg);
-  return { ...redactMcpEnv(cfg), reachable: probe.reachable, toolCount: probe.toolCount, error: probe.error, latencyMs: probe.latencyMs };
+  return { ...redactMcpEnv(cfg), reachable: probe.reachable, toolCount: probe.toolCount, error: probe.error, latencyMs: probe.latencyMs, ...inject(cfg.name) };
 }

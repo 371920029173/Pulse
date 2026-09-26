@@ -414,3 +414,12 @@
 
 
 .layoutDesktop { min-height: 100vh; display: flex; flex-direction: column; }
+
+/* Light theme: more transparent frosted glass (dark theme unchanged). */
+:global(html[data-theme="light"]) .sidebarRail {
+  background: color-mix(in srgb, var(--bg-secondary) 46%, transparent);
+}
+:global(html[data-theme="light"]) .sidebarFab,
+:global(html[data-theme="light"]) .traceFab {
+  background: color-mix(in srgb, var(--bg-secondary) 62%, transparent);
+}

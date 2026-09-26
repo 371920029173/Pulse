@@ -1,6 +1,14 @@
 import type { LLMProvider, LLMMessage, ToolDefinition, ToolCall, StreamChunk } from '@she/shared';
 import { createLogger } from '@she/shared';
 import { repairApiMessages } from '../protocol.js';
+import {
+  StreamInterruptedError,
+  isTimeoutError,
+  retryStatusChunk,
+  lengthNoticeChunk,
+  interruptedNoticeChunk,
+  hasCompleteArguments,
+} from './stream-failure.js';
 
 const log = createLogger('openai');
 
@@ -276,7 +284,41 @@ export class OpenAIProvider implements LLMProvider {
     this.applyThinking(body, openaiMessages);
     if (stream) (body as any).stream_options = { include_usage: true };
 
-    let response = await this.post(body, signal);
+    /*
+     * A stream that breaks BEFORE anything was shown is retried with backoff, visibly.
+     *
+     * Only that case: nothing reached the user and nothing was stored, so asking again is the
+     * same request with the same prefix — no second answer on screen, no history rewrite. A
+     * break AFTER content keeps what arrived and offers 继续 instead (see `handleStream`).
+     */
+    const maxAttempts = this.maxAttempts();
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.requestOnce(body, stream, onChunk, signal);
+      } catch (err) {
+        const retryable = err instanceof StreamInterruptedError && err.retryable && !signal?.aborted;
+        if (!retryable || attempt >= maxAttempts) throw err;
+        log.warn(`stream broke before any content (attempt ${attempt}/${maxAttempts}): ${(err as Error).message}`);
+        onChunk?.(retryStatusChunk(attempt, { timeout: isTimeoutError(err) || /超时|timeout/i.test((err as Error).message) }));
+        await sleep(backoffMs(attempt, null), signal);
+      }
+    }
+  }
+
+  /** Total attempts including the first; `SHE_LLM_ATTEMPTS`, default 3. */
+  private maxAttempts(): number {
+    const raw = Number(process.env.SHE_LLM_ATTEMPTS);
+    return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 3;
+  }
+
+  /** One request (with its own HTTP-level retries) and the reading of its response. */
+  private async requestOnce(
+    body: Record<string, unknown>,
+    stream: boolean,
+    onChunk: ((chunk: StreamChunk) => void) | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<LLMMessage> {
+    let response = await this.post(body, signal, onChunk);
 
     // A 400 that names a thinking-protocol field is often "this endpoint doesn't
     // speak that dialect" or "you forgot to echo reasoning_content". Both are
@@ -336,7 +378,7 @@ export class OpenAIProvider implements LLMProvider {
         }
         if (patched) retry = true;
       }
-      if (retry) response = await this.post(body, signal);
+      if (retry) response = await this.post(body, signal, onChunk);
     }
 
     if (!response.ok) {
@@ -358,7 +400,7 @@ export class OpenAIProvider implements LLMProvider {
         onChunk({ type: 'status', content: '该端点忽略了流式请求，已按普通响应处理。' });
         return this.handleNonStream(response, onChunk);
       }
-      return this.handleStream(response, onChunk);
+      return this.handleStream(response, onChunk, signal);
     }
     return this.handleNonStream(response, onChunk);
   }
@@ -390,14 +432,20 @@ export class OpenAIProvider implements LLMProvider {
    * What is NOT retried: 4xx other than 429. A bad request stays bad; retrying only
    * delays the error and multiplies the bill.
    */
-  private async post(body: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
+  private async post(
+    body: Record<string, unknown>,
+    signal?: AbortSignal,
+    onChunk?: (chunk: StreamChunk) => void,
+  ): Promise<Response> {
     /*
      * Total attempts, including the first. Deliberately not "retries": "how many
      * retries" invites 0, which reads as "disable retrying" but would mean "never
      * send the request at all". 1 means no retry.
+     *
+     * Every retry is announced through `onChunk` ("网络不稳，正在重试（第 n 次）…"), so a wait of
+     * several seconds reads as recovery rather than as a hang.
      */
-    const raw = Number(process.env.SHE_LLM_ATTEMPTS);
-    const maxAttempts = Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 3;
+    const maxAttempts = this.maxAttempts();
 
     let lastError: Error | null = null;
 
@@ -406,11 +454,18 @@ export class OpenAIProvider implements LLMProvider {
       try {
         response = await this.fetchOnce(body, signal);
       } catch (err) {
-        // An abort is deliberate; a network error is worth another try.
-        if (signal?.aborted || /abort/i.test(String((err as Error).message))) throw err;
+        // An abort is deliberate; a network error — including our own request timeout, whose
+        // message also says "aborted" — is worth another try.
+        const timeout = isTimeoutError(err);
+        if (signal?.aborted || (!timeout && /abort/i.test(String((err as Error).message)))) throw err;
         lastError = err instanceof Error ? err : new Error(String(err));
+        if (timeout) lastError = new Error(`模型请求超时（${lastError.message}）`);
         log.warn(`LLM request failed (attempt ${attempt}/${maxAttempts}): ${lastError.message}`);
-        if (attempt < maxAttempts) { await sleep(backoffMs(attempt, null), signal); continue; }
+        if (attempt < maxAttempts) {
+          onChunk?.(retryStatusChunk(attempt, { timeout }));
+          await sleep(backoffMs(attempt, null), signal);
+          continue;
+        }
         throw lastError;
       }
 
@@ -435,6 +490,7 @@ export class OpenAIProvider implements LLMProvider {
         `LLM returned ${response.status} (attempt ${attempt}/${maxAttempts})`
         + `${retryAfter !== null ? `, retry-after ${retryAfter}s` : ''}: ${detail.slice(0, 200)}`,
       );
+      onChunk?.(retryStatusChunk(attempt, { status: response.status }));
       await sleep(backoffMs(attempt, retryAfter), signal);
     }
 
@@ -469,6 +525,7 @@ export class OpenAIProvider implements LLMProvider {
   private async handleNonStream(response: Response, onChunk?: (chunk: StreamChunk) => void): Promise<LLMMessage> {
     const data = await response.json() as {
       choices: Array<{
+        finish_reason?: string | null;
         message: {
           role: string;
           content: string | null;
@@ -523,8 +580,16 @@ export class OpenAIProvider implements LLMProvider {
       onChunk?.({ type: 'reasoning', content: reasoning });
     }
 
-    if (msg.tool_calls?.length) {
-      result.tool_calls = msg.tool_calls.map(tc => ({
+    let calls = msg.tool_calls ?? [];
+    let dropped = 0;
+    if (choice.finish_reason === 'length') {
+      // Cut off by max_tokens: a call whose arguments are not complete JSON must not run.
+      const complete = calls.filter((tc) => hasCompleteArguments(tc.function?.arguments ?? ''));
+      dropped = calls.length - complete.length;
+      calls = complete;
+    }
+    if (calls.length) {
+      result.tool_calls = calls.map(tc => ({
         id: tc.id,
         type: 'function' as const,
         function: {
@@ -533,6 +598,10 @@ export class OpenAIProvider implements LLMProvider {
         },
       }));
     }
+    if (choice.finish_reason === 'length') {
+      log.warn(`reply stopped at max_tokens (finish_reason=length, ${result.content?.length ?? 0} chars)`);
+      onChunk?.(lengthNoticeChunk(dropped));
+    }
 
     return result;
   }
@@ -540,9 +609,12 @@ export class OpenAIProvider implements LLMProvider {
   private async handleStream(
     response: Response,
     onChunk: (chunk: StreamChunk) => void,
+    signal?: AbortSignal,
   ): Promise<LLMMessage> {
     const reader = response.body?.getReader();
     if (!reader) throw new Error('No response body for streaming');
+    /** The last `finish_reason` seen: `length` means max_tokens cut the reply off. */
+    let finishReason: string | null = null;
 
     const decoder = new TextDecoder();
     let buffer = '';
@@ -623,7 +695,10 @@ export class OpenAIProvider implements LLMProvider {
           }
 
           sawAnyFrame = true;
-          if (parsed.choices?.[0]?.finish_reason) sawEndMarker = true;
+          if (parsed.choices?.[0]?.finish_reason) {
+            sawEndMarker = true;
+            finishReason = parsed.choices[0].finish_reason ?? null;
+          }
 
           if ((parsed as any).usage && onChunk) {
             const u = (parsed as any).usage;
@@ -698,8 +773,14 @@ export class OpenAIProvider implements LLMProvider {
       /*
        * An aborted turn is a deliberate stop, not a failure to report — the agent
        * already handles it, and salvaging here would defeat the abort.
+       *
+       * Our own request timeout also surfaces as an abort ("aborted due to timeout"). That one
+       * is NOT the user's stop: it is a provider that went quiet, and it is salvaged/retried
+       * like any other broken connection.
        */
-      if (/abort/i.test(breakReason)) throw err;
+      const timeout = isTimeoutError(err);
+      if (signal?.aborted || (!timeout && /abort/i.test(breakReason))) throw err;
+      if (timeout) breakReason = `模型响应超时（${breakReason}）`;
     }
 
     /*
@@ -731,7 +812,30 @@ export class OpenAIProvider implements LLMProvider {
       const hint = sawAnyFrame
         ? ''
         : '（响应里没有任何流式数据，该端点可能不支持流式；可设 SHE_LLM_STREAM=off 关闭流式后再试）';
-      throw new Error(`流式响应中断（尚未收到内容）: ${breakReason}${hint}`);
+      /*
+       * Retryable only when nothing at all was put on screen: a tool-call card that already
+       * rendered would be duplicated by a second attempt. A stream that ended cleanly with no
+       * frames is an endpoint that does not stream — asking again gets the same nothing.
+       */
+      const cleanEmpty = !sawAnyFrame && breakReason === '响应里没有任何流式数据';
+      throw new StreamInterruptedError(
+        `流式响应中断（尚未收到内容）: ${breakReason}${hint}`,
+        !cleanEmpty && toolCallAccum.size === 0,
+      );
+    }
+
+    /*
+     * `finish_reason: length` — the reply hit max_tokens. It ended "normally" on the wire, which
+     * is exactly why it used to look finished. Say so, and drop any tool call whose arguments
+     * were cut mid-JSON (running it would act on wrong arguments).
+     */
+    let lengthDropped = 0;
+    if (!broke && finishReason === 'length') {
+      for (const [idx, accum] of [...toolCallAccum]) {
+        if (!hasCompleteArguments(accum.arguments)) { toolCallAccum.delete(idx); lengthDropped++; }
+      }
+      log.warn(`reply stopped at max_tokens (finish_reason=length, ${contentAccum.length} chars)`);
+      onChunk(lengthNoticeChunk(lengthDropped));
     }
 
     if (broke) {
@@ -745,12 +849,7 @@ export class OpenAIProvider implements LLMProvider {
       const dropped = toolCallAccum.size;
       if (dropped > 0) toolCallAccum.clear();
 
-      onChunk({
-        type: 'status',
-        content:
-          `⚠ 响应中断，已保留收到的内容${dropped ? `，并丢弃了 ${dropped} 个未完整的工具调用` : ''}。`
-          + '回复「继续」可以接着往下写。',
-      });
+      onChunk(interruptedNoticeChunk(breakReason, dropped));
     }
 
     for (const [, accum] of toolCallAccum) {

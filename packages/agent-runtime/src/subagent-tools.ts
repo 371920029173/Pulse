@@ -532,6 +532,28 @@ export const DEFAULT_SUBAGENT_TIMEOUT_SECONDS = 180;
 export const MIN_SUBAGENT_TIMEOUT_SECONDS = 30;
 export const MAX_SUBAGENT_TIMEOUT_SECONDS = 30 * 60;
 
+/**
+ * 软截止：预算用到这个比例时，往子任务里插一句"停止探索、现在就交付"。
+ *
+ * 真实故障（2026-09-25 的 task_spawn）：子任务在第 90 秒就已经拿齐了交付物需要的事实
+ * （四个符号都 grep 过、lsp_references 过），之后却把工作区里每个文件都读了一遍，直到
+ * 180 秒被硬杀。交接单里写了期限，但模型在长推理里不会自己看表；硬杀之后只剩半截进度。
+ * 所以在硬杀之前给它一次明确的收尾机会，剩下的时间足够再走一两步（那次每步约 40 秒）。
+ */
+export const SUBAGENT_WRAP_UP_RATIO = 0.7;
+
+/** 软截止在预算里的时刻（毫秒）。导出以便测试。 */
+export function subagentWrapUpDelayMs(budgetMs: number): number {
+  return Math.round(budgetMs * SUBAGENT_WRAP_UP_RATIO);
+}
+
+/** 软截止时插进子任务的话。只说一件事：用手上已有的东西交付，不要再读新文件。 */
+export function composeWrapUpNudge(remainingSeconds: number): string {
+  const s = Math.max(1, Math.round(remainingSeconds));
+  return `时间快到了：这个子任务还剩约 ${s} 秒就会被强制结束。停止继续探索，不要再读新文件或跑新的搜索。` +
+    `现在就用你已经拿到的信息，按交接单的交付物格式给出最终答复；没查完的部分直接写明"未核实"。`;
+}
+
 /** Clamp a requested budget, or fall back to the default. Exported so the rule is testable. */
 export function resolveSubagentTimeoutMs(requested: unknown, fallbackSeconds = DEFAULT_SUBAGENT_TIMEOUT_SECONDS): number {
   const fallback = fallbackSeconds * 1000;

@@ -102,7 +102,9 @@ console.log('1. 依赖图：该开始的是「前置都做完」的那一步');
 
   const done = await call(tools, 'plan_update', { step_id: 's4', status: 'done' });
   check('全部做完后收口，不再给「下一步」', /下一步: 无，计划已收口/.test(done), done);
-  check('完成数不会超过实际做完的步数', /4\/4 完成/.test(done), done);
+  // plan_update now replies with only the changed step; the whole plan is read back via plan_list.
+  const doneFull = await call(tools, 'plan_list', {});
+  check('完成数不会超过实际做完的步数', /4\/4 完成/.test(doneFull), doneFull);
 }
 
 console.log('\n2. 断点恢复：换一个 store、换一个会话，还知道从哪继续');
@@ -161,10 +163,11 @@ console.log('\n3. 失败策略：写下来的处置办法要真的执行');
   await call(tools, 'plan_create', { title: '停', steps: [{ title: 'a' }, { title: 'b', dependsOn: ['s1'] }] });
   const blocked = await call(tools, 'plan_update', { step_id: 's1', status: 'blocked', note: '装不上' });
   check('stop 策略下这一步停在 blocked', mark(blocked, 's1').includes('[!]'), blocked);
-  check('受阻的计划不当作完成', /状态 open/.test(blocked), blocked);
+  const blockedFull = await call(tools, 'plan_list', {});
+  check('受阻的计划不当作完成', /状态 open/.test(blockedFull), blockedFull);
   check('受阻时下一步就是那一步，不能消失', /下一步: s1 a/.test(blocked), blocked);
   check('并说清要用户决定', /onFailure=stop/.test(blocked) && /需要用户决定/.test(blocked), blocked);
-  check('后面那步不能因为前面受阻就偷偷开始', mark(blocked, 's2').includes('[ ]'), blocked);
+  check('后面那步不能因为前面受阻就偷偷开始', mark(blockedFull, 's2').includes('[ ]'), blockedFull);
 }
 
 {
