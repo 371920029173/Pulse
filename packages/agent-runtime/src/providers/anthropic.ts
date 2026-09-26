@@ -1,13 +1,16 @@
 ﻿import type { LLMProvider, LLMMessage, ToolDefinition, ToolCall, StreamChunk } from '@she/shared';
 import { repairApiMessages } from '../protocol.js';
 import { lengthNoticeChunk, interruptedNoticeChunk } from './stream-failure.js';
+import { resolveImages, skippedNotice } from './images.js';
 
 interface AnthropicContentBlock {
-  type: 'text' | 'tool_use';
+  type: 'text' | 'tool_use' | 'image';
   text?: string;
   id?: string;
   name?: string;
   input?: Record<string, unknown>;
+  /** `type: 'image'`. Base64 with a declared media type — Anthropic takes no data URL. */
+  source?: { type: 'base64'; media_type: string; data: string };
 }
 
 export class AnthropicProvider implements LLMProvider {
@@ -70,6 +73,35 @@ export class AnthropicProvider implements LLMProvider {
         }
         anthropicMessages.push({ role: 'assistant', content });
         continue;
+      }
+      /*
+       * A user turn with images becomes content blocks; everything else stays a plain string.
+       *
+       * Anthropic has no data-URL form: the bytes go in `source.data` with `media_type` beside
+       * them. Images come first so the text reads as a caption on what the model was just shown,
+       * which is how the user wrote it. A turn whose images all failed to resolve keeps the plain
+       * string shape and carries the reason as text instead.
+       */
+      if (msg.role === 'user' && msg.images?.length) {
+        const { ok, skipped } = resolveImages(msg.images);
+        if (ok.length) {
+          const blocks: AnthropicContentBlock[] = ok.map((image) => ({
+            type: 'image' as const,
+            source: { type: 'base64' as const, media_type: image.mime, data: image.base64 },
+          }));
+          const body = msg.content?.trim() ? msg.content : '';
+          const notice = skippedNotice(skipped);
+          const text = notice ? (body ? `${body}\n\n${notice}` : notice) : body;
+          if (text) blocks.push({ type: 'text', text });
+          anthropicMessages.push({ role: 'user', content: blocks });
+          continue;
+        }
+        const notice = skippedNotice(skipped);
+        if (notice) {
+          const body = msg.content?.trim() ? `${msg.content}\n\n${notice}` : notice;
+          anthropicMessages.push({ role: 'user', content: body });
+          continue;
+        }
       }
       const text = msg.content?.trim() ? msg.content : '…';
       anthropicMessages.push({ role: msg.role, content: text });

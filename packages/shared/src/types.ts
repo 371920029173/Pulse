@@ -126,12 +126,37 @@ export interface KBQueryResult {
 
 // ─── LLM Types ───
 
+/**
+ * An image attached to a turn.
+ *
+ * Stored as a PATH, never as bytes. Two reasons, both measured elsewhere in this repo:
+ * the transcript is replayed on every request, so inlining base64 here would grow the session
+ * file without bound; and a re-encoded blob would change the request prefix on every replay,
+ * defeating the provider's prompt cache. The bytes are read once, at the moment the request is
+ * built, and never enter the transcript.
+ */
+export interface MessageImage {
+  /** Path to the image bytes. Absolute, or resolvable against the caller's workspace. */
+  path: string;
+  /** MIME type the endpoint is told, e.g. `image/png`. */
+  mime: string;
+}
+
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
   name?: string;
   tool_call_id?: string;
   tool_calls?: ToolCall[];
+  /**
+   * Images the user attached to this turn (pasted, dropped, or referenced).
+   *
+   * Only user messages carry these: a model that could *see* images would still not be able to
+   * attach any, and tool results stay text. A provider that supports vision renders them as
+   * content parts; one that does not sends the text alone and says so in the text, rather than
+   * dropping them in silence.
+   */
+  images?: MessageImage[];
   /**
    * Chain-of-thought.
    *

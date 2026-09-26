@@ -9,6 +9,7 @@ import {
   interruptedNoticeChunk,
   hasCompleteArguments,
 } from './stream-failure.js';
+import { resolveImages, skippedNotice } from './images.js';
 
 const log = createLogger('openai');
 
@@ -79,9 +80,20 @@ interface OpenAITool {
   function: OpenAIFunction;
 }
 
+/**
+ * A content part, for turns that carry an image.
+ *
+ * Text-only turns keep `content` as a plain string rather than a one-part array. That is not
+ * cosmetic: the request prefix is what the prompt cache keys on, and rewriting every text message
+ * into `[{type:'text',…}]` would re-key the whole history of every existing conversation.
+ */
+export type OpenAIContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
 interface OpenAIRequestMessage {
   role: string;
-  content: string | null;
+  content: string | null | OpenAIContentPart[];
   name?: string;
   tool_call_id?: string;
   tool_calls?: Array<{
@@ -884,8 +896,7 @@ export class OpenAIProvider implements LLMProvider {
   }
 
   private toOpenAIMessage(msg: LLMMessage): OpenAIRequestMessage {
-    let text = typeof msg.content === 'string' ? msg.content : '';
-    /*
+    let text = typeof msg.content === 'string' ? msg.content : '';    /*
      * An assistant turn with neither text nor tool calls is rejected:
      * "Invalid assistant message: content or tool_calls must be set".
      *
@@ -910,6 +921,32 @@ export class OpenAIProvider implements LLMProvider {
     if (msg.tool_call_id) result.tool_call_id = msg.tool_call_id;
     if (msg.tool_calls?.length) {
       result.tool_calls = msg.tool_calls;
+    }
+
+    /*
+     * Attached images turn the message into content parts.
+     *
+     * Only user turns can carry them (see `MessageImage`), and only when there is at least one
+     * readable file: when every attachment failed to resolve, the message stays a plain string
+     * with a note in it, so a text-only request is never reshaped into a parts array it did not
+     * need — that reshaping is what would invalidate an otherwise cacheable prefix.
+     */
+    if (msg.role === 'user' && msg.images?.length) {
+      const { ok, skipped } = resolveImages(msg.images);
+      if (ok.length) {
+        const parts: OpenAIContentPart[] = [];
+        const body = text.trim() ? text : '';
+        if (body) parts.push({ type: 'text', text: body });
+        for (const image of ok) parts.push({ type: 'image_url', image_url: { url: image.dataUrl } });
+        result.content = parts;
+        return result;
+      }
+      const notice = skippedNotice(skipped);
+      if (notice) {
+        const combined = text.trim() ? `${text}\n\n${notice}` : notice;
+        result.content = combined;
+        text = combined;
+      }
     }
 
     if (msg.role === 'assistant' && msg.tool_calls?.length && this.echoesReasoningContent()) {

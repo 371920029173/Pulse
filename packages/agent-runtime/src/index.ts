@@ -1,5 +1,19 @@
 export { OpenAIProvider } from './providers/openai.js';
 export { AnthropicProvider } from './providers/anthropic.js';
+/*
+ * Image attachments: the server names the uploaded file (so it needs the MIME helpers), and
+ * anything that wants to know what will actually be sent can reuse the same reader.
+ */
+export {
+  IMAGE_MIME_ALLOWLIST,
+  MAX_IMAGE_BYTES,
+  formatMb,
+  guessImageMime,
+  normalizeImageMime,
+  resolveImages,
+  skippedNotice,
+} from './providers/images.js';
+export type { ResolvedImage, ResolvedImages } from './providers/images.js';
 export {
   classifyLlmFailure,
   failureLabel,
