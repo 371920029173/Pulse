@@ -24,3 +24,7 @@ _*.py
 # Electron staged runtime (rebuilt by stage-desktop-runtime.mjs)
 packages/desktop/runtime/
 
+# Playwright MCP server 的页面快照，落在它运行时的 cwd 下。
+# MCP 接通之后才会出现，而且每页一份 —— 不进仓库。
+.playwright-mcp/
+
