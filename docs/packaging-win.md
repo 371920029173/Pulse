@@ -40,8 +40,11 @@ Two things keep it out, and both are needed:
   state is excluded, without it the staging stops.
 
 One side effect is worth knowing rather than fixing: `pnpm deploy` writes a partial copy of its
-output into `packages/server/packages/` whenever the target directory is inside another workspace
-package (`packages/desktop/runtime`), because it resolves the output path against the deployed
-package. It is untracked, ~27 files, bounded, and now excluded from the artifact — but do not be
-surprised to see it reappear after a staging run.
+output into a `packages` subdirectory inside the server package whenever the target directory is
+inside another workspace package (`packages/desktop/runtime`), because it resolves the output path
+against the deployed package. It is untracked, ~27 files, bounded, and now excluded from the
+artifact — but do not be surprised to see it reappear after a staging run. (It is deliberately not
+listed here as a path: it does not exist on a clean checkout, so naming it makes the docs gate
+report a dangling reference in CI while passing locally, where a previous staging run left it
+behind.)
 
