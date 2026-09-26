@@ -10,12 +10,12 @@
 # is not a substitute for `docker build && docker run`.
 #
 # Build:
-#   docker build -t she:0.2.0 .
+#   docker build -t she:0.3.0 .
 # Run (workspace mounted so the agent's files and history persist):
 #   docker run --rm -p 4577:4577 \
 #     -v "$PWD/workspace:/workspace" \
 #     -e OPENAI_API_KEY=sk-... \
-#     she:0.2.0
+#     she:0.3.0
 # Then open http://127.0.0.1:4577
 
 # ─── build ───

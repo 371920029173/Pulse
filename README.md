@@ -157,9 +157,9 @@ for a domain, list it in `SHE_ALLOWED_HOSTS` (the request guard rejects unknown 
 which is what blocks DNS rebinding).
 
 ```bash
-docker build -t pulse:0.2.0 .
+docker build -t pulse:0.3.0 .
 docker run --rm -p 127.0.0.1:5577:5577 -v "$PWD/workspace:/workspace" \
-  -e OPENAI_API_KEY=sk-... pulse:0.2.0
+  -e OPENAI_API_KEY=sk-... pulse:0.3.0
 ```
 
 > **There is no authentication on this API.** It can run shell commands, read and write your

@@ -4,6 +4,31 @@ Notable changes per release. This project follows [semantic versioning](https://
 the major version changes when stored state or the plugin API breaks, minor for
 features, patch for fixes.
 
+## 0.3.0
+
+修复了一些已知问题并进行大幅升级与优化. Most items come from a live end-to-end audit of the agent against its own workspace.
+
+### Added
+
+**Knowledge base editing and retirement.** `kb_upsert` no longer silently creates a second node for an existing title; entries can be edited or retired. Tools and API only for now, no UI buttons yet.
+
+**Plan autopilot.** Plans advance on their own until done (cap 40 steps, `SHE_PLAN_AUTOPILOT=0` turns it off), and the bundled skills explain how to plan.
+
+**Version-controlled skills.** Bundled skills now live in `skills/` (previously the gitignored `.she/skills`, still used as a fallback) and are staged into the desktop build.
+
+**Chat attach.** Switching back to a chat mid-turn resumes the live chain-of-thought stream instead of waiting for the turn to finish.
+
+**Markdown rendering.** Tables (with alignment and horizontal scroll), numbered lists, block quotes, rules and h4 to h6 headings.
+
+### Fixed
+
+- Scheduler: a task that comes due while its session is busy is queued and retried instead of failing; manual runs no longer consume a one-shot task's real fire; finished one-shot tasks are pruned after 7 days and hidden from `schedule_list` by default.
+- `reflection_check` no longer compares tool-call counts against plan steps.
+- Error book: intentional negative tests can be marked `expect_failure`; the header shows the real count; hints are specific.
+- LSP: columns are correct in files with a BOM, and the open-document cache no longer goes stale.
+- `grep` glob matching.
+- The default port is 5577 everywhere (env doctor, perf smoke, docs, theme studio).
+
 ## 0.2.0
 
 This release is mostly about the gap between "works" and "trustworthy": measuring
