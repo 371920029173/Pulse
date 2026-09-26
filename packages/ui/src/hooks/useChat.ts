@@ -47,6 +47,14 @@ export interface ChatMessage {
   isStreaming?: boolean;
   /** Set while reasoning is still streaming and content has not started. */
   isThinking?: boolean;
+  /**
+   * Files the user attached to this turn.
+   *
+   * Shown as thumbnails on the user's bubble. The `path` is what actually goes to the model — the
+   * bytes are read server-side at request time — so this survives a reload as long as the file is
+   * still in `.she/attachments/`.
+   */
+  images?: Array<{ path: string; mime: string; name?: string; url?: string }>;
   /** Work-group speaker. Absent in a 1:1 chat. */
   speaker?: { name: string; hue: number };
   /**
@@ -121,6 +129,24 @@ interface ServerHistoryMessage {
   reasoning?: string | null;
   tool_calls?: { id?: string; type?: string; function?: { name?: string; arguments?: string } }[];
   tool_call_id?: string;
+  /** Attachments on a user message, by path — the bytes are re-read server-side each turn. */
+  images?: Array<{ path?: string; mime?: string }>;
+}
+
+/**
+ * The preview URL for a stored attachment, or undefined when we cannot serve it.
+ *
+ * Reloaded history only carries paths, and the preview route is deliberately confined to
+ * `.she/attachments/` — so a path from anywhere else gets no URL and renders as a file chip
+ * instead of a broken image. Deciding that here keeps the check in one place rather than leaving
+ * the component to guess from a 404.
+ */
+function attachmentPreviewUrl(path: string): string | undefined {
+  const normalized = String(path ?? '').replace(/\\/g, '/');
+  if (!normalized.includes('/.she/attachments/')) return undefined;
+  const name = normalized.split('/').pop();
+  if (!name) return undefined;
+  return `/api/attachments/file?name=${encodeURIComponent(name)}`;
 }
 
 /**
@@ -162,7 +188,16 @@ function normalizeHistory(raw: ServerHistoryMessage[]): ChatMessage[] {
 
     // The plan autopilot resumes a turn with a `[自动续跑]` user message; it is the system talking, not the user.
     if (m.role === 'user' && content.startsWith('[自动续跑]')) return { role: 'system', content: '计划还没做完，自动继续下一步' };
-    if (m.role === 'user' || m.role === 'system') return { role: m.role, content };
+    const images: Array<{ path: string; mime: string; name: string; url?: string }> = [];
+    for (const im of m.images ?? []) {
+      const imagePath = String(im?.path ?? '');
+      if (!imagePath) continue;
+      const name = imagePath.replace(/\\/g, '/').split('/').pop() ?? imagePath;
+      images.push({ path: imagePath, mime: String(im?.mime ?? ''), name, url: attachmentPreviewUrl(imagePath) });
+    }
+    if (m.role === 'user' || m.role === 'system') {
+      return { role: m.role, content, ...(images.length ? { images } : {}) };
+    }
     return { role: 'assistant', content, reasoning };
   });
 }
@@ -584,10 +619,10 @@ export function useChat(sessionId?: string | null) {
     };
   }, []);
 
-  const sendMessage = useCallback((text: string) => {
-    if (!text.trim() || isLoading) return;
+  const sendMessage = useCallback((text: string, images?: ChatMessage['images']) => {
+    if ((!text.trim() && !images?.length) || isLoading) return;
 
-    const userMsg: ChatMessage = { role: 'user', content: text };
+    const userMsg: ChatMessage = { role: 'user', content: text, ...(images?.length ? { images } : {}) };
     setMessages((prev) => [...prev, userMsg]);
     setIsLoading(true);
     setPendingConfirm(null);
@@ -608,7 +643,13 @@ export function useChat(sessionId?: string | null) {
     const handlers = attachStreamHandlers(acc, toolCalls, currentToolCallRef);
     streamSSE(
       withSid('/api/chat'),
-      { message: text, stream: true, session_id: sidRef.current },
+      {
+        message: text,
+        stream: true,
+        session_id: sidRef.current,
+        // Paths only: the bytes stay on disk and are read when the request is built.
+        images: images?.map((i) => ({ path: i.path, mime: i.mime })),
+      },
       {
         ...handlers,
         onDone: () => {

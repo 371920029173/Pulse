@@ -34,6 +34,7 @@ import type { ClusterRole } from './cluster.js';
 import { listMcpServers, probeMcpServer, writeMcpServer, removeMcpServer, setMcpServerEnabled } from './mcp.js';
 import { PluginManager, KNOWN_PERMISSIONS, type PluginManifest } from './plugins.js';
 import { McpBridge } from './mcp-bridge.js';
+import { ATTACHMENT_MAX_BYTES, MAX_CHAT_IMAGES, attachmentMime, attachmentsDir, resolveAttachmentFile, saveAttachment } from './attachments.js';
 import { FeishuBridge, type FeishuConfig } from './feishu.js';
 
 import { AuditLog } from './audit.js';
@@ -2254,7 +2255,13 @@ function registerRoutes(router: Router): void {
   });
 
   router.post('/api/chat', async (req, res) => {
-    const body = await parseBody<{ message: string; stream?: boolean; session_id?: string }>(req);
+    const body = await parseBody<{
+      message: string;
+      stream?: boolean;
+      session_id?: string;
+      /** Pasted/dropped attachments, already uploaded and living under .she/attachments/. */
+      images?: Array<{ path?: string; mime?: string }>;
+    }>(req);
     /*
      * Type-check, don't just truth-check.
      *
@@ -2266,6 +2273,20 @@ function registerRoutes(router: Router): void {
       throw new HttpError(400, 'Missing required field: message (string)');
     }
     const message = expandMentions(body.message, config.workspace.root);
+    /*
+     * Attachments, validated at the edge.
+     *
+     * An entry with no path is dropped here rather than becoming a transcript line that says
+     * nothing; one whose FILE cannot be read is kept and reported to the model as text (see the
+     * providers). The cap is a guard on the request, not on the feature: eight screenshots in one
+     * turn is already far past what a person does deliberately.
+     */
+    const images = Array.isArray(body.images)
+      ? body.images
+        .map((i) => ({ path: String(i?.path ?? '').trim(), mime: String(i?.mime ?? '').trim() }))
+        .filter((i) => i.path)
+        .slice(0, MAX_CHAT_IMAGES)
+      : undefined;
     const agent = agentFor(req, body);
     const sid = sessionIdOf(req, body);
 
@@ -2318,7 +2339,7 @@ function registerRoutes(router: Router): void {
             lastPersist = now;
             try { persistHistory(sid); } catch { /* the final persist still runs */ }
           }
-        });
+        }, images);
         recordTurnMetrics(agent, turnStart, usageBefore, true);
         auditGuardrail(agent, sid, '对话');
         sendSSEEvent(res, { type: 'done', content: reply.content });
@@ -2341,7 +2362,7 @@ function registerRoutes(router: Router): void {
       const turnStart = Date.now();
       const usageBefore = agent.getTokenUsage();
       try {
-        const reply = await agent.chat(message);
+        const reply = await agent.chat(message, undefined, images);
         recordTurnMetrics(agent, turnStart, usageBefore, true);
         auditGuardrail(agent, sid, '对话');
         persistHistory(sid);
@@ -3289,6 +3310,56 @@ router.get('/api/fs/tree', (req, res) => {
   // ranged GET, and a 404 there makes them give up on the file entirely.
   router.get('/api/background/file', serveBackgroundFile);
   router.addRoute('HEAD', '/api/background/file', serveBackgroundFile);
+
+  /*
+   * Attachments: the upload half of pasting an image.
+   *
+   * Raw body rather than base64 JSON, for the same reason as the wallpaper: a screenshot is
+   * already several MB, and base64 inflates it by a third and forces the browser to build the
+   * whole string first. The name arrives in `x-filename` because the body is the bytes.
+   *
+   * What is returned is the PATH, not an id: providers read the bytes at request time, and the
+   * transcript stores the path so later turns of the same conversation can still send the image.
+   */
+  router.post('/api/attachments', async (req, res) => {
+    const { buffer, tooLarge } = await readRawBody(req, ATTACHMENT_MAX_BYTES);
+    if (tooLarge) {
+      throw new HttpError(413, `附件过大（上限 ${Math.round(ATTACHMENT_MAX_BYTES / 1024 / 1024)}MB）`);
+    }
+    const header = req.headers['x-filename'];
+    const rawName = decodeURIComponent(String(Array.isArray(header) ? header[0] : header || 'attachment'));
+    const typeHeader = req.headers['x-mime'];
+    const declaredMime = String(Array.isArray(typeHeader) ? typeHeader[0] : typeHeader || '');
+    const saved = saveAttachment(config.workspace.root, buffer, rawName, declaredMime);
+    sendJSON(res, {
+      ...saved,
+      /** For the composer's thumbnail; served by the route below. */
+      url: `/api/attachments/file?name=${encodeURIComponent(saved.name)}`,
+    });
+  });
+
+  /** Read one attachment back for preview. Confined to the attachments directory by name. */
+  router.get('/api/attachments/file', (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const full = resolveAttachmentFile(config.workspace.root, url.searchParams.get('name') ?? '');
+    let buf: Buffer;
+    try {
+      buf = readFileSync(full);
+    } catch {
+      throw new HttpError(404, '附件不存在');
+    }
+    res.writeHead(200, {
+      'content-type': attachmentMime(full),
+      'content-length': String(buf.length),
+      'cache-control': 'private, max-age=31536000, immutable',
+    });
+    res.end(buf);
+  });
+
+  /** Where attachments live, so Settings can show and clean the directory. */
+  router.get('/api/attachments/dir', (_req, res) => {
+    sendJSON(res, { dir: attachmentsDir(config.workspace.root) });
+  });
 
   router.delete('/api/background', (_req, res) => {
     const dir = BG_DIR();

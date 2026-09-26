@@ -7,7 +7,7 @@ pnpm check:all       # 上面这些 + 自我验证评测（调模型，需要 ke
 
 `check:all` 只是 `check:offline && eval:verify`，所以两条链不会漂移。
 
-单测：`pnpm -r test`（6 个包，1339 项）。除 `eval:agent` / `eval:verify` 外**全部离线、不花钱**。
+单测：`pnpm -r test`（6 个包，1362 项）。除 `eval:agent` / `eval:verify` 外**全部离线、不花钱**。
 
 两个评测的判分都是**确定性断言**（文件系统、命令输出、回复字符串、以及「这次跑了哪些工具」），不调用 LLM 判分 ——
 那会让成本翻倍并引入不确定性。它们按**通过率**判定而不是要求满分，因为测的是模型行为：

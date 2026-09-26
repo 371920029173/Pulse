@@ -2,6 +2,7 @@ import type {
   SheConfig,
   LLMProvider,
   LLMMessage,
+  MessageImage,
   ToolDefinition,
   StreamChunk,
   ConfirmTicketInfo,
@@ -1592,6 +1593,16 @@ export class Agent {
   async chat(
     userMessage: string,
     onChunk?: (chunk: StreamChunk) => void,
+    /**
+     * Images attached to this turn.
+     *
+     * They ride on the user message in the transcript, by PATH: the bytes are read when a request
+     * is built, never stored here, so a long conversation does not grow by megabytes per
+     * screenshot and the request prefix stays identical from turn to turn (which is what the
+     * provider's prompt cache keys on). The path must outlive the turn for the same reason — a
+     * later turn of this conversation will re-send it.
+     */
+    images?: MessageImage[],
   ): Promise<LLMMessage> {
     /*
      * One turn at a time per conversation.
@@ -1613,7 +1624,7 @@ export class Agent {
       throw new TurnInProgressError();
     }
 
-    this.history.push({ role: 'user', content: userMessage });
+    this.history.push({ role: 'user', content: userMessage, ...(images?.length ? { images } : {}) });
     // Recorded before the loop starts so a tool called during it sees this request.
     this.lastUserRequest = userMessage;
     this.beginRun(userMessage);

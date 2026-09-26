@@ -21,6 +21,7 @@ import {
   formatMb,
   guessImageMime,
   normalizeImageMime,
+  resolveImageMime,
   resolveImages,
   skippedNotice,
 } from '../providers/images.js';
@@ -117,7 +118,7 @@ describe('resolveImages', () => {
     assert.equal(normalizeImageMime('IMAGE/PNG'), 'image/png');
     assert.equal(normalizeImageMime('image/jpg'), 'image/jpeg');
     assert.equal(normalizeImageMime('image/png;charset=binary'), 'image/png');
-    assert.equal(guessImageMime('C:\\tmp\\A.PNG'), 'image/png');
+    assert.equal(guessImageMime('A.PNG'), 'image/png');
     assert.equal(guessImageMime('x.jpeg'), 'image/jpeg');
     assert.equal(guessImageMime('x.txt'), '');
     assert.deepEqual([...IMAGE_MIME_ALLOWLIST], ['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
@@ -145,6 +146,31 @@ function capturingFetch(seen: Array<Record<string, unknown>>) {
     );
   }) as unknown as typeof fetch;
 }
+
+describe('resolveImageMime', () => {
+  /*
+   * The single rule both halves of the feature depend on: the upload stores a type and the
+   * provider sends a type, and if those two ever disagree the image is stored as something
+   * nothing will read back as an image. Tested here rather than through either caller so a
+   * divergence shows up as one failing rule instead of two mysterious symptoms.
+   */
+  it('a declared type we accept wins', () => {
+    assert.equal(resolveImageMime('image/png', 'noext'), 'image/png');
+    assert.equal(resolveImageMime('image/jpg', 'x.png'), 'image/jpeg');
+    assert.equal(resolveImageMime('image/webp; charset=binary', 'x.png'), 'image/webp');
+  });
+
+  it('an unusable declared type falls back to the extension', () => {
+    assert.equal(resolveImageMime('application/octet-stream', 'x.webp'), 'image/webp');
+    assert.equal(resolveImageMime('', 'x.jpeg'), 'image/jpeg');
+    assert.equal(resolveImageMime('text/plain', 'shot.PNG'), 'image/png');
+  });
+
+  it('neither knows: empty, so the caller can report a reason instead of sending junk', () => {
+    assert.equal(resolveImageMime('', 'notes.txt'), '');
+    assert.equal(resolveImageMime('application/pdf', 'doc.pdf'), '');
+  });
+});
 
 describe('images on the wire', () => {
   it('OpenAI gets an image_url data URL, and text-only turns keep the plain string shape', async () => {

@@ -263,3 +263,45 @@ export async function probeHealth(signal?: AbortSignal): Promise<boolean> {
     return false;
   }
 }
+
+/** A file the user pasted or dropped, after the server has stored it. */
+export interface UploadedAttachment {
+  /** Absolute path — what goes to the model and what `@`-references point at. */
+  path: string;
+  relPath: string;
+  name: string;
+  mime: string;
+  bytes: number;
+  /** Served URL, for the composer thumbnail. */
+  url: string;
+}
+
+/**
+ * Upload one pasted/dropped file.
+ *
+ * Raw body with the name in a header, matching the wallpaper upload: a pasted screenshot is
+ * already megabytes, and base64 would inflate it by a third before the request even starts.
+ */
+export async function uploadAttachment(file: File | Blob, filename?: string): Promise<UploadedAttachment> {
+  const type = (file as File).type || '';
+  const name = filename || (file as File).name || 'attachment';
+  const res = await apiFetch('/api/attachments', {
+    method: 'POST',
+    headers: {
+      'Content-Type': type || 'application/octet-stream',
+      'X-Filename': encodeURIComponent(name),
+      'X-Mime': type,
+    },
+    body: file,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` })) as { error?: string };
+    throw new Error(err.error ?? `HTTP ${res.status}`);
+  }
+  return await res.json() as UploadedAttachment;
+}
+
+/** Prefix a stored attachment's URL for use in an `<img src>`. */
+export function attachmentUrl(url: string): string {
+  return url.startsWith('/') ? `${BASE}${url}` : url;
+}

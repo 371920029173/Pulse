@@ -76,6 +76,26 @@ export function guessImageMime(path: string): string {
   }
 }
 
+/** Whether we will send this type as-is. */
+export function isAllowedImageMime(mime: string): boolean {
+  return (IMAGE_MIME_ALLOWLIST as readonly string[]).includes(normalizeImageMime(mime));
+}
+
+/**
+ * The type to declare for one attachment: a declared type we accept, otherwise the extension.
+ *
+ * This is the rule the whole feature lives or dies on, so it lives in exactly one place. The
+ * fallback is load-bearing, not politeness: drag-and-drop and the clipboard routinely report
+ * `application/octet-stream` or nothing at all, so a rule that only trusted a declared `image/*`
+ * would silently drop every pasted screenshot — the exact failure this module exists to prevent.
+ * Returns `''` when neither the declared type nor the extension says "image".
+ */
+export function resolveImageMime(declared: string, path: string): string {
+  const normalized = normalizeImageMime(declared);
+  if (isAllowedImageMime(normalized)) return normalized;
+  return guessImageMime(path);
+}
+
 /**
  * Read every attached image, keeping the ones we can send and explaining the others.
  *
@@ -99,16 +119,11 @@ export function resolveImages(
       continue;
     }
     /*
-     * A declared type we accept wins; otherwise trust the extension.
-     *
-     * The fallback is load-bearing, not politeness: drag-and-drop routinely reports
-     * `application/octet-stream` or an empty type, so a rule that only accepted a declared
-     * `image/*` would silently drop every pasted screenshot — the exact failure this module
-     * exists to prevent.
+     * A declared type we accept wins; otherwise trust the extension. The rule lives in
+     * `resolveImageMime` so the upload path stores the same type this line would send.
      */
-    const allowed = (m: string) => (IMAGE_MIME_ALLOWLIST as readonly string[]).includes(m);
     const declared = normalizeImageMime(image.mime);
-    const mime = allowed(declared) ? declared : guessImageMime(path);
+    const mime = resolveImageMime(declared, path);
     if (!mime) {
       skipped.push(declared
         ? `（附件 ${path} 的类型 ${declared} 不支持，已跳过）`

@@ -6,7 +6,7 @@ import { ComposerPanel } from './ComposerPanel';
 import { Markdown } from './Markdown';
 import { IconSend, IconStop } from './Icons';
 import { t } from '../lib/i18n';
-import { fetchJSON } from '../lib/api';
+import { fetchJSON, uploadAttachment, attachmentUrl, type UploadedAttachment } from '../lib/api';
 import styles from '../styles/Chat.module.css';
 import { toast } from '../lib/toast';
 import { loadShortcuts, matchesChord, type ShortcutMap } from '../lib/shortcuts';
@@ -55,7 +55,7 @@ interface ChatProps {
    * Rendered as a strip so you can see who is thinking / who has spoken.
    */
   groupPeers?: { id: string; name: string; hue: number; active: boolean; done: boolean }[];
-  onSend: (text: string) => void;
+  onSend: (text: string, images?: Array<{ path: string; mime: string; name?: string; url?: string }>) => void;
   onInterject?: (text: string) => void;
   onStop: () => void;
   onPause?: () => void;
@@ -732,6 +732,20 @@ const MessageBubble = memo(function MessageBubble({
     {isUser ? (
       <div className={`${styles.messageRow} ${styles.messageRowUser}`}>
         <div className={styles.bubbleWrap}>
+          {msg.images?.length ? (
+            <div className={styles.bubbleImages}>
+              {msg.images.map((im) => (
+                im.mime?.startsWith('image/') && im.url ? (
+                  <a key={im.path} className={styles.bubbleImageLink} href={attachmentUrl(im.url)} target="_blank" rel="noreferrer" title={im.name ?? im.path}>
+                    <img className={styles.bubbleImage} src={attachmentUrl(im.url)} alt={im.name ?? t('附件')} />
+                  </a>
+                ) : (
+                  /* Non-images are named, not thumbnailed: the agent reads the file itself. */
+                  <span key={im.path} className={styles.bubbleFileChip}>{im.name ?? im.path}</span>
+                )
+              ))}
+            </div>
+          ) : null}
           <div className={`${styles.bubble} ${styles.bubbleUser}`} data-surface="bubble">
             {body}
           </div>
@@ -838,6 +852,17 @@ export function Chat({
 }: ChatProps) {
   const [input, setInput] = useState('');
   const [dragging, setDragging] = useState(false);
+  /*
+   * Files waiting to be sent with the next message.
+   *
+   * A pasted screenshot has no path — unlike a dropped file, the clipboard only carries bytes —
+   * so it cannot be referenced with `@path` the way a drop is. It is uploaded immediately instead,
+   * and the chip shows the thumbnail from the stored copy: uploading at paste time is what lets
+   * the user see what they actually attached before spending a turn on it.
+   */
+  const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
+  const [attachBusy, setAttachBusy] = useState(false);
+  const [attachError, setAttachError] = useState<string | null>(null);
   const [hits, setHits] = useState<SuggestHit[]>([]);
   const [hitIndex, setHitIndex] = useState(0);
   const [mentionOpen, setMentionOpen] = useState(false);
@@ -1031,7 +1056,10 @@ export function Chat({
 
   const handleSend = useCallback(() => {
     const trimmed = input.trim();
-    if (!trimmed && refs.length === 0) return;
+    // While an upload is in flight there is nothing to send yet: the chip is not there, so a
+    // message sent now would go out without the file the user thinks they just pasted.
+    if (attachBusy) return;
+    if (!trimmed && refs.length === 0 && attachments.length === 0) return;
     // Re-attach references as tokens for the server; the UI never showed them.
     const prefix = refs
       .map((r) => {
@@ -1042,17 +1070,34 @@ export function Chat({
       .join(' ');
     const message = [prefix, trimmed].filter(Boolean).join(' ');
     setRefs([]);
+    /*
+     * An attachment with no words still says something ("what is wrong here?"), so the message may
+     * be empty on the wire. The server and the providers treat images and text as independent
+     * parts; inventing placeholder text here would be a sentence the user never wrote.
+     */
+    const images = attachments.map((a) => ({ path: a.path, mime: a.mime, name: a.name, url: a.url }));
     // While a turn is running the same box appends context instead of
     // interrupting it — the agent folds it in at the next iteration.
     if (isLoading) {
       onInterject?.(message);
-    } else {
-      onSend(message);
+      /*
+       * The chips STAY when interjecting.
+       *
+       * A mid-turn addition is text only, so clearing them here would delete the attachment the
+       * user is looking at while telling them nothing — they would believe the image went out with
+       * the interjection. Leaving them in the box is the honest signal: still not sent.
+       */
+      setInput('');
+      setMentionOpen(false);
+      if (textareaRef.current) textareaRef.current.style.height = 'auto';
+      return;
     }
+    setAttachments([]);
+    onSend(message, images);
     setInput('');
     setMentionOpen(false);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
-  }, [input, isLoading, onSend, onInterject]);
+  }, [input, isLoading, onSend, onInterject, refs, attachments, attachBusy]);
 
   /** 继续 on a cut-off reply: appends a continuation turn, never edits the reply already sent. */
   const handleContinue = useCallback(() => { onSend(continuePrompt()); }, [onSend]);
@@ -1146,6 +1191,43 @@ export function Chat({
     },
     [refreshSuggest],
   );
+
+  /**
+   * Paste: an image becomes an attachment, anything else pastes as usual.
+   *
+   * Only `preventDefault` when we actually took an image, so pasting text, a path, or a code block
+   * keeps the browser's behaviour — including the `@file:` references the composer already
+   * understands.
+   */
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files: File[] = [];
+    for (const item of Array.from(e.clipboardData?.items ?? [])) {
+      if (item.kind !== 'file') continue;
+      const f = item.getAsFile();
+      if (f) files.push(f);
+    }
+    if (!files.length) return;
+    e.preventDefault();
+    setAttachError(null);
+    setAttachBusy(true);
+    void (async () => {
+      try {
+        for (const file of files) {
+          // A pasted image arrives as `image.png` from the clipboard; keep a real name if there is one.
+          const uploaded = await uploadAttachment(file, file.name || 'pasted');
+          setAttachments((prev) => [...prev, uploaded]);
+        }
+      } catch (err) {
+        setAttachError((err as Error).message);
+      } finally {
+        setAttachBusy(false);
+      }
+    })();
+  }, []);
+
+  const removeAttachment = useCallback((name: string) => {
+    setAttachments((prev) => prev.filter((a) => a.name !== name));
+  }, []);
 
   return (
     <div
@@ -1321,17 +1403,47 @@ export function Chat({
         ) : null}
 
         <div className={styles.inputWrapper}>
+          {/*
+            Attachment chips sit above the box, inside the same rounded frame.
+            Thumbnails rather than filenames: the whole point of pasting a screenshot is not having
+            to describe it, so the user has to be able to check they pasted the right one — a
+            filename from the clipboard is always `image.png`.
+          */}
+          {attachments.length || attachError || attachBusy ? (
+            <div className={styles.attachRow}>
+              {attachments.map((a) => (
+                <div key={a.name} className={styles.attachChip} title={`${a.name} · ${Math.max(1, Math.round(a.bytes / 1024))}KB`}>
+                  {a.mime.startsWith('image/') ? (
+                    <img className={styles.attachThumb} src={attachmentUrl(a.url)} alt={a.name} />
+                  ) : (
+                    <span className={styles.attachExt}>{a.name.split('.').pop()?.toUpperCase().slice(0, 4)}</span>
+                  )}
+                  <button
+                    type="button"
+                    className={styles.attachRemove}
+                    onClick={() => removeAttachment(a.name)}
+                    title={t('移除附件')}
+                    aria-label={t('移除附件')}
+                  >×</button>
+                </div>
+              ))}
+              {attachBusy ? <div className={`${styles.attachChip} ${styles.attachBusy}`}>{t('上传中…')}</div> : null}
+              {attachError ? <div className={styles.attachError}>{attachError}</div> : null}
+            </div>
+          ) : null}
+
           <textarea
             ref={textareaRef}
             className={styles.textarea}
             placeholder={
               isLoading
                 ? '补充信息…（Enter 追加 · 连按两次 Enter 打断 · Shift+Enter 换行）'
-                : '@file: / @folder: / @symbol: · #标题（Enter 发送 · Shift+Enter 换行）'
+                : '@file: / @folder: / @symbol: · 可粘贴图片（Enter 发送 · Shift+Enter 换行）'
             }
             value={input}
             onChange={handleTextareaChange}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             rows={1}
           />
           {/*
@@ -1348,10 +1460,10 @@ export function Chat({
             ><IconStop size={16} /></button>
           ) : (
             <button
-              className={`${styles.sendBtn} ${!input.trim() ? styles.sendBtnDisabled : ''}`}
+              className={`${styles.sendBtn} ${attachBusy || (!input.trim() && attachments.length === 0) ? styles.sendBtnDisabled : ''}`}
               onClick={handleSend}
-              disabled={!input.trim()}
-              title="发送（Enter）"
+              disabled={attachBusy || (!input.trim() && attachments.length === 0)}
+              title={attachBusy ? t('附件上传中…') : t('发送（Enter）')}
               aria-label={t('发送')}
             ><IconSend size={17} /></button>
           )}

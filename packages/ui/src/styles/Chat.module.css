@@ -341,6 +341,7 @@
 
 .inputWrapper {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   gap: 8px;
   background: color-mix(in srgb, var(--bg-primary) 92%, transparent);
@@ -361,6 +362,147 @@
     0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent),
     var(--shadow-md);
   transform: translateY(-1px);
+}
+
+/*
+ * Attachment chips.
+ *
+ * Full width on their own line above the textarea: the box is a row, and sharing that row with the
+ * text would shrink the typing area every time a file is attached.
+ */
+.attachRow {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+/* Attachments on an already-sent user message, above its bubble. */
+.bubbleImages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+  justify-content: flex-end;
+}
+
+.bubbleImageLink {
+  display: block;
+  line-height: 0;
+}
+
+.bubbleImage {
+  max-width: 220px;
+  max-height: 160px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  object-fit: cover;
+  cursor: zoom-in;
+  transition: transform var(--transition), border-color var(--transition);
+}
+
+.bubbleImage:hover {
+  transform: scale(1.02);
+  border-color: var(--border-focus);
+}
+
+.bubbleFileChip {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--text-secondary);
+}
+
+/* A thumbnail tile: sized to its own square, like the images it previews rather than to
+   the control grid (the send button beside it is 34px). */
+.attachChip {
+  position: relative;
+  width: 54px;
+  aspect-ratio: 1;
+  border-radius: var(--radius-sm);
+  /* Tinted, not hairline: controls here are filled, and `1px solid var(--border)` on a
+     control is what check:ui rejects — see the refChip this borrows its frame from. */
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: visible;
+  animation: attachIn 180ms var(--ease-spring);
+}
+
+@keyframes attachIn {
+  from { opacity: 0; transform: scale(0.9); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.attachThumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: calc(var(--radius-sm) - 1px);
+  display: block;
+}
+
+.attachExt {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+/* Takes the row's height from the thumbnails it is waiting beside, so the row stays one height. */
+.attachBusy {
+  width: auto;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  min-height: 26px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-style: dashed;
+}
+
+.attachError {
+  font-size: 12px;
+  color: var(--danger);
+}
+
+/* Sits on the corner and only appears on hover: the thumbnail is the content. Filled, no
+   outline — the same treatment as the × on a file-reference chip. */
+.attachRemove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: none;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  opacity: 0;
+  transition: opacity var(--transition), color var(--transition);
+}
+
+.attachChip:hover .attachRemove,
+.attachRemove:focus-visible {
+  opacity: 1;
+}
+
+.attachRemove:hover {
+  color: var(--danger);
+  border-color: var(--danger);
 }
 
 .textarea {

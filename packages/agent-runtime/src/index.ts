@@ -10,6 +10,7 @@ export {
   formatMb,
   guessImageMime,
   normalizeImageMime,
+  resolveImageMime,
   resolveImages,
   skippedNotice,
 } from './providers/images.js';
