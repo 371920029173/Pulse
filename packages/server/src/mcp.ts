@@ -190,7 +190,16 @@ function probeServer(
         let msg: { id?: number; result?: { tools?: unknown[]; serverInfo?: unknown } };
         try { msg = JSON.parse(line); } catch { continue; }
         if (msg.id === 1 && msg.result) {
-          // initialized -> ask for tools
+          /*
+           * Acknowledge first, THEN ask for tools.
+           *
+           * Per the spec the client MUST send `notifications/initialized` before any other
+           * request, and a compliant server may refuse everything until it arrives. The bridge
+           * does this; the probe did not, so a strict server answered `tools/list` with an error
+           * the probe could not read — and the panel reported "超时" for a server the agent could
+           * call perfectly well. Two implementations of one handshake, disagreeing.
+           */
+          send({ jsonrpc: '2.0', method: 'notifications/initialized' });
           send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
         } else if (msg.id === 2 && msg.result) {
           toolCount = Array.isArray(msg.result.tools) ? msg.result.tools.length : 0;

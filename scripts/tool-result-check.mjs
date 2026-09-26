@@ -90,6 +90,15 @@ console.log('\n=== 真实工具产出的结果 ===');
    */
   const shellOk = IS_WINDOWS ? 'cmd /c echo hi' : 'echo hi';
   const shellExit3 = IS_WINDOWS ? 'cmd /c exit 3' : 'exit 3';
+  /*
+   * The destructive command, aimed at something inside the throwaway workspace.
+   *
+   * `isDestructive` is a plain regex over the command text (`/rm\s+-rf/i`), so a path that is
+   * local trips it exactly like `/` does — but if the denial ever regresses, this deletes a
+   * directory that does not exist in a temp folder instead of the CI runner's filesystem.
+   * A check may only be this dangerous by accident, never on purpose.
+   */
+  const destructiveProbe = 'rm -rf ./.she-check-destructive-probe';
   const cases = [
     // [label, toolset, name, args, expected kind]
     ['grep 无匹配', sandboxTools, 'grep', { pattern: 'zzz_no_such_symbol_zzz' }, 'empty'],
@@ -101,7 +110,7 @@ console.log('\n=== 真实工具产出的结果 ===');
      * was wrong, and the check said so by returning the confirm payload. The refusal path is
      * exercised separately, below, against the raw shell result.
      */
-    ['破坏性命令先要确认（不是失败）', strictTools, 'shell', { command: 'rm -rf /' }, 'none'],
+    ['破坏性命令先要确认（不是失败）', strictTools, 'shell', { command: destructiveProbe }, 'none'],
     ['fs_read 文件不存在', sandboxTools, 'fs_read', { path: 'nope/missing.ts' }, 'not_found'],
     ['fs_read 工作区外（越权）', sandboxTools, 'fs_read', { path: '../../../etc/passwd' }, 'permission'],
     ['未知工具', sandboxTools, 'definitely_not_a_tool', {}, 'unavailable'],
@@ -137,7 +146,7 @@ console.log('\n=== 真实工具产出的结果 ===');
    * how the `DENIED:` producer — the one message the classifier reads as a prefix — is
    * exercised at all.
    */
-  const refused = await strictShell.exec('rm -rf /');
+  const refused = await strictShell.exec(destructiveProbe);
   check('沙箱确实拒绝破坏性命令', refused.denied === true && /^DENIED:/.test(refused.stderr),
     JSON.stringify(refused).slice(0, 200));
   check('DENIED 结果 → permission',

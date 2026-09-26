@@ -104,7 +104,12 @@ describe('SandboxShell', () => {
   });
 
   it('should deny destructive commands by default', async () => {
-    const result = await shell.exec('rm -rf /');
+    /*
+     * Aimed inside `tempDir` on purpose. The denial is a regex over the command text, so any
+     * `rm -rf <path>` trips it — and this test is the one that asserts the denial works. If it
+     * ever regresses, the blast radius should be the throwaway temp directory, not `/`.
+     */
+    const result = await shell.exec('rm -rf ./not-real-destructive-probe');
     assert.equal(result.denied, true);
     assert.equal(result.exitCode, -1);
     assert.ok(result.stderr.includes('DENIED'));

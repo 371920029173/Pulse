@@ -141,7 +141,9 @@ console.log('\n=== 未配置白名单时不干预（不破坏既有用法）==='
 console.log('\n=== 黑名单仍然生效（白名单是叠加，不是替换）===');
 {
   const shell = new SandboxShell(workspace, { denyDestructiveByDefault: true });
-  const r = await shell.exec('rm -rf /tmp/definitely-not-real');
+  // Scoped to the throwaway workspace: the denylist is a pattern over the command text, so
+  // `rm -rf ./x` exercises it just as well as `/tmp/x` with a far smaller blast radius.
+  const r = await shell.exec('rm -rf ./definitely-not-real');
   check('已知破坏性命令被拒绝', r.denied === true, JSON.stringify(r).slice(0, 160));
 }
 
