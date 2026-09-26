@@ -70,3 +70,39 @@ else mkdirSync(join(RUNTIME, 'skills'), { recursive: true });
 copyFileSync(process.execPath, join(RUNTIME, 'node.exe'));
 writeFileSync(join(RUNTIME, 'README.txt'), 'Pulse desktop runtime — do not edit\n', 'utf8');
 console.log('Runtime staged at', RUNTIME);
+
+/*
+ * Refuse to ship a runtime carrying anything but the product.
+ *
+ * `pnpm deploy` copies the package directory, so whatever sits in `packages/server` at build time
+ * ends up inside the installer. That is not theoretical: an earlier build shipped the author's
+ * `.she/` (knowledge base, session list), a `.playwright-mcp/` page snapshot, the TypeScript
+ * sources, and a `packages/` tree that a previous packaging run had nested into itself. Nobody was
+ * reading any of it — the launcher points SHE_WORKSPACE at the user's own folder — so the failure
+ * was silent in both directions: extra weight in every artifact, and someone else's data
+ * distributed with it.
+ *
+ * `files: ["dist"]` in the server manifest is the fix; this is the ratchet. It fails the build
+ * rather than warning, because a warning here is read after the installer has been published.
+ */
+const FORBIDDEN = [
+  ['.she', '开发期的运行时状态（知识库 / 会话记录）'],
+  ['.playwright-mcp', 'MCP 页面快照'],
+  ['src', 'TypeScript 源码（运行时只读 dist）'],
+  ['packages', '上一次打包残留的自嵌套目录'],
+  ['tsconfig.tsbuildinfo', '构建缓存'],
+  ['tsconfig.json', '构建配置'],
+  ['.env', '本机密钥'],
+];
+const shipped = [];
+for (const [name, why] of FORBIDDEN) {
+  const p = join(serverOut, name);
+  if (existsSync(p)) shipped.push(`${name}  (${why})`);
+}
+if (shipped.length) {
+  console.error('\n运行时里混进了不该发布的东西：');
+  for (const s of shipped) console.error(`  - ${s}`);
+  console.error('\n应在 packages/server/package.json 的 files 里排除，而不是在构建后手工删。');
+  process.exit(1);
+}
+console.log(`运行时干净：只有 dist（已排除 ${FORBIDDEN.map(([n]) => n).join(' / ')}）`);

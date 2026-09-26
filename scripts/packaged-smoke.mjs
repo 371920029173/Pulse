@@ -113,6 +113,40 @@ try {
     check('任务接口可用（mark-stale 路由所在）', tasks.status === 200, `status=${tasks.status}`);
     const kb = await api('/api/kb/tree');
     check('知识库接口可用', kb.status === 200, `status=${kb.status}`);
+
+    /*
+     * Attachments, end to end inside the artifact.
+     *
+     * The route existing is not the interesting half: an upload writes to `.she/attachments` under
+     * the workspace and hands back a path the providers read on every later turn, so the thing to
+     * prove is that the file survives the round trip and comes back served. A path that is written
+     * but unreadable looks identical to a working one until the model is asked about the picture.
+     */
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    let uploaded = null;
+    try {
+      const r = await fetch(`http://127.0.0.1:${PORT}/api/attachments`, {
+        method: 'POST',
+        headers: { 'content-type': 'image/png', 'x-filename': 'pasted.png', 'x-mime': 'image/png' },
+        body: png,
+        signal: AbortSignal.timeout(5000),
+      });
+      uploaded = r.ok ? await r.json() : null;
+      check('附件上传接口可用', r.ok, `status=${r.status}`);
+    } catch (e) { check('附件上传接口可用', false, String(e.message)); }
+
+    if (uploaded) {
+      check('上传返回的是工作区里的绝对路径', typeof uploaded.path === 'string' && uploaded.path.includes('.she'), uploaded.path);
+      check('上传保留了可读的原名后缀', String(uploaded.name).endsWith('pasted.png'), uploaded.name);
+      const back = await fetch(`http://127.0.0.1:${PORT}${uploaded.url}`, { signal: AbortSignal.timeout(5000) });
+      const body = Buffer.from(await back.arrayBuffer());
+      check('附件能按返回的地址读回来（内容一致）', back.status === 200 && body.equals(png), `status=${back.status} bytes=${body.length}`);
+      const escape = await api(`/api/attachments/file?name=${encodeURIComponent('..%2F..%2F.env')}`);
+      check('附件回读拒绝目录穿越', escape.status === 400 || escape.status === 403, `status=${escape.status}`);
+    }
   }
 } finally {
   try { child.kill(); } catch { /* gone */ }
