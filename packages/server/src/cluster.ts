@@ -11,6 +11,7 @@ import {
   createGroupPlanTools,
   decideContinuation,
   isSubstantiveRound,
+  mentionedMembers,
   planSignature,
   renderContinuationNote,
 } from './cluster-auto.js';
@@ -755,6 +756,18 @@ async function runRounds(
   const membersOf = (phase: ClusterPhase) => snapshot().members.filter((m) => m.phase === phase);
   const userCount = () => snapshot().messages.filter((m) => m.role === 'user').length;
   const usersAtStart = userCount();
+  /*
+   * Whoever the user addressed with `@` in the message that opened this wave.
+   *
+   * Computed once, from the goal, against the non-lead seats — a mention of a role name
+   * ("@研发") addresses every seat of that role, which is what `mentionedMembers` already does.
+   * Handed to every continuation decision so the mention keeps its meaning for the whole wave
+   * instead of only describing who the user was thinking of.
+   */
+  const userDirective = mentionedMembers(
+    opts.goal,
+    snapshot().members.filter((m) => m.phase !== 'lead'),
+  );
   const checkStop = () => {
     if (signal.aborted) throw new ClusterInterrupted();
   };
@@ -921,6 +934,7 @@ async function runRounds(
         members: snapshot().members,
         plan,
         roundStartedAt,
+        userDirective,
       });
       if (!decision.proceed) { stopReason = decision.reason; break; }
       if (autoRound >= settings.maxRounds) {

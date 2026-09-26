@@ -542,15 +542,42 @@ export const MAX_SUBAGENT_TIMEOUT_SECONDS = 30 * 60;
  */
 export const SUBAGENT_WRAP_UP_RATIO = 0.7;
 
-/** 软截止在预算里的时刻（毫秒）。导出以便测试。 */
+/**
+ * 软截止是一段窗口，不是某一个时刻。
+ *
+ * 提醒要等一个回合边界才可能被看到——`interject` 只能排在工具调用和它的结果之后。2026-09-25
+ * 那次超时留下的算术：提醒在 126.0s 发出，但子任务正等在一次 63.4s 的模型请求上，于是它 153.6s
+ * 才落地，只剩 26.4s 给"最后一答"。同一轮里回合耗时的中位是 13.5s、最大 63.4s——那次赶上属于运气。
+ *
+ * 落晚了本来还可以补一次，但只有一发就没有下一次。所以窗口内排三次：第一次仍是原来的比例，
+ * 后两次更晚、措辞点明是重复提醒。子任务按提醒交付了就结束，剩下的定时器随回合一起清掉；只有
+ * 前一次落地后还在探索，才会用到后一次。
+ */
+export const SUBAGENT_WRAP_UP_RATIOS = [SUBAGENT_WRAP_UP_RATIO, 0.8, 0.88] as const;
+
+/** 软截止在预算里的时刻（毫秒），即第一次提醒。导出以便测试。 */
 export function subagentWrapUpDelayMs(budgetMs: number): number {
   return Math.round(budgetMs * SUBAGENT_WRAP_UP_RATIO);
 }
 
-/** 软截止时插进子任务的话。只说一件事：用手上已有的东西交付，不要再读新文件。 */
-export function composeWrapUpNudge(remainingSeconds: number): string {
+/** 窗口内每次提醒的时刻（毫秒）：严格递增，且都早于硬截止。 */
+export function subagentWrapUpScheduleMs(budgetMs: number): number[] {
+  return SUBAGENT_WRAP_UP_RATIOS.map((r) => Math.round(budgetMs * r));
+}
+
+/**
+ * 软截止时插进子任务的话。只说一件事：用手上已有的东西交付，不要再读新文件。
+ *
+ * `attempt` 大于 1 表示前一次提醒已经落地、子任务却还在花同一笔预算探索。这时不能再温和：
+ * 剩下的时间只够一轮，它必须先交付。措辞要说清这一点，否则和第一次没区别。
+ */
+export function composeWrapUpNudge(remainingSeconds: number, attempt = 1): string {
   const s = Math.max(1, Math.round(remainingSeconds));
+  const repeated = attempt > 1
+    ? `这是第 ${attempt} 次提醒：上一次提醒之后你还在探索，而剩余时间只够一轮了。`
+    : '';
   return `时间快到了：这个子任务还剩约 ${s} 秒就会被强制结束。停止继续探索，不要再读新文件或跑新的搜索。` +
+    repeated +
     `现在就用你已经拿到的信息，按交接单的交付物格式给出最终答复；没查完的部分直接写明"未核实"。`;
 }
 
@@ -606,8 +633,10 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
       'with one call each, and you decide what goes into your own memory.',
       '',
       `Budget: each child is stopped after ${DEFAULT_SUBAGENT_TIMEOUT_SECONDS}s by default and returns NO result when that happens`,
-      '(you get a report of what it had done so far, not its findings). A child is heavy work — running tests,',
-      'reading many files — so give an expensive one its own budget with `timeout_ms`, or pass `background: true`',
+      '(you get a report of what it had done so far, not its findings). That clock is spent mostly WAITING ON THE MODEL,',
+      `not running tools: measured on this endpoint, ${DEFAULT_SUBAGENT_TIMEOUT_SECONDS}s is about six model turns, and a single`,
+      'turn has been observed taking 60s+. So a task whose tools are instant still times out if it needs many turns —',
+      'size `timeout_ms` by how many turns the task implies, not only by how big the files are, or pass `background: true`',
       'if you do not need the answer in this turn.',
     ].join('\n'),
     parameters: {

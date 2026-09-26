@@ -158,6 +158,21 @@ export function decideContinuation(input: {
   members: AutoMember[];
   plan?: Plan;
   roundStartedAt: number;
+  /**
+   * Members the USER named with `@` in the message that started this wave.
+   *
+   * Without this, `@` only worked in one direction: the leader's closing summary could address
+   * members, but a person writing "@研发1 去查 X" was talking to nobody — the mention sat in the
+   * goal text as prose. Worse, it made the room look single-turn: a leader that *reports* instead
+   * of *assigning* ("总结：报告见上。") ended the run, and the unfinished goal waited for the user
+   * to prod it. A user mention is the strongest instruction in the room, so it both seeds the
+   * targets and keeps the wave from stopping on "没有待处理的分派".
+   *
+   * It deliberately does NOT override the explicit stops: 【收工】, a question to the user, and a
+   * plan step parked on ask/stop still end the wave. Overriding those would make one mention run
+   * the room to the round cap. Cost stays bounded by the cap and the stall guard.
+   */
+  userDirective?: AutoMember[];
 }): ContinuationDecision {
   const { members } = input;
   const byId = new Map(members.map((m) => [m.id, m]));
@@ -210,6 +225,18 @@ export function decideContinuation(input: {
     if (!owners.length && !targets.size) owners = workers.filter((m) => m.phase === 'work');
     for (const m of owners) targets.set(m.id, m);
     why.push(`计划还有可执行的步骤：${runnable.map((s) => `${s.id} ${s.title}`).join('；')}`);
+  }
+
+  /*
+   * The person's own mention, applied last so it is added to whatever the leader already assigned.
+   *
+   * A leader that assigns nothing no longer ends the wave on its own when the user named someone:
+   * "没有待处理的分派" was accurate about the *summary* and wrong about the room's outstanding work.
+   */
+  const directed = input.userDirective ?? [];
+  if (directed.length) {
+    for (const m of directed) targets.set(m.id, m);
+    why.push(`用户点名：${directed.map((m) => m.name).join('、')}`);
   }
 
   if (!targets.size) return stop('没有待处理的分派');

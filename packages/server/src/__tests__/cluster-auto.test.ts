@@ -92,6 +92,68 @@ describe('decideContinuation', () => {
     assert.equal(d.proceed, true);
     assert.deepEqual(d.targets.map((m) => m.name), ['研发2']);
   });
+
+  /**
+   * 用户自己的 @ 必须有实际效果。
+   *
+   * 报告出来的是"单轮"观感：领导汇报而不分派（"总结：报告见上。"）时这一轮就结束了，目标没做完却
+   * 要用户再来推一次。用户点名过的成员不该等这个——那是房间里最强的指令。
+   */
+  it('a user mention keeps the wave going when the leader only reports', () => {
+    const workers = ROOM_55C2.filter((m) => m.phase !== 'lead');
+    const mention = mentionedMembers('@研发1 复查 C 盘，顺便把日志贴出来', workers);
+    assert.deepEqual(mention.map((m) => m.name), ['研发1'], '先证明 goal 里确实解析出了点名');
+
+    const base = {
+      members: ROOM_55C2,
+      roundStartedAt: Date.now(),
+      roundMessages: [{ role: 'leader', name: '领导', content: '总结：报告见上。' }],
+    };
+    // 没有点名时，仍然是原来的规则：没有分派就停。
+    assert.equal(decideContinuation(base).proceed, false);
+    // 点名后继续，且目标就是被点的人。
+    const d = decideContinuation({ ...base, userDirective: mention });
+    assert.equal(d.proceed, true, d.reason);
+    assert.deepEqual(d.targets.map((m) => m.name), ['研发1']);
+    assert.ok(d.why.some((w) => w.includes('用户点名')), d.why.join('；'));
+  });
+
+  it('a user mention adds to the leader\'s assignment instead of replacing it', () => {
+    const workers = ROOM_55C2.filter((m) => m.phase !== 'lead');
+    const d = decideContinuation({
+      members: ROOM_55C2,
+      roundStartedAt: Date.now(),
+      roundMessages: [{ role: 'leader', name: '领导', content: '@研发3 接着跑。' }],
+      userDirective: mentionedMembers('@研发1 你也看一下', workers),
+    });
+    assert.equal(d.proceed, true);
+    // 顺序按成员表来（不是按插入顺序）：研发1 在研发3 之前。
+    assert.deepEqual(d.targets.map((m) => m.name), ['研发1', '研发3']);
+  });
+
+  /**
+   * 点名的效力不能盖过明确收口，否则一次点名会让房间一直跑到轮数上限。
+   */
+  it('a user mention does NOT override 收工 or a question to the user', () => {
+    const workers = ROOM_55C2.filter((m) => m.phase !== 'lead');
+    const directive = mentionedMembers('@研发1 去做', workers);
+    const done = decideContinuation({
+      members: ROOM_55C2,
+      roundStartedAt: Date.now(),
+      roundMessages: [{ role: 'leader', name: '领导', content: '全部完成。【收工】' }],
+      userDirective: directive,
+    });
+    assert.equal(done.proceed, false, done.reason);
+    assert.match(done.reason, /收工/);
+    const ask = decideContinuation({
+      members: ROOM_55C2,
+      roundStartedAt: Date.now(),
+      roundMessages: [{ role: 'leader', name: '领导', content: '先清理哪个目录？' }],
+      userDirective: directive,
+    });
+    assert.equal(ask.proceed, false, ask.reason);
+    assert.match(ask.reason, /回答问题/);
+  });
 });
 
 describe('mentionedMembers', () => {
@@ -236,6 +298,30 @@ describe('runClusterWave automation', () => {
       providerFactory: fakeFactory((c) => ({ content: c.name === '领导' ? '@研发 开工' : work(1) }), calls),
     });
     assert.equal(calls.length, 4);
+  });
+
+  /**
+   * 用户 "@名字" 的端到端效果：领导只汇报、不分派时，被点名的成员仍然开工。
+   *
+   * 修之前这里只会跑 1 轮（4 次调用），也就是"我不管就没人会去执行"。
+   */
+  it('keeps working for a user-mentioned member even when the leader only reports', async () => {
+    process.env.SHE_CLUSTER_AUTO_MAX = '1';
+    const { store, roomId, config } = setup();
+    const calls: Call[] = [];
+    const room = await runClusterWave({
+      config, store, roomId, goal: '@研发 扫一遍 C 盘的垃圾文件',
+      providerFactory: fakeFactory((c, n) => {
+        if (c.name === '领导') return { content: '总结：报告见上。' };
+        return { content: work(n + 1) };
+      }, calls),
+    });
+    assert.equal(room.status, 'idle');
+    // 单轮是 4 次调用（拆解/产出/审查/汇总）；多出来的一轮说明点名生效。
+    assert.ok(calls.length > 4, `点名后应有自动续跑，实际只有 ${calls.length} 次调用`);
+    assert.equal(calls.filter((c) => c.name === '研发').length, 2);
+    assert.ok(room.messages.some((m) => m.content.includes('用户点名')), '续跑说明里要写明是用户点名');
+    assert.match(room.messages[room.messages.length - 1].content, /自动续跑结束/);
   });
 
   it('stops after two rounds without substantive output', async () => {

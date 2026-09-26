@@ -11,7 +11,7 @@ import { KBStore, GroupKBEngine, mergeKnowledgeBases } from '@she/kb';
 import type { KBMemoryPatch } from '@she/kb';
 import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLink } from './kb-link.js';
 import { SandboxShell, createTools, ConfirmTicketStore } from '@she/sandbox';
-import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, subagentWrapUpDelayMs, composeWrapUpNudge, selectHarvestNotes } from '@she/agent-runtime';
+import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, subagentWrapUpScheduleMs, composeWrapUpNudge, selectHarvestNotes } from '@she/agent-runtime';
 import type { SubagentRunner, SubagentResult, SubagentKbHarvest } from '@she/agent-runtime';
 import { PlanStore, MemoStore, nextStepOf } from '@she/agent-runtime';
 import { RunTraceStore, ConfidenceMirror, REFLECTION_DIR } from '@she/agent-runtime';
@@ -971,12 +971,17 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
         /*
          * 软截止：硬杀之前先让子任务收尾。interject 会排队，等当前工具组结束后再并入对话，
          * 所以不会插在工具调用和它的结果之间。子任务提前结束时清掉计时器。
+         *
+         * 排的是三次而不是一次：提醒只能落在回合边界上，而单个回合可能长达一分钟（实测 63.4s），
+         * 所以第一次可能落地得很晚——2026-09-25 那次只剩 26.4s。落晚了若没有下一次就无从补救。
          */
-        const wrapUpAt = subagentWrapUpDelayMs(budgetMs);
-        const wrapUpTimer = setTimeout(() => {
-          try { child.interject(composeWrapUpNudge((budgetMs - wrapUpAt) / 1000)); } catch { /* ignore */ }
-        }, wrapUpAt);
-        wrapUpTimer.unref?.();
+        const wrapUpTimers = subagentWrapUpScheduleMs(budgetMs).map((at, i) => {
+          const timer = setTimeout(() => {
+            try { child.interject(composeWrapUpNudge((budgetMs - at) / 1000, i + 1)); } catch { /* ignore */ }
+          }, at);
+          timer.unref?.();
+          return timer;
+        });
         try {
           const out = await Promise.race([
             child.chat(brief),
@@ -987,7 +992,7 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
              */
             new Promise<null>((r) => setTimeout(() => { timedOut = true; r(null); }, budgetMs).unref?.()),
           ]);
-          clearTimeout(wrapUpTimer);
+          for (const timer of wrapUpTimers) clearTimeout(timer);
           if (timedOut) {
             try { child.stop(); } catch { /* ignore */ }
           }
