@@ -38,6 +38,7 @@ import {
 import { removeTempDir } from './lib/temp.mjs';
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const IS_WINDOWS = process.platform === 'win32';
 const dir = mkdtempSync(join(tmpdir(), 'she-errorbook-'));
 mkdirSync(join(dir, '.she'), { recursive: true });
 writeFileSync(join(dir, 'present.ts'), 'export const a = 1;\n', 'utf8');
@@ -89,8 +90,15 @@ const NO_MATCH = 'zzz_no_such_symbol_zzz';
 // ─── 1. 真实失败 → 真的落库 ─────────────────────────────────────────────────
 console.log('\n=== 真实工具失败 → 真的写进 KB ===');
 {
+  /*
+   * `cmd /c exit 3` is a Windows built-in; on POSIX `/bin/sh` answers `cmd: not found` and exits
+   * 127. That is *also* non-zero, so this case passed on Linux for the wrong reason — it asserted
+   * "some non-zero exit" while its label claimed `exit 3`. Spelled per platform so the number
+   * really is the one the command produced.
+   */
+  const exit3 = IS_WINDOWS ? 'cmd /c exit 3' : 'exit 3';
   const cases = [
-    ['shell 非零退出码', 'shell', { command: 'cmd /c exit 3' }, 'nonzero_exit'],
+    ['shell 非零退出码', 'shell', { command: exit3 }, 'nonzero_exit'],
     ['fs_read 文件不存在', 'fs_read', { path: 'nope/missing.ts' }, 'not_found'],
     ['fs_read 工作区外', 'fs_read', { path: '../../../etc/passwd' }, 'permission'],
     ['未知工具', 'definitely_not_a_tool', {}, 'unavailable'],

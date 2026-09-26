@@ -33,6 +33,7 @@ import {
 import { removeTempDir } from './lib/temp.mjs';
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const IS_WINDOWS = process.platform === 'win32';
 const dir = mkdtempSync(join(tmpdir(), 'she-toolresult-'));
 mkdirSync(join(dir, '.she'), { recursive: true });
 writeFileSync(join(dir, 'present.ts'), 'export const a = 1;\n', 'utf8');
@@ -78,11 +79,22 @@ async function run(toolset, name, args) {
 // ─── 1. 真实生产者 ──────────────────────────────────────────────────────────
 console.log('\n=== 真实工具产出的结果 ===');
 {
+  /*
+   * The shell commands are spelled for the platform actually running this check.
+   *
+   * `cmd /c …` is a Windows built-in, so on POSIX it is not a command at all: `/bin/sh` answers
+   * `cmd: not found` and exits 127. That made 「shell 成功」 FAIL on CI while passing on Windows,
+   * and made 「shell 非零退出码」 pass for the wrong reason (127 is non-zero, but not because of
+   * `exit 3` — the check was asserting a number, not the behaviour it named). This is the same
+   * defect the timeout case below already split on platform for.
+   */
+  const shellOk = IS_WINDOWS ? 'cmd /c echo hi' : 'echo hi';
+  const shellExit3 = IS_WINDOWS ? 'cmd /c exit 3' : 'exit 3';
   const cases = [
     // [label, toolset, name, args, expected kind]
     ['grep 无匹配', sandboxTools, 'grep', { pattern: 'zzz_no_such_symbol_zzz' }, 'empty'],
-    ['shell 非零退出码', sandboxTools, 'shell', { command: 'cmd /c exit 3' }, 'nonzero_exit'],
-    ['shell 成功', sandboxTools, 'shell', { command: 'cmd /c echo hi' }, 'none'],
+    ['shell 非零退出码', sandboxTools, 'shell', { command: shellExit3 }, 'nonzero_exit'],
+    ['shell 成功', sandboxTools, 'shell', { command: shellOk }, 'none'],
     /*
      * A destructive command does NOT fail here — the sandbox asks the user first, and
      * "waiting for a human" is a state rather than a failure. Asserting `permission` for this
@@ -112,7 +124,7 @@ console.log('\n=== 真实工具产出的结果 ===');
    */
   const impatient = new SandboxShell(dir, { ...cfg.sandbox, timeout: 600, allowAllCommands: true });
   const slow = createTools(impatient, dir, { allowAllCommands: true });
-  const slowCommand = process.platform === 'win32' ? 'ping -n 6 127.0.0.1' : 'sleep 5';
+  const slowCommand = IS_WINDOWS ? 'ping -n 6 127.0.0.1' : 'sleep 5';
   const timedOut = await run(slow, 'shell', { command: slowCommand });
   check('shell 超时 → timeout', classifyToolResult('shell', timedOut).kind === 'timeout',
     `实际 ${classifyToolResult('shell', timedOut).kind}\n原始返回: ${String(timedOut).slice(0, 200)}`);
@@ -136,7 +148,8 @@ console.log('\n=== 真实工具产出的结果 ===');
    * reaches the model: an unlisted command under an allow-list sandbox.
    */
   const allowListed = new SandboxShell(dir, { ...cfg.sandbox, allowAllCommands: true, allowedCommands: ['echo'] });
-  const notListed = await allowListed.exec('cmd /c dir');
+  // Any command the allow-list does not name; spelled per platform for the same reason as above.
+  const notListed = await allowListed.exec(IS_WINDOWS ? 'cmd /c dir' : 'ls');
   check('白名单外的命令被拒绝', notListed.denied === true, JSON.stringify(notListed).slice(0, 200));
   check('白名单拒绝 → permission',
     classifyToolResult('shell', `DENIED: ${notListed.stderr}`).kind === 'permission',
