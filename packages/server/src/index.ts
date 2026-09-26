@@ -5327,6 +5327,26 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
     log.warn(`Plugin loading failed: ${(e as Error).message}`);
   }
 
+  /*
+   * Connect the MCP servers BEFORE the first agent is built — the same reason as the plugins
+   * above, and the bug that made the first version of the bridge useless.
+   *
+   * `mcp.definitions()` is a cache that only `refresh()` fills. Without a call here the agent
+   * snapshots an empty list and is handed NONE of the configured MCP tools, while the panel
+   * cheerfully reports "reachable, 14 tools" from the separate probe path. Nothing errors —
+   * the tools are simply absent, and the only tool that could have told the agent about them
+   * is the one it was never given.
+   *
+   * Bounded by the bridge's own connect budget (15s for all servers, started in parallel), so
+   * one hung server cannot hold boot open indefinitely.
+   */
+  try {
+    const mcpTools = await mcp.refresh();
+    if (mcpTools.length) log.info(`Loaded ${mcpTools.length} MCP tool(s)`);
+  } catch (e) {
+    log.warn(`MCP tool registration failed (server still starts): ${(e as Error).message}`);
+  }
+
   const initialAgent = makeAgent(config, active.id);
   if (active.messages?.length) initialAgent.setHistory(active.messages);
   agents.set(active.id, initialAgent);

@@ -1,0 +1,26 @@
+- generic [ref=e4]:
+  - banner [ref=e5]:
+    - generic [ref=e7]: b
+    - generic [ref=e8]:
+      - heading "Pulse" [level=1] [ref=e9]
+      - paragraph [ref=e10]: Structured Hierarchy Engine
+  - generic [ref=e11]:
+    - generic [ref=e12]:
+      - generic [ref=e13]: 主题
+      - generic [ref=e14]:
+        - button "深色" [ref=e15] [cursor=pointer]
+        - button "浅色" [ref=e16] [cursor=pointer]
+    - generic [ref=e17]:
+      - generic [ref=e18]: 背景
+      - generic [ref=e19]:
+        - button "选择图片 / 视频" [ref=e20] [cursor=pointer]
+        - generic [ref=e21]: 支持 jpg / png / mp4，拖到这里也行
+  - generic [ref=e22]:
+    - generic [ref=e23]:
+      - generic [ref=e24]: 工作区
+      - generic [ref=e25]: 读取中…
+    - button "输入路径" [ref=e27] [cursor=pointer]
+  - contentinfo [ref=e28]:
+    - button "更多设置" [ref=e29] [cursor=pointer]
+    - button "技能库" [ref=e30] [cursor=pointer]
+    - button "扩展坞 ▸" [ref=e31] [cursor=pointer]
