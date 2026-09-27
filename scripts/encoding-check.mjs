@@ -328,8 +328,17 @@ const SAMPLES = {
 
 // ── 4. Memo ──
 {
-  const m = await api('/api/memo', { method: 'POST', body: { text: SAMPLES.mixed } });
+  /*
+   * 备忘现在按会话存（`.she/sessions/<id>/memo.json`，2026-09-27 起），所以要显式指明会话：
+   * 不带 session_id 时服务端按"没有会话"处理（写请求直接 400），不会退回一份所有会话共享的本子。
+   */
+  const s = await api('/api/sessions', { method: 'POST', body: { title: 'memo-enc' } });
+  const sid = s.data?.id;
+  const m = await api('/api/memo', { method: 'POST', body: { text: SAMPLES.mixed, session_id: sid } });
   check('备忘往返一致', m.data?.text === SAMPLES.mixed, JSON.stringify(m.data?.text));
+  const back = await api(`/api/memo?session_id=${sid}`);
+  check('备忘回读一致', (back.data?.entries ?? []).some((e) => e.text === SAMPLES.mixed),
+    JSON.stringify((back.data?.entries ?? []).map((e) => e.text)));
 }
 
 // ── 5. A skill file: name and CONTENT on disk ──

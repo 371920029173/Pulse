@@ -3,6 +3,7 @@ import { join, resolve, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ToolDefinition } from '@she/shared';
 import { highFindings, renderGuardrailRefusal, scanOutbound } from './guardrail.js';
+import { sessionStateDir } from './session-state.js';
 
 export interface KBToolSetLike {
   definitions: ToolDefinition[];
@@ -156,14 +157,23 @@ function findCycle(steps: PlanStep[]): string | null {
 
 export class PlanStore {
   private filePath: string;
-  /** When set, all reads/writes are scoped to this conversation. */
-  private sessionId: string | null;
+  /**
+   * 这个 store 属于哪个会话。
+   *
+   * 从 2026-09-27 起它是**必需的**，而且只用来标注来源 —— 文件本身已经是会话私有的
+   * （`sessionStateDir(root, id)/plans.json`），所以"别的会话的计划"不是被过滤掉的，是根本不在这个文件里。
+   * 原来这里是"一份 `plans.json` 装所有会话 + 读的时候按 sessionId 过滤"，那对"读"不成立：文件是同一份。
+   */
+  private sessionId: string;
+  /** 本会话状态目录（`.she/sessions/<id>`），供需要把相邻文件放一起的调用方复用。 */
+  readonly directory: string;
 
-  constructor(workspaceRoot: string, sessionId?: string | null) {
-    const dir = join(workspaceRoot, '.she');
+  constructor(workspaceRoot: string, sessionId: string) {
+    const dir = sessionStateDir(workspaceRoot, sessionId);
     mkdirSync(dir, { recursive: true });
+    this.directory = dir;
     this.filePath = join(dir, 'plans.json');
-    this.sessionId = sessionId ?? null;
+    this.sessionId = sessionId;
   }
 
   private load(): Plan[] {
@@ -227,29 +237,25 @@ export class PlanStore {
   }
 
   /**
-   * The open plan to keep working on.
+   * The open plan of this conversation.
    *
-   * Prefer one this conversation created. If it has none, an open plan from
-   * any conversation is still visible — that is the point of a workspace plan.
+   * 2026-09-27 起这里没有"退回别的会话的计划"这一步了：文件按会话分开，别人的计划根本不在这个文件里，
+   * 所以也就没有"默认读得到别人的计划"这回事。长任务要跨会话续做，走的是**显式动作**（去打开那个会话），
+   * 不再靠 `plan_list` 顺手把别人的计划捞出来。
    */
   active(): Plan | undefined {
-    const all = this.list();
-    const mine = this.sessionId ? all.filter((p) => p.sessionId === this.sessionId) : all;
-    return mine.find((p) => p.status === 'open') ?? all.find((p) => p.status === 'open');
+    return this.list().find((p) => p.status === 'open');
   }
 
   /**
-   * THIS conversation's open plan, with no cross-conversation fallback.
+   * THIS conversation's open plan.
    *
-   * `active()` deliberately reaches into other conversations, because a plan is workspace state
-   * and resuming one is the point. That is the wrong rule for a delivery check: an old open plan
-   * from an unrelated chat must not be able to block today's delivery, or the cheapest way past
-   * the refusal would be to mark those steps `done` — the exact behavior the check exists to
-   * prevent. No session id means no plan of ours to check, so nothing is refused.
+   * 曾经它和 `active()` 是两条规则（`active()` 会伸到别的会话里去），因为那时"计划是工作区状态"。
+   * 现在文件本身按会话分开，两条规则合成了一条；保留这个名字是因为调用点读起来更清楚 —— 交付检查问的
+   * 是"本会话有没有未完成的计划"，而不是"工作区里有没有"。
    */
   mine(): Plan | undefined {
-    if (!this.sessionId) return undefined;
-    return this.load().find((p) => p.status === 'open' && p.sessionId === this.sessionId);
+    return this.active();
   }
 
   /**
@@ -292,7 +298,7 @@ export class PlanStore {
         attempts: 0,
         updatedAt: now,
       })),
-      sessionId: this.sessionId ?? undefined,
+      sessionId: this.sessionId,
       createdAt: now,
       updatedAt: now,
     };
@@ -719,7 +725,11 @@ export function nextStepOf(plan: Plan): { step: PlanStep; why: string } | undefi
  *   - report_write: turn findings into a shareable artifact
  *   - ask_user: explicitly request clarification instead of guessing
  */
-export function createPlanTools(workspaceRoot: string, sessionId?: string | null): KBToolSetLike & { store: PlanStore } {
+export function createPlanTools(workspaceRoot: string, sessionId: string): KBToolSetLike & { store: PlanStore } {
+  /*
+   * 会话 id 来自**这个 agent 的上下文**，不是工具参数 —— 工具层没有"指定别的会话的计划"这个入口。
+   * 这是必需的参数（不是可选）：可选的 id 会让"忘了传"变成"落到一个共享文件"，正是要根除的形态。
+   */
   const plans = new PlanStore(workspaceRoot, sessionId);
   const toolMap = new Map<string, { def: ToolDefinition; fn: (a: Record<string, unknown>) => Promise<string> }>();
 

@@ -8,6 +8,12 @@ features, patch for fixes.
 
 ### Fixed
 
+- **A conversation can no longer read another conversation's plans, memos, notes or reasoning.** These were workspace-level single files (`memo.json`, `plans.json`, `reflection/confidence.json`, `subagent-notes/`, `runs/`), separated only by a `session_id` field that readers filtered on — which does nothing for reads, because the file was the same file. An audit read another chat's full plan text, its sub-agent notes and its confidence samples from inside one session. They now live under `.she/sessions/<sessionId>/`, so another conversation's state does not exist at that path rather than being filtered out. The session id is never a tool argument and never optional: `sessionStateDir` is the only place the path is built, it encodes the id into a filesystem-safe directory name (chat ids are `sess_<hex>` but group plans use `cluster:<roomId>`, and `:` cannot appear in a Windows directory name), and it throws on a missing or malformed id instead of falling back to a shared directory — a fallback bucket is exactly the shape this removes, and nothing would ever notice it. Agents constructed without a session (read-only status routes) no longer get `plan_*` / `memo_*` at all.
+
+  Inverting this changed two documented behaviours on purpose: `plan_list` used to return *every* plan including other chats' (the system prompt said so in as many words), and `Plans live in the workspace file` was how a long task was picked up in a new chat. Plans still survive a restart within their own conversation; continuing work that lives in another chat is now an explicit act (open that chat), not something the tool list hands over by default.
+
+  Not moved: `reports/` (`report_write` deliverables, judged differently from reasoning), `kb.sqlite` (the workspace's long-term memory by design) and `audit.log`.
+
 - **MCP tools are now actually registered to the agent.** Previously MCP servers were only probed (started, tools counted, stopped), so the panel showed "reachable, N tools" while the agent had none of them. A new bridge (`packages/server/src/mcp-bridge.ts`) keeps one stdio session per enabled server and exposes its tools as `mcp_<server>_<tool>` (sorted, stable between turns, rebuilt only when the MCP config changes). MCP servers run outside the sandbox, so each call needs the same user confirmation as a dangerous built-in unless allow-all is on. The MCP panel shows how many tools were injected and warns when that differs from the probe.
 
 ## 0.3.0
@@ -194,7 +200,8 @@ conversation, it already accounts for which prerequisites are done, and it comes
 rule as the tool output so the two cannot disagree. A plan that finds new work reopens rather
 than staying closed, and dependency cycles and dangling references are refused and not written to
 disk, since a cycle means no step can ever start. `pnpm check:plan` drives the real tools, throws
-the toolset away to simulate a restart, and reads the plan back from `.she/plans.json`.
+the toolset away to simulate a restart, and reads the plan back from
+`.she/sessions/<session>/plans.json` (plans are per-conversation since 2026-09-27).
 
 **A hand-off has a shape, and "not verified" is not "done".** `report_write` used to produce the
 same free-form document whether the agent was answering a question or handing back finished work,

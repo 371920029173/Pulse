@@ -4282,29 +4282,48 @@ router.get('/api/fs/tree', (req, res) => {
     sendJSON(res, { ok });
   });
 
-  // ── shared memo (scratchpad for user + agent) ──
-  const memoOf = () => new MemoStore(config.workspace.root);
+  // ── per-session memo (scratchpad for user + agent) ──
+  /*
+   * 备忘按会话分开存（`.she/sessions/<id>/memo.json`），2026-09-27 起。
+   *
+   * 原来是工作区级单文件 `memo.json`，于是任何会话都能读到别的会话记下的东西；分账只靠"读的时候
+   * 过滤"，而文件是同一份 —— 那对"读"不成立。现在路径就不同。
+   *
+   * 没有会话时不给兜底：读返回空、写直接拒绝。兜底桶（一个所有会话共享的备忘本）正是这一层要根除的
+   * 形态，而且它出错时没人会发现。
+   */
+  const memoFor = (req: import('node:http').IncomingMessage, body?: { session_id?: string }) => {
+    const id = sessionIdOf(req, body);
+    return id ? { id, store: new MemoStore(config.workspace.root, id) } : null;
+  };
 
-  router.get('/api/memo', (_req, res) => {
-    sendJSON(res, { entries: memoOf().list() });
+  router.get('/api/memo', (req, res) => {
+    const hit = memoFor(req);
+    sendJSON(res, { entries: hit ? hit.store.list() : [] });
   });
 
   router.post('/api/memo', async (req, res) => {
-    const body = await parseBody<{ text?: string }>(req);
+    const body = await parseBody<{ text?: string; session_id?: string }>(req);
+    const hit = memoFor(req, body);
+    if (!hit) throw new HttpError(400, '缺少 session_id：备忘按会话分开存，没有会话就没有可归属的本子');
     const text = String(body.text ?? '').trim();
     if (!text) throw new HttpError(400, 'Missing text');
-    sendJSON(res, memoOf().add(text, 'user'), 201);
+    sendJSON(res, hit.store.add(text, 'user'), 201);
   });
 
   router.put('/api/memo/:id', async (req, res, params) => {
-    const body = await parseBody<{ text?: string; done?: boolean }>(req);
-    const entry = memoOf().update(params.id, body);
+    const body = await parseBody<{ text?: string; done?: boolean; session_id?: string }>(req);
+    const hit = memoFor(req, body);
+    if (!hit) throw new HttpError(400, '缺少 session_id：备忘按会话分开存');
+    const entry = hit.store.update(params.id, body);
     if (!entry) throw new HttpError(404, 'Memo not found');
     sendJSON(res, entry);
   });
 
   router.delete('/api/memo/:id', (req, res, params) => {
-    const ok = memoOf().remove(params.id);
+    const hit = memoFor(req);
+    if (!hit) throw new HttpError(400, '缺少 session_id：备忘按会话分开存');
+    const ok = hit.store.remove(params.id);
     if (!ok) throw new HttpError(404, 'Memo not found');
     sendJSON(res, { ok: true });
   });
@@ -4780,9 +4799,18 @@ router.get('/api/fs/tree', (req, res) => {
   });
 
   // ── long-horizon plans (written by the agent's plan_* tools) ──
-  // Plans belong to a conversation, so the client passes session_id.
-  const planStoreFor = (req: import('node:http').IncomingMessage, body?: { session_id?: string }) =>
-    new PlanStore(config.workspace.root, sessionIdOf(req, body) || null);
+  /*
+   * 计划按会话分开存（`.she/sessions/<id>/plans.json`），客户端传 session_id。
+   *
+   * 2026-09-27 之前这是一份工作区级 `plans.json` 加"读的时候按 sessionId 过滤"，于是任何会话都能读到
+   * 别的会话的计划全文，还能接着改。现在文件本身按会话分开，"别人的计划"不是被过滤掉的，是不在文件里。
+   *
+   * 没有会话时读返回空、写拒绝 —— 不退回"看全部"。
+   */
+  const planStoreFor = (req: import('node:http').IncomingMessage, body?: { session_id?: string }) => {
+    const id = sessionIdOf(req, body);
+    return id ? new PlanStore(config.workspace.root, id) : null;
+  };
 
   
   // ---- background / subagent task cards ----
@@ -4822,6 +4850,7 @@ router.get('/api/fs/tree', (req, res) => {
 
   router.get('/api/plans', (req, res) => {
     const store = planStoreFor(req);
+    if (!store) return sendJSON(res, { plans: [] });
     /*
      * The resume point is computed here, from `nextStepOf`, rather than in the panel.
      *
@@ -4852,7 +4881,9 @@ router.get('/api/fs/tree', (req, res) => {
     if (!['pending', 'active', 'done', 'blocked', 'dropped'].includes(status)) {
       throw new HttpError(400, 'invalid status');
     }
-    const result = planStoreFor(req, body).setStepStatus(planId, stepId, status as StepStatus, body.note);
+    const store = planStoreFor(req, body);
+    if (!store) throw new HttpError(400, '缺少 session_id：计划按会话分开存');
+    const result = store.setStepStatus(planId, stepId, status as StepStatus, body.note);
     if (!result.ok) {
       /*
        * A refused transition is not a 404. The plan and the step exist; the plan's own rule is

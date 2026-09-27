@@ -13,10 +13,13 @@ interface MemoEntry {
 }
 
 /**
- * Shared scratchpad. Both the user (here) and the agent (memo_* tools) write to
- * the same file, so edits from either side show up on refresh/poll.
+ * 会话私有的草稿板。用户（这里）和 agent（`memo_*` 工具）写的是**同一个会话**的那一份，所以两边改完
+ * 刷新/轮询就能看到。
+ *
+ * 2026-09-27 起备忘按会话分文件（`.she/sessions/<id>/memo.json`），所以这里必须带上当前会话 id：
+ * 不带就是"没有会话"，服务端会返回空列表（而不是退回一份所有会话共享的本子）。
  */
-export function Memo({ compact = false }: { compact?: boolean }) {
+export function Memo({ compact = false, sessionId }: { compact?: boolean; sessionId?: string | null }) {
   const [entries, setEntries] = useState<MemoEntry[]>([]);
   const [draft, setDraft] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -34,15 +37,22 @@ export function Memo({ compact = false }: { compact?: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
+  /* 会话 id 进 URL / body，服务端凭它决定读哪个会话的备忘本。 */
+  const withSession = useCallback(
+    (url: string) => (sessionId ? `${url}${url.includes('?') ? '&' : '?'}session_id=${encodeURIComponent(sessionId)}` : url),
+    [sessionId],
+  );
+  const sessionBody = useCallback(<T extends Record<string, unknown>>(body: T) => ({ ...body, session_id: sessionId }), [sessionId]);
+
   const load = useCallback(async () => {
     try {
-      const data = await fetchJSON<{ entries: MemoEntry[] }>('/api/memo');
+      const data = await fetchJSON<{ entries: MemoEntry[] }>(withSession('/api/memo'));
       setEntries(data.entries ?? []);
       setError(null);
     } catch (e) {
       setError((e as Error).message);
     }
-  }, []);
+  }, [withSession]);
 
   useEffect(() => {
     void load();
@@ -62,31 +72,31 @@ export function Memo({ compact = false }: { compact?: boolean }) {
     if (!text) return;
     setDraft('');
     try {
-      await fetchJSON('/api/memo', { method: 'POST', body: { text } });
+      await fetchJSON('/api/memo', { method: 'POST', body: sessionBody({ text }) });
       await load();
     } catch (e) {
       setError((e as Error).message);
     }
-  }, [draft, load]);
+  }, [draft, load, sessionBody]);
 
   const toggle = useCallback(async (m: MemoEntry) => {
-    await fetchJSON(`/api/memo/${m.id}`, { method: 'PUT', body: { done: !m.done } });
+    await fetchJSON(`/api/memo/${m.id}`, { method: 'PUT', body: sessionBody({ done: !m.done }) });
     await load();
-  }, [load]);
+  }, [load, sessionBody]);
 
   const saveEdit = useCallback(async () => {
     if (!editingId) return;
     const text = editingText.trim();
     setEditingId(null);
     if (!text) return;
-    await fetchJSON(`/api/memo/${editingId}`, { method: 'PUT', body: { text } });
+    await fetchJSON(`/api/memo/${editingId}`, { method: 'PUT', body: sessionBody({ text }) });
     await load();
-  }, [editingId, editingText, load]);
+  }, [editingId, editingText, load, sessionBody]);
 
   const remove = useCallback(async (id: string) => {
-    await fetchJSON(`/api/memo/${id}`, { method: 'DELETE' });
+    await fetchJSON(withSession(`/api/memo/${id}`), { method: 'DELETE' });
     await load();
-  }, [load]);
+  }, [load, withSession]);
 
   const visible = showDone ? entries : entries.filter((m) => !m.done);
   const doneCount = entries.filter((m) => m.done).length;

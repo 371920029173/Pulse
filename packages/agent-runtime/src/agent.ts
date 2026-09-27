@@ -454,12 +454,19 @@ export class Agent {
       }
     }
 
-    // Long-horizon affordances: durable plans, report artifacts, and asking.
-    const planTools = createPlanTools(config.workspace.root, this.sessionId);
-    this.planStore = planTools.store;
-    for (const def of planTools.definitions) {
+    /*
+     * 长任务工具：可持久化的计划、报告产物、以及反问。
+     *
+     * 没有会话就没有这套工具 —— 不给它兜底。计划/备忘按会话分文件（`sessionStateDir`），所以一个
+     * "没有会话的 agent"根本没有可以归属的文件；给它一个共享文件就是这一层要根除的形态。什么时候会出现
+     * 无会话的 agent：只读状态路由（`/api/chat/running` 这类）故意不创建会话，而那些 agent 从不跑回合，
+     * 也就永远不需要这些工具。
+     */
+    const planTools = this.sessionId ? createPlanTools(config.workspace.root, this.sessionId) : null;
+    this.planStore = planTools?.store;
+    for (const def of planTools?.definitions ?? []) {
       this.allToolDefs.push(def);
-      this.executors.set(def.name, (args) => planTools.execute(def.name, args));
+      this.executors.set(def.name, (args) => planTools!.execute(def.name, args));
     }
 
     /*
@@ -476,7 +483,7 @@ export class Agent {
       listTools: () => this.allToolDefs.map((d) => d.name),
       skillProfile: () => readSkillProfile(config.workspace.root),
       automationMode: () => config.automationMode !== false,
-      activePlanGoal: () => planTools.store.active()?.goal,
+      activePlanGoal: () => planTools?.store.active()?.goal,
       knownErrors: (query) => this.errorBook
         .lookup({ query, limit: 3 })
         .map((e) => formatErrorEntry(e)),
@@ -512,7 +519,7 @@ export class Agent {
        */
       goal: () => {
         const rec = new PreflightStore(config.workspace.root, this.sessionId).latestForSession();
-        return rec?.actual_goal || rec?.stated_intent || planTools.store.active()?.goal || null;
+        return rec?.actual_goal || rec?.stated_intent || planTools?.store.active()?.goal || null;
       },
       // Inferred constraints are passed as SOFT: pre-flight derived them from the request and the
       // workspace rather than from the user's words, and treating a derived preference as a hard
@@ -522,9 +529,9 @@ export class Agent {
         return (rec?.inferred_constraints ?? []).map((text) => ({ text, hardness: 'soft' as const }));
       },
       actions: () => this.currentRunActions(),
-      currentStep: () => planTools.store.active()?.steps.find((s) => s.status === 'active')?.title ?? null,
+      currentStep: () => planTools?.store.active()?.steps.find((s) => s.status === 'active')?.title ?? null,
       budget: () => {
-        const plan = planTools.store.active();
+        const plan = planTools?.store.active();
         /*
          * Same unit on both sides. This used to compare tool CALLS (35) against plan STEPS (9) and
          * report an overrun on almost every real plan, since one step routinely takes several calls.
@@ -568,10 +575,15 @@ export class Agent {
     }
 
     // Shared scratchpad, editable by both the user and the agent.
-    const memoTools = createMemoTools(config.workspace.root);
-    for (const def of memoTools.definitions) {
-      this.allToolDefs.push(def);
-      this.executors.set(def.name, (args) => memoTools.execute(def.name, args));
+    /*
+     * 备忘（草稿板）也按会话分文件，理由同计划工具：没有会话就不注册，不给共享兜底。
+     */
+    if (this.sessionId) {
+      const memoTools = createMemoTools(config.workspace.root, this.sessionId);
+      for (const def of memoTools.definitions) {
+        this.allToolDefs.push(def);
+        this.executors.set(def.name, (args) => memoTools.execute(def.name, args));
+      }
     }
 
     // Delegation. Only registered when a runner was injected — a child agent is

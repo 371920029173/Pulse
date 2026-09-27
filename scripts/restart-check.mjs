@@ -273,9 +273,9 @@ const created = {};
   check('允许工作的时间段写入成功', w.status === 200, `status=${w.status} body=${w.text.slice(0, 100)}`);
 }
 
-// 6. A memo.
+// 6. A memo. 备忘按会话存（2026-09-27 起），所以写和读都得指名同一个会话。
 {
-  const r = await raw('/api/memo', { method: 'POST', body: { text: '重启后这条备忘要还在' } });
+  const r = await raw('/api/memo', { method: 'POST', body: { text: '重启后这条备忘要还在', session_id: created.session } });
   check('备忘创建成功', r.status === 201, `status=${r.status}`);
 }
 
@@ -427,9 +427,9 @@ await boot('第二次启动');
   }
 }
 
-// Memo. The list is `{ entries: [...] }`.
+// Memo. The list is `{ entries: [...] }`. 备忘按会话存，读的时候要指名当初写进去的那个会话。
 {
-  const r = json(await raw('/api/memo'));
+  const r = json(await raw(`/api/memo?session_id=${created.session}`));
   const list = r?.entries ?? [];
   check('备忘保留', list.some((m) => m.text === '重启后这条备忘要还在'),
     list.map((m) => m.text).join(' | ').slice(0, 80));

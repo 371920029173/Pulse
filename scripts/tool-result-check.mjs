@@ -54,7 +54,7 @@ const store = new KBStore(join(dir, 'kb.sqlite'));
 const engine = new GroupKBEngine(store, { ...cfg.kb, dbPath: join(dir, 'kb.sqlite') });
 const shell = new SandboxShell(dir, cfg.sandbox);
 const sandboxTools = createTools(shell, dir, { allowAllCommands: true });
-const planTools = createPlanTools(dir, null);
+const planTools = createPlanTools(dir, 'sess-toolresult');
 const kbTools = createKBTools(engine);
 /*
  * A sandbox that still refuses things. `loadConfig` relaxes the destructive default when the

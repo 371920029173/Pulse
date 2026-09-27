@@ -199,11 +199,19 @@ describe('createGroupPlanTools', () => {
     assert.match(await tools.execute('plan_update', { step_id: 's1', status: 'done' }), /还没有计划/);
     assert.match(await tools.execute('plan_create', { title: 'G', steps: ['研发：扫描', '审查：复核'] }), /Created plan/);
     assert.match(await tools.execute('plan_create', { title: 'G2', steps: ['x'] }), /已经有进行中的计划/);
-    assert.match(await tools.execute('plan_update', { plan_id: other.id, step_id: 's1', status: 'done' }), /不是本群的计划/);
+    /*
+     * 别的会话的计划 id 在群里**查不到**，而不是"查到了然后拒绝"。
+     *
+     * 2026-09-27 起计划按会话分文件：群计划存在 `groupPlanSession('r1')` 那个会话的目录里，chat-1 的
+     * 计划在另一个文件。所以拿 chat-1 的 plan_id 来改，报的是"计划不存在"——旧断言（"不是本群的计划"）
+     * 属于"一份文件 + 读时过滤"的时代，那时只能靠比较 sessionId 才挡得住。
+     */
+    assert.match(await tools.execute('plan_update', { plan_id: other.id, step_id: 's1', status: 'done' }), /plan not found/);
     assert.match(await tools.execute('plan_update', { step_id: 's1', status: 'done' }), /已更新/);
     assert.equal(tools.current()?.sessionId, groupPlanSession('r1'));
     assert.equal(tools.current()?.steps[0].status, 'done');
-    assert.equal(new PlanStore(dir).get(other.id)?.steps[0].status, 'active');
+    // 群动不了别的会话的计划：它还在自己的文件里，状态没被改。
+    assert.equal(new PlanStore(dir, 'chat-1').get(other.id)?.steps[0].status, 'active');
   });
 });
 

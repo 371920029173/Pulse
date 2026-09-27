@@ -36,7 +36,7 @@
 |---|---|---|
 | D1 | 改在哪个基础：tag 新树（含今天的 `pathKey`/`mountStateDir`）还是只在 `c60c906` 重做 | 回到 tag，开分支 `isolation-root-fix`，`main` 留给 `github/main` |
 | D2 | 子代理 worktree：结束即删，还是保留但登记可一键清 | 结束即删；现场证据写进 `.she/runs`（不靠工作区外的目录） |
-| D3 | 会话数据迁移：就地迁移（备份 + 条数对账）还是新旧并存兼容期 | 就地迁移 + 备份 + 对账，少一条即中止 |
+| D3 | 会话数据迁移：就地迁移（备份 + 条数对账）还是新旧并存兼容期 | **已作废**：用户 2026-09-27 决定丢弃旧数据（对话记录/知识库都可以不要），只改路径、不迁移 |
 | D4 | 审计默认读取范围：只当前会话，还是全局 | 只当前会话（全局要走显式参数） |
 | D5 | 真隔离选型：WSL2 / Docker / 受限账号+ACL / 暂不做 | WSL2（见 4.2 对比） |
 | D6 | worktree 目录名：保持中文（`sub-带-scope-…`）还是改 ASCII | 改 ASCII（`sub-<id>`），避免跨工具编码风险 |
@@ -59,18 +59,37 @@
 
 ### 层 2：会话层（最大的一块，分 3 步）
 
-- **2.1 布局与迁移**
+- **2.1 布局与旧数据**（迁移已按用户决定取消）
   目标布局：`.she/sessions/<sessionId>/{memo.json, plans.json, confidence.json, notes/, runs/, preflight.json}`
-  迁移：按记录里的 `session_id` 拆分；无法归属的进 `.she/sessions/_legacy/`；迁移前后**条数对账**，少一条即中止并回滚。
-  验收：迁移脚本自带对账输出；`check:data` 增加"迁移不丢记录"断言。
+  会话目录名要经 `encodeSessionId`：会话 id 形状不止一种（聊天 `sess_<hex>`、群计划 `cluster:<roomId>`），
+  而 `:` 在 Windows 上不能做目录名，所以是**编码**（可逆、不碰撞）而不是"只接受 ASCII"——后者会让群计划
+  一构造就抛错（实测被门禁抓住）。
+  **仍然留在工作区级的**：`reports/`（`report_write` 的交付物，和"推理原文/笔记"不是一类）、`kb.sqlite`
+  （知识库按设计就是工作区的长期记忆，本层不动）、`audit.log`。这三处要不要跟着分区还没定。
+
+  旧数据：**不迁移**。用户 2026-09-27 决定"对话记录、知识库内容什么的都可以不要"，所以不做逐条搬迁、
+  不做条数对账、不写迁移脚本。旧的工作区级文件（`memo.json` / `plans.json` / `reflection/confidence.json` /
+  `runs/` / `subagent-notes/` / `preflight/`）在新代码里**不再被读取**，原样留在盘上，需要时人工归档到
+  `.she/archive/`。这条极大的降低了风险：层 2 从"破坏性迁移"变成"改路径 + 旧文件自然作废"。
+  验收：新起的会话在自己的目录里产生状态；旧路径下的文件不再被任何代码读。
 - **2.2 结构收紧（这条才是"不可能违反"）**
   - 所有 store 构造强制带会话 id：`new MemoStore(dir, id)`（现在只有目录，`memo-tools.ts:89`）
   - 工具层（`plan_*` / `memo_*` / 反思相关）的 session id **来自 agent 上下文**，不接受调用方传入
-  - API 层统一走 `sessionIdOf(req)`（`index.ts:1660`）后再解析路径，禁止用裸 id 拼路径
+  - API 层统一走 `sessionIdOf(req)`（`index.ts:1865`）后再解析路径，禁止用裸 id 拼路径
+  - 路径解析集中在 `sessionStateDir(root, sessionId)`：id 非法就抛错，不接受空 id 兜底（否则"没拿到会话"
+    会静默变成一个所有会话共享的桶，正是要防的那件事）
   验收：新增 `check:session-isolation` —— 起真服务、两个会话，交叉断言：B 读不到 A 的备忘/计划/笔记/置信度样本；**工具被传入 A 的 id 也拒绝**；轨迹文件路径不落在 B 的目录下。
   变异验证：把 id 改成入参可覆盖，门禁必须转红。
 - **2.3 界面与说明**
   会话列表明示"记忆按会话隔离"；跨会话查看必须是显式动作（一个入口 + 说明），不再"看起来是一份"。
+
+  **两个必须一并改掉的"口径"**（它们是当前行为的说明书，不改就等于文档在撒谎）：
+  - `system-prompt.ts:454` 现在写着"Plans live in the workspace file `.she/plans.json`… `plan_list` returns
+    every plan, including ones opened in another conversation. Switching chats does not retire them."
+    —— 这正是本层要废掉的行为，提示词必须反过来写。
+  - `system-prompt.ts:429` 说 `report_write` 写进 `.she/reports/`；若把报告也按会话分区，这句要跟着改。
+  影响面（已核实）：`/api/memo`、`/api/plans`、`/api/runs`、`/api/reflection` 四个面板；前者是工作区全局落盘，
+  后三者已按 `session_id` 过滤但**共用一份物理文件**。
 
 ### 层 3：存储
 

@@ -332,10 +332,15 @@ export function groupPlanSession(roomId: string): string {
 /**
  * The single-agent plan tools, scoped to one room.
  *
- * Same store and same rules (`.she/plans.json`, dependencies, onFailure), with three differences:
- * only the plan tools are offered (no ask_user / report_write — the group has no turn to end),
- * a call without `plan_id` goes to THIS room's open plan instead of whatever plan is newest in the
- * workspace, and a plan belonging to another chat or room cannot be touched from here.
+ * Same store and same rules (per-session `.she/sessions/<id>/plans.json`, dependencies, onFailure),
+ * with three differences: only the plan tools are offered (no ask_user / report_write — the group
+ * has no turn to end), a call without `plan_id` goes to THIS room's open plan rather than whatever
+ * plan is newest, and a plan belonging to another chat cannot be reached from here.
+ *
+ * 最后那条曾经是一段**检查**（"这个计划 id 属于别的会话就拒绝"），因为那时所有会话共用一份
+ * `plans.json` —— 同一条计划 id 在群和聊天里都查得到，所以必须靠比较 `sessionId` 挡住。2026-09-27
+ * 起计划按会话分文件，别的会话的计划根本不在这个文件里，于是那段检查变成死代码：`store.get()` 直接
+ * 找不到，报的是"计划不存在"。这就是这一层要的效果 —— 从"检查后拒绝"变成"结构上不可达"。
  */
 export function createGroupPlanTools(workspaceRoot: string, roomId: string): {
   definitions: ToolDefinition[];
@@ -361,10 +366,6 @@ export function createGroupPlanTools(workspaceRoot: string, roomId: string): {
     if (!given) {
       if (!mine) return 'Error: 本群还没有计划——先由领导用 plan_create 建一个';
       return inner.execute(name, { ...args, plan_id: mine.id });
-    }
-    const target = inner.store.get(given);
-    if (target && target.sessionId !== session) {
-      return `Error: ${target.id} 不是本群的计划（本群计划：${mine?.id ?? '无'}）`;
     }
     return inner.execute(name, args);
   };

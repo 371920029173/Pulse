@@ -159,9 +159,9 @@ function bundledSkillsRoot(): string {
  *
  * A child runs unattended and must not touch what the parent owns: `plan_*` and `preflight_*`
  * describe the PARENT's request, `ask_user` has nobody to answer, `report_*` writes long-lived
- * artifacts, `memo_*` is a shared scratchpad, `schedule_*` would let it queue the parent's future
- * work, and `kb_ingest_*` stages files the parent has not agreed to. `reflection_check` reads the
- * pre-flight record, so a child asking it would be measured against someone else's goal.
+ * artifacts, `memo_*` is the parent conversation's scratchpad, `schedule_*` would let it queue the
+ * parent's future work, and `kb_ingest_*` stages files the parent has not agreed to. `reflection_check`
+ * reads the pre-flight record, so a child asking it would be measured against someone else's goal.
  *
  * Spelled out rather than derived from a shared list because the two live in different packages
  * (`agent.ts` filters the tool DEFINITIONS, this file filters PROSE), and a regex that is too
@@ -428,7 +428,7 @@ ${
     '- `reflection_check`: mid-task self-check against the recorded goal and constraints. Reports semantic drift, budget overrun and your own confidence bias. Read-only — it cannot edit the plan.',
     '- `report_write`: write a shareable markdown artifact into `.she/reports/`. `kind="delivery"` hands back finished work (conclusion / evidence / assumptions / risks / open); `kind="report"` is a plain analysis document.',
     '- `ask_user`: ask the user — ONLY when you need information you cannot obtain yourself.',
-    '- `memo_list` / `memo_add` / `memo_update`: shared scratchpad for ideas and TODOs.',
+    '- `memo_list` / `memo_add` / `memo_update`: the scratchpad shared with the user IN THIS CONVERSATION (`.she/sessions/<this conversation>/memo.json`). Another chat has its own; you cannot see or edit that one.',
     '- `fs_read`, `fs_write`, `fs_list`, `grep`, `shell`',
     '- `git_status`, `git_diff`, `git_log`: Git inspection (read-only).',
     '- `lsp_diagnostics`: type errors and warnings for a file, from the real language server.',
@@ -451,7 +451,7 @@ ${
    * template's spacing identical for a main agent.
    */
   const plansSection = subagent ? '' : `## Long-range plans (every profile)
-Plans live in the workspace file \`.she/plans.json\`, not inside one chat. \`plan_list\` returns every plan, including ones opened in another conversation. Switching chats does not retire them.
+Plans live in \`.she/sessions/<this conversation>/plans.json\`. \`plan_list\` returns the plans of THIS conversation only: another chat's plan is not visible from here, and switching chats does not carry it over. That is deliberate — one chat cannot read or edit another's plan. If the user asks to resume work that lives in another chat, say so and let them open that chat rather than guessing at its plan.
 
 - At the start of multi-step work, call \`plan_list\`. Continue an open plan only when the user's current message is about that work. A leftover plan is not a standing order.
 - \`plan_create\` before non-trivial work. \`plan_update\` as each step actually finishes — not when you intend to do it. Its reply lists only what changed plus \`进度\` and \`下一步:\`; call \`plan_get\` when you need every step and note.
@@ -462,7 +462,7 @@ Plans live in the workspace file \`.she/plans.json\`, not inside one chat. \`pla
 - dev: every implementation step ends with a check (\`lsp_diagnostics\` or actually running the code) before it is marked done.
 - liberal: steps are research or writing stages, and each one names the artifact it produces.
 - general: keep the plan short and concrete; still persist it.
-- custom: follow the skill files, and still persist the plan so the next chat can see it.
+- custom: follow the skill files, and still persist the plan (in this conversation's own file) so the work survives a restart.
 `;
 
   const deliverySection = subagent ? '' : `## Delivering work

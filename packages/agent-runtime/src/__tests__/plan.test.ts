@@ -1,20 +1,27 @@
 /**
- * Plan store: durable, per-session progress tracking.
+ * Plan store: durable, **per-session** progress tracking.
  *
- * The plan is what the agent uses to keep its own long-horizon work straight, so
- * the invariants that matter here are that a plan survives a restart and stays
- * visible to every conversation (a long task must not vanish when the chat
- * changes) — plus the
- * auto-advance behaviour, which is easy to break silently.
+ * 计划是 agent 用来管自己长任务的东西，所以这里要紧的性质是：计划活过一次重启（同一会话内）。
+ *
+ * 2026-09-27 起"每个会话都看得见"这条**被反过来了**：原来一份 `plans.json` 装所有会话、读的时候
+ * 按 sessionId 过滤，于是任何会话都能读到别的会话的计划全文。现在文件按会话分开，别的会话的计划
+ * **不在这个文件里**。长任务要跨会话续做走显式动作（打开那个会话），不再靠 `plan_list` 顺手捞。
+ *
+ * 文件头这句原本写的是 "stays visible to every conversation (a long task must not vanish when the
+ * chat changes)" —— 那句是旧行为的说明书，留着就是撒谎，所以改了。
  */
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PlanStore, renderPlan, createPlanTools } from '../plan-tools.js';
 import type { StepStatus } from '../plan-tools.js';
 import { classifyToolResult } from '../tool-result.js';
+
+/** 本文件默认的会话；需要第二个会话时用 `SESS_B`。 */
+const SESS = 'sess_plan';
+const SESS_B = 'sess_plan_b';
 
 /**
  * Apply a legal transition and hand back the plan.
@@ -35,7 +42,7 @@ afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 describe('PlanStore', () => {
   it('first step starts active, the rest pending', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const plan = store.create('收尾工作', ['分类', '提交'], '把未提交的改动整理好');
     assert.equal(plan.steps.length, 2);
     // The agent reads `active` as "do this now"; getting this wrong makes it
@@ -46,37 +53,47 @@ describe('PlanStore', () => {
   });
 
   it('survives a reload (durability)', () => {
-    const a = new PlanStore(dir);
+    const a = new PlanStore(dir, SESS);
     const created = a.create('持久化', ['一步']);
     // A second store over the same directory stands in for a process restart.
-    const b = new PlanStore(dir);
+    const b = new PlanStore(dir, SESS);
     const found = b.get(created.id);
     assert.ok(found, '重启后应能读回计划');
     assert.equal(found!.title, '持久化');
   });
 
-  it('lists plans from every conversation', () => {
+  it('【关键】每个会话只看得到自己的计划（两个文件，不是一个文件加过滤）', () => {
     const storeA = new PlanStore(dir, 'sess-A');
     const storeB = new PlanStore(dir, 'sess-B');
     const a = storeA.create('属于 A', ['x']);
-    const b = storeB.create('属于 B', ['y']);
-    const titles = storeA.list().map((p) => p.title).sort();
-    assert.deepEqual(titles, ['属于 A', '属于 B']);
-    assert.equal(storeB.get(a.id)?.title, '属于 A');
-    assert.equal(storeA.active()?.id, a.id, '优先继续本会话自己的未完成计划');
-    assert.equal(storeB.active()?.id, b.id);
-    const updated = setStep(storeA, b.id, b.steps[0].id, 'done');
-    assert.equal(updated?.status, 'done', '别的会话留下的计划也要能接着改');
+    storeB.create('属于 B', ['y']);
+    // 旧行为（2026-09-27 之前）：A 看得到 B 的计划，还能接着改 —— 那是"工作区计划"，也是跨会话读的入口。
+    assert.deepEqual(storeA.list().map((p) => p.title), ['属于 A']);
+    assert.deepEqual(storeB.list().map((p) => p.title), ['属于 B']);
+    assert.equal(storeB.get(a.id), undefined, 'B 不该看得到 A 的计划');
+    assert.equal(storeA.active()?.id, a.id);
+    // 它自己的计划照旧能接着改 —— 分离的是"别人的"，不是"我的"。
+    const updated = setStep(storeA, a.id, a.steps[0].id, 'done');
+    assert.equal(updated?.status, 'done');
+    // 两个文件各在各的目录里。
+    assert.equal(existsSync(join(dir, '.she', 'sessions', 'sess-A', 'plans.json')), true);
+    assert.equal(existsSync(join(dir, '.she', 'sessions', 'sess-B', 'plans.json')), true);
   });
 
-  it('an unbound store sees every plan', () => {
+  it('【关键】构造 store 必须给它一个会话 —— 不给就没法"看到全部"', () => {
+    // 旧行为里有一条测试专门断言「未绑定会话的 store 看得到全部计划」。`sessionId` 现在是必需参数，
+    // 所以那条路没有了：忘了传 id 是抛错，不是"落到共享文件"。兜底桶是所有会话共享的记忆，且没人会发现。
+    assert.throws(() => new PlanStore(dir, ''), /不合法/);
+    assert.throws(() => new PlanStore(dir, '../..'), /不合法/);
+    // 两个会话各自建了计划，第三个会话看不到它们。
     new PlanStore(dir, 'sess-A').create('A 的', ['x']);
     new PlanStore(dir, 'sess-B').create('B 的', ['y']);
-    assert.equal(new PlanStore(dir).list().length, 2);
+    assert.deepEqual(new PlanStore(dir, 'sess-C').list(), []);
+    assert.notEqual(SESS, SESS_B);
   });
 
   it('completing a step auto-advances the next one', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('两步', ['a', 'b']);
     setStep(store, p.id, p.steps[0].id, 'done');
     const after = store.get(p.id)!;
@@ -85,7 +102,7 @@ describe('PlanStore', () => {
   });
 
   it('closes the plan once every step is done or dropped', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('两步', ['a', 'b']);
     setStep(store, p.id, p.steps[0].id, 'done');
     setStep(store, p.id, p.steps[1].id, 'dropped');
@@ -93,7 +110,7 @@ describe('PlanStore', () => {
   });
 
   it('a blocked step does not close the plan', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('被阻塞', ['a']);
     setStep(store, p.id, p.steps[0].id, 'blocked', '等外部依赖');
     const after = store.get(p.id)!;
@@ -102,7 +119,7 @@ describe('PlanStore', () => {
   });
 
   it('addSteps appends and keeps existing steps', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('增量', ['一']);
     const after = store.addSteps(p.id, ['二', '三'])!;
     assert.equal(after.steps.length, 3);
@@ -111,7 +128,7 @@ describe('PlanStore', () => {
   });
 
   it('accepts a short plan id prefix', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('前缀', ['x']);
     // The model often echoes a truncated id; resolving it is what makes
     // plan_update usable in practice.
@@ -119,14 +136,14 @@ describe('PlanStore', () => {
   });
 
   it('empty titles are rejected rather than creating junk', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('   ', ['', '  ', '有效步骤']);
     assert.equal(p.title, '未命名计划', '空标题应有兜底');
     assert.equal(p.steps.length, 1, '空步骤应被过滤');
   });
 
   it('active() returns the newest open plan only', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const first = store.create('旧的', ['a']);
     store.create('新的', ['b']);
     store.setStatus(first.id, 'done');
@@ -144,7 +161,7 @@ describe('PlanStore', () => {
  */
 describe('PlanStore 依赖与失败策略', () => {
   it('前置没完成时不能开始，也不能标完成', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('有依赖', [{ title: 'a' }, { title: 'b', dependsOn: ['s1'] }]);
     assert.equal(p.steps[0].status, 'active', '没有前置的第一步应直接开始');
     assert.equal(p.steps[1].status, 'pending');
@@ -161,7 +178,7 @@ describe('PlanStore 依赖与失败策略', () => {
   });
 
   it('手动跳过一步，依赖它的步骤也会被跳过（不能假装前置做完了）', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('跳过的前置', [{ title: 'a' }, { title: 'b', dependsOn: ['s1'] }]);
     setStep(store, p.id, 's1', 'dropped');
     const after = store.get(p.id)!;
@@ -170,7 +187,7 @@ describe('PlanStore 依赖与失败策略', () => {
   });
 
   it('给做完的计划加新步骤会重新打开它', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('做完又发现活', ['a']);
     setStep(store, p.id, 's1', 'done');
     assert.equal(store.get(p.id)!.status, 'done');
@@ -183,7 +200,7 @@ describe('PlanStore 依赖与失败策略', () => {
   });
 
   it('完成一步后激活的是「前置都做完」的那一步，不是列表里的下一步', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('菱形', [
       'a',
       { title: 'b', dependsOn: ['s1'] },
@@ -205,7 +222,7 @@ describe('PlanStore 依赖与失败策略', () => {
   });
 
   it('同一时间只有一步在进行中', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('并行', ['a', 'b']);
     setStep(store, p.id, 's2', 'active');
     const after = store.get(p.id)!;
@@ -214,7 +231,7 @@ describe('PlanStore 依赖与失败策略', () => {
   });
 
   it('依赖不存在的步骤会被拒绝，并保持原样', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('坏依赖', ['a', 'b']);
     const r = store.setStepStatus(p.id, 's2', 'pending', undefined, { dependsOn: ['s9'] });
     assert.equal(r.ok, false);
@@ -223,16 +240,16 @@ describe('PlanStore 依赖与失败策略', () => {
   });
 
   it('依赖成环会被拒绝，而且不落盘', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('环', ['a', 'b']);
     assert.equal(store.setStepStatus(p.id, 's1', 'pending', undefined, { dependsOn: ['s2'] }).ok, true);
     const r = store.setStepStatus(p.id, 's2', 'pending', undefined, { dependsOn: ['s1'] });
     assert.equal(r.ok, false, 's1→s2→s1 没有一步能开始');
-    assert.deepEqual(new PlanStore(dir).get(p.id)!.steps[1].dependsOn, [], '成环的依赖不能写下去');
+    assert.deepEqual(new PlanStore(dir, SESS).get(p.id)!.steps[1].dependsOn, [], '成环的依赖不能写下去');
   });
 
   it('onFailure=skip 会把依赖它的步骤一起跳过，并写清原因', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('跳过', [
       'a',
       { title: 'b', dependsOn: ['s1'], onFailure: 'skip' },
@@ -251,7 +268,7 @@ describe('PlanStore 依赖与失败策略', () => {
   });
 
   it('onFailure=stop 时停下来，并说清卡在哪一步', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('停止', ['a', { title: 'b', dependsOn: ['s1'] }]);
     setStep(store, p.id, 's1', 'blocked', '装不上');
 
@@ -265,7 +282,7 @@ describe('PlanStore 依赖与失败策略', () => {
   });
 
   it('retry 会记下试了几次，重复重试不是静默死循环', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('重试', [{ title: 'a', onFailure: 'retry' }]);
     setStep(store, p.id, 's1', 'blocked', '连不上');
     assert.match(store.nextStep(p.id)!.why, /换个做法再试一次/);
@@ -277,28 +294,28 @@ describe('PlanStore 依赖与失败策略', () => {
   });
 
   it('ask 策略会明说要问用户', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('问', [{ title: '删库', onFailure: 'ask' }]);
     setStep(store, p.id, 's1', 'blocked', '需要用户确认');
     assert.match(store.nextStep(p.id)!.why, /ask_user/, '该问用户时不能自己猜');
   });
 
   it('nextStep 在计划跑完时给不出东西', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('收口', ['a']);
     setStep(store, p.id, 's1', 'done');
     assert.equal(store.nextStep(p.id), undefined);
   });
 
   it('创建时激活的是「没有前置」的那一步，而不是列表里的第一步', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('前向依赖', [{ title: 'b', dependsOn: ['s2'] }, { title: 'a' }]);
     assert.equal(p.steps[1].status, 'active', 's1 还在等 s2，能开始的是 s2');
     assert.equal(p.steps[0].status, 'pending');
   });
 
   it('指出「在等一个永远不会来的前置」', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('等前置', ['a']);
     setStep(store, p.id, 's1', 'dropped');
     // A step added afterwards can still name the dropped step; that is a real plan state, and it
@@ -311,8 +328,8 @@ describe('PlanStore 依赖与失败策略', () => {
   });
 
   it('老的计划文件（没有 dependsOn / onFailure）照常读', () => {
-    mkdirSync(join(dir, '.she'), { recursive: true });
-    writeFileSync(join(dir, '.she', 'plans.json'), JSON.stringify([{
+    mkdirSync(join(dir, '.she', 'sessions', SESS), { recursive: true });
+    writeFileSync(join(dir, '.she', 'sessions', SESS, 'plans.json'), JSON.stringify([{
       id: 'plan_old0001',
       title: '旧计划',
       status: 'open',
@@ -321,7 +338,7 @@ describe('PlanStore 依赖与失败策略', () => {
       updatedAt: '2020-01-01T00:00:00.000Z',
     }]), 'utf8');
 
-    const p = new PlanStore(dir).get('plan_old0001')!;
+    const p = new PlanStore(dir, SESS).get('plan_old0001')!;
     assert.deepEqual(p.steps[0].dependsOn, [], '默认无依赖');
     assert.equal(p.steps[0].onFailure, 'stop', '默认停');
     assert.ok(renderPlan(p).includes('下一步: s1'), '老计划也要能给出下一步');
@@ -330,7 +347,7 @@ describe('PlanStore 依赖与失败策略', () => {
 
 describe('renderPlan', () => {
   it('distinguishes step states and shows progress', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('渲染', ['做完的', '没做的'], '目标说明');
     setStep(store, p.id, p.steps[0].id, 'done');
     const text = renderPlan(store.get(p.id)!);
@@ -344,7 +361,7 @@ describe('renderPlan', () => {
   });
 
   it('把依赖、失败策略和「下一步」都渲染出来', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('断点', [
       'a',
       { title: 'b', dependsOn: ['s1'], onFailure: 'skip' },
@@ -359,7 +376,7 @@ describe('renderPlan', () => {
   });
 
   it('没有默认值的步骤不印噪声（普通计划读起来和以前一样）', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('普通', ['a', 'b']);
     const text = renderPlan(store.get(p.id)!);
     assert.ok(!text.includes('依赖:'), '没有依赖就不该印「依赖:」');
@@ -367,7 +384,7 @@ describe('renderPlan', () => {
   });
 
   it('卡住的计划渲染成「卡住」，不是「做完了」', () => {
-    const store = new PlanStore(dir);
+    const store = new PlanStore(dir, SESS);
     const p = store.create('卡住', ['a']);
     setStep(store, p.id, 's1', 'blocked', '装不上');
     const text = renderPlan(store.get(p.id)!);

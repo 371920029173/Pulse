@@ -44,8 +44,15 @@ const toolsFor = (session) => createPlanTools(dir, session);
 
 const call = async (tools, name, args) => tools.execute(name, args);
 
-/** The plan as stored on disk — not the object the tool just returned. */
-const onDisk = () => JSON.parse(readFileSync(join(dir, '.she', 'plans.json'), 'utf8'));
+/**
+ * The plan as stored on disk — not the object the tool just returned.
+ *
+ * 2026-09-27 起计划按会话分文件（`.she/sessions/<id>/plans.json`），所以这里要带上会话 id：
+ * 读错文件会让这一段"验证落盘"变成验证空气。id 在磁盘上要经 `encodeSessionId`，这里用的都是
+ * 普通 ASCII 会话名，编码后原样保留。
+ */
+const onDisk = (session = 'sess-a') =>
+  JSON.parse(readFileSync(join(dir, '.she', 'sessions', session, 'plans.json'), 'utf8'));
 
 const mark = (planText, stepId) =>
   planText.split('\n').find((l) => new RegExp(`\\s${stepId}\\s`).test(l))?.trim() ?? '';
@@ -116,8 +123,15 @@ console.log('\n2. 断点恢复：换一个 store、换一个会话，还知道�
   });
   await call(tools, 'plan_update', { step_id: 's1', status: 'done' });
 
-  // Everything in memory is gone: new toolset, different session, same workspace file.
-  const restarted = toolsFor('sess-c');
+  /*
+   * Everything in memory is gone: a new toolset over the SAME session stands in for a process
+   * restart.
+   *
+   * 2026-09-27 之前这里写的是"换一个 store、**换一个会话**"，因为那时计划是一份工作区文件，
+   * 换个会话照样看得见 —— 那条正是跨会话读的入口。断点恢复要证明的性质其实是"进程没了计划还在"，
+   * 与"别的会话能不能看见"无关，所以这里改成同一个会话；跨会话那条路另加断言钉死（本节末尾）。
+   */
+  const restarted = toolsFor('sess-b');
   const listed = await call(restarted, 'plan_list', {});
   check('重启后仍看得见计划', /迁移数据库/.test(listed), listed);
   check('重启后直接指出从哪一步继续', /下一步: s2 跑迁移/.test(listed), listed);
@@ -129,11 +143,23 @@ console.log('\n2. 断点恢复：换一个 store、换一个会话，还知道�
    * come back as `active` — not as `pending` (which reads as "never started" and loses the fact
    * that half the work may be on disk) and not as `done`.
    */
-  const raw = onDisk().find((p) => p.title === '迁移数据库');
+  const raw = onDisk('sess-b').find((p) => p.title === '迁移数据库');
   check('盘上记的是步骤状态，不是渲染出来的文本', raw.steps[1].status === 'active', JSON.stringify(raw.steps));
 
   const next = await call(restarted, 'plan_update', { step_id: 's2', status: 'done' });
   check('恢复后能接着正常推进', /下一步: s3 验证/.test(next), next);
+
+  /*
+   * 【关键】另一个会话看不到这份计划，也改不动它。
+   *
+   * 旧行为：看得见，还能接着改。现在计划按会话分文件，所以这里是"读不到"，而不是"读到了然后拒绝"。
+   * 这一条要是被改回去，整个会话隔离就等于没做 —— 钉在这里，将来改错了门禁会响。
+   */
+  const other = toolsFor('sess-c');
+  const otherListed = await call(other, 'plan_list', {});
+  check('【关键】换一个会话看不到这份计划', !/迁移数据库/.test(otherListed), otherListed);
+  const otherEdit = await call(other, 'plan_update', { plan_id: raw.id, step_id: 's3', status: 'done' });
+  check('【关键】也改不动它（计划不在这个会话的文件里）', /^Error:/.test(otherEdit), otherEdit);
 }
 
 console.log('\n3. 失败策略：写下来的处置办法要真的执行');
@@ -197,13 +223,13 @@ console.log('\n4. 图的形状本身不能被写坏');
 
   const badDep = await call(tools, 'plan_update', { step_id: 's2', depends_on: ['s9'] });
   check('事后声明一个不存在的依赖会被拒绝', badDep.startsWith('Error: '), badDep);
-  const stillClean = onDisk().find((p) => p.title === '图');
+  const stillClean = onDisk('sess-h').find((p) => p.title === '图');
   check('拒绝后盘上没有半截依赖', stillClean.steps[1].dependsOn.length === 0, JSON.stringify(stillClean.steps[1]));
 
   await call(tools, 'plan_update', { step_id: 's1', depends_on: ['s2'] });
   const cycle = await call(tools, 'plan_update', { step_id: 's2', depends_on: ['s1'] });
   check('成环会被拒绝（成环 = 没有任何一步能开始）', /成环/.test(cycle), cycle);
-  const afterCycle = JSON.parse(readFileSync(join(dir, '.she', 'plans.json'), 'utf8')).find((p) => p.title === '图');
+  const afterCycle = onDisk('sess-h').find((p) => p.title === '图');
   check('成环的依赖不会落盘', afterCycle.steps[1].dependsOn.length === 0, JSON.stringify(afterCycle.steps[1]));
 
   const reOpened = await call(tools, 'plan_create', { title: '做完又发现活', steps: ['a'] });

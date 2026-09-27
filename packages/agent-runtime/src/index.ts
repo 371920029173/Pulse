@@ -126,6 +126,12 @@ export { createIngestTools, chunkFileContent } from './ingest-tools.js';
 export type { IngestItem, IngestBatch } from './ingest-tools.js';
 export { MemoStore, createMemoTools } from './memo-tools.js';
 export type { MemoEntry } from './memo-tools.js';
+
+/*
+ * 会话状态目录：跨会话隔离的唯一路径解析点。见 session-state.ts 里的说明 —— 放在 barrel 上是为了
+ * 让"拼会话路径"这件事只有一个入口，谁也别自己 join。
+ */
+export { sessionStateDir, isSafeSessionId } from './session-state.js';
 export {
   createSubagentTools,
   composeHandoffPrompt,

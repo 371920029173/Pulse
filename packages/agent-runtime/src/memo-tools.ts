@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from '
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ToolDefinition } from '@she/shared';
+import { sessionStateDir } from './session-state.js';
 
 export interface MemoEntry {
   id: string;
@@ -14,16 +15,20 @@ export interface MemoEntry {
 }
 
 /**
- * Shared scratchpad for the user and the agent(s).
+ * 会话私有的草稿板（备忘）——用户和这个会话的 agent 都能改。
  *
- * Deliberately tiny and file-backed: it is for ideas and TODOs that are not
- * worth a KB node, and it must be editable from both sides (UI + tools).
+ * 为什么按会话分文件（2026-09-27 改）：原来它是工作区级单文件 `memo.json`，于是任何会话都能读到别的
+ * 会话记下的东西。分账只靠"读的时候过滤"对读不成立 —— 文件是同一份。现在路径由 `sessionStateDir`
+ * 决定，别的会话的备忘**在路径上不存在**。
+ *
+ * 仍然很小、仍然是文件存储：它是给"不值得写进知识库的想法和待办"用的，而且必须两边都能改（UI + 工具）。
  */
 export class MemoStore {
   private filePath: string;
 
-  constructor(workspaceRoot: string) {
-    const dir = join(workspaceRoot, '.she');
+  constructor(workspaceRoot: string, sessionId: string) {
+    // 唯一允许拼会话路径的方式；id 非法会在这里抛错，不会静默落到共享目录。
+    const dir = sessionStateDir(workspaceRoot, sessionId);
     mkdirSync(dir, { recursive: true });
     this.filePath = join(dir, 'memo.json');
   }
@@ -82,11 +87,15 @@ export class MemoStore {
 }
 
 /** Tools so the agent can read and write the same scratchpad as the user. */
-export function createMemoTools(workspaceRoot: string): {
+export function createMemoTools(workspaceRoot: string, sessionId: string): {
   definitions: ToolDefinition[];
   execute: (name: string, args: Record<string, unknown>) => Promise<string>;
 } {
-  const store = new MemoStore(workspaceRoot);
+  /*
+   * 会话 id 来自**这个 agent 的上下文**，不是工具参数。工具层因此没有"指定别的会话"这个入口 ——
+   * 拿不到别人的备忘不是靠它自律，是靠它没有那条路。
+   */
+  const store = new MemoStore(workspaceRoot, sessionId);
   const toolMap = new Map<string, { def: ToolDefinition; fn: (a: Record<string, unknown>) => Promise<string> }>();
   const reg = (def: ToolDefinition, fn: (a: Record<string, unknown>) => Promise<string>) =>
     toolMap.set(def.name, { def, fn });

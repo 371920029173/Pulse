@@ -280,7 +280,13 @@ const ANSWER = `你的 key 是 ${SECRETS.api_key}，已经写进 .env 了。`;
 console.log('\n8. 交付文件拦下来（回答只是提示，交付是拒绝）');
 {
   const ws = tempDir('report');
-  const tools = createPlanTools(ws, null);
+  /*
+   * 计划/备忘按会话分文件，所以要给一个会话 id。
+   *
+   * 注意：`report_write` 的产物**仍然**落在工作区级 `.she/reports/`（本层没动它）。报告是交付物，
+   * 和"agent 的推理原文/笔记"不是一类东西，是否也按会话分区还没定，见隔离加固计划的 2.1 遗留项。
+   */
+  const tools = createPlanTools(ws, 'sess-guardrail');
   const write = tools.execute;
 
   const withSecret = await write('report_write', {
