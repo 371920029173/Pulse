@@ -55,8 +55,8 @@ import { listTree, readWorkspaceFile, suggestPaths } from './files.js';
 import { outlinePath, suggestSymbols } from './outline.js';
 import { parseContextExport } from './contextParsers.js';
 import { discoverConversations, loadTranscript, materializeConversation } from './discovery.js';
-import { knownProjectRoots, rememberProject } from './projects.js';
-import { addWorktree, changedFiles, isGitRepo, listWorktrees, removeWorktree, resetWorktree, transferLocalChanges } from './worktrees.js';
+import { forgetProject, knownProjectRoots, rememberProject } from './projects.js';
+import { addWorktree, asciiName, changedFiles, deleteBranch, diffAgainst, isGitRepo, listWorktrees, removeWorktree, resetWorktree, transferLocalChanges } from './worktrees.js';
 import { taskBoard } from './taskBoard.js';
 
 const log = createLogger('server');
@@ -636,6 +636,37 @@ function roomHome(roomId: string): { store: ClusterStore; root: string } | null 
   return null;
 }
 
+/**
+ * Point the process at another project's state directory.
+ *
+ * Sessions and work groups are both filed per state directory, so a switch swaps both stores — and
+ * the rail reads the other projects' copies through `otherStores` / `otherClusters`. That makes the
+ * swap a place where one file can quietly end up with two live stores, which is the bug this whole
+ * area exists to prevent:
+ *
+ *   - the store we are LEAVING holds the newest state for its file (it is the one the user has been
+ *     writing through), so it is parked in the cache rather than dropped;
+ *   - the store we are MOVING TO must be taken from the cache if it is there, and removed from it
+ *     either way, because the mounted slot is now its single owner.
+ *
+ * Skipping the second half is not theoretical. The rail is polled continuously, so a project the
+ * user has not opened yet already has a cached store reading `rooms: []` from disk; if the switch
+ * leaves that instance in place and builds a second one for the mounted slot, the group the user
+ * then creates is written by the mounted copy and read back from the stale one. Reproduced live on
+ * 2026-09-27 (build 13472): a room existed in `_she-live-test/.she/cluster/rooms.json` and the rail
+ * listed no groups at all, with `GET /api/cluster/rooms/<id>` answering 404.
+ */
+function mountStateDir(nextState: string): void {
+  otherStores.set(pathKey(sessions.rootDir), sessions);
+  otherClusters.set(pathKey(stateDir), cluster);
+  stateDir = nextState;
+  sessions = otherStores.get(pathKey(stateDir)) ?? new SessionStore(stateDir);
+  cluster = otherClusters.get(pathKey(stateDir)) ?? new ClusterStore(stateDir);
+  otherStores.delete(pathKey(stateDir));
+  otherClusters.delete(pathKey(stateDir));
+  log.info(`Switched state dir to ${stateDir} (${sessions.list().sessions.length} chats)`);
+}
+
 function projectRoots(): string[] {
   let extra: string[] = [];
   try {
@@ -875,7 +906,7 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
        * is meant to prevent — so the note travels back in the result.
        */
       let directory = baseDir;
-      let worktree: { path: string; branch: string } | null = null;
+      let worktree: { path: string; branch: string; head: string } | null = null;
       let isolationNote: string | undefined;
 
       const repo = isGitRepo(baseDir);
@@ -892,8 +923,8 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
       const wanted = shouldIsolate(req, true);
       if (isolate) {
         try {
-          const info = addWorktree(baseDir, `sub-${req.description}`, { unique: true });
-          worktree = { path: info.path, branch: info.branch };
+          const info = addWorktree(baseDir, `sub-${asciiName(req.description)}`, { unique: true });
+          worktree = { path: info.path, branch: info.branch, head: info.head || 'HEAD' };
           directory = info.path;
           // Carry the parent's uncommitted work across, or the child would be editing a version
           // of the project that is older than the one the parent is describing to it.
@@ -996,6 +1027,73 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
       };
 
       /*
+       * 回收隔离副本：记录搬进工作区，工作区外的那棵树删掉。
+       *
+       * 为什么不是"留着让人看"：副本的路径在 `.she-worktrees` 下、也就是工作区外面，所以子代理自己看不到、
+       * 清不掉（2026-09-27 那次隔离专项检查就是原话："我自己看不到也清不掉"），而人会忘。留着的结果是每个
+       * 子任务在工作区外留一棵完整的代码树加一个 `she/*` 分支，积累到没人知道哪些还有用。副本的价值是
+       * "孩子干过什么"，那两样东西（transcript 和改动）都能搬进工作区，代码树本身不能。
+       *
+       * 顺序不是风格问题：
+       *   1. 先算改动清单、先读笔记（都在树里，删了就没了）；
+       *   2. 再把 child 的 `.she` 搬进 `<工作区>/.she/subagent-history/<子会话 id>/`，会话记录里的
+       *      `directory` 改指归档处，否则点开那份记录会去挂一个已经不存在的目录；
+       *   3. 再写改动补丁 —— 子任务提交过的东西在分支删掉后就只剩这份补丁；
+       *   4. 最后才松句柄、删树。Windows 上 sqlite 句柄握着目录，删树会以 "Invalid argument" 失败，
+       *      那正是 `closeEngineFor` 存在的原因。
+       *
+       * 任何一步失败都不影响子任务的结果：回收是收尾，不是交付。失败时把原因写进 note，让父级看得见。
+       */
+      const reclaimWorktree = (info: SubagentResult['worktree']): SubagentResult['worktree'] => {
+        if (!worktree || !info) return info;
+        const wt = worktree;
+        const archive = join(parentCfg.workspace.root, '.she', 'subagent-history', childSession.id);
+        let patchPath: string | undefined;
+        try {
+          rmSync(archive, { recursive: true, force: true });
+          mkdirSync(archive, { recursive: true });
+          const childState = join(wt.path, '.she');
+          if (existsSync(childState)) renameSync(childState, join(archive, '.she'));
+          const patch = diffAgainst(wt.path, wt.head);
+          if (patch.trim()) {
+            patchPath = join(archive, 'worktree.patch');
+            writeFileSync(patchPath, patch, 'utf8');
+          }
+          try {
+            new SessionStore(archive).update(childSession.id, { directory: archive });
+          } catch { /* 记录在归档里；只是 directory 还指着旧路径 */ }
+          try { rememberProject(projectIndexFile(), archive); } catch { /* non-fatal */ }
+
+          /* 用户可能正开着这个副本的会话：那就把挂载点搬到归档处，而不是让他在一个刚被删掉的目录上翻页。 */
+          const wasMounted = pathKey(stateDir) === pathKey(wt.path);
+          if (wasMounted) mountStateDir(archive);
+          if (!disposeWorkspace(wt.path)) throw new Error('副本里还有会话在运行，这次不回收');
+          otherStores.delete(pathKey(wt.path));
+          removeWorktree(parentCfg.workspace.root, wt.path);
+          try { forgetProject(projectIndexFile(), wt.path); } catch { /* 索引清不掉不影响回收 */ }
+          const branchError = deleteBranch(parentCfg.workspace.root, wt.branch);
+          return {
+            ...info,
+            path: archive,
+            note: [
+              info.note,
+              `副本已回收：记录在 ${archive}${patchPath ? `，改动补丁在 ${patchPath}` : '（没有改动）'}`,
+              branchError ? `分支没删掉：${branchError}` : '',
+            ].filter(Boolean).join(' '),
+            reclaimed: { archivePath: archive, patchPath, branchDeleted: !branchError, error: branchError ?? undefined },
+          };
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          log.warn(`隔离副本没回收掉（${wt.path}）: ${reason}`);
+          return {
+            ...info,
+            note: [info.note, `副本没回收掉（${reason}），它还在 ${wt.path}`].filter(Boolean).join(' '),
+            reclaimed: { archivePath: archive, patchPath, branchDeleted: false, error: reason },
+          };
+        }
+      };
+
+      /*
        * Isolation status, reported on every return path including the ones with no worktree.
        *
        * `handOff` and the failure branch both used to drop it: `collectWorktree` returns undefined when
@@ -1063,6 +1161,16 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
         return digestPath ? { ...harvest, digestPath } : harvest;
       };
 
+      /*
+       * 每一条结束路径（跑完、超时、失败）都要走这里，顺序反过来就等于丢东西：
+       * 改动清单必须在树还在的时候取，笔记必须在副本被删之前读，回收必须在这两样之后。
+       */
+      const finish = (result: SubagentResult): SubagentResult => {
+        const wtInfo = collectWorktree();
+        const harvest = notesFor();
+        return { ...result, worktree: reclaimWorktree(wtInfo), kbHarvest: harvest };
+      };
+
       const job = (async (): Promise<SubagentResult> => {
         let timedOut = false;
         /*
@@ -1120,28 +1228,24 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
             changed: collectWorktree()?.changed,
             worktreePath: worktree?.path,
           });
-          return {
+          return finish({
             description: req.description,
             ok: !timedOut,
             result: timedOut
               ? timedOutText()
               : `${out?.content ?? '(无输出)'}\n\n（子会话 ${childSession.id}）`,
             handoff: req.handoff,
-            worktree: collectWorktree(),
             isolation: isolationInfo(),
-            kbHarvest: notesFor(),
-          };
+          });
         } catch (err) {
           try { storeFor(directory).update(childSession.id, { title: req.description, messages: child.historyForDisk() }); } catch { /* ignore */ }
-          return {
+          return finish({
             description: req.description,
             ok: false,
             result: `子任务失败: ${err instanceof Error ? err.message : String(err)}\n\n（子会话 ${childSession.id}）`,
             handoff: req.handoff,
-            worktree: collectWorktree(),
             isolation: isolationInfo(),
-            kbHarvest: notesFor(),
-          };
+          });
         }
       })();
 
@@ -1153,7 +1257,12 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
           ok: true,
           result: `已在后台继续。打开会话「${childSession.title}」（${childSession.id}）可以看它的过程。`
             + `\n它结束时写下的知识库笔记会汇总到 ${join('.she', 'subagent-notes', `${childSession.id}.md`)}`
-            + '（子任务的知识库副本随后会被删除，所以需要的结论用 `fs_read` 从那份摘要里取）。',
+            + '（子任务的知识库副本随后会被删除，所以需要的结论用 `fs_read` 从那份摘要里取）。'
+            + (worktree
+              ? `\n它跑在隔离副本里（${worktree.path}）。副本会在它结束后自动回收：记录搬到 `
+                + `${join('.she', 'subagent-history', childSession.id)}，改动补丁也写在那里；`
+                + '所以"过程"要从那份记录里看，不是从副本目录里看。'
+              : ''),
           handoff: req.handoff,
           worktree: collectWorktree('子任务仍在后台运行，改动清单要等它结束后再取。'),
           isolation: isolationInfo(),
@@ -1905,18 +2014,13 @@ function mountWorkspace(root: string, sessionId?: string): ChatSession {
      * state directory.
      */
     if (pathKey(nextState) !== pathKey(stateDir)) {
-      otherStores.set(pathKey(sessions.rootDir), sessions);
-      stateDir = nextState;
-      sessions = new SessionStore(stateDir);
-      otherStores.delete(pathKey(sessions.rootDir));
-      cluster = new ClusterStore(stateDir);
+      mountStateDir(nextState);
       for (const [id, agent] of [...agents]) {
         if (agent.isRunning()) continue;
         const pinned = findSession(id)?.session.directory;
         if (pinned) continue;
         dropAgent(id);
       }
-      log.info(`Switched state dir to ${stateDir} (${sessions.list().sessions.length} chats)`);
     }
     try { rememberProject(projectIndexFile(), next); } catch (err) {
       log.warn(`记录项目目录失败: ${(err as Error).message}`);
@@ -2963,16 +3067,9 @@ router.put('/api/settings', async (req, res) => {
     const nextStateDir = resolveStateDir(config);
     if (pathKey(nextStateDir) !== pathKey(stateDir)) {
         persistHistory();
-        /* Keep the projects we are leaving reachable by the rail: session and group stores are
-         * per-state-directory, so dropping them here is how a project's chats disappeared from the
-         * sidebar the moment another workspace was opened. */
-        otherStores.set(pathKey(sessions.rootDir), sessions);
-        otherClusters.set(pathKey(stateDir), cluster);
-        stateDir = nextStateDir;
-        sessions = new SessionStore(stateDir);
-        cluster = new ClusterStore(stateDir);
-        otherStores.delete(pathKey(sessions.rootDir));
-        otherClusters.delete(pathKey(stateDir));
+        /* Both stores move together — see `mountStateDir` for why the incoming one must be taken
+         * from the cache rather than duplicated. */
+        mountStateDir(nextStateDir);
         // Disposes as well as drops: each agent owns a language server process.
         disposeAllAgents();
       }
@@ -4274,7 +4371,29 @@ router.get('/api/fs/tree', (req, res) => {
       const p = wsRegistry();
       if (!existsSync(p)) return { recent: [] };
       const j = JSON.parse(readFileSync(p, 'utf8')) as { recent?: string[] };
-      return { recent: Array.isArray(j.recent) ? j.recent : [] };
+      const raw = Array.isArray(j.recent) ? j.recent : [];
+      /*
+       * One directory is one entry, whatever spelling it was recorded with.
+       *
+       * This is `pathKey`'s problem again, one layer out. The registry used to compare raw strings,
+       * so this machine's list held both `D:\AGI\_she-live-test` and `d:\AGI\_she-live-test` — and
+       * the workspace panel renders one row per entry, so it showed the SAME folder twice, one
+       * marked 当前 and one marked 1会话. Read as "the isolation is broken": two identical projects
+       * sitting side by side. It is not a display artefact either — each row is a separate root the
+       * API will happily switch to.
+       *
+       * Deduplicating on the way in heals registries already written that way, and keeping the
+       * first spelling preserves the recency order the list exists for.
+       */
+      const out: string[] = [];
+      const seen = new Set<string>();
+      for (const r of raw) {
+        const key = pathKey(r);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(r);
+      }
+      return { recent: out };
     } catch {
       return { recent: [] };
     }
@@ -4282,7 +4401,7 @@ router.get('/api/fs/tree', (req, res) => {
 
   function rememberWorkspace(root: string): void {
     const { recent } = readWorkspaceRegistry();
-    const next = [root, ...recent.filter((r) => r !== root)].slice(0, 12);
+    const next = [root, ...recent.filter((r) => pathKey(r) !== pathKey(root))].slice(0, 12);
     try {
       const p = wsRegistry();
       mkdirSync(dirname(p), { recursive: true });
@@ -4317,7 +4436,17 @@ router.get('/api/fs/tree', (req, res) => {
     // Only the current workspace and ones the user actually opened.
     // Previously we also listed every sibling folder of the install root, which
     // auto-generated a list the user never asked for. Picking is explicit now.
-    const roots = [...new Set([current, ...recent])].filter((r) => existsSync(r));
+    //
+    // Deduplicated the same way the registry is: the mounted root leads, so its spelling wins, and a
+    // second entry naming the same directory under another casing cannot render as a second folder.
+    const roots: string[] = [];
+    const seenRoots = new Set<string>();
+    for (const r of [current, ...recent]) {
+      const key = pathKey(r);
+      if (seenRoots.has(key) || !existsSync(r)) continue;
+      seenRoots.add(key);
+      roots.push(r);
+    }
     sendJSON(res, {
       current,
       workspaces: roots.map(describeWorkspace),
@@ -4639,6 +4768,7 @@ router.get('/api/fs/tree', (req, res) => {
     }
     try {
       removeWorktree(repo, path);
+      try { forgetProject(projectIndexFile(), path); } catch { /* 索引清不掉不影响删除 */ }
       sendJSON(res, { ok: true });
     } catch (err) {
       throw new HttpError(400, (err as Error).message);

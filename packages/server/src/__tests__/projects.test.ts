@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { knownProjectRoots, rememberProject } from '../projects.js';
+import { forgetProject, knownProjectRoots, rememberProject } from '../projects.js';
 
 const win = process.platform === 'win32';
 
@@ -103,5 +103,29 @@ describe('project index', () => {
     writeFileSync(file, JSON.stringify({ roots: [ghost] }), 'utf8');
     assert.equal(existsSync(ghost), false);
     assert.deepEqual(knownProjectRoots(file, a), [a]);
+  });
+
+  it('forgetProject 真的抹掉一条（回收副本后索引不留死路径）', () => {
+    rememberProject(file, a);
+    rememberProject(file, b);
+    forgetProject(file, b);
+    const roots = JSON.parse(readFileSync(file, 'utf8')).roots as string[];
+    assert.deepEqual(roots, [a]);
+  });
+
+  it('forgetProject 按同一目录的另一种拼写也能抹掉', { skip: !win }, () => {
+    const upper = join(dir, 'Alpha');
+    const lower = join(dir, 'alpha');
+    if (upper === lower) return;
+    rememberProject(file, lower);
+    forgetProject(file, upper);
+    const roots = JSON.parse(readFileSync(file, 'utf8')).roots as string[];
+    assert.deepEqual(roots, [], `另一种拼写没被抹掉: ${JSON.stringify(roots)}`);
+  });
+
+  it('forgetProject 抹不存在的东西时不写坏文件', () => {
+    rememberProject(file, a);
+    forgetProject(file, b);
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).roots, [a]);
   });
 });

@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
@@ -77,6 +78,9 @@ export function listWorktrees(repo: string): WorktreeInfo[] {
  * asking for isolation in Chinese silently fell back to the shared checkout. A Unicode letter is
  * a perfectly good directory character on Windows, macOS and Linux, and the things that actually
  * need removing are separators, whitespace and the Windows-illegal tail characters.
+ *
+ * This is what a USER-typed name goes through. Machine-generated names go through `asciiName`
+ * instead — see there for why the two are not the same question.
  */
 function slug(name: string): string {
   return name
@@ -86,6 +90,37 @@ function slug(name: string): string {
     // Windows cannot create a name ending in a dot or space, and `..` must never survive.
     .replace(/[. ]+$/g, '')
     .slice(0, 40);
+}
+
+/**
+ * Name for a worktree whose label came from the program, not from a person: ASCII, never empty.
+ *
+ * Measured cost of Unicode names, 2026-09-27. A subagent worktree was created as
+ * `sub-带-scope-子代理-验证私有-worktree-隔离`, and that name then had to be handled by every tool in
+ * the chain: PowerShell mangled it when the path was passed as an argument (the same string read
+ * back as mojibake), `git worktree list` output could not be matched against it without an
+ * encoding-safe reader, and the audit itself gave up on cleaning it up ("我自己看不到也清不掉").
+ * The directory is real and correct; the handling around it is the problem, and a name the program
+ * chose is the wrong place to spend that risk. The human-readable task name is not lost: it is the
+ * child session's title, it is in the handoff brief, and it comes back in the parent's result.
+ *
+ * The never-empty rule is load-bearing, not decoration. An empty slug throws, and the subagent path
+ * treats a throw as "isolation could not be granted" and quietly runs the child in the shared
+ * checkout — the exact accident the whole feature exists to prevent. A label written entirely in
+ * CJK is therefore turned into a generated id rather than into an empty string.
+ */
+export function asciiName(label: string): string {
+  const ascii = label
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    // Windows cannot create a name ending in a dot or space, and `..` must never survive.
+    .replace(/[. ]+$/g, '')
+    .slice(0, 24)
+    .replace(/-+$/g, '');
+  // Two characters, so a stray "a" from a label like "修 a" does not become the whole name.
+  if (ascii.length >= 2) return ascii;
+  return `t${randomUUID().replace(/-/g, '').slice(0, 8)}`;
 }
 
 function worktreePath(repo: string, name: string): string {
@@ -122,6 +157,46 @@ export function removeWorktree(repo: string, path: string): void {
   assertRepo(repo);
   const r = git(repo, ['worktree', 'remove', '--force', path]);
   if (!r.ok) throw new Error(r.stderr || 'git worktree remove 失败');
+}
+
+/**
+ * Everything in `dir` differs from `base`, as a patch.
+ *
+ * Written down before an isolated copy is removed. `changedFiles` gives the file names, which is
+ * what a parent acts on; this keeps the CONTENT, because a child that committed its work has it
+ * nowhere else once the branch goes. Truncated rather than unbounded: this is a record, and a
+ * record that fills the disk is a new problem.
+ */
+export function diffAgainst(dir: string, base: string): string {
+  if (!existsSync(join(dir, '.git'))) return '';
+  /*
+   * 先 `add -A` 再 `diff --cached`：`git diff` 不显示**新建**文件，而子任务的产物通常正是新建文件
+   * （2026-09-27 实测：子级建了 notes/out.md，`git diff HEAD` 是空的，补丁因此没留成）。暂存区脏掉
+   * 无所谓 —— 这个调用之后这棵树立刻被删掉，它的索引一起消失。
+   */
+  const staged = git(dir, ['add', '-A', '--', '.']).ok;
+  const r = staged ? git(dir, ['diff', '--cached', base]) : git(dir, ['diff', base]);
+  if (!r.ok) return '';
+  return r.stdout.length > MAX_PATCH_CHARS ? `${r.stdout.slice(0, MAX_PATCH_CHARS)}\n（补丁超过 ${MAX_PATCH_CHARS} 字节，已截断）\n` : r.stdout;
+}
+
+/** A patch this size is already far past "a record of what the child did". */
+const MAX_PATCH_CHARS = 512 * 1024;
+
+/**
+ * Delete a branch in `repo`. A branch that is already gone is not an error.
+ *
+ * Separate from `removeWorktree` on purpose: the interactive route keeps the branch, because a
+ * user who deletes a worktree panel entry may still want the commits. The subagent path deletes it
+ * only after the content has been written to a patch, so nothing is lost by the deletion.
+ */
+export function deleteBranch(repo: string, branch: string): string | null {
+  assertRepo(repo);
+  if (!branch) return null;
+  const exists = git(repo, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
+  if (!exists.ok) return null;
+  const r = git(repo, ['branch', '-D', branch]);
+  return r.ok ? null : (r.stderr || 'git branch -D 失败');
 }
 
 /** Point a worktree at the main checkout's current commit. */

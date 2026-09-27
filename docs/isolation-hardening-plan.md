@@ -1,0 +1,120 @@
+# 隔离根治计划
+
+面向"正经 Agent"的标准：不变量要在**结构上不可能违反**，而不是靠提示词自律。本文是动手前的方案，未经批准不改产品代码。
+
+状态：**待评审**（本文件本身未提交）
+
+---
+
+## 0. 要保证的不变量
+
+| 编号 | 不变量 | 违反的后果 |
+|---|---|---|
+| I1 | A 会话的记忆 / 计划 / 笔记 / 轨迹 / 推理原文，B 会话**在文件路径上取不到**；工具即使被传入别人的 session id 也必须拒绝 | 一个会话能读到另一个会话的推理原文，等于没有会话边界 |
+| I2 | 一个目录 = 一种身份 = 一份存储；打开别的项目不改变当前项目的可见性（轨道不丢项、工作群不消失） | 用户看到"东西凭空消失" |
+| I3 | 子进程的实际能力 ⊆ 工具参数校验的能力；做不到就用确认票 + 明示，**不许宣传"越不出去"** | 用户以为有沙箱，实际任意代码可读全盘 |
+| I4 | 写入原子；损坏必须留底**并且报错**；迁移不得静默丢记录 | 一次坏写毁掉全部会话历史 |
+
+## 1. 现状（实测事实，不是推测）
+
+| 面 | 现状 | 位置 |
+|---|---|---|
+| 计划 | 按 session 过滤，但**同一份 `plans.json`** | `packages/agent-runtime/src/plan-tools.ts:723` `new PlanStore(workspaceRoot, sessionId)` |
+| 备忘 | **工作区全局**，会话间完全共享 | `packages/agent-runtime/src/memo-tools.ts:89`、`packages/server/src/index.ts:4067` `new MemoStore(workspaceRoot)` |
+| 运行轨迹 | **工作区全局** | `packages/agent-runtime/src/agent.ts:332` `new RunTraceStore(root)` |
+| 置信度样本 | **工作区全局** | `packages/agent-runtime/src/agent.ts:421` `new ConfidenceMirror(root)` |
+| 审计 | 工作区单文件，记录**带** `session_id`，查询**能**过滤；默认是否过滤取决于调用方 | `packages/server/src/audit.ts:136`、`:81`、`:323` |
+| 会话 / 群存储 | 工作区级单文件；key 判定已修（见层 1） | `sessions.json`、`cluster/rooms.json` |
+| 沙箱 | 只校验**命令字符串**与**工具参数**；无进程级约束 | `packages/sandbox/src/shell.ts` `SandboxShell.exec` / `validatePath` |
+| 存储损坏 | `sessions.json.before-corrupt`（222,808B / **12 条会话**）仍在盘上；`sessions.json.unusable-…`（23B）是手写夹具，不是事故物证 | `D:\AGI\_she-live-test\.she\` |
+
+对照 R14 报告的修正：③ 成立且代码可证；② 成立但**只发生在同一工作区内的会话之间**（"工作区之间"是另一条轴）；"损坏时静默清空"**不成立** —— 这版的行为是原样留底，缺的是"说出来"。
+
+## 2. 决策点（需要拍板；括号里是我的默认）
+
+| 编号 | 决策 | 默认 |
+|---|---|---|
+| D1 | 改在哪个基础：tag 新树（含今天的 `pathKey`/`mountStateDir`）还是只在 `c60c906` 重做 | 回到 tag，开分支 `isolation-root-fix`，`main` 留给 `github/main` |
+| D2 | 子代理 worktree：结束即删，还是保留但登记可一键清 | 结束即删；现场证据写进 `.she/runs`（不靠工作区外的目录） |
+| D3 | 会话数据迁移：就地迁移（备份 + 条数对账）还是新旧并存兼容期 | 就地迁移 + 备份 + 对账，少一条即中止 |
+| D4 | 审计默认读取范围：只当前会话，还是全局 | 只当前会话（全局要走显式参数） |
+| D5 | 真隔离选型：WSL2 / Docker / 受限账号+ACL / 暂不做 | WSL2（见 4.2 对比） |
+| D6 | worktree 目录名：保持中文（`sub-带-scope-…`）还是改 ASCII | 改 ASCII（`sub-<id>`），避免跨工具编码风险 |
+
+## 3. 分层工作项
+
+每项格式：**改动 → 验收 → 风险 → 回滚**。
+
+### 层 1：工作区（最小，先落地）
+
+- **1.1** 恢复今天的修复：`pathKey`（真实路径 + Windows 不分大小写）、`mountStateDir`（切换时寄存离开的存储并接管缓存实例）、跨项目群存储（tag 里已有）。
+  验收：`check:data` 全绿（含第 10–12 段）。
+- **1.2** 索引与 registry 去重（`projects.json` / `workspaces.json`）。
+  验收：同一目录两种写法不再产生两行、不再产生两份存储（`check:data` 第 11 段 + 新增 API 级断言）。
+- **1.3** worktree 生命周期：子级结束后清理（按 D2）；目录名 ASCII（按 D6）；新增 `/api/worktrees` 列出 + 一键删（`removeWorktree` 已有，`packages/server/src/worktrees.ts:121`）。
+  验收：新增门禁 —— 一个 worktree 子级跑完后，`git worktree list` 与本机目录都不新增；异常退出也清。
+  风险：误删仍在使用的 worktree → 只清"本进程创建且已结束"的，且删除前把 diff 摘要写进 `.she/runs`。
+- **1.4** 清理现存残留：`D:\AGI\_she-live-test` 的注册 worktree（目录已不存在）、分支 `she/*`、索引里的 worktree 路径、归档 `sessions.json.before-corrupt`。
+  风险：那是"验证 worktree 隔离"那轮的现场 → 先归档再删。
+
+### 层 2：会话层（最大的一块，分 3 步）
+
+- **2.1 布局与迁移**
+  目标布局：`.she/sessions/<sessionId>/{memo.json, plans.json, confidence.json, notes/, runs/, preflight.json}`
+  迁移：按记录里的 `session_id` 拆分；无法归属的进 `.she/sessions/_legacy/`；迁移前后**条数对账**，少一条即中止并回滚。
+  验收：迁移脚本自带对账输出；`check:data` 增加"迁移不丢记录"断言。
+- **2.2 结构收紧（这条才是"不可能违反"）**
+  - 所有 store 构造强制带会话 id：`new MemoStore(dir, id)`（现在只有目录，`memo-tools.ts:89`）
+  - 工具层（`plan_*` / `memo_*` / 反思相关）的 session id **来自 agent 上下文**，不接受调用方传入
+  - API 层统一走 `sessionIdOf(req)`（`index.ts:1660`）后再解析路径，禁止用裸 id 拼路径
+  验收：新增 `check:session-isolation` —— 起真服务、两个会话，交叉断言：B 读不到 A 的备忘/计划/笔记/置信度样本；**工具被传入 A 的 id 也拒绝**；轨迹文件路径不落在 B 的目录下。
+  变异验证：把 id 改成入参可覆盖，门禁必须转红。
+- **2.3 界面与说明**
+  会话列表明示"记忆按会话隔离"；跨会话查看必须是显式动作（一个入口 + 说明），不再"看起来是一份"。
+
+### 层 3：存储
+
+- **3.1** 原子替换：同目录写 `*.tmp` + `rename`，不再整份覆写。
+- **3.2** 写前校验：`validateSessions()` 不过就 abort，保留旧文件不动。
+- **3.3** 损坏：留底（已有）+ **接口/界面明确报错**（给出留底路径与丢失条数）。
+  验收（门禁）：写入中途抛错 → 文件仍是旧内容；两个 store 同文件并发写不互抹；坏文件不影响启动且被点名。
+  样本：`_she-live-test/.she/sessions.json`（391,498B）与 `.before-corrupt`（222,808B / 12 条）都是天然材料。
+
+### 层 4：沙箱
+
+- **4.1 不装依赖先做**：把"任意代码执行"（`node -e`、`python -c`、`powershell -Command`、`git -C` …）识别成独立风险等级 → 走确认票 → 结果里注明"子进程不受路径约束"；改正 `docs/s-tier-backlog.md:113` 的"路径逃逸拒绝"措辞。
+- **4.2 真隔离（按 D5）**
+
+  | 方案 | 安装代价 | 机制 | 强度 |
+  |---|---|---|---|
+  | WSL2（推荐） | 内核 + 发行版约 1GB；WSL 内需装 node | `wsl -d <distro> -- bash -lc '<cmd>'`，工作区挂 `/mnt/<盘>/…` | 真用户 / 命名空间隔离 |
+  | Docker | Docker Desktop 1–2GB（依赖 WSL2/Hyper-V） | `docker run --rm --network=none -v ws:/ws -w /ws img sh -lc '<cmd>'` | 真隔离；冷启动 0.5–2s |
+  | 受限账号 + ACL | 不用装；需原生 `CreateProcessWithLogonW`/runas + 每工作区配 ACL + 管密码 | 低权账号启动子进程 | **弱**：同机其它路径仍可能可达 |
+
+  门禁必须**按平台可跳过**（CI 没 WSL 时 skip，不许假绿）。
+- **4.3 第二条通道写进文档**：`source: cursor` 的 filesystem MCP 根由 Cursor 配置决定，所以"能碰的路径 = 工作区 ∪ 该 MCP 配置的根"，两套策略由不同组件执行 —— 产品文档要直说。
+
+## 4. 顺序与检查点
+
+| 步骤 | 产出 | 验收 |
+|---|---|---|
+| 1 | 层 1 全量 | `check:data` + worktree 残留门禁 + 真机子级跑一轮 |
+| 2a | 层 2.1 迁移脚本 | 迁移对账输出 + 备份可回滚 |
+| 2b | 层 2.2 结构收紧 | 新 `check:session-isolation` 全绿 + 变异验证转红 |
+| 2c | 层 2.3 界面 | 真机两会话交叉手测 |
+| 3 | 层 3 存储 | 三条存储门禁 |
+| 4a | 层 4.1 策略 + 文档 | 真机确认：任意代码执行会弹确认票且结果有明示 |
+| 4b | 层 4.2 真隔离 | 按平台门禁（可 skip）+ 真机试一条越界读取被拒 |
+
+每步交付：**改前改后实测对照 + 门禁结论**；不做"应该好了"的汇报。
+
+## 5. 范围外（明确不做）
+
+- 不属于本仓库的：Cursor 全局 MCP 配置本身（只在 4.3 写清关系）。
+- 重做提示词层面的"礼貌约束"：I1 靠路径与工具层落实，不靠措辞。
+
+## 6. 已知遗留
+
+- R14 报告里"跨会话写（会污染他会话计划）"未测 —— 层 2.2 落地后该场景应当**结构上不可达**，届时补一条门禁而不是补一次手测。
+- "沙箱拦截规则穷举"（`powershell -Command` / `python -c` / `git -C`）归到 4.1 的门禁里，逐条钉住。
+- `sessions.json` 是否曾轮转：从盘上看没有轮转产物（只有损坏留底），按 I4 由层 3 统一解决。

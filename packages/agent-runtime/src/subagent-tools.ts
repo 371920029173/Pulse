@@ -189,12 +189,35 @@ export function formatTimeoutReport(
 }
 
 export interface SubagentWorktree {
+  /**
+   * Where the child's record is.
+   *
+   * Not the git worktree once the child has finished: that tree is removed the moment it is no
+   * longer editing (`reclaimed`), so a path pointing at it would be a path that does not exist.
+   * What is here instead is the archived state directory inside the parent workspace
+   * (`.she/subagent-history/<child id>`), where the transcript and the patch live.
+   */
   path: string;
   branch: string;
   /** Repo-relative paths the child touched, from `git status --porcelain`. */
   changed: string[];
   /** Why isolation did not happen, when it was asked for and not granted. */
   note?: string;
+  /**
+   * Set when the isolated copy was reclaimed: the git tree is gone, the record is not.
+   *
+   * Absent while the child is still running (a background child keeps its worktree until it ends),
+   * and absent when isolation was never granted in the first place.
+   */
+  reclaimed?: {
+    /** Directory inside the workspace holding the child's transcript. */
+    archivePath: string;
+    /** Patch of everything the child changed, written next to the transcript. */
+    patchPath?: string;
+    branchDeleted: boolean;
+    /** Why the branch survived, when it did. */
+    error?: string;
+  };
 }
 
 /** The slice of a KB node the harvest needs. Structural, so this module needs no KB dependency. */

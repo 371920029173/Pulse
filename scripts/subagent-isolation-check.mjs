@@ -48,6 +48,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
+import { killTree } from './lib/kill-tree.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -428,7 +429,7 @@ async function startLive({ ws, task, llmPort, port }) {
 
   const base = `http://127.0.0.1:${port}`;
   const stop = async () => {
-    try { child.kill(); } catch { /* already gone */ }
+    killTree(child.pid);
     try { stub.close(); } catch { /* already gone */ }
     await new Promise((r) => setTimeout(r, 400));
   };
@@ -481,13 +482,35 @@ if (!live.ok) {
   const worktreeDirs = existsSync(worktreesRoot)
     ? (await import('node:fs')).readdirSync(worktreesRoot).filter((n) => n.startsWith('sub-'))
     : [];
-  check('【关键】为它建了一个隔离副本', worktreeDirs.length === 1, JSON.stringify(worktreeDirs));
-  const wtPath = worktreeDirs.length ? join(worktreesRoot, worktreeDirs[0]) : null;
+  /*
+   * 副本用完即回收（2026-09-27 起）。
+   *
+   * 老断言是「为它建了一个副本」——那时副本一直留着。但副本的路径在工作区**外**（`.she-worktrees`），
+   * 所以子代理自己看不到也清不掉，而人会忘：每个子任务在工作区外留一棵完整的代码树加一个 `she/*` 分支，
+   * 积累到没人知道哪些还有用（实测里那次隔离专项检查的残留就是这样，报告里写的是「我自己看不到也清不掉」）。
+   * 现在子级一结束就回收，记录搬进工作区。所以这里要同时证两件事：树没了，而它干过什么还在。
+   */
+  check('【关键】子任务跑完后工作区外不留副本', worktreeDirs.length === 0, JSON.stringify(worktreeDirs));
+  const leftoverBranches = (git(ws, ['branch', '--list', 'she/*']).stdout || '').trim();
+  check('【关键】`she/*` 分支也一起删掉（只删目录会在仓库里积一堆没人管的分支）',
+    leftoverBranches === '', leftoverBranches);
 
-  if (childSession && wtPath) {
+  const archive = childSession ? join(ws, '.she', 'subagent-history', childSession.id) : null;
+  check('【关键】子会话的记录搬进了工作区（副本没了，但它干过什么还在）',
+    Boolean(archive) && existsSync(join(archive, '.she', 'sessions.json')), String(archive));
+  /*
+   * 这一段里子级**没有改过任何文件**（stub 模型只回一句话），所以补丁不该被造出来，回执要如实说
+   * "没有改动"。补丁本身（含"新建文件也要进补丁"这条回归）在第 4 段用真 git 确定性地钉住 —— 让这里
+   * 依赖一个只会回话的 stub 去写文件，测的就成了 stub，不是补丁。
+   */
+  check('子级没改文件时不编造补丁（回执在下一段里断言）',
+    Boolean(archive) && !existsSync(join(archive, 'worktree.patch')),
+    archive && existsSync(archive) ? JSON.stringify(readdirSync(archive)) : '没有归档目录');
+
+  if (childSession) {
     const detail = await (await api(`/api/sessions/${childSession.id}`)).json();
-    check('【关键】子会话被关在副本里（它的工作目录就是副本）',
-      canon(detail?.directory ?? '') === canon(wtPath), `${detail?.directory} vs ${wtPath}`);
+    check('【关键】子会话的记录仍指得着一个存在的目录（否则点开会去挂一个刚被删掉的路径）',
+      canon(detail?.directory ?? '') === canon(archive ?? ''), `${detail?.directory} vs ${archive}`);
 
     const firstUser = (detail?.messages ?? []).find((m) => m.role === 'user');
     const brief = String(firstUser?.content ?? '');
@@ -496,17 +519,18 @@ if (!live.ok) {
     check('交接单里有允许改动的范围', brief.includes('notes/out.md'), brief.slice(0, 400));
     check('交接单里有约束', brief.includes('不要装新依赖'), brief.slice(0, 400));
     check('交接单里写明了工作目录是副本',
-      brief.includes(wtPath.split(/[\\/]/).pop()) && /工作目录/.test(brief), brief.slice(0, 500));
+      /工作目录/.test(brief) && brief.includes('.she-worktrees'), brief.slice(0, 500));
     check('交接单里说明了改动不会自动进入主工作区', /隔离副本/.test(brief), brief.slice(0, 500));
   }
 
   const parentId = sessions?.active_id ?? allSessions.find((s) => s.title !== TASK_LABEL)?.id;
   const parentDetail = parentId ? await (await api(`/api/sessions/${parentId}`)).json() : null;
   const parentText = JSON.stringify(parentDetail ?? {});
-  const wtLeaf = wtPath ? wtPath.split(/[\\/]/).pop() : '';
   check('拿得到父级的会话记录', Boolean(parentDetail), `${parentId} ${parentText.slice(0, 200)}`);
-  check('【关键】父级拿到的回执里带着副本路径（否则它不知道去哪取结果）',
-    Boolean(wtLeaf) && parentText.includes(wtLeaf), `${wtLeaf} :: ${parentText.slice(0, 500)}`);
+  check('【关键】父级拿到的回执里说明了副本已回收、记录在哪（否则它不知道去哪取结果）',
+    /副本已回收/.test(parentText) && parentText.includes('subagent-history'), parentText.slice(0, 600));
+  check('回执里如实说这次没有改动（没改动就不该出现补丁路径）',
+    /没有改动/.test(parentText) && !parentText.includes('worktree.patch'), parentText.slice(0, 600));
   check('回执里列出了允许改动的范围', /允许改动/.test(parentText), parentText.slice(0, 500));
   check('【关键】副本建成了就不该出现「未隔离」警告（狼来了会让警告失效）',
     !/未隔离/.test(parentText), parentText.slice(0, 500));
@@ -781,7 +805,7 @@ const live3 = {
   api: (path, init) => fetch(`${kbBase3}${path}`, { signal: AbortSignal.timeout(90_000), ...init }),
   log: () => kbOut3,
   stop: async () => {
-    try { kbChildProc.kill(); } catch { /* already gone */ }
+    try { killTree(kbChildProc.pid); } catch { /* already gone */ }
     try { kbStub.server.close(); } catch { /* already gone */ }
     await new Promise((r) => setTimeout(r, 400));
   },
@@ -803,8 +827,16 @@ if (!live3.ok) {
   const child3 = (sessions3?.sessions ?? []).find((s) => s.title === TASK_LABEL);
   const wtRoot3 = join(kbRoot, '.she-worktrees', 'ws');
   const wtDirs3 = existsSync(wtRoot3) ? (await import('node:fs')).readdirSync(wtRoot3).filter((n) => n.startsWith('sub-')) : [];
-  const wtPath3 = wtDirs3.length === 1 ? join(wtRoot3, wtDirs3[0]) : null;
-  check('【前提】确实为它建了副本', Boolean(wtPath3), JSON.stringify(wtDirs3));
+  /*
+   * 这里同时是「库句柄有没有攥住目录」的实测。
+   *
+   * 子级的知识库副本开在副本里面，而句柄属于这个 server 进程：只要没松开，Windows 上目录就删不掉
+   * （`Invalid argument`），回收会留下一个谁也清不掉的树。所以「回收后目录数为 0」这一条同时钉住两件事 ——
+   * 生命周期正确，以及 handle 真的被 `disposeWorkspace` 放掉了。这条工作区**有**父级知识库、子级**有**
+   * 私有副本，是三个工作区里最能暴露句柄问题的一个。
+   */
+  check('【关键】带知识库副本的副本也回收干净了（句柄没把目录攥住）',
+    wtDirs3.length === 0, JSON.stringify(wtDirs3));
 
   /*
    * The snapshot is asserted through what the CHILD did, not by opening the copy.
@@ -866,16 +898,28 @@ if (!live3.ok) {
    * The child's KB is opened by the server process and cached per path, so deleting the worktree
    * afterwards keeps a live sqlite handle inside the directory — on Windows `rmdir` then fails with
    * EBUSY and the copy can never be cleaned up. Asserting through the real route (rather than
-   * against the helper) is the point: the handle belongs to the server, and that is the process
+    * against the helper) is the point: the handle belongs to the server, and that is the process
    * the UI's delete button runs in.
+   *
+   * 子任务的副本现在是自动回收的，所以这条删除路由要用一个手动建的副本去测 —— 否则这段检查会
+   * 随着回收一起悄悄不再执行（`if (wtPath)` 为假），而"UI 上的删除按钮还能不能用"就没人验了。
    */
-  if (wtPath3) {
-    const del = await live3.api(`/api/worktrees?repo=${encodeURIComponent(ws3)}&path=${encodeURIComponent(wtPath3)}`, {
+  const manual = await live3.api('/api/worktrees', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `manual-${Date.now().toString(36)}`, repo: ws3 }),
+  });
+  const manualBody = await manual.json().catch(() => ({}));
+  const manualPath = manualBody?.worktree?.path ?? manualBody?.path ?? null;
+  check('【前提】能手动建一个副本（删除路由要有东西可删）', Boolean(manual.ok && manualPath), `${manual.status} ${JSON.stringify(manualBody).slice(0, 300)}`);
+
+  if (manualPath) {
+    const del = await live3.api(`/api/worktrees?repo=${encodeURIComponent(ws3)}&path=${encodeURIComponent(manualPath)}`, {
       method: 'DELETE',
     });
     const delBody = await del.text();
     let locked = '';
-    if (!del.ok || existsSync(wtPath3)) {
+    if (!del.ok || existsSync(manualPath)) {
       // Identify the file that actually kept the directory: on Windows the message is only
       // "Invalid argument", which says nothing about which handle is open.
       const { readdirSync: rd, rmSync: rm } = await import('node:fs');
@@ -884,14 +928,14 @@ if (!live3.ok) {
         for (const e of rd(d, { withFileTypes: true })) {
           const p = join(d, e.name);
           if (e.isDirectory()) { walk(p); continue; }
-          try { rm(p); } catch { stuck.push(p.replace(wtPath3, '')); }
+          try { rm(p); } catch { stuck.push(p.replace(manualPath, '')); }
         }
       };
-      try { walk(wtPath3); } catch { /* best effort */ }
+      try { walk(manualPath); } catch { /* best effort */ }
       locked = stuck.length ? ` 锁住: ${stuck.join(', ')}` : '';
     }
-    check('【关键】子任务跑完后副本能被删掉（服务端没有把库句柄一直攥着）',
-      del.ok && !existsSync(wtPath3), `${del.status} ${delBody.slice(0, 300)} ${existsSync(wtPath3) ? '目录还在' : ''}${locked}`);
+    check('【关键】手动副本能被删掉（服务端没有把目录攥着）',
+      del.ok && !existsSync(manualPath), `${del.status} ${delBody.slice(0, 300)} ${existsSync(manualPath) ? '目录还在' : ''}${locked}`);
   }
 }
 
@@ -1003,7 +1047,7 @@ if (!started) {
     !/needs_confirm/.test(text4), text4.slice(0, 900));
 }
 
-rawChild.kill();
+rawChild.pid && killTree(rawChild.pid);
 try { rawStub.server.close(); } catch { /* already gone */ }
 await new Promise((r) => setTimeout(r, 400));
 
@@ -1208,7 +1252,7 @@ if (!sharedStarted) {
   }
 }
 
-sharedChild.kill();
+sharedChild.pid && killTree(sharedChild.pid);
 try { sharedStub.server.close(); } catch { /* already gone */ }
 await new Promise((r) => setTimeout(r, 400));
 
@@ -1427,7 +1471,7 @@ if (!timeoutStarted) {
   }
 }
 
-timeoutChild.kill();
+timeoutChild.pid && killTree(timeoutChild.pid);
 try { timeoutStub.server.close(); } catch { /* already gone */ }
 await new Promise((r) => setTimeout(r, 400));
 
