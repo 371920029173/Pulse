@@ -26,7 +26,11 @@ function read(file: string): string[] {
 
 export function rememberProject(file: string, root: string): void {
   const abs = resolve(root);
-  const roots = [abs, ...read(file).filter((r) => resolve(r) !== abs)].slice(0, 40);
+  const key = process.platform === 'win32' ? abs.toLowerCase() : abs;
+  const roots = [abs, ...read(file).filter((r) => {
+    const o = resolve(r);
+    return (process.platform === 'win32' ? o.toLowerCase() : o) !== key;
+  })].slice(0, 40);
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, JSON.stringify({ roots }, null, 2), 'utf8');
 }
@@ -39,8 +43,15 @@ export function knownProjectRoots(file: string, current: string, extra: string[]
   for (const raw of all) {
     if (!raw) continue;
     const abs = resolve(raw);
-    if (seen.has(abs) || !existsSync(abs)) continue;
-    seen.add(abs);
+    /*
+     * Deduped by identity, not by spelling. This machine's index held both `d:\AGI\x` and
+     * `D:\AGI\x`; two entries mean two session stores and two group stores over one state file, and
+     * the rail then lists the same project twice while the two in-memory copies overwrite each
+     * other's writes.
+     */
+    const key = process.platform === 'win32' ? abs.toLowerCase() : abs;
+    if (seen.has(key) || !existsSync(abs)) continue;
+    seen.add(key);
     out.push(abs);
   }
   return out;

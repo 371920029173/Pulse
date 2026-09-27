@@ -79,8 +79,11 @@ function makeWorkspace(label, sessions) {
  * Also probes `/api/sessions` while it is up, because several assertions are about the app being
  * USABLE after recovery rather than merely about the process starting — "the server came up" was the
  * whole condition of two assertions that could therefore never fail.
+ *
+ * `probe` runs while the server is still up, for checks that need several requests against one
+ * process (a workspace switch, say) rather than a single boot-and-look.
  */
-async function bootOnce(workspace) {
+async function bootOnce(workspace, probe) {
   const child = spawn('node', [SERVER_ENTRY], {
     cwd: SERVER_DIR,
     // Pinned in the child environment, not only in the workspace: ambient variables win over the
@@ -117,6 +120,10 @@ async function bootOnce(workspace) {
       const body = await r.json();
       sessionsProbe = { status: r.status, isArray: Array.isArray(body?.sessions) };
     } catch { /* left as the failed default */ }
+  }
+
+  if (healthy && probe) {
+    try { await probe(`http://127.0.0.1:${PORT}`); } catch (err) { console.error(`probe 失败: ${err.message}`); }
   }
 
   // Recovery runs during boot; give it a moment to finish writing.
@@ -420,6 +427,203 @@ console.log('\n数据安全回归（会启动真实服务，用临时工作区�
   record('屏幕上正在读的会话没有被换掉', after.active_id === 's1', `active_id=${after.active_id}`);
   if (status >= 400) record('拒绝时说清了为什么', body.length > 0, body.slice(0, 200));
   removeTempDir(ws);
+}
+
+// ── 10. 打开另一个项目的会话，不能把会话轨道里的东西弄丢 ──
+{
+  /*
+   * The shape the user hit on 2026-09-27: they had a chat pinned to another project (an old copy of
+   * the same project, from before it was moved) and clicking it made a work group vanish from the
+   * rail — while the agent in the first chat simultaneously lost its knowledge base, because the
+   * switch remounted the KB and closed the store that agent was holding.
+   *
+   * Both come from one place: opening a chat that lives in another directory mounts THAT project,
+   * swapping the state directory (sessions AND rooms) and remounting the KB. What must not happen is
+   * either store going missing from the user's view, or a live agent losing its database.
+   */
+  const sessionsOf = (id, title, directory) => ({
+    schema_version: 'she-sessions/0.1',
+    active_id: id,
+    sessions: [{
+      id,
+      title,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      messages: [],
+      ...(directory ? { directory } : {}),
+    }],
+  });
+
+  const wsA = makeWorkspace('switchA', sessionsOf('sess_a', 'A 的会话'));
+  // B's chat names B as its own directory — that mismatch is the whole trigger for the switch.
+  const wsB = makeWorkspace('switchB');
+  writeFileSync(
+    join(wsB, '.she', 'sessions.json'),
+    JSON.stringify(sessionsOf('sess_b', 'B 的会话', wsB), null, 2),
+    'utf8',
+  );
+
+  let roomListed = false;
+  let chatSurvived = false;
+  let roomOpens = false;
+  let writeLanded = false;
+  let seen = '';
+  let switchDetail = '';
+
+  const { healthy } = await bootOnce(wsA, async (base) => {
+    const call = async (method, path, body) => {
+      const r = await fetch(base + path, {
+        method,
+        headers: body ? { 'content-type': 'application/json' } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(15_000),
+      });
+      let parsed = null;
+      try { parsed = await r.json(); } catch { /* not json */ }
+      return { status: r.status, body: parsed };
+    };
+
+    // A work group belonging to A, created while A is the mounted project.
+    const created = await call('POST', '/api/cluster/rooms', { title: '切换前的工作群' });
+    const roomId = created.body?.id;
+    if (!roomId) { switchDetail = `建群失败 status=${created.status}`; return; }
+
+    /*
+     * Visit B and come back before clicking: the app-level project index only records the directory
+     * a switch moves TO, so this is what makes B's chat findable at all — and it is also why a real
+     * user's rail keeps showing projects they have visited.
+     */
+    await call('POST', '/api/workspaces/switch', { root: wsB });
+    await call('POST', '/api/workspaces/switch', { root: wsA });
+
+    // The click: a chat pinned to another directory activates ITS project.
+    const clicked = await call('POST', '/api/sessions/sess_b/activate');
+    switchDetail = `click status=${clicked.status}`;
+
+    const rail = await call('GET', '/api/conversations');
+    const items = Array.isArray(rail.body?.items) ? rail.body.items : [];
+    seen = items.map((i) => `${i.kind}:${i.id}`).join(' ') || '(空)';
+    roomListed = items.some((i) => i.kind === 'cluster' && i.id === roomId);
+    chatSurvived = items.some((i) => i.id === 'sess_a');
+
+    roomOpens = (await call('GET', `/api/cluster/rooms/${roomId}`)).status === 200;
+
+    const sent = await call('POST', `/api/cluster/rooms/${roomId}/message`, { content: '来自 B 的一句话' });
+    const reread = await call('GET', `/api/cluster/rooms/${roomId}`);
+    writeLanded = sent.status < 400 && (reread.body?.messages?.length ?? 0) > 0;
+  });
+
+  record(
+    '【关键】点了另一个项目的会话之后，工作群仍留在轨道里（曾凭空消失）',
+    healthy && roomListed,
+    roomListed ? switchDetail : `切走之后轨道只剩：${seen}`,
+  );
+  record(
+    '点了另一个项目的会话之后，原来那个项目的会话也还在轨道里',
+    healthy && chatSurvived,
+    seen,
+  );
+  record(
+    '轨道上列出来的群是真能打开的（不是列出来就 404）',
+    healthy && roomOpens,
+    roomOpens ? '' : 'GET /api/cluster/rooms/<id> 没有返回 200',
+  );
+  record(
+    '给另一个项目的群发消息，落在群自己所在的那个项目里',
+    healthy && writeLanded,
+    writeLanded ? '' : '消息没有回到那个群自己的存储',
+  );
+  removeTempDir(wsA);
+  removeTempDir(wsB);
+}
+
+// ── 11. 同一个目录的两种写法，是同一个项目 ──
+if (process.platform === 'win32') {
+  /*
+   * The live index on 2026-09-27 held both `d:\AGI\_she-live-test` and `D:\AGI\_she-live-test` —
+   * one directory, two spellings. Keyed by spelling that is two SessionStores over one
+   * `sessions.json`: each keeps its own in-memory list and persists it wholesale, so a chat created
+   * through one spelling disappears when the other spelling next writes. That is the shape of
+   * "点第二个 chat，东西就不见了" — the loss is silent and looks like the rail dropping items.
+   */
+  const flipDriveCase = (p) => {
+    const m = /^([A-Za-z]):/.exec(p);
+    if (!m) return null;
+    const letter = m[1];
+    const flipped = letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase();
+    return flipped + p.slice(1);
+  };
+  const ws = makeWorkspace('spelling', EMPTY_SESSIONS('拼写测试'));
+  const other = flipDriveCase(ws);
+  if (other && other !== ws) {
+    // Seed the app-level index with both spellings, exactly as the live one had them.
+    mkdirSync(join(ws, 'appdir'), { recursive: true });
+    writeFileSync(
+      join(ws, 'appdir', 'projects.json'),
+      JSON.stringify({ roots: [ws, other] }, null, 2),
+      'utf8',
+    );
+
+    let detail = '';
+    let allListed = false;
+    let titlesKept = false;
+    const { healthy } = await bootOnce(ws, async (base) => {
+      const call = async (method, path, body) => {
+        const r = await fetch(base + path, {
+          method,
+          headers: body ? { 'content-type': 'application/json' } : undefined,
+          body: body ? JSON.stringify(body) : undefined,
+          signal: AbortSignal.timeout(15_000),
+        });
+        let parsed = null;
+        try { parsed = await r.json(); } catch { /* not json */ }
+        return { status: r.status, body: parsed };
+      };
+
+      const x = await call('POST', '/api/sessions', { title: '先建的 X', directory: ws });
+      // In the duplicated-store build this listing is what brings the second spelling's store into
+      // existence, with a copy of the file as it is right now.
+      await call('GET', '/api/sessions');
+      const y = await call('POST', '/api/sessions', { title: '后建的 Y', directory: ws });
+      const z = await call('POST', '/api/sessions', { title: '在另一种拼写下建的 Z', directory: other });
+
+      const listed = await call('GET', '/api/sessions');
+      const rail = new Map((listed.body?.sessions || []).map((s) => [s.id, s]));
+      const wanted = [['X', x.body?.id], ['Y', y.body?.id], ['Z', z.body?.id]];
+      const missing = wanted.filter(([, id]) => !id || !rail.has(id)).map(([n]) => n);
+      allListed = missing.length === 0;
+      detail = missing.length
+        ? `轨道上少了 ${missing.join('/')}（一共 ${rail.size} 条：${[...rail.values()].map((s) => s.title).join(' | ')}）`
+        : '';
+
+      const onDisk = JSON.parse(readFileSync(join(ws, '.she', 'sessions.json'), 'utf8'));
+      const byId = new Map((onDisk.sessions || []).map((s) => [s.id, s]));
+      const lost = wanted
+        .filter(([, id]) => !id || !byId.has(id))
+        .map(([n]) => `${n}(整个没了)`);
+      for (const [name, id] of wanted) {
+        const s = byId.get(id);
+        if (s && s.title !== { X: '先建的 X', Y: '后建的 Y', Z: '在另一种拼写下建的 Z' }[name]) {
+          lost.push(`${name} 的标题变成「${s.title}」`);
+        }
+      }
+      titlesKept = lost.length === 0;
+      if (titlesKept) detail = `盘上 ${byId.size} 个会话，标题都在`;
+      else if (allListed) detail = lost.join('；');
+    });
+
+    record(
+      '【关键】同一个目录的两种写法不能在轨道里变成两份（新建的会话曾从列表里消失）',
+      healthy && allListed,
+      allListed ? 'X/Y/Z 都在轨道上' : detail,
+    );
+    record(
+      '【关键】同一个目录的两种写法不能各自持有一份存储，把对方的会话写没',
+      healthy && titlesKept,
+      titlesKept ? detail : detail || '盘上的会话被另一种拼写的副本覆盖了',
+    );
+    removeTempDir(ws);
+  }
 }
 
 const failed = results.filter((r) => !r.pass);

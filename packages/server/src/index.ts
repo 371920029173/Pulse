@@ -418,8 +418,18 @@ let config: SheConfig;
 let store: KBStore;
 let engine: GroupKBEngine;
 
-function remountKnowledgeBase(dbPath: string): void {
-  try { store?.close(); } catch { /* ignore */ }
+/**
+ * Mount a knowledge base as the current one.
+ *
+ * `closeCurrent: false` is for the one caller that has already arranged for the outgoing store to
+ * keep living (`mountWorkspace`, which parks it in `extraEngines` for the sessions still pinned to
+ * it). Everything else closes it — correctly, because those callers are about to copy or merge the
+ * file and a live handle blocks that on Windows.
+ */
+function remountKnowledgeBase(dbPath: string, opts: { closeCurrent?: boolean } = {}): void {
+  if (opts.closeCurrent !== false) {
+    try { store?.close(); } catch { /* ignore */ }
+  }
   const dir = dirname(dbPath);
   try { mkdirSync(dir, { recursive: true }); } catch { /* ignore */ }
   store = new KBStore(dbPath);
@@ -434,7 +444,7 @@ function remountKnowledgeBase(dbPath: string): void {
 const extraEngines = new Map<string, GroupKBEngine>();
 
 /**
- * Identity of a database file, not its spelling.
+ * Identity of a path, not its spelling.
  *
  * `resolve()` normalises separators and dots and nothing else, so one file reached two ways gets
  * two cache keys and — worse — two live connections inside one process. That is not hypothetical:
@@ -444,8 +454,14 @@ const extraEngines = new Map<string, GroupKBEngine>();
  * contention waiting to happen, and a handle you cannot find again is a handle you cannot close —
  * which is how a directory ends up undeletable. Comparing real paths, case-insensitively on
  * Windows because the filesystem itself is, keeps one file to one engine.
+ *
+ * Directories need the same treatment, for the same reason and with a sharper consequence. This
+ * machine's project index held both `d:\AGI\_she-live-test` and `D:\AGI\_she-live-test` — one
+ * directory, two spellings — and keyed by spelling that is two SessionStores and two ClusterStores
+ * over one `sessions.json`: two in-memory copies, each free to persist its own version and write
+ * the other's conversations away.
  */
-function dbKey(p: string): string {
+function pathKey(p: string): string {
   let out = resolve(p);
   try { out = realpathSync.native(out); } catch { /* not created yet — resolve() is the best there is */ }
   return process.platform === 'win32' ? out.toLowerCase() : out;
@@ -453,15 +469,38 @@ function dbKey(p: string): string {
 
 /** Whether two paths name the same knowledge base. */
 function sameDb(a: string, b: string): boolean {
-  return dbKey(a) === dbKey(b);
+  return pathKey(a) === pathKey(b);
+}
+
+/**
+ * Whether an engine still holds a usable connection.
+ *
+ * A closed store is not fatal to a holder that already has it (`KBStore` reopens on use), but a
+ * *lookup* should prefer building a fresh engine over handing out one whose connection has been
+ * released, because the store's cached statements are rebuilt either way.
+ */
+function engineAlive(e: GroupKBEngine | undefined): boolean {
+  const store = (e as unknown as { store?: { isOpen?: boolean } } | undefined)?.store;
+  return store?.isOpen === true;
 }
 
 function engineFor(dbPath: string): GroupKBEngine {
   const abs = resolve(dbPath);
-  const key = dbKey(abs);
-  if (key === dbKey(config.kb.dbPath)) return engine;
+  const key = pathKey(abs);
+  if (key === pathKey(config.kb.dbPath)) {
+    /*
+     * `/api/kb/share` and `/api/kb/merge` close the current store before copying the file, so a
+     * request landing in that window would otherwise be handed an engine that answers every call
+     * with "The database connection is not open". Rebuild instead of returning a corpse.
+     */
+    if (!engineAlive(engine)) remountKnowledgeBase(config.kb.dbPath);
+    return engine;
+  }
   const hit = extraEngines.get(key);
-  if (hit) return hit;
+  if (hit) {
+    if (engineAlive(hit)) return hit;
+    extraEngines.delete(key);
+  }
   mkdirSync(dirname(abs), { recursive: true });
   const extra = new GroupKBEngine(new KBStore(abs), config.kb);
   extraEngines.set(key, extra);
@@ -479,7 +518,7 @@ function engineFor(dbPath: string): GroupKBEngine {
  * same path must build a fresh engine rather than be handed a closed store.
  */
 function closeEngineFor(dbPath: string): void {
-  const key = dbKey(dbPath);
+  const key = pathKey(dbPath);
   const extra = extraEngines.get(key);
   if (!extra) return;
   try { (extra as unknown as { store: { close(): void } }).store.close(); } catch { /* ignore */ }
@@ -491,15 +530,22 @@ function closeEngineFor(dbPath: string): void {
  *
  * Called before removing a worktree: the sqlite handle is what actually holds the lock, and an
  * agent still pinned to that directory would go on working in a directory that no longer exists.
- * Running agents are left alone — their work is not the deletion's to interrupt.
+ *
+ * Returns false — releasing nothing — when a session in that directory is still running. Their
+ * work is not the deletion's to interrupt, and that used to be enforced only for the agents while
+ * the KB handle was closed regardless, which meant a delete could break the knowledge base of an
+ * agent still working in it. The caller turns a false into a refusal.
  */
-function disposeWorkspace(dir: string): void {
+function disposeWorkspace(dir: string): boolean {
   const abs = resolve(dir);
+  const busy = [...agents].some(([id, a]) => a.isRunning() && sameDb(rootForSession(id), abs));
+  if (busy) return false;
   closeEngineFor(join(abs, '.she', 'kb.sqlite'));
   for (const [id, agent] of [...agents]) {
     if (agent.isRunning()) continue;
     if (sameDb(rootForSession(id), abs)) dropAgent(id);
   }
+  return true;
 }
 
 let sessions: SessionStore;
@@ -524,20 +570,70 @@ let activeAgentId: string | null = null;
 const detachParents = new Set<string>();
 /** Session stores for projects other than the one currently mounted. */
 const otherStores = new Map<string, SessionStore>();
+/** The same, for the work groups living in those projects' state directories. */
+const otherClusters = new Map<string, ClusterStore>();
 
 function projectIndexFile(): string {
   return join(appDir(), 'projects.json');
 }
 
 function storeFor(dir: string): SessionStore {
-  const key = resolve(dir);
-  if (resolve(sessions.rootDir) === key) return sessions;
+  const abs = resolve(dir);
+  const key = pathKey(abs);
+  if (pathKey(sessions.rootDir) === key) return sessions;
   let hit = otherStores.get(key);
   if (!hit) {
-    hit = new SessionStore(key);
+    /* Keyed case-insensitively, constructed with the spelling the user gave: one store per
+     * directory, but the path shown in the UI keeps its original capitals. */
+    hit = new SessionStore(abs);
     otherStores.set(key, hit);
   }
   return hit;
+}
+
+/**
+ * The work-group store for a project's state directory.
+ *
+ * Groups are per state directory just like sessions, so the session rail has to reach into the
+ * other projects' stores to keep listing them (see `/api/conversations`).
+ */
+function clusterFor(dir: string): ClusterStore {
+  const abs = resolve(dir);
+  const key = pathKey(abs);
+  if (pathKey(stateDir) === key) return cluster;
+  let hit = otherClusters.get(key);
+  if (!hit) {
+    hit = new ClusterStore(abs);
+    otherClusters.set(key, hit);
+  }
+  return hit;
+}
+
+/** Every cluster store the session rail can see: the mounted one first, then each known project's. */
+function clusterStoresForRail(): ClusterStore[] {
+  const stores = new Set<ClusterStore>([cluster]);
+  for (const root of projectRoots()) stores.add(clusterFor(root));
+  return [...stores];
+}
+
+/**
+ * Where a room actually lives: the store holding it, and the project it belongs to.
+ *
+ * Rooms are filed per state directory, so opening a chat that belongs to another project mounts
+ * that project's directory and the room you were looking at is suddenly in a store nobody is
+ * asking. Every room route used to look the id up in the mounted `cluster` alone, which is why a
+ * room the rail lists (the rail lists all projects) answered 404 the moment it was clicked — and a
+ * button that always fails is worse than no button. A room records its own `workspace`, which is
+ * also what decides whose skills and whose knowledge base it should use.
+ */
+function roomHome(roomId: string): { store: ClusterStore; root: string } | null {
+  for (const store of clusterStoresForRail()) {
+    const room = store.get(roomId);
+    if (room) {
+      return { store, root: room.workspace ? resolve(room.workspace) : resolve(config.workspace.root) };
+    }
+  }
+  return null;
 }
 
 function projectRoots(): string[] {
@@ -643,7 +739,7 @@ function findSession(id: string): { store: SessionStore; session: ChatSession } 
   const local = sessions.get(id);
   if (local) return { store: sessions, session: local };
   for (const root of projectRoots()) {
-    if (resolve(root) === resolve(sessions.rootDir)) continue;
+    if (sameDb(root, sessions.rootDir)) continue;
     const store = storeFor(root);
     const session = store.get(id);
     if (session) return { store, session };
@@ -692,7 +788,7 @@ function cleanLegacyWorkspaceBackground(): void {
     const globalDir = join(appDir(), 'background');
     // When the app directory *is* the legacy directory (SHE_APP_DIR pointing into the
     // workspace), nothing is duplicated and this is not a migration.
-    if (resolve(legacyDir) === resolve(globalDir)) return;
+    if (pathKey(legacyDir) === pathKey(globalDir)) return;
 
     for (const name of readdirSync(legacyDir)) {
       const legacyFile = join(legacyDir, name);
@@ -1167,7 +1263,7 @@ function writeHarvestDigest(root: string, sessionId: string, harvest: SubagentKb
 
 function configForRoot(root: string): SheConfig {
   const abs = resolve(root);
-  if (abs === resolve(config.workspace.root)) return config;
+  if (sameDb(abs, config.workspace.root)) return config;
   const kb = resolveWorkspaceKbPath(abs);
   return {
     ...config,
@@ -1786,13 +1882,33 @@ function mountWorkspace(root: string, sessionId?: string): ChatSession {
     const prevKb = config.kb.dbPath;
     config.workspace.root = next;
     config.kb.dbPath = resolveWorkspaceKbPath(next).dbPath;
-    if (!sameDb(prevKb, config.kb.dbPath)) remountKnowledgeBase(config.kb.dbPath);
+    if (!sameDb(prevKb, config.kb.dbPath)) {
+      /*
+       * Hand the outgoing knowledge base to the sessions still pinned to it instead of closing it.
+       *
+       * An agent is built with the engine for its session's directory and holds that reference for
+       * the session's life, and this switch deliberately keeps pinned sessions running. Closing the
+       * engine here therefore undid precisely what the switch promises: on 2026-09-27 a switch at
+       * 16:34 left a 14-hour session calling a released connection — `The database connection is
+       * not open` on every `kb_*` and `errorbook_*` call, while the UI (which reads the freshly
+       * mounted store) looked perfectly healthy — and only a restart brought it back. Parking it in
+       * the extra-engine cache lets `engineFor()` hand those sessions the same live connection.
+       */
+      if (engineAlive(engine)) extraEngines.set(pathKey(prevKb), engine);
+      remountKnowledgeBase(config.kb.dbPath, { closeCurrent: false });
+    }
     const nextState = resolveStateDir(config);
-    if (nextState !== stateDir) {
-      otherStores.set(resolve(sessions.rootDir), sessions);
+    /*
+     * Compared by identity, not by spelling. Two spellings of one directory resolve to one state
+     * directory, and a raw string compare would tear down and rebuild both stores for no reason —
+     * dropping the in-memory copies a live agent's session is pinned to. One directory is one
+     * state directory.
+     */
+    if (pathKey(nextState) !== pathKey(stateDir)) {
+      otherStores.set(pathKey(sessions.rootDir), sessions);
       stateDir = nextState;
       sessions = new SessionStore(stateDir);
-      otherStores.delete(resolve(sessions.rootDir));
+      otherStores.delete(pathKey(sessions.rootDir));
       cluster = new ClusterStore(stateDir);
       for (const [id, agent] of [...agents]) {
         if (agent.isRunning()) continue;
@@ -1811,7 +1927,7 @@ function mountWorkspace(root: string, sessionId?: string): ChatSession {
   let chosen: ChatSession | null = null;
   if (sessionId) {
     const found = findSession(sessionId);
-    if (found && resolve(found.session.directory || found.store.rootDir) === resolve(sessions.rootDir)) {
+    if (found && sameDb(found.session.directory || found.store.rootDir, sessions.rootDir)) {
       chosen = found.store.setActive(sessionId);
     } else if (found) {
       chosen = found.session;
@@ -2763,7 +2879,7 @@ router.put('/api/settings', async (req, res) => {
        * changing in this same request. A genuinely different path is still a real binding.
        */
       const localDefault = resolve(config.workspace.root, '.she', 'kb.sqlite');
-      const echoOfPrevious = resolve(config.workspace.root) !== prevWorkspaceRoot
+      const echoOfPrevious = !sameDb(config.workspace.root, prevWorkspaceRoot)
         && sameDb(p, prevKbDbPath);
       const echoedOwnDefault = Boolean(p) && sameDb(isAbsolute(p) ? p : resolve(config.workspace.root, p), localDefault);
       if (!p || echoOfPrevious || echoedOwnDefault) {
@@ -2845,11 +2961,18 @@ router.put('/api/settings', async (req, res) => {
 
     // If the workspace moved, relocate chat/cluster state so history follows.
     const nextStateDir = resolveStateDir(config);
-    if (nextStateDir !== stateDir) {
+    if (pathKey(nextStateDir) !== pathKey(stateDir)) {
         persistHistory();
+        /* Keep the projects we are leaving reachable by the rail: session and group stores are
+         * per-state-directory, so dropping them here is how a project's chats disappeared from the
+         * sidebar the moment another workspace was opened. */
+        otherStores.set(pathKey(sessions.rootDir), sessions);
+        otherClusters.set(pathKey(stateDir), cluster);
         stateDir = nextStateDir;
         sessions = new SessionStore(stateDir);
         cluster = new ClusterStore(stateDir);
+        otherStores.delete(pathKey(sessions.rootDir));
+        otherClusters.delete(pathKey(stateDir));
         // Disposes as well as drops: each agent owns a language server process.
         disposeAllAgents();
       }
@@ -2880,8 +3003,7 @@ router.put('/api/settings', async (req, res) => {
         throw new HttpError(500, `知识库挂载失败: ${(err as Error).message}`);
       }
     }
-    const restartRequired =
-      resolve(prevWorkspaceRoot) !== resolve(config.workspace.root);
+    const restartRequired = !sameDb(prevWorkspaceRoot, config.workspace.root);
 
     sendJSON(res, {
       ok: true,
@@ -3403,7 +3525,7 @@ router.get('/api/fs/tree', (req, res) => {
       if (process.env.SHE_KB_PATH) delete process.env.SHE_KB_PATH;
       config.kb.dbPath = abs;
     }
-    if (resolve(prev) !== resolve(config.kb.dbPath)) {
+    if (!sameDb(prev, config.kb.dbPath)) {
       remountKnowledgeBase(config.kb.dbPath);
     }
     const resolved = resolveWorkspaceKbPath(config.workspace.root);
@@ -3458,7 +3580,7 @@ router.get('/api/fs/tree', (req, res) => {
       remountKnowledgeBase(config.kb.dbPath);
       throw new HttpError(500, `合库失败: ${(err as Error).message}`);
     }
-    if (resolve(target) !== resolve(config.kb.dbPath)) {
+    if (!sameDb(target, config.kb.dbPath)) {
       writeKbLink(config.workspace.root, target, 'merged shared KB');
       if (process.env.SHE_KB_PATH) delete process.env.SHE_KB_PATH;
       config.kb.dbPath = target;
@@ -4240,7 +4362,7 @@ router.get('/api/fs/tree', (req, res) => {
     const seen = new Set(mineVisible.map((s) => s.id));
     const extra = [];
     for (const root of projectRoots()) {
-      if (resolve(root) === resolve(sessions.rootDir)) continue;
+      if (sameDb(root, sessions.rootDir)) continue;
       for (const s of visibleToTenant(storeFor(root).list(includeClosed).sessions)) {
         if (seen.has(s.id)) continue;
         seen.add(s.id);
@@ -4291,7 +4413,7 @@ router.get('/api/fs/tree', (req, res) => {
     const owner = storeFor(directory);
     const s = createSession(owner, body.title, { directory, parentId: body.parent_id });
     try { rememberProject(projectIndexFile(), directory); } catch { /* non-fatal */ }
-    if (resolve(directory) === resolve(config.workspace.root)) {
+    if (sameDb(directory, config.workspace.root)) {
       activeAgentId = s.id;
       agents.set(s.id, makeAgent(config, s.id));
     }
@@ -4368,7 +4490,7 @@ router.get('/api/fs/tree', (req, res) => {
    * than no button, so the group gets a real export of its own.
    */
   router.get('/api/cluster/rooms/:id/export', (_req, res, params) => {
-    const room = cluster.get(params.id);
+    const room = roomHome(params.id)?.store.get(params.id) ?? null;
     if (!room) throw new HttpError(404, `Room not found: ${params.id}`);
     const lines: string[] = [
       `# ${room.title || '工作群'}`,
@@ -4406,7 +4528,7 @@ router.get('/api/fs/tree', (req, res) => {
     const found = findSession(params.id);
     if (!found) throw new HttpError(404, `Session not found: ${params.id}`);
     const dir = resolve(found.session.directory || found.store.rootDir);
-    if (dir !== resolve(config.workspace.root)) {
+    if (!sameDb(dir, config.workspace.root)) {
       const active = mountWorkspace(dir, params.id);
       sendJSON(res, active);
       return;
@@ -4509,10 +4631,13 @@ router.get('/api/fs/tree', (req, res) => {
     const repo = resolve(url.searchParams.get('repo') || config.workspace.root);
     const path = resolve(url.searchParams.get('path') || '');
     if (!path) throw new HttpError(400, '缺少 path');
+    // Release the KB handle first: deleting a directory that has a live sqlite file inside it
+    // fails on Windows, and the child's KB copy always lives there. A running session keeps its
+    // handle, and the delete is refused rather than pulling the KB out from under it.
+    if (!disposeWorkspace(path)) {
+      throw new HttpError(409, '这个工作区里还有正在运行的会话，等它跑完再删 —— 否则会把它正在用的知识库抽走');
+    }
     try {
-      // Release the KB handle first: deleting a directory that has a live sqlite file inside it
-      // fails on Windows, and the child's KB copy always lives there.
-      disposeWorkspace(path);
       removeWorktree(repo, path);
       sendJSON(res, { ok: true });
     } catch (err) {
@@ -5055,7 +5180,9 @@ router.get('/api/fs/tree', (req, res) => {
 
   // ── cluster discussion rooms (parallel agents) ──
   router.get('/api/cluster/rooms', (_req, res) => {
-    sendJSON(res, { rooms: cluster.list() });
+    // Across every known project, for the same reason as the rail: a room filed in another
+    // project's state directory is still a room the user can see and open.
+    sendJSON(res, { rooms: clusterStoresForRail().flatMap((c) => c.list()) });
   });
 
   /**
@@ -5078,7 +5205,8 @@ router.get('/api/fs/tree', (req, res) => {
       background?: boolean;
       running?: boolean;
     }> = [];
-    for (const root of projectRoots()) {
+    const roots = projectRoots();
+    for (const root of roots) {
       for (const s of visibleToTenant(storeFor(root).list().sessions)) {
         if (seen.has(s.id)) continue;
         seen.add(s.id);
@@ -5095,15 +5223,31 @@ router.get('/api/fs/tree', (req, res) => {
         });
       }
     }
-    const groups = cluster.list().map((r) => ({
-      id: r.id,
-      kind: 'cluster' as const,
-      title: r.title,
-      created_at: r.created_at,
-      updated_at: r.updated_at,
-      memberCount: r.members?.length ?? 0,
-      status: r.status,
-    }));
+    /*
+     * Groups come from every known project as well, not just the mounted one.
+     *
+     * A room lives in its project's state directory, and opening a chat that belongs to another
+     * project mounts that project's directory — so reading only the mounted `cluster` made the rail
+     * drop groups the moment such a chat was clicked. Reproduced live on 2026-09-27: three rail
+     * items became two, with the work group gone. `seenGroups` keeps a room from being listed twice
+     * when two spellings of a path resolve to one state directory.
+     */
+    const seenGroups = new Set<string>();
+    const groups = clusterStoresForRail().flatMap((c) =>
+      c.list().flatMap((r) => {
+        if (seenGroups.has(r.id)) return [];
+        seenGroups.add(r.id);
+        return [{
+          id: r.id,
+          kind: 'cluster' as const,
+          title: r.title,
+          created_at: r.created_at,
+          updated_at: r.updated_at,
+          memberCount: r.members?.length ?? 0,
+          status: r.status,
+        }];
+      }),
+    );
     const all = [...chats, ...groups].sort((a, b) =>
       (b.updated_at ?? '').localeCompare(a.updated_at ?? ''),
     );
@@ -5133,7 +5277,8 @@ router.get('/api/fs/tree', (req, res) => {
   router.put('/api/cluster/rooms/:id/roles', async (req, res, params) => {
     const body = await parseBody<{ roles?: ClusterRole[] }>(req);
     if (!Array.isArray(body.roles)) throw new HttpError(400, 'roles[] is required');
-    const room = cluster.setRoles(params.id, body.roles, config.workspace.root);
+    const home = roomHome(params.id);
+    const room = home?.store.setRoles(params.id, body.roles, configForRoot(home.root).workspace.root);
     if (!room) throw new HttpError(404, 'Room not found');
     sendJSON(res, room);
   });
@@ -5174,13 +5319,15 @@ router.get('/api/fs/tree', (req, res) => {
           log.warn(`角色技能生成失败（角色仍会创建）: ${(err as Error).message}`);
         }
       }
-    const room = cluster.upsertRole(params.id, role, config.workspace.root);
+    const home = roomHome(params.id);
+    const room = home?.store.upsertRole(params.id, role, configForRoot(home.root).workspace.root);
     if (!room) throw new HttpError(404, 'Room not found');
     sendJSON(res, { room, role }, 201);
   });
 
   router.delete('/api/cluster/rooms/:id/roles/:key', (req, res, params) => {
-    const room = cluster.removeRole(params.id, params.key, config.workspace.root);
+    const home = roomHome(params.id);
+    const room = home?.store.removeRole(params.id, params.key, configForRoot(home.root).workspace.root);
     if (!room) throw new HttpError(404, 'Room not found');
     sendJSON(res, room);
   });
@@ -5214,18 +5361,18 @@ router.get('/api/fs/tree', (req, res) => {
 
   router.put('/api/cluster/rooms/:id/title', async (req, res, params) => {
     const body = await parseBody<{ title?: string }>(req);
-    const room = cluster.rename(params.id, String(body.title ?? ''));
+    const room = roomHome(params.id)?.store.rename(params.id, String(body.title ?? ''));
     if (!room) throw new HttpError(404, 'Room not found');
     sendJSON(res, room);
   });
 
   router.delete('/api/cluster/rooms/:id', (req, res, params) => {
-    cluster.remove(params.id);
+    roomHome(params.id)?.store.remove(params.id);
     sendJSON(res, { ok: true });
   });
 
   router.get('/api/cluster/rooms/:id', (_req, res, params) => {
-    const room = cluster.get(params.id);
+    const room = roomHome(params.id)?.store.get(params.id) ?? null;
     if (!room) throw new HttpError(404, 'Room not found');
     sendJSON(res, room);
   });
@@ -5234,13 +5381,14 @@ router.get('/api/fs/tree', (req, res) => {
     const body = await parseBody<{ content?: string }>(req);
     const content = String(body.content || '').trim();
     if (!content) throw new HttpError(400, 'Missing content');
-    const msg = cluster.append(params.id, { role: 'user', name: '用户', content });
+    const msg = roomHome(params.id)?.store.append(params.id, { role: 'user', name: '用户', content });
     if (!msg) throw new HttpError(404, 'Room not found');
     sendJSON(res, msg, 201);
   });
 
   router.post('/api/cluster/rooms/:id/reload-skills', (_req, res, params) => {
-    const room = cluster.reloadSkills(params.id, config.workspace.root);
+    const home = roomHome(params.id);
+    const room = home?.store.reloadSkills(params.id, configForRoot(home.root).workspace.root);
     if (!room) throw new HttpError(404, 'Room not found');
     sendJSON(res, room);
   });
@@ -5251,23 +5399,32 @@ router.get('/api/fs/tree', (req, res) => {
   });
 
   router.post('/api/cluster/rooms/:id/export-kb', async (req, res, params) => {
-    const room = cluster.get(params.id);
-    if (!room) throw new HttpError(404, 'Room not found');
+    const home = roomHome(params.id);
+    const room = home?.store.get(params.id);
+    if (!home || !room) throw new HttpError(404, 'Room not found');
     const body = await parseBody<{ title?: string }>(req);
     const day = new Date().toISOString().slice(0, 10);
     const rootName = 'imports';
-    let root = store.getAllGroups().find((g) => g.name === rootName && !g.parentGroupId);
-    if (!root) root = engine.createGroup(rootName);
-    let srcGroup = store.getAllGroups().find((g) => g.name === 'cluster' && g.parentGroupId === root!.id);
-    if (!srcGroup) srcGroup = engine.createGroup('cluster', root.id);
-    let dayGroup = store.getAllGroups().find((g) => g.name === day && g.parentGroupId === srcGroup!.id);
-    if (!dayGroup) dayGroup = engine.createGroup(day, srcGroup.id);
+    /*
+     * The minutes belong in the knowledge base of the project the room belongs to, not in whichever
+     * project happens to be mounted: filing another project's discussion into this project's KB
+     * would attach a memory about the wrong codebase, and it would be unreachable from the chat
+     * that had the discussion.
+     */
+    const roomEngine = engineFor(resolveWorkspaceKbPath(home.root).dbPath);
+    const roomStore = (roomEngine as unknown as { store: KBStore }).store;
+    let root = roomStore.getAllGroups().find((g) => g.name === rootName && !g.parentGroupId);
+    if (!root) root = roomEngine.createGroup(rootName);
+    let srcGroup = roomStore.getAllGroups().find((g) => g.name === 'cluster' && g.parentGroupId === root!.id);
+    if (!srcGroup) srcGroup = roomEngine.createGroup('cluster', root.id);
+    let dayGroup = roomStore.getAllGroups().find((g) => g.name === day && g.parentGroupId === srcGroup!.id);
+    if (!dayGroup) dayGroup = roomEngine.createGroup(day, srcGroup.id);
 
     const title = (body.title || room.title || '讨论纪要').slice(0, 80);
     const transcript = room.messages
       .map((m) => `## ${m.name}${m.parallel_group ? ` · 并行 ${m.parallel_group}` : ''}\n\n${m.content}`)
       .join('\n\n');
-    const mem = engine.addMemory(
+    const mem = roomEngine.addMemory(
       dayGroup.id,
       'text',
       `${title} (${room.id})`,
@@ -5292,7 +5449,7 @@ router.get('/api/fs/tree', (req, res) => {
    * unknown room still 404s, so "no such room" and "nothing running" stay distinguishable.
    */
   router.post('/api/cluster/rooms/:id/stop', (_req, res, params) => {
-    if (!cluster.get(params.id)) throw new HttpError(404, 'Room not found');
+    if (!roomHome(params.id)) throw new HttpError(404, 'Room not found');
     sendJSON(res, { stopped: stopClusterRun(params.id) });
   });
 
@@ -5300,6 +5457,16 @@ router.get('/api/fs/tree', (req, res) => {
     const body = await parseBody<{ goal?: string; stream?: boolean }>(req);
     const goal = String(body.goal || '').trim();
     if (!goal) throw new HttpError(400, 'Missing goal');
+
+    /*
+     * Run the room where it lives. A room filed in another project's state directory uses that
+     * project's workspace — its skills, its knowledge base, its files — not the workspace this
+     * request happened to arrive on.
+     */
+    const home = roomHome(params.id);
+    if (!home) throw new HttpError(404, 'Room not found');
+    const roomConfig = configForRoot(home.root);
+    const roomStore = home.store;
 
     const wantStream =
       body.stream === true ||
@@ -5309,8 +5476,8 @@ router.get('/api/fs/tree', (req, res) => {
       startSSE(res);
       try {
         const room = await runClusterWave({
-          config,
-          store: cluster,
+          config: roomConfig,
+          store: roomStore,
           roomId: params.id,
           goal,
           onEvent: (ev) => sendSSEEvent(res, ev),
@@ -5326,8 +5493,8 @@ router.get('/api/fs/tree', (req, res) => {
     }
 
     const room = await runClusterWave({
-      config,
-      store: cluster,
+      config: roomConfig,
+      store: roomStore,
       roomId: params.id,
       goal,
     });
@@ -5477,7 +5644,7 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
       const ids: string[] = [];
       for (const s of sessions.list(true).sessions) ids.push(s.id);
       for (const root of projectRoots()) {
-        if (resolve(root) === resolve(sessions.rootDir)) continue;
+        if (sameDb(root, sessions.rootDir)) continue;
         for (const s of storeFor(root).list(true).sessions) ids.push(s.id);
       }
       const n = tenantLedger().adopt(ids, adoptTo);

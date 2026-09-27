@@ -203,8 +203,29 @@ export interface CreateEdgeInput {
 
 // ─── KBStore class ───
 
+/**
+ * Open a connection with the pragmas this store requires.
+ *
+ * Shared by the constructor and by the reopen path below, because a connection rebuilt after a
+ * close must be configured exactly like the first one — notably `journal_mode = DELETE`, without
+ * which a reopened base would start leaving its rows in a `-wal` sidecar and every copy of the
+ * file ("look at kb.sqlite") would silently read an empty database.
+ */
+function openConnection(dbPath: string): Database.Database {
+  const db = new Database(dbPath);
+  // DELETE, not WAL: the bytes live in kb.sqlite itself. WAL leaves the real
+  // rows in a sidecar, so a copy or a look at the main file sees an empty base.
+  db.pragma('journal_mode = DELETE');
+  db.pragma('synchronous = FULL');
+  db.pragma('foreign_keys = ON');
+  return db;
+}
+
 export class KBStore {
-  private db: Database.Database;
+  private conn: Database.Database;
+  private readonly dbPath: string;
+  /** How many times a connection somebody else closed had to be rebuilt. See `db`. */
+  private reopens = 0;
   /** Lazily built BM25 index; invalidated on any memory mutation. */
   private lexical: LexicalIndex | null = null;
   /**
@@ -229,6 +250,59 @@ export class KBStore {
   /** Memoized prepared statements (prepare() re-parses on every call). */
   private stmtCache = new Map<string, Database.Statement>();
 
+  /**
+   * The live connection, reopened on demand.
+   *
+   * This store is shared and long-lived: an Agent is built with the engine for its session's
+   * directory and holds that reference for the whole session. The store itself, meanwhile, can be
+   * closed by lifecycle events that know nothing about that holder — remounting the knowledge base
+   * when the workspace or the KB path changes, `share`/`merge` closing it before copying the file,
+   * and worktree cleanup releasing the handle so Windows can delete the directory. Each of those
+   * closed a store a live holder still pointed at, and better-sqlite3's answer to using a closed
+   * connection is a bare `The database connection is not open` — on every subsequent call,
+   * permanently, with no recovery short of restarting the process.
+   *
+   * That is not hypothetical: on 2026-09-27 a workspace switch at 16:34 closed the store a
+   * then 14-hour-old session was using, and for the rest of the day `kb_query`, `kb_upsert`,
+   * `kb_edit` and `errorbook_lookup` all failed with that message while the UI, which reads the
+   * freshly mounted store, worked perfectly. It reads like a corrupted database; it was a closed
+   * handle.
+   *
+   * Reopening is safe because the path never changes: a session pinned to a directory must keep
+   * seeing that directory's knowledge base, which is exactly what reopening re-establishes.
+   * (The other half of the fix is not closing a store that is still in use — see the server's
+   * `mountWorkspace` and `disposeWorkspace`.)
+   */
+  private get db(): Database.Database {
+    if (this.conn.open) return this.conn;
+    this.conn = openConnection(this.dbPath);
+    /*
+     * Prepared statements belong to the connection that prepared them and throw once it is gone,
+     * and the caches describe rows read through it — so none of them may outlive a reopen.
+     */
+    this.stmtCache.clear();
+    this.memCache.clear();
+    this.groupCache.clear();
+    this.lexical = null;
+    this.reopens++;
+    return this.conn;
+  }
+
+  /** Whether the connection is currently usable. Read before handing this store to somebody else. */
+  get isOpen(): boolean {
+    return this.conn.open;
+  }
+
+  /**
+   * How many times a closed connection has been rebuilt (0 in a healthy process).
+   *
+   * Exposed so "somebody closed my handle" is observable instead of silently papered over: a
+   * non-zero value means a lifecycle path closed a store that was still in use.
+   */
+  get reopenCount(): number {
+    return this.reopens;
+  }
+
   private cacheMemory(mem: MemoryNode): MemoryNode {
     if (this.memCache.size >= KBStore.MEM_CACHE_MAX) this.memCache.clear();
     this.memCache.set(mem.id, mem);
@@ -244,9 +318,16 @@ export class KBStore {
   }
 
   private stmt(sql: string): Database.Statement {
+    /*
+     * Touch the connection before the cache. The getter reopens a closed connection and clears the
+     * cache when it does; reading the cache first would hand out a Statement belonging to the dead
+     * connection — which throws `The database connection is not open` and, worse, never gives the
+     * reopen a chance to happen at all.
+     */
+    const db = this.db;
     let s = this.stmtCache.get(sql);
     if (!s) {
-      s = this.db.prepare(sql);
+      s = db.prepare(sql);
       this.stmtCache.set(sql, s);
     }
     return s;
@@ -257,12 +338,8 @@ export class KBStore {
   }
 
   constructor(dbPath: string) {
-    this.db = new Database(dbPath);
-    // DELETE, not WAL: the bytes live in kb.sqlite itself. WAL leaves the real
-    // rows in a sidecar, so a copy or a look at the main file sees an empty base.
-    this.db.pragma('journal_mode = DELETE');
-    this.db.pragma('synchronous = FULL');
-    this.db.pragma('foreign_keys = ON');
+    this.dbPath = dbPath;
+    this.conn = openConnection(dbPath);
     this.migrate();
   }
 
@@ -821,7 +898,15 @@ export class KBStore {
     return this.db.transaction(fn)();
   }
 
+  /**
+   * Release the connection.
+   *
+   * A later use reopens it (see `db`), so this means "let go of the file for now" rather than
+   * "never use this store again" — which is exactly what callers need: Windows refuses to delete
+   * or copy a directory that holds a live sqlite handle, and the handle has to come back the
+   * moment its session needs it again.
+   */
   close(): void {
-    this.db.close();
+    this.conn.close();
   }
 }
