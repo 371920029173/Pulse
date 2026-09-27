@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
+import { killTree } from './lib/kill-tree.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -174,7 +175,7 @@ try {
   check('验证过程未抛异常', false, err.stack ?? err.message);
 } finally {
   if (child) {
-    try { child.kill(); } catch { /* already gone */ }
+    killTree(child.pid);
     await sleep(1500);
   }
   // Leave the temp tree when something failed, so it can be inspected.

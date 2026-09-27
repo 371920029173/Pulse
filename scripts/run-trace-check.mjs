@@ -34,6 +34,7 @@ import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
+import { killTree } from './lib/kill-tree.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -337,7 +338,7 @@ const post = (path, body) => api(path, {
 });
 
 function cleanup() {
-  try { child.kill(); } catch { /* already gone */ }
+  killTree(child.pid);
   removeTempDir(workspace);
 }
 

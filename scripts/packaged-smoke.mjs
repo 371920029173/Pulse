@@ -6,6 +6,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
+import { killTree } from './lib/kill-tree.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -149,7 +150,7 @@ try {
     }
   }
 } finally {
-  try { child.kill(); } catch { /* gone */ }
+  killTree(child.pid);
   await sleep(700);
   rmSync(ws, { recursive: true, force: true });
 }

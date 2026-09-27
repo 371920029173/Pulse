@@ -20,6 +20,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
+import { killTree } from './lib/kill-tree.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -146,7 +147,7 @@ async function boot() {
 
 async function shutdown() {
   if (!child) return;
-  child.kill();
+  killTree(child.pid);
   child = null;
   for (let i = 0; i < 40; i++) {
     try {

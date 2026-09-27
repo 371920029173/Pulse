@@ -25,6 +25,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
+import { killTree } from './lib/kill-tree.mjs';
 import { pickSafePort } from './safe-port.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -141,7 +142,7 @@ async function boot() {
 
 async function shutdown() {
   if (child) {
-    child.kill();
+    killTree(child.pid);
     child = null;
     await sleep(600);
   }

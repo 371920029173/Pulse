@@ -31,6 +31,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
+import { killTree } from './lib/kill-tree.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -210,7 +211,7 @@ async function shutdown() {
   if (child) {
     const pid = child.pid;
     child = null;
-    try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+    killTree(pid);
     await waitFor(async () => (await api('/api/health', { timeoutMs: 800 })).status === 0,
       { what: '服务停止', timeoutMs: 15_000, stepMs: 200 }).catch(() => undefined);
   }

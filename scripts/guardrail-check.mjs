@@ -30,6 +30,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
+import { killTree } from './lib/kill-tree.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -469,7 +470,7 @@ if (!(await waitForHealth())) {
   check('【关键】运行轨迹里没有连接串密码', !traceText.includes('hunter2secret'), traceText.slice(0, 300));
   check('轨迹里看得见护栏这一行（不是只有值被删掉了）', /出口合规护栏|不该外发/.test(traceText), traceText.slice(0, 400));
 
-  try { child.kill(); } catch { /* already gone */ }
+  killTree(child.pid);
 }
 try { stubLlm.close(); } catch { /* already gone */ }
 

@@ -29,6 +29,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
+import { killTree } from './lib/kill-tree.mjs';
 import { pickSafePort } from './safe-port.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -165,7 +166,7 @@ async function killServer() {
   if (!child) return;
   const pid = child.pid;
   child = null;
-  try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  killTree(pid);
   // Wait for the port to free rather than guessing at a sleep.
   for (let i = 0; i < 60; i++) {
     if ((await raw('/api/health')).status === 0) return;

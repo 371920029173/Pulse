@@ -29,6 +29,7 @@ import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
+import { killTree } from './lib/kill-tree.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -359,7 +360,7 @@ await api('/api/config/recovery').then((r) => r.json()).then((r) => {
     r.degraded === false && r.recovery === null && r.snapshot?.exists === true, JSON.stringify(r).slice(0, 300));
 }).catch((e) => check('GET /api/config/recovery 结构正确（正常态）', false, String(e)));
 
-try { child.kill(); } catch { /* already gone */ }
+killTree(child.pid);
 await new Promise((r) => setTimeout(r, 600));
 
 // Break it, and restart: this is the moment the whole feature exists for.
@@ -396,7 +397,7 @@ check('审计里写明从哪到哪', /回退到/.test(String(rollbackRecords[0]?
 const after = await (await api('/api/health')).json();
 check('回退不会假装立刻换了配置（重启才生效）', after?.config?.degraded === true, JSON.stringify(after?.config));
 
-try { child.kill(); } catch { /* already gone */ }
+killTree(child.pid);
 for (const d of dirs) removeTempDir(d);
 
 console.log('');

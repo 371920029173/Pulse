@@ -30,6 +30,7 @@ import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
+import { killTree } from './lib/kill-tree.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -341,7 +342,7 @@ let sessionA = null;
   check('审计能按 kind=auth 查（新 kind 接进了校验白名单）', status.status === 200, `status=${status.status}`);
 }
 
-child.kill();
+killTree(child.pid);
 await new Promise((r) => setTimeout(r, 600));
 for (const d of dirs) removeTempDir(d);
 

@@ -23,12 +23,39 @@ import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { removeTempDir } from './lib/temp.mjs';
+import { killTree } from './lib/kill-tree.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
 const SERVER_DIR = join(ROOT, 'packages', 'server');
 const SERVER_ENTRY = join(SERVER_DIR, 'dist', 'index.js');
 const PORT = process.env.SHE_TEST_PORT || '5598';
+/*
+ * The install's own `.env` must not be part of a test run.
+ *
+ * `updateEnvFile` writes `SHE_WORKSPACE` on every workspace switch, and the server resolves the
+ * settings file from the install root — not from the throwaway workspace it was handed. Without the
+ * override below, a section that switches workspaces rewrites the REAL `.env` to point at a temp
+ * directory. That is not theoretical: on 2026-09-27 a run of this suite left
+ * `SHE_WORKSPACE=C:\...\Temp\she-safety-cacheA-…` in the install's `.env`, the desktop window then
+ * restarted the backend (it had gone away) and it came up mounted on that temp directory, from which
+ * it wrote the temp project into the user's app-level project index — the sidebar then listed a
+ * phantom project whose chats answered 404.
+ *
+ * Every other boot-based suite here already passes `SHE_ENV_FILE`; this one was the exception.
+ */
+const ENV_FILE = join(ROOT, '.env');
+/** Snapshot taken before the first boot; compared against at the end (see the guard below). */
+const envBefore = existsSync(ENV_FILE) ? readFileSync(ENV_FILE) : null;
+function isolatedEnv(workspace) {
+  return {
+    ...process.env,
+    SHE_ENV_FILE: join(workspace, '.env'),
+    SHE_WORKSPACE: workspace,
+    SHE_PORT: PORT,
+    SHE_APP_DIR: join(workspace, 'appdir'),
+  };
+}
 /** Port for the stub model in section 9 — the server is pointed at it instead of a real provider. */
 const LLM_PORT = Number(PORT) + 1;
 
@@ -87,13 +114,9 @@ async function bootOnce(workspace, probe) {
   const child = spawn('node', [SERVER_ENTRY], {
     cwd: SERVER_DIR,
     // Pinned in the child environment, not only in the workspace: ambient variables win over the
-    // `.env`, so an exported SHE_PORT would make this probe the developer's own server.
-    env: {
-      ...process.env,
-      SHE_WORKSPACE: workspace,
-      SHE_PORT: PORT,
-      SHE_APP_DIR: join(workspace, 'appdir'),
-    },
+    // `.env`, so an exported SHE_PORT would make this probe the developer's own server. SHE_ENV_FILE
+    // keeps the install's `.env` out of it entirely — see the note next to `PORT`.
+    env: isolatedEnv(workspace),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -128,7 +151,7 @@ async function bootOnce(workspace, probe) {
 
   // Recovery runs during boot; give it a moment to finish writing.
   await new Promise((r) => setTimeout(r, 2000));
-  child.kill();
+  killTree(child.pid);
   await new Promise((r) => setTimeout(r, 800));
   return { healthy, out, sessionsProbe };
 }
@@ -366,10 +389,7 @@ console.log('\n数据安全回归（会启动真实服务，用临时工作区�
   const child = spawn('node', [SERVER_ENTRY], {
     cwd: SERVER_DIR,
     env: {
-      ...process.env,
-      SHE_WORKSPACE: ws,
-      SHE_PORT: PORT,
-      SHE_APP_DIR: join(ws, 'appdir'),
+      ...isolatedEnv(ws),
       SHE_LLM_PROVIDER: 'openai',
       OPENAI_BASE_URL: `http://127.0.0.1:${LLM_PORT}/v1`,
       OPENAI_MODEL: 'stub',
@@ -407,7 +427,7 @@ console.log('\n数据安全回归（会启动真实服务，用临时工作区�
     }
   }
   await new Promise((r) => setTimeout(r, 1200));
-  try { child.kill(); } catch { /* already gone */ }
+  killTree(child.pid);
   try { stub.close(); } catch { /* already gone */ }
   await new Promise((r) => setTimeout(r, 800));
 
@@ -626,7 +646,129 @@ if (process.platform === 'win32') {
   }
 }
 
+// ── 12. 群是在哪个项目里建的，切走之后就要还在（这一次：轨道先被轮询过） ──
+{
+  /*
+   * 第 10 段测不出「真实的坏法」，因为它只在最后才读一次轨道 —— 而真实的界面是**不停**在轮询的。
+   *
+   * 轮询会在你还没打开那个项目时就给它的存储建一个缓存实例（读到的是当时的空文件）。之后你一
+   * 旦切到那个项目、在那里建了群，写是通过「挂载中」的那个实例落盘的，而读却从缓存里那个旧实
+   * 例拿 —— 同一个 rooms.json 上两个实例，轨道就成了空的。2026-09-27 真机上就是这样：群里明明
+   * 有一条记录躺在 D:\AGI\_she-live-test\.she\cluster\rooms.json 里，轨道一条群都不显示，点进
+   * 去还是 404。
+   *
+   * 这一段的顺序是照抄那次的：先轮询轨道（把 B 的存储缓存起来）→ 切到 B → 在 B 建群 →
+   * 切回 A → 轨道必须还列着那个群。
+   */
+  const wsA = makeWorkspace('cacheA', EMPTY_SESSIONS('A 的会话'));
+  /* A distinct id: two stores both holding `s1` would be deduped by the rail, which hides which
+   * project a listed chat came from. */
+  const bSessions = EMPTY_SESSIONS('B 的会话');
+  bSessions.sessions[0].id = 'sess_b';
+  bSessions.active_id = 'sess_b';
+  const wsB = makeWorkspace('cacheB', bSessions);
+  /*
+   * B must already be a KNOWN project before the first rail read — that is the precondition the
+   * earlier attempt at this test missed, and it is exactly the live situation (the user had visited
+   * those directories hours before, so the app-level index listed them). Without this, the poll
+   * below never touches B's store, no stale copy is ever made, and the test passes on the broken
+   * code — which is what happened.
+   */
+  mkdirSync(join(wsA, 'appdir'), { recursive: true });
+  writeFileSync(
+    join(wsA, 'appdir', 'projects.json'),
+    JSON.stringify({ roots: [wsA, wsB] }, null, 2),
+    'utf8',
+  );
+
+  let detail = '';
+  let listed = false;
+  let opens = false;
+  let messageLands = false;
+
+  const { healthy } = await bootOnce(wsA, async (base) => {
+    const call = async (method, path, body) => {
+      const r = await fetch(base + path, {
+        method,
+        headers: body ? { 'content-type': 'application/json' } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(15_000),
+      });
+      let parsed = null;
+      try { parsed = await r.json(); } catch { /* not json */ }
+      return { status: r.status, body: parsed };
+    };
+
+    /*
+     * 界面式的轮询：此时 B 还没被打开，但它是「已知项目」，所以这一读就给 B 的存储建了一个缓存实例
+     * （读到的是当时的空文件）。这一行是下面那条断言的前提，不是装饰 —— 少了它，坏代码也能过。
+     */
+    const poll = await call('GET', '/api/conversations');
+    const bVisible = (poll.body?.items ?? []).some((i) => resolve(i.directory ?? '') === resolve(wsB));
+    if (!bVisible) detail = '前置条件没满足：第一次轮询时 B 还不是已知项目（那测的就不是缓存问题）';
+
+    await call('POST', '/api/workspaces/switch', { root: wsB });
+    const made = await call('POST', '/api/cluster/rooms', { title: '在 B 里建的群' });
+    const roomId = made.body?.id;
+    await call('POST', '/api/workspaces/switch', { root: wsA });
+
+    const rail = await call('GET', '/api/conversations');
+    const items = Array.isArray(rail.body?.items) ? rail.body.items : [];
+    listed = Boolean(roomId) && items.some((i) => i.kind === 'cluster' && i.id === roomId);
+    if (!listed) {
+      detail = `轨道上只有 ${items.map((i) => `${i.kind}:${i.id}`).join(' ') || '(空)'}`;
+    }
+
+    const opened = await call('GET', `/api/cluster/rooms/${roomId}`);
+    opens = opened.status === 200 && opened.body?.title === '在 B 里建的群';
+    if (opens === false && !detail) detail = `GET /api/cluster/rooms/<id> → ${opened.status}`;
+
+    const sent = await call('POST', `/api/cluster/rooms/${roomId}/message`, { content: '落在 B 里的一句话' });
+    const reread = await call('GET', `/api/cluster/rooms/${roomId}`);
+    messageLands = sent.status < 400 && (reread.body?.messages?.length ?? 0) > 0;
+    if (!messageLands && !detail) detail = `给群发消息 status=${sent.status}`;
+
+    const onDisk = JSON.parse(readFileSync(join(wsB, '.she', 'cluster', 'rooms.json'), 'utf8'));
+    if (listed && !(onDisk.rooms || []).some((r) => r.id === roomId)) {
+      listed = false;
+      detail = '轨道显示有，但 B 的 rooms.json 里没有 —— 读的不是同一个文件';
+    }
+  });
+
+  record(
+    '【关键】轨道被轮询过之后，在别的项目里建的群切走仍留在轨道里（曾整条消失、点开 404）',
+    healthy && listed && opens,
+    listed && opens ? '群在轨道里，也打得开' : detail,
+  );
+  record(
+    '在那个项目里给群发的消息，真的落在那个项目的 rooms.json 里',
+    healthy && messageLands,
+    messageLands ? '' : detail || '消息没落到群里',
+  );
+  removeTempDir(wsA);
+  removeTempDir(wsB);
+}
+
 const failed = results.filter((r) => !r.pass);
+
+/*
+ * The install's `.env` is compared against a snapshot taken before the first server boot.
+ *
+ * A test that quietly edits the user's settings is worse than no test: it made this suite pass while
+ * leaving the app pointed at a temp workspace, and nothing in the output said so. Hash rather than
+ * mtime, because a rewrite that keeps the same content is harmless.
+ */
+{
+  const after = existsSync(ENV_FILE) ? readFileSync(ENV_FILE) : null;
+  const same = (envBefore === null && after === null)
+    || (envBefore !== null && after !== null && envBefore.equals(after));
+  record(
+    '整套检查没有改动安装目录的 .env（否则测试会把用户的工作区改到临时目录）',
+    same,
+    same ? '' : `${ENV_FILE} 被改动了`,
+  );
+}
+
 console.log(`\n${results.length - failed.length} 通过 / ${failed.length} 失败`);
 if (failed.length) {
   console.log('\n失败项:');

@@ -29,6 +29,7 @@ import { spawn } from 'node:child_process';
 import http from 'node:http';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
+import { killTree } from './lib/kill-tree.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -128,7 +129,7 @@ async function boot(bindHost, allowedHosts) {
 
 async function shutdown() {
   if (!child) return;
-  child.kill();
+  killTree(child.pid);
   child = null;
   for (let i = 0; i < 40 && !(await portFree()); i++) {
     await new Promise((r) => setTimeout(r, 250));
