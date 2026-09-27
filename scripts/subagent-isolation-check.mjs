@@ -688,8 +688,15 @@ const leftoverKbCopies = (wsRoot) => {
   return readdirSync(dir).filter((n) => n.endsWith('.sqlite'));
 };
 
-/** The notes digest a child's harvest is written to, when it wrote anything. */
-const digestPath = (wsRoot, childId) => join(wsRoot, '.she', 'subagent-notes', `${childId}.md`);
+/**
+ * The notes digest a child's harvest is written to, when it wrote anything.
+ *
+ * 2026-09-27 起它写在**父会话**自己的目录里（`.she/sessions/<父会话>/notes/<子会话>.md`），不再是
+ * 工作区级共享的 `.she/subagent-notes/`：那份摘要的归属是父级，而共享目录意味着任何会话按文件名
+ * 就能读到别人的子任务笔记。父级是通过 `task_spawn` 的返回值被显式交到这个路径的。
+ */
+const digestPath = (wsRoot, parentId, childId) =>
+  join(wsRoot, '.she', 'sessions', parentId, 'notes', `${childId}.md`);
 
 const CHILD_NOTE_TITLE = '子级查到的产物约定';
 const CHILD_NOTE_MARKER = 'MARKER-CHILD-NOTE';
@@ -874,9 +881,15 @@ if (!live3.ok) {
     kbCount(parentKb) === 1, `父级库现有 ${kbCount(parentKb)} 条`);
 
   if (child3) {
-    const digest3 = digestPath(ws3, child3.id);
+    const digest3 = digestPath(ws3, parentId3, child3.id);
     check('【关键】全文另存了一份，父级能读到完整的笔记（不只是开头一段）',
       existsSync(digest3) && readFileSync(digest3, 'utf8').includes(CHILD_NOTE_MARKER), digest3);
+    /*
+     * 【关键】而且它**只**在父会话的目录里：工作区级那个共享目录不该再有这份摘要。
+     * 这条钉的是"别的会话读不到"这件事本身 —— 如果哪天路径又拼回共享目录，门禁会响。
+     */
+    check('【关键】摘要不在工作区级共享目录下（别的会话按文件名也读不到）',
+      !existsSync(join(ws3, '.she', 'subagent-notes', `${child3.id}.md`)), join(ws3, '.she', 'subagent-notes'));
   }
   check('【关键】子级结束后副本被删掉（不留一个没人管的库在磁盘上）',
     leftoverKbCopies(ws3).length === 0, JSON.stringify(leftoverKbCopies(ws3)));

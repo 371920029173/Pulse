@@ -164,7 +164,11 @@ console.log('\n=== 记录落盘 ===');
   const store = new PreflightStore(dir, 'sess-check');
   const rec = buildRecord(analyzeRequest('做个东西', ctx()), { stated_intent: 's', actual_goal: '目标甲' });
   const file = store.save(rec);
-  check('写到 .she/preflight/ 下', existsSync(file) && file.includes(join('.she', 'preflight')),
+  /*
+   * 按会话落盘（2026-09-27 起）：记录里有用户的请求原文，共享目录等于任何会话都能读到别人问过什么。
+   */
+  check('写到本会话目录 .she/sessions/<id>/preflight/ 下',
+    existsSync(file) && file.includes(join('.she', 'sessions', 'sess-check', 'preflight')),
     file);
 
   const back = store.latest();
@@ -186,10 +190,10 @@ console.log('\n=== 记录落盘 ===');
   check('同毫秒内连续保存时，最新的仍排最前', store.latest()?.actual_goal === '目标乙',
     `latest=${store.latest()?.actual_goal}`);
 
-  writeFileSync(join(dir, '.she', 'preflight', 'zz-broken.json'), '{ not json', 'utf8');
+  writeFileSync(join(dir, '.she', 'sessions', 'sess-check', 'preflight', 'zz-broken.json'), '{ not json', 'utf8');
   check('坏文件被跳过，不连累好记录', store.list().length === 2, `实际 ${store.list().length} 条`);
 
-  const tmps = readdirSync(join(dir, '.she', 'preflight')).filter((f) => f.endsWith('.tmp'));
+  const tmps = readdirSync(join(dir, '.she', 'sessions', 'sess-check', 'preflight')).filter((f) => f.endsWith('.tmp'));
   check('没有残留临时文件', tmps.length === 0, tmps.join(', '));
 }
 
@@ -215,7 +219,7 @@ console.log('\n=== 工具行为 ===');
   check('输出把 ask_user 限定在两种情形，而不是无条件要求',
     /只有属于「只有用户知道的信息」或「不可逆/.test(out), out.slice(-300));
 
-  const nothing = createPreflightTools(dir, { getRequest: () => '', listTools: () => [] });
+  const nothing = createPreflightTools(dir, { sessionId: 'sess-tool', getRequest: () => '', listTools: () => [] });
   check('没有用户请求时明确拒绝分析',
     /没有可分析的用户请求/.test(await nothing.execute('preflight_record', { stated_intent: 's', actual_goal: 'g' })));
 
@@ -236,7 +240,13 @@ console.log('\n=== 接入真实 Agent ===');
   const sandboxTools = createTools(shell, dir, { allowAllCommands: true });
   const names = (a) => (a.allToolDefs ?? []).map((d) => d.name);
 
-  const parent = new Agent(cfg, engine, sandboxTools, null, {
+  /*
+   * A session id: since 2026-09-27 `preflight_*` writes into the conversation's own directory
+   * (`.she/sessions/<id>/preflight/`), so an agent without a session does not register it. The
+   * product's agents always have a session — only read-only status routes build session-less ones,
+   * and those never take a turn.
+   */
+  const parent = new Agent(cfg, engine, sandboxTools, 'sess-preflight', {
     subagentRunner: { run: async () => ({ description: 'x', ok: true, result: 'ok' }) },
   });
   check('父智能体注册了 preflight_record', names(parent).includes('preflight_record'),
@@ -251,10 +261,12 @@ console.log('\n=== 接入真实 Agent ===');
   const executor = parent.executors?.get('preflight_record');
   check('工具在父智能体的执行表里', typeof executor === 'function');
   if (typeof executor === 'function') {
-    const before = new PreflightStore(dir).list().length;
+    // 记录按会话存：这里读的就是父级那个会话的目录（`sess-preflight`），不是工作区共享目录。
+    const storeOf = () => new PreflightStore(dir, 'sess-preflight');
+    const before = storeOf().list().length;
     const refused = await executor({ stated_intent: 's', actual_goal: 'g' });
     check('未收到用户消息时拒绝分析', /没有可分析的用户请求/.test(String(refused)), String(refused).slice(0, 120));
-    check('拒绝时不写记录', new PreflightStore(dir).list().length === before);
+    check('拒绝时不写记录', storeOf().list().length === before);
 
     // Simulate the turn: this is the exact field `chat()` sets.
     parent.lastUserRequest = '整理 @file:src/real.ts 并删掉旧日志';
@@ -263,7 +275,7 @@ console.log('\n=== 接入真实 Agent ===');
     check('分析里用上了工作区里的真实文件与风险字眼',
       /real\.ts/.test(String(accepted)) && /删除\/清空/.test(String(accepted)),
       String(accepted).slice(0, 400));
-    check('记录落盘到该工作区', new PreflightStore(dir).list().length === before + 1);
+    check('记录落盘到该会话的目录', storeOf().list().length === before + 1);
   }
 
   const prompt = getSystemPrompt(dir);

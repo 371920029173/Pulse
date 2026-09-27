@@ -47,15 +47,26 @@ const record = (name, pass, detail) => {
 };
 
 // ── parent ──────────────────────────────────────────────────────────────────
+/*
+ * A session id, because a real parent always has one.
+ *
+ * 2026-09-27 起 `plan_*` / `preflight_*` / `memo_*` 是**会话级**工具（它们的文件按会话存），所以没有会话
+ * 的 agent 不再注册它们。这个检查原本用 `null` 造父级，于是"父级有这些工具"的前提没了 —— 那不是产品
+ * 形态：服务端的每个 agent 都绑着一个会话，只有只读状态路由会造无会话的 agent，而那种 agent 从不跑回合。
+ */
+const parentSession = 'sess-subagent-check';
 const parentRunner = { run: async () => ({ description: 'x', ok: true, result: 'ok' }) };
-const parent = new Agent(cfg, engine, tools, null, { subagentRunner: parentRunner });
+const parent = new Agent(cfg, engine, tools, parentSession, { subagentRunner: parentRunner });
 const parentTools = toolNames(parent);
 
 record('父智能体有 task_spawn', parentTools.includes('task_spawn'), `${parentTools.length} 个工具`);
 record('父智能体有 ask_user', parentTools.includes('ask_user'), '');
+record('父级有会话级工具（计划/预检/备忘）', 
+  parentTools.some((n) => n.startsWith('plan_')) && parentTools.includes('preflight_record') && parentTools.some((n) => n.startsWith('memo_')),
+  `${parentTools.length} 个工具`);
 
 // ── child ───────────────────────────────────────────────────────────────────
-const child = new Agent(cfg, engine, tools, null, { isSubagent: true });
+const child = new Agent(cfg, engine, tools, 'sess-subagent-check-child', { isSubagent: true });
 const childTools = toolNames(child);
 
 record('子智能体没有 task_spawn（无法递归）', !childTools.includes('task_spawn'), `${childTools.length} 个工具`);

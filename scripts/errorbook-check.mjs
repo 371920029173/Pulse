@@ -385,6 +385,7 @@ console.log('\n=== 预检带上已知错误 ===');
    * be, whereas a missing file is a reason to go and create one.
    */
   const preflight = createPreflightTools(dir, {
+    sessionId: 'sess-errorbook',
     getRequest: () => '帮我修 @file:src/not-there.ts，之前老是 EADDRINUSE',
     listTools: () => ['shell', 'fs_read'],
     knownErrors: (q) => book.lookup({ query: q, limit: 3 }).map(formatErrorEntry),

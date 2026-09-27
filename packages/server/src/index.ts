@@ -13,7 +13,7 @@ import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLin
 import { SandboxShell, createTools, ConfirmTicketStore } from '@she/sandbox';
 import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, subagentWrapUpScheduleMs, composeWrapUpNudge, selectHarvestNotes } from '@she/agent-runtime';
 import type { SubagentRunner, SubagentResult, SubagentKbHarvest } from '@she/agent-runtime';
-import { PlanStore, MemoStore, nextStepOf } from '@she/agent-runtime';
+import { PlanStore, MemoStore, nextStepOf, encodeSessionId } from '@she/agent-runtime';
 import { RunTraceStore, ConfidenceMirror, REFLECTION_DIR } from '@she/agent-runtime';
 import { retireKnownFalsePositives } from '@she/agent-runtime';
 import { classifyLlmFailure, failureLabel } from '@she/agent-runtime';
@@ -1157,7 +1157,7 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
       const notesFor = (): SubagentKbHarvest | undefined => {
         const harvest = takeKbNotes();
         if (!harvest?.notes.length) return harvest;
-        const digestPath = writeHarvestDigest(parentCfg.workspace.root, childSession.id, harvest);
+        const digestPath = writeHarvestDigest(parentCfg.workspace.root, parentSessionId, childSession.id, harvest);
         return digestPath ? { ...harvest, digestPath } : harvest;
       };
 
@@ -1256,7 +1256,7 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
           description: req.description,
           ok: true,
           result: `已在后台继续。打开会话「${childSession.title}」（${childSession.id}）可以看它的过程。`
-            + `\n它结束时写下的知识库笔记会汇总到 ${join('.she', 'subagent-notes', `${childSession.id}.md`)}`
+            + `\n它结束时写下的知识库笔记会汇总到 ${harvestDigestRelPath(parentSessionId, childSession.id)}`
             + '（子任务的知识库副本随后会被删除，所以需要的结论用 `fs_read` 从那份摘要里取）。'
             + (worktree
               ? `\n它跑在隔离副本里（${worktree.path}）。副本会在它结束后自动回收：记录搬到 `
@@ -1348,14 +1348,28 @@ function subagentKbPath(sessionId: string): string | null {
  * promising a file that is not there — a dangling pointer is worse than an admitted gap, because
  * the parent would have nothing to act on in either case and no way to tell that it was misled.
  */
-function writeHarvestDigest(root: string, sessionId: string, harvest: SubagentKbHarvest): string | undefined {
+/**
+ * 子任务笔记摘要的落点（工作区相对路径）。
+ *
+ * 抽出来是因为**两处**需要它：写入方（`writeHarvestDigest`）和提前报给父级的那条交接消息（后台子任务
+ * 结束时父级拿到的路径）。两处各自拼一次就是经典的"两份缓存键"问题 —— 其中一处改了、另一处没改，
+ * 父级会拿到一个指向空气的路径，而它没法分辨"笔记没写"和"路径错了"。
+ */
+function harvestDigestRelPath(parentSessionId: string, childSessionId: string): string {
+  return join(
+    '.she', 'sessions', encodeSessionId(parentSessionId),
+    'notes', `${encodeSessionId(childSessionId)}.md`,
+  );
+}
+
+function writeHarvestDigest(root: string, parentSessionId: string, childSessionId: string, harvest: SubagentKbHarvest): string | undefined {
   if (!harvest.notes.length) return undefined;
   try {
-    const dir = join(root, '.she', 'subagent-notes');
-    mkdirSync(dir, { recursive: true });
-    const file = join(dir, `${sessionId}.md`);
+    const rel = harvestDigestRelPath(parentSessionId, childSessionId);
+    const file = join(root, rel);
+    mkdirSync(dirname(file), { recursive: true });
     const body = [
-      `# 子任务笔记（子会话 ${sessionId}）`,
+      `# 子任务笔记（子会话 ${childSessionId}）`,
       '',
       '子任务在自己的知识库副本里写下的内容。副本已经删除，这里是这些笔记唯一的一份。',
       '值得留的用 `kb_upsert` 搬进主库（组名按内容自定），其余不用管。',

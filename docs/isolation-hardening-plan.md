@@ -57,7 +57,7 @@
 - **1.4** 清理现存残留：`D:\AGI\_she-live-test` 的注册 worktree（目录已不存在）、分支 `she/*`、索引里的 worktree 路径、归档 `sessions.json.before-corrupt`。
   风险：那是"验证 worktree 隔离"那轮的现场 → 先归档再删。
 
-### 层 2：会话层（最大的一块，分 3 步）
+### 层 2：会话层（最大的一块，分几批推）
 
 - **2.1 布局与旧数据**（迁移已按用户决定取消）
   目标布局：`.she/sessions/<sessionId>/{memo.json, plans.json, confidence.json, notes/, runs/, preflight.json}`

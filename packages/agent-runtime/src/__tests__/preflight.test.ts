@@ -218,7 +218,7 @@ describe('PreflightStore', () => {
   });
 
   it('keeps every record rather than the last one', () => {
-    const store = new PreflightStore(dir);
+    const store = new PreflightStore(dir, 'sess-1');
     for (const g of ['一', '二', '三']) {
       store.save(buildRecord(analyzeRequest('x', ctx()), { stated_intent: 's', actual_goal: g }));
     }
@@ -228,54 +228,62 @@ describe('PreflightStore', () => {
 
   it('skips an unreadable file instead of hiding the good ones', () => {
     // A half-written or hand-edited record must not take the whole directory down with it.
-    const store = new PreflightStore(dir);
+    const store = new PreflightStore(dir, 'sess-1');
     store.save(buildRecord(analyzeRequest('x', ctx()), { stated_intent: 's', actual_goal: '好记录' }));
-    writeFileSync(join(dir, '.she', 'preflight', 'zz-broken.json'), '{ not json', 'utf8');
+    writeFileSync(join(dir, '.she', 'sessions', 'sess-1', 'preflight', 'zz-broken.json'), '{ not json', 'utf8');
     const all = store.list();
     assert.equal(all.length, 1);
     assert.equal(all[0].actual_goal, '好记录');
   });
 
   it('writes no temp files behind', () => {
-    const store = new PreflightStore(dir);
+    const store = new PreflightStore(dir, 'sess-1');
     store.save(buildRecord(analyzeRequest('x', ctx()), { stated_intent: 's', actual_goal: 'g' }));
-    const files = readdirSync(join(dir, '.she', 'preflight'));
+    const files = readdirSync(join(dir, '.she', 'sessions', 'sess-1', 'preflight'));
     assert.equal(files.filter((f) => f.endsWith('.tmp')).length, 0, `残留临时文件: ${files.join(', ')}`);
   });
 
   /*
    * A record is a yardstick for ONE request, and the drift check weighs the actions of the turn
-   * that is running against it. `latest()` answers "newest in this workspace", which is a
-   * different question, and answering it produced a measured false accusation: a delegated child
-   * compared five file reads against the PARENT's goal ("得到一份基于实机证据的 SHE 功能评估"),
-   * reported drift as fact, and filed the lesson in the parent's error book. A new conversation in
-   * a busy workspace inherits the same way — it starts under the previous chat's goal.
+   * that is running against it. 这一段原来是在钉"同一个共享目录里怎么挑出自己那条"：
+   *
+   *   记录的目标曾被**子代理**读到，而记录属于父级 —— 于是子代理的自评拿一个它从未收到过的目标当
+   *   尺子：五次读共享文件、对"得到一份基于实机证据的 SHE 功能评估"一个字都没沾，却把"跑偏"当事实
+   *   报了上来，还把这条教训写回了父级的错题本。忙碌工作区里新开的会话同样会继承上一个聊天的目标。
+   *
+   * 2026-09-27 起目录按会话分开，所以"挑出自己那条"这个动作没有了 —— 别的会话的记录不在这个目录里。
+   * 下面钉的从"比较出来"变成"路径上不存在"。
    */
   const goalOf = (g: string) => buildRecord(analyzeRequest('x', ctx()), { stated_intent: 's', actual_goal: g });
 
-  it('latestForSession returns this conversation\'s own record, not the newest in the workspace', () => {
+  it('【关键】父级和子级各读自己那一份，两个目录不打照面', () => {
     const parent = new PreflightStore(dir, 'sess-parent');
     parent.save(goalOf('父级的目标'));
     const child = new PreflightStore(dir, 'sess-child');
     child.save(goalOf('子级的目标'));
 
-    assert.equal(child.latestForSession()?.actual_goal, '子级的目标');
-    assert.equal(parent.latestForSession()?.actual_goal, '父级的目标');
+    assert.equal(child.latest()?.actual_goal, '子级的目标');
+    assert.equal(parent.latest()?.actual_goal, '父级的目标');
+    // 两份记录在两个目录里，各自只有一条。
+    assert.equal(parent.list().length, 1);
+    assert.equal(child.list().length, 1);
+    assert.notEqual(parent.sessionId, child.sessionId);
   });
 
-  it('a conversation that never analysed anything gets no goal, not someone else\'s', () => {
+  it('【关键】从没分析过的会话拿到"没有目标"，而不是别人的目标', () => {
     new PreflightStore(dir, 'sess-parent').save(goalOf('父级的目标'));
-    assert.equal(new PreflightStore(dir, 'sess-fresh').latestForSession(), undefined);
-    // Nothing found must mean "no yardstick", and the drift check reports nothing without one.
-    // Guessing the newest record would make every fresh conversation inherit a stranger's goal.
+    const fresh = new PreflightStore(dir, 'sess-fresh');
+    assert.equal(fresh.latest(), undefined);
+    assert.deepEqual(fresh.list(), []);
+    // 没有目标 = 没有尺子，漂移检查就不报东西。猜一个"最新记录"会让每个新会话继承陌生人的目标。
   });
 
-  it('a store with no session id reads a record that also has none', () => {
-    // A one-shot run writes and reads its own analysis inside one turn, and has no session id
-    // to match on — that pair has to keep working, or the check silently stops running there.
-    new PreflightStore(dir, null).save(goalOf('无会话记录'));
-    assert.equal(new PreflightStore(dir, null).latestForSession()?.actual_goal, '无会话记录');
-    assert.equal(new PreflightStore(dir, 'sess-other').latestForSession(), undefined);
+  it('【关键】没有会话就没有预检记录 —— 构造 store 直接抛错', () => {
+    // 旧行为有一条测试专门断言"没有会话 id 的 store 去读没有会话 id 的记录"（一次性运行在同一回合
+    // 里写了自己的分析再读回来）。现在 `sessionId` 是必需参数，那条路没有了：记录存的是**用户的请求
+    // 原文**，所以它必须属于某个会话；"不属于任何会话的记录"本身就不该存在。
+    assert.throws(() => new PreflightStore(dir, null as never), /不合法/);
+    assert.throws(() => new PreflightStore(dir, ''), /不合法/);
   });
 });
 
@@ -299,7 +307,7 @@ describe('preflight tool', () => {
     assert.match(out, /pre-flight/i, out);
     assert.match(out, /gone\.ts/, '输出里要点出那个不存在的文件');
     assert.match(out, /ask_user/, '要明确要求先问再动');
-    assert.ok(existsSync(join(dir, '.she', 'preflight')), '记录应落盘');
+    assert.ok(existsSync(join(dir, '.she', 'sessions', 'sess-1', 'preflight')), '记录应落盘到本会话目录');
   });
 
   it('says there is nothing to analyse when no user request is on the turn', async () => {

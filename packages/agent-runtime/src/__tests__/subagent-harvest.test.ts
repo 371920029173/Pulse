@@ -80,9 +80,9 @@ describe('收割：回执里怎么写', () => {
   it('摘要有文件时给出路径，父级能直接 fs_read', () => {
     const lines = renderKbHarvest({
       ...selectHarvestNotes([note()]),
-      digestPath: '.she/subagent-notes/sess_1.md',
+      digestPath: '.she/sessions/sess_parent/notes/sess_1.md',
     }).join('\n');
-    assert.match(lines, /\.she\/subagent-notes\/sess_1\.md/);
+    assert.match(lines, /\.she\/sessions\/sess_parent\/notes\/sess_1\.md/);
   });
 
   it('自省条目单独报数，并说明为什么不并入', () => {

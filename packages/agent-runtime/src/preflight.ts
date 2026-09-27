@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { resolveInsideWorkspace } from '@she/sandbox';
+import { sessionStateDir } from './session-state.js';
 import type { ToolDefinition } from '@she/shared';
 
 /**
@@ -566,23 +567,18 @@ export function renderRecord(r: PreflightRecord): string {
 // ─── Persistence ────────────────────────────────────────────────────────────
 
 /**
- * One JSON file per analysis under `.she/preflight/`.
+ * One JSON file per analysis under `.she/sessions/<sessionId>/preflight/`.
  *
  * Not a single rolling file like the plan store: these are per-turn records meant to be
  * read back individually (by a later run, by the audit log, by a person debugging a
  * decision), and rewriting one growing array on every turn would make that harder rather
  * than easier. Writes go through a temp file and a rename, so a crash mid-write cannot
  * leave a half-record that a reader then has to defend against.
- */
-/**
- * How far back `latestForSession` looks.
  *
- * A conversation's own analysis is written by the turn that reads it back, so it is normally the
- * newest file in the directory; the margin is for a workspace where several conversations write
- * between two turns of this one. Beyond that the answer would be "unknown" anyway, and an
- * unbounded parse of a directory that grows one file per turn is a cost with no matching benefit.
+ * 目录按会话分开（2026-09-27）：这些记录里有**用户的请求原文**（`stated_intent` / `actual_goal`），
+ * 共享一个目录等于任何会话都能读到别人问过什么。原来靠"扫描最新 N 条、逐条比对 sessionId"来分账，
+ * 对读不成立 —— 文件在同一个目录里，读到只是比对一下而已。
  */
-const SESSION_SCAN_LIMIT = 200;
 
 export class PreflightStore {
   private dir: string;
@@ -601,8 +597,8 @@ export class PreflightStore {
    */
   private seq = 0;
 
-  constructor(workspaceRoot: string, public readonly sessionId?: string | null) {
-    this.dir = join(workspaceRoot, '.she', 'preflight');
+  constructor(workspaceRoot: string, public readonly sessionId: string) {
+    this.dir = join(sessionStateDir(workspaceRoot, sessionId), 'preflight');
   }
 
   private ensureDir(): void {
@@ -654,35 +650,32 @@ export class PreflightStore {
     return this.list(1)[0];
   }
 
-  /**
-   * The newest record written by THIS conversation, or `undefined`.
+  /*
+   * 2026-09-27：`latestForSession()` 没有了，它就是上面的 `latest()`。
    *
-   * `latest()` answers "what is the newest analysis in this workspace", which is the wrong
-   * question everywhere a record is used as a yardstick: an analysis speaks for the request it
-   * was written about, and nothing else. The measured failure was a delegated child reading the
-   * PARENT's record, so its self-review compared the child's actions against a goal it was never
-   * given — five shared-file reads, zero words from "得到一份基于实机证据的 SHE 功能评估", drift
-   * reported as fact, and the lesson written back into the parent's error book. The same mistake
-   * lands on a fresh conversation in a busy workspace: it would inherit the previous chat's goal.
+   * 原来有两个方法，因为"这个目录里最新的一条"和"这个会话最新的一条"不是一回事：目录是共享的，
+   * 里面的记录来自所有会话，所以必须扫描最新 N 条、逐条比对 `sessionId` 才能挑出自己那条
+   * （`SESSION_SCAN_LIMIT = 200` 就是那个补丁 —— 它还附带一个后果：超过 200 条的旧记录看不见）。
    *
-   * A record with no session id is matched to a store with no session id (a one-shot run writing
-   * and reading its own analysis in the same turn). Every other combination is a different
-   * conversation, and "no goal" is the honest answer — with no goal the drift check reports
-   * nothing at all, which is why this returns `undefined` rather than guessing the newest.
+   * 那个方法记着的教训仍然是这一层最有力的证据，值得留着：曾经有一条记录被**子代理**读到，而记录属于
+   * 父级，于是子代理的自评拿一个它从未收到过的目标当尺子 —— 五次读共享文件、对"得到一份基于实机证据的
+   * SHE 功能评估"一个字都没沾，却把"跑偏"当事实报了上来，还把这条教训写回了父级的错题本。同样的错会
+   * 发生在忙碌工作区里新开的会话上：它会继承上一个聊天的目标。
+   *
+   * 现在的答案是结构性的而不是比较出来的：目录按会话分开，"这里最新的一条"本来就是"我的一条"。
    */
-  latestForSession(): PreflightRecord | undefined {
-    const mine = String(this.sessionId ?? '');
-    // Bounded rather than exhaustive: a conversation's own newest analysis is by definition a
-    // recent file (it is written by the turn that is running), and scanning a directory that
-    // grows by one file per turn forever to find it would cost more than the answer is worth.
-    return this.list(SESSION_SCAN_LIMIT).find((r) => String(r.sessionId ?? '') === mine);
-  }
 }
 
 // ─── Tool set ───────────────────────────────────────────────────────────────
 
 export interface PreflightToolDeps {
-  sessionId?: string | null;
+  /**
+   * 这个 agent 所属的会话 —— 必填。
+   *
+   * 预检记录里有用户的请求原文，所以按会话存；没有会话就没有可以归属的记录，所以这个字段不是可选的
+   * （可选会让"忘了传"静默变成"落到共享目录"）。没有会话的 agent 不注册这套工具。
+   */
+  sessionId: string;
   /**
    * The request being analysed.
    *
@@ -718,7 +711,7 @@ export function createPreflightTools(
   workspaceRoot: string,
   deps: PreflightToolDeps,
 ): PreflightToolSet {
-  const store = new PreflightStore(workspaceRoot, deps.sessionId ?? null);
+  const store = new PreflightStore(workspaceRoot, deps.sessionId);
 
   const toolMap = new Map<string, { def: ToolDefinition; fn: (a: Record<string, unknown>) => Promise<string> }>();
   const reg = (def: ToolDefinition, fn: (a: Record<string, unknown>) => Promise<string>) =>

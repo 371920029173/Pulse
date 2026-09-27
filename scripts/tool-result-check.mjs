@@ -194,6 +194,7 @@ console.log('\n=== 真实工具产出的结果 ===');
    * preflight tool: it refuses to analyse before any user turn has been recorded.
    */
   const preflightTools = createPreflightTools(dir, {
+    sessionId: 'sess-toolresult',
     getRequest: () => '',
     listTools: () => ['fs_read'],
   });

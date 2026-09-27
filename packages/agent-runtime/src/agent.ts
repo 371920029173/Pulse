@@ -19,6 +19,7 @@ import { PendingPatchStore, CheckpointStore, resolveInsideWorkspace } from '@she
 import { createKBTools } from './kb-tools.js';
 import { createPlanTools, planAutopilot } from './plan-tools.js';
 import { createPreflightTools, PreflightStore } from './preflight.js';
+import type { PreflightRecord } from './preflight.js';
 import {
   ErrorBook, createErrorbookTools, isWorthRemembering, formatErrorEntry,
   EXPECT_FAILURE_ARG, isIntentionalFailure, withExpectFailureParam,
@@ -146,6 +147,18 @@ export class Agent {
 
   /** This conversation's plan store, read by the plan autopilot at the end of each model reply. */
   private planStore?: ReturnType<typeof createPlanTools>['store'];
+
+  /**
+   * 本会话最新的一条预检记录；没有会话就是 undefined。
+   *
+   * 预检记录按会话存（`.she/sessions/<id>/preflight/`），所以这里既不需要也不接受"会话"参数 ——
+   * 目录本身就是这个会话的。没有会话时返回 undefined（"还没分析过"），而不是去读别人的。
+   */
+  private preflightRecord(): PreflightRecord | undefined {
+    return this.sessionId
+      ? new PreflightStore(this.config.workspace.root, this.sessionId).latest()
+      : undefined;
+  }
 
   /**
    * Sink for tool-originated stream events during the current turn. Set on
@@ -473,11 +486,14 @@ export class Agent {
      * Pre-flight intent analysis. Registered next to the plan tools because they are used
      * together — analyse the request, then write the plan that implements it.
      *
+     * 预检记录里有用户的请求原文，按会话存（`.she/sessions/<id>/preflight/`），所以没有会话就不注册
+     * 这套工具：不存在"没有会话的预检记录"这种东西，也不给兜底目录。
+     *
      * `listTools` reads `allToolDefs` lazily. At construction time the list is only half
      * built, so a snapshot taken here would under-report what this agent has and invent
      * missing prerequisites for tools that are in fact registered a few lines below.
      */
-    const preflightTools = createPreflightTools(config.workspace.root, {
+    const preflightTools = this.sessionId ? createPreflightTools(config.workspace.root, {
       sessionId: this.sessionId,
       getRequest: () => this.lastUserRequest,
       listTools: () => this.allToolDefs.map((d) => d.name),
@@ -487,10 +503,10 @@ export class Agent {
       knownErrors: (query) => this.errorBook
         .lookup({ query, limit: 3 })
         .map((e) => formatErrorEntry(e)),
-    });
-    for (const def of preflightTools.definitions) {
+    }) : null;
+    for (const def of preflightTools?.definitions ?? []) {
       this.allToolDefs.push(def);
-      this.executors.set(def.name, (args) => preflightTools.execute(def.name, args));
+      this.executors.set(def.name, (args) => preflightTools!.execute(def.name, args));
     }
 
     // The read side of the error book: what has gone wrong here before. Registered next to
@@ -518,15 +534,15 @@ export class Agent {
        * so a record written for a different request turns the check into a false accusation.
        */
       goal: () => {
-        const rec = new PreflightStore(config.workspace.root, this.sessionId).latestForSession();
+        const rec = this.preflightRecord();
         return rec?.actual_goal || rec?.stated_intent || planTools?.store.active()?.goal || null;
       },
       // Inferred constraints are passed as SOFT: pre-flight derived them from the request and the
       // workspace rather than from the user's words, and treating a derived preference as a hard
       // prohibition would report drift for ordinary work.
       constraints: () => {
-        const rec = new PreflightStore(config.workspace.root, this.sessionId).latestForSession();
-        return (rec?.inferred_constraints ?? []).map((text) => ({ text, hardness: 'soft' as const }));
+        const rec = this.preflightRecord();
+        return (rec?.inferred_constraints ?? []).map((text: string) => ({ text, hardness: 'soft' as const }));
       },
       actions: () => this.currentRunActions(),
       currentStep: () => planTools?.store.active()?.steps.find((s) => s.status === 'active')?.title ?? null,
@@ -1723,7 +1739,7 @@ export class Agent {
      * defending on the parent's behalf.
      */
     try {
-      const rec = new PreflightStore(this.config.workspace.root, this.sessionId).latestForSession();
+      const rec = this.preflightRecord();
       if (rec) {
         recorder.preflight(rec);
         // The claim this run is being measured against, kept so the mirror's sample is the one
@@ -1908,7 +1924,7 @@ export class Agent {
    */
   private readPreflightRecord(): import('./preflight.js').PreflightRecord | null {
     try {
-      return new PreflightStore(this.config.workspace.root, this.sessionId).latestForSession() ?? null;
+      return this.preflightRecord() ?? null;
     } catch {
       return null;
     }
@@ -1916,7 +1932,7 @@ export class Agent {
 
   private readPreflightConfidence(): { confidence: number; clamped: boolean; topic?: string } | null {
     const rec = this.readPreflightRecord();
-    // Ownership is already settled by `readPreflightRecord` (see `latestForSession`); the test
+    // Ownership is already settled by `readPreflightRecord` (see `preflightRecord`); the test
     // here is only whether this record carries a claim to measure.
     if (!rec || typeof rec.confidence !== 'number') return null;
     return { confidence: rec.confidence, clamped: rec.confidenceClamped === true, topic: rec.actual_goal?.slice(0, 40) };
