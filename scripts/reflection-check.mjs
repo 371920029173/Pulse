@@ -75,7 +75,17 @@ const { KBStore, GroupKBEngine } = await import(
 );
 
 const tempDir = (p) => mkdtempSync(join(tmpdir(), p));
-const confFile = (root) => join(root, REFLECTION_DIR, 'confidence.json');
+
+/*
+ * 置信度镜像拆成两份文件：跨会话的数字账在工作区级，逐条样本（带话题文本）在会话自己的目录里。
+ * 测试里用一个固定的假会话 id，路径断言才写得清楚。
+ */
+const SESSION = 'sess-reflect';
+const mirrorOn = (root, session = SESSION, keep) => (
+  keep === undefined ? new ConfidenceMirror(root, session) : new ConfidenceMirror(root, session, keep)
+);
+const ledgerFile = (root) => join(root, REFLECTION_DIR, 'confidence.json');
+const mineFile = (root, session = SESSION) => join(root, '.she', 'sessions', session, 'confidence.json');
 
 /* ══════════════════════════════════════════════════════════════════════════
  * 1. 漂移检测：什么时候开口
@@ -286,7 +296,7 @@ console.log('\n5. 置信度镜像');
   const observe = (m, claimed, attempted, succeeded, clamped = false, topic) =>
     m.observe({ claimed, attempted, succeeded, clamped, topic });
 
-  const m = new ConfidenceMirror(root);
+  const m = mirrorOn(root);
   check('一开始文件不存在也能读（当成空历史）', m.samples().length === 0, null);
   observe(m, 0.9, 4, 1);
   observe(m, 0.9, 4, 1);
@@ -298,12 +308,16 @@ console.log('\n5. 置信度镜像');
   check('建议说清了「置信度要由已核对的事实推出」',
     /已核对的事实/.test(m.report().advice ?? ''), m.report().advice);
 
-  check('落盘了，且是 JSON', existsSync(confFile(root)) && JSON.parse(readFileSync(confFile(root), 'utf8')).samples.length === 3, null);
-  const reopened = new ConfidenceMirror(root);
-  check('换一个实例还能读到（习惯要跨会话才看得见）',
+  check('跨会话的数字账落盘了，且是 JSON',
+    existsSync(ledgerFile(root)) && JSON.parse(readFileSync(ledgerFile(root), 'utf8')).samples.length === 3, null);
+  const reopened = mirrorOn(root);
+  check('换一个实例还能读到（习惯跨重启可见）',
     reopened.samples().length === 3 && reopened.report().bucket === 'overconfident', null);
+  check('另一个会话看得到结论、看不到样本（数字共享，文本不共享）',
+    mirrorOn(root, 'sess-other').report().bucket === 'overconfident'
+      && mirrorOn(root, 'sess-other').samples().length === 0, null);
 
-  const noTools = new ConfidenceMirror(tempDir('she-reflect-notools-'));
+  const noTools = mirrorOn(tempDir('she-reflect-notools-'));
   observe(noTools, 0.4, 4, 1);
   observe(noTools, 0.4, 4, 1);
   observe(noTools, 0.4, 4, 1);
@@ -317,42 +331,64 @@ console.log('\n5. 置信度镜像');
   check('成功数被夹在尝试数以内（调用方数错也造不出 >1 的成功率）',
     miscount.succeeded === 2 && miscount.attempted === 2, JSON.stringify(miscount));
 
-  const honest = new ConfidenceMirror(tempDir('she-reflect-ok-'));
+  const honest = mirrorOn(tempDir('she-reflect-ok-'));
   for (let i = 0; i < 3; i++) observe(honest, 0.75, 4, 3);
   check('对得上就是 calibrated，不硬找问题',
     honest.report().bucket === 'calibrated' && renderCalibration(honest.report()) === '', null);
 
-  const shy = new ConfidenceMirror(tempDir('she-reflect-shy-'));
+  const shy = mirrorOn(tempDir('she-reflect-shy-'));
   for (let i = 0; i < 3; i++) observe(shy, 0.3, 4, 4);
   check('自评低于实际成功率也是偏差（偏保守）',
     shy.report().bucket === 'underconfident' && /偏保守/.test(renderCalibration(shy.report())), null);
 
-  const windowed = new ConfidenceMirror(tempDir('she-reflect-window-'));
+  const windowed = mirrorOn(tempDir('she-reflect-window-'));
   for (let i = 0; i < 6; i++) observe(windowed, 0.2, 4, 4);
   for (let i = 0; i < 3; i++) observe(windowed, 0.95, 4, 1);
   check('窗口决定报告哪一段习惯（旧数据会盖住当前习惯）',
     windowed.report({ window: 3 }).bucket === 'overconfident' && windowed.report().bucket === 'underconfident',
     JSON.stringify([windowed.report({ window: 3 }).bucket, windowed.report().bucket]));
 
-  const bounded = new ConfidenceMirror(tempDir('she-reflect-bound-'), 3);
+  const bounded = mirrorOn(tempDir('she-reflect-bound-'), SESSION, 3);
   for (let i = 0; i < 5; i++) observe(bounded, 0.5, 2, 1);
   check('只保留最近 N 条', bounded.samples().length === 3, String(bounded.samples().length));
 
-  const clamped = new ConfidenceMirror(tempDir('she-reflect-clamp-'));
+  const clamped = mirrorOn(tempDir('she-reflect-clamp-'));
   for (let i = 0; i < 4; i++) observe(clamped, 0.9, 4, 2, true);
   check('预检被压过上限的比例也算进建议', /压到上限/.test(renderCalibration(clamped.report())), renderCalibration(clamped.report()));
 
   const damagedRoot = tempDir('she-reflect-damaged-');
   mkdirSync(join(damagedRoot, REFLECTION_DIR), { recursive: true });
-  writeFileSync(confFile(damagedRoot), '{ 这不是 JSON', 'utf8');
-  const damaged = new ConfidenceMirror(damagedRoot);
+  writeFileSync(ledgerFile(damagedRoot), '{ 这不是 JSON', 'utf8');
+  const damaged = mirrorOn(damagedRoot);
   check('文件损坏时当成空历史，不抛异常',
     damaged.samples().length === 0 && damaged.report().bucket === 'unknown', null);
 
-  const cleared = new ConfidenceMirror(tempDir('she-reflect-clear-'));
+  const cleared = mirrorOn(tempDir('she-reflect-clear-'));
   observe(cleared, 0.9, 4, 2);
   cleared.clear();
   check('清空之后内存和文件都空', cleared.samples().length === 0, String(cleared.samples().length));
+
+  /*
+   * 拆分的核心断言：带话题文本的那一份只能待在本会话目录里。这一条如果松掉，"跨会话只共享数字"
+   * 就只是注释里的一句话 —— 而文本恰恰是这一层要挡的东西。
+   */
+  const splitRoot = tempDir('she-reflect-split-');
+  const splitM = mirrorOn(splitRoot);
+  for (let i = 0; i < 3; i++) {
+    splitM.observe({ claimed: 0.95, attempted: 4, succeeded: 1, clamped: false, topic: '把计费模块的发票重算一遍', runId: 'run-xyz' });
+  }
+  const ledgerText = readFileSync(ledgerFile(splitRoot), 'utf8');
+  check('工作区级的文件里没有一个字的任务文本', !ledgerText.includes('发票'), ledgerText.slice(0, 200));
+  check('工作区级的文件里没有 run id', !ledgerText.includes('run-xyz'), null);
+  check('字段是封闭集合（多一个字段就多一条泄露通道）',
+    Object.keys(JSON.parse(ledgerText).samples[0]).sort().join(',') === 'at,attempted,claimed,clamped,succeeded',
+    Object.keys(JSON.parse(ledgerText).samples[0]).join(','));
+  check('本会话的文件里有文本（拆分是搬家，不是丢数据）',
+    readFileSync(mineFile(splitRoot), 'utf8').includes('发票'), null);
+  check('领域偏差只从本会话的样本里算',
+    splitM.report().worst[0]?.topic === '把计费模块的发票重算一遍'
+      && mirrorOn(splitRoot, 'sess-other').report().worst.length === 0, null);
+  removeTempDir(splitRoot);
 
   removeTempDir(root);
 }
@@ -506,9 +542,19 @@ const workspace = tempDir('she-reflect-live-');
  * 先写历史，再起服务。这样断言的就是「镜像跨进程可读」——而重启恰好是 agent 最想当自己没犯过错的时候。
  */
 {
-  const seeded = new ConfidenceMirror(workspace);
+  const seeded = mirrorOn(workspace);
   for (let i = 0; i < 4; i++) seeded.observe({ claimed: 0.95, attempted: 4, succeeded: 1, clamped: true, topic: '迁移脚本' });
-  check('起服务之前盘上就有历史', JSON.parse(readFileSync(confFile(workspace), 'utf8')).samples.length === 4, null);
+  check('起服务之前盘上就有历史', JSON.parse(readFileSync(ledgerFile(workspace), 'utf8')).samples.length === 4, null);
+  check('样本落在会话自己的目录里',
+    JSON.parse(readFileSync(mineFile(workspace), 'utf8')).samples.length === 4, null);
+  /*
+   * 另一个会话也写一条。它自己那一条也会进数字账 —— 这正是"账是共用的"：所以下面读到的总数是 5，
+   * 而"5"这个数字本身就在证明结论跨会话可见（另一个会话的样本没有落进我的样本文件）。
+   */
+  mirrorOn(workspace, 'sess-other').observe({ claimed: 0.9, attempted: 4, succeeded: 2, topic: '别人的话题' });
+  check('数字账是共用的（另一个会话的一条也在里面）',
+    JSON.parse(readFileSync(ledgerFile(workspace), 'utf8')).samples.length === 5
+      && JSON.parse(readFileSync(mineFile(workspace), 'utf8')).samples.length === 4, null);
 }
 
 const child = spawn('node', [SERVER_ENTRY], {
@@ -561,28 +607,52 @@ if (!(await waitForHealth())) {
 }
 
 try {
-  const res = await api('/api/reflection');
+  const res = await api(`/api/reflection?session_id=${SESSION}`);
   check('GET /api/reflection 返回 200', res.status === 200, `status=${res.status}`);
   const body = await res.json();
-  check('没有任何一轮跑过时，读的是盘上的镜像历史',
-    body.confidence?.samples === 4 && body.confidence?.bucket === 'overconfident',
+  /*
+   * 结论来自共用的数字账（5 条 = 本会话 4 条 + 另一个会话 1 条），但 `worst` 只报本会话的话题：
+   * 结论可以跨会话，点名"你最近老在迁移脚本上过于乐观"必须是我自己的样本。
+   */
+  check('没有任何一轮跑过时，读的是盘上的镜像历史（数字账）',
+    body.confidence?.samples === 5 && body.confidence?.bucket === 'overconfident'
+      && body.confidence?.worst.length === 1 && body.confidence.worst[0].topic === '迁移脚本',
     JSON.stringify(body.confidence));
   check('带上目录，界面不用猜',
     typeof body.root === 'string' && body.root.includes('.she'), body.root);
+  check('带上样本文件的落点（本会话自己那份）',
+    typeof body.samples_root === 'string' && body.samples_root.includes('sessions'), body.samples_root);
   check('带上最近样本（界面要能显示具体数字）',
     Array.isArray(body.samples) && body.samples.length === 4, JSON.stringify(body.samples?.length));
   check('样本里带领域，便于按领域看偏差',
     body.samples.every((s) => s.topic === '迁移脚本'), JSON.stringify(body.samples?.[0]));
+  /*
+   * 两份文件的分工在 API 上要看得见：结论来自数字账（不带会话也能读到），样本来自本会话。
+   * 换一个会话提问，样本是空的、结论照旧 —— 这正是"数字共享、文本不共享"。
+   */
+  const other = await (await api('/api/reflection?session_id=sess-other')).json();
+  check('换一个会话：结论还在，样本换成它自己的（不带别人的文本）',
+    other.confidence?.bucket === 'overconfident' && other.samples.length === 1
+      && other.samples[0].topic === '别人的话题', JSON.stringify(other.samples));
+  check('不带 session_id 时：结论照读（数字账不分会话），样本取当前会话/为空',
+    (await (await api('/api/reflection')).json()).confidence.samples === 5, null);
   check('本轮还没有 agent 时 last/critic 是 null，不是伪造对象',
     body.last === null && body.critic === null, JSON.stringify({ last: body.last, critic: body.critic }));
 
   check('?window= 能收窄窗口',
-    (await (await api('/api/reflection?window=2')).json()).confidence.samples === 2, null);
+    (await (await api(`/api/reflection?window=2&session_id=${SESSION}`)).json()).confidence.samples === 2, null);
 
-  const reset = await post('/api/reflection/confidence/reset');
+  const reset = await post('/api/reflection/confidence/reset', { session_id: SESSION });
   check('POST /api/reflection/confidence/reset 清空历史', reset.status === 200, `status=${reset.status}`);
-  check('清空后读回来是空的',
-    (await (await api('/api/reflection')).json()).confidence.samples === 0, null);
+  check('清空后读回来是空的（数字账 + 本会话样本都清）',
+    (await (await api(`/api/reflection?session_id=${SESSION}`)).json()).confidence.samples === 0
+      && JSON.parse(readFileSync(mineFile(workspace), 'utf8')).samples.length === 0,
+    JSON.stringify({
+      confidence: (await (await api(`/api/reflection?session_id=${SESSION}`)).json()).confidence.samples,
+      mine: JSON.parse(readFileSync(mineFile(workspace), 'utf8')).samples.length,
+    }));
+  check('别的会话自己的样本文件不替它清（那是它的，不是我的）',
+    JSON.parse(readFileSync(mineFile(workspace, 'sess-other'), 'utf8')).samples.length === 1, null);
 
   const audit = await (await api('/api/audit?kind=config')).json();
   check('重置留了审计记录（它会改变 agent 之后拿到的自我认知）',
@@ -649,9 +719,17 @@ console.log('\n9. 接线与提示词');
 
   check('server 提供 /api/reflection', /router\.get\('\/api\/reflection'/.test(serverSrc), null);
   check('镜像跟着工作区走（换项目不会串历史）',
-    /function reflectionMirror[\s\S]{0,500}?config\.workspace\.root/.test(serverSrc), null);
-  check('镜像在服务里是缓存的（面板轮询不会每次重读文件）',
-    /let reflectionMirrors[\s\S]{0,300}?reflectionMirrorsRoot !== root/.test(serverSrc), null);
+    /function reflectionMirror[\s\S]{0,600}?config\.workspace\.root/.test(serverSrc), null);
+  check('镜像在服务里是按会话缓存的（面板轮询不会每次重读文件）',
+    /const reflectionMirrors = new Map<string, ConfidenceMirror>\(\)/.test(serverSrc)
+      && /reflectionMirrorsRoot !== root/.test(serverSrc)
+      && /reflectionMirrors\.get\(key\)/.test(serverSrc), null);
+  check('镜像构造时带上会话（不带就读不到本会话的样本）',
+    /new ConfidenceMirror\(root, sessionId\)/.test(serverSrc), null);
+  check('agent 构造镜像时带上会话',
+    /new ConfidenceMirror\(config\.workspace\.root, this\.sessionId\)/.test(agentSrc), null);
+  check('重置清的是数字账 + 本会话样本，并在审计里点名了会话',
+    /reset_confidence_mirror/.test(serverSrc) && /session_id: sessionId \?\? undefined, change: 'reset_confidence_mirror'/.test(serverSrc), null);
 
   check('工作群里多了一个「批评者」角色，和产出者分开',
     /key: 'critic'/.test(clusterSrc) && /phase: 'review'/.test(clusterSrc), null);

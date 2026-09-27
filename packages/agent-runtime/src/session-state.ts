@@ -1,3 +1,4 @@
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -21,9 +22,74 @@ import { join } from 'node:path';
  * 的东西"：编码可逆、不碰撞，而拒绝会让功能凭空消失。
  */
 export function sessionStateDir(workspaceRoot: string, sessionId: string): string {
+  return join(workspaceRoot, sessionStateRelDir(sessionId));
+}
+
+/**
+ * 同一个路径，但相对工作区根 —— 给"要报给用户看的路径"用（例如写进笔记摘要的落点）。
+ *
+ * 存在的理由是"布局只能有一处知道"：这个前缀 `.she/sessions/<编码 id>` 之前在两处各拼了一次
+ * （写入方和报给父级的交接消息），其中一处改了另一处没改，父级就会拿到一个指向空气的路径，而它
+ * 分辨不出"笔记没写"和"路径错了"。
+ */
+export function sessionStateRelDir(sessionId: string): string {
   const why = sessionIdProblem(sessionId);
   if (why) throw new Error(`会话 id 不合法（${why}），不能拿它拼状态路径: ${JSON.stringify(sessionId)}`);
-  return join(workspaceRoot, '.she', 'sessions', encodeSessionId(sessionId));
+  return join(SESSIONS_REL, encodeSessionId(sessionId));
+}
+
+/** 所有会话私有状态的父目录（相对工作区）：`.she/sessions/`。 */
+export const SESSIONS_REL = join('.she', 'sessions');
+
+/** 所有会话私有状态的父目录：`.she/sessions/`。 */
+export function sessionsRoot(workspaceRoot: string): string {
+  return join(workspaceRoot, SESSIONS_REL);
+}
+
+/**
+ * 目录名 → 会话 id，是 `encodeSessionId` 的逆。解不回来（旧版本留下的、手工创建的）返回 null。
+ *
+ * 需要它是因为"列出有哪些会话"这件事只能从目录名入手：`.she/sessions/` 下的目录名是编码过的，
+ * 而调用方要的是能拿去开会话、能拼回 `sessionStateDir` 的 id。解错一个字符就会指向另一个会话，
+ * 所以这里对解码结果再跑一遍合法性校验 —— 能解出来但拿回去拼不出同一个路径的，一律当不认识。
+ */
+export function decodeSessionId(dirName: string): string | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(dirName);
+  } catch {
+    // 手工改过的目录名里可能有个孤立的 `%`，`decodeURIComponent` 会抛。
+    return null;
+  }
+  if (sessionIdProblem(decoded)) return null;
+  if (encodeSessionId(decoded) !== dirName) return null;
+  return decoded;
+}
+
+/**
+ * 这个工作区里有过私有状态的会话 id。
+ *
+ * **列目录不是读内容**：返回的是名字，一个受权限保护的会话不会因此漏出任何计划、笔记或轨迹。
+ * 它的用途只有一个 —— 用户显式要求"看别的会话"时的候选清单（面板里的选择器），以及把这些会话
+ * 拼回 `sessionStateDir` 去读它们自己的目录。默认路径上没有任何东西调用它。
+ *
+ * 不解码的就跳过：一个解不出来的目录名属于"不认识"，而不是"某个会话"，猜一个 id 出来比跳过更糟。
+ */
+export function listSessionIds(workspaceRoot: string): string[] {
+  let names: string[];
+  try {
+    names = readdirSync(sessionsRoot(workspaceRoot), { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const name of names) {
+    const id = decodeSessionId(name);
+    if (id) out.push(id);
+  }
+  return out.sort();
 }
 
 /**

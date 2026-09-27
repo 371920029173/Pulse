@@ -215,7 +215,9 @@ function makeAgent(ws, answer) {
   const config = loadConfig(ROOT);
   config.workspace.root = ws;
   config.llm = { ...config.llm, model: 'stub', baseUrl: 'http://stub.invalid' };
-  const runs = new RunTraceStore(ws);
+  // A trace is per conversation, so the store names one even though this agent is driven directly
+  // rather than through a chat session; the assertions below only read this turn's own file.
+  const runs = new RunTraceStore(ws, 'sess-guardrail');
   const agent = new Agent(config, engine, base, null, { runTrace: runs });
   agent.provider = { name: 'stub', async chat() { return { role: 'assistant', content: answer }; } };
   return { agent, store, runs };
@@ -466,9 +468,16 @@ if (!(await waitForHealth())) {
   // The trace: both the prompt (which quoted a key) and any quoted tool result must be clean.
   const runs = await (await api('/api/runs?limit=5')).json();
   const runIds = (runs?.runs ?? []).map((r) => r.id);
+  /*
+   * The list response names the conversation it read, and each row carries its own `session_id`
+   * when a listing spans conversations. The detail route requires one rather than falling back to
+   * "whichever conversation the server touched last" — a raw turn is read from the session that
+   * ran it, so the id has to come from the row (or from the list) and not from an assumption.
+   */
+  const runSession = runs?.runs?.[0]?.session_id ?? runs?.session_id ?? '';
   let traceText = '';
   for (const id of runIds) {
-    const detail = await (await api(`/api/runs/${id}`)).json();
+    const detail = await (await api(`/api/runs/${id}?session_id=${encodeURIComponent(runSession)}`)).json();
     traceText += JSON.stringify(detail);
   }
   check('跑完的轮次留下了运行轨迹（否则这条断言是空过的）', runIds.length >= 1, JSON.stringify(runs).slice(0, 300));

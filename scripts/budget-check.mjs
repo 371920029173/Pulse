@@ -110,8 +110,9 @@ function makeAgent(ws, tools, provider, budget, opts = {}) {
   config.llm = { ...config.llm, model: 'stub', baseUrl: 'http://stub.invalid' };
   config.sandbox = { ...config.sandbox, allowAllCommands: true, denyDestructiveByDefault: false };
   config.budget = { ...DEFAULT_BUDGET, ...budget };
-  // An explicit store so the assertions can read this turn's trace back.
-  const runs = new RunTraceStore(ws);
+  // An explicit store so the assertions can read this turn's trace back. It belongs to the same
+  // conversation the agent serves — a trace is per conversation, so the two have to agree.
+  const runs = new RunTraceStore(ws, opts.sessionId ?? 'sess-budget');
   const agent = new Agent(config, engine, tools, opts.sessionId ?? null, { runTrace: runs });
   agent.provider = provider;
   return { agent, store, runs };

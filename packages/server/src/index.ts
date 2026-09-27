@@ -13,8 +13,9 @@ import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLin
 import { SandboxShell, createTools, ConfirmTicketStore } from '@she/sandbox';
 import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, subagentWrapUpScheduleMs, composeWrapUpNudge, selectHarvestNotes } from '@she/agent-runtime';
 import type { SubagentRunner, SubagentResult, SubagentKbHarvest } from '@she/agent-runtime';
-import { PlanStore, MemoStore, nextStepOf, encodeSessionId } from '@she/agent-runtime';
+import { PlanStore, MemoStore, nextStepOf, planSessions, encodeSessionId, sessionStateDir, sessionStateRelDir, listSessionIds } from '@she/agent-runtime';
 import { RunTraceStore, ConfidenceMirror, REFLECTION_DIR } from '@she/agent-runtime';
+import type { RunSummary } from '@she/agent-runtime';
 import { retireKnownFalsePositives } from '@she/agent-runtime';
 import { classifyLlmFailure, failureLabel } from '@she/agent-runtime';
 import type { StepStatus } from '@she/agent-runtime';
@@ -1351,13 +1352,13 @@ function subagentKbPath(sessionId: string): string | null {
 /**
  * 子任务笔记摘要的落点（工作区相对路径）。
  *
- * 抽出来是因为**两处**需要它：写入方（`writeHarvestDigest`）和提前报给父级的那条交接消息（后台子任务
- * 结束时父级拿到的路径）。两处各自拼一次就是经典的"两份缓存键"问题 —— 其中一处改了、另一处没改，
- * 父级会拿到一个指向空气的路径，而它没法分辨"笔记没写"和"路径错了"。
+ * 前缀来自 `sessionStateRelDir`，不在这里拼：写入方（`writeHarvestDigest`）和提前报给父级的那条交接
+ * 消息（后台子任务结束时父级拿到的路径）都从这里取，两处各自拼一次就是经典的"两份缓存键"问题 ——
+ * 其中一处改了、另一处没改，父级会拿到一个指向空气的路径，而它没法分辨"笔记没写"和"路径错了"。
  */
 function harvestDigestRelPath(parentSessionId: string, childSessionId: string): string {
   return join(
-    '.she', 'sessions', encodeSessionId(parentSessionId),
+    sessionStateRelDir(parentSessionId),
     'notes', `${encodeSessionId(childSessionId)}.md`,
   );
 }
@@ -1533,41 +1534,83 @@ function auditLog(): AuditLog {
 }
 
 /**
- * The run-trace store for the workspace the server is running against.
+ * The run-trace store for one conversation.
  *
- * A local mirror of `auditLog`'s caching: pointed at the workspace, re-created when the root
- * changes. Built directly rather than taken from a session's `Agent`, because the run list has to
- * be readable BEFORE any turn in this process has ever run — "show me what happened last time" is
+ * Keyed by (root, session): a trace is written under the session's own directory, so there is a
+ * different store per conversation rather than one for the process. Cached because the panel polls
+ * every few seconds and each construction would re-list the directory; the cache is dropped when
+ * the workspace root changes, which is the only thing that invalidates it.
+ *
+ * Built directly rather than taken from a session's `Agent`, because the run list has to be
+ * readable BEFORE any turn in this process has ever run — "show me what happened last time" is
  * asked on a fresh start, which is precisely when no agent object exists yet.
  */
-let runTraces: RunTraceStore | null = null;
+const runTraces = new Map<string, RunTraceStore>();
 let runTracesRoot = '';
-function runTraceStore(): RunTraceStore {
+function runTraceStore(sessionId: string): RunTraceStore {
   const root = resolve(config.workspace.root);
-  if (!runTraces || runTracesRoot !== root) {
-    runTraces = new RunTraceStore(root);
+  if (runTracesRoot !== root) {
+    runTraces.clear();
     runTracesRoot = root;
   }
-  return runTraces;
+  let store = runTraces.get(sessionId);
+  if (!store) {
+    store = new RunTraceStore(root, sessionId);
+    runTraces.set(sessionId, store);
+  }
+  return store;
 }
 
 /**
- * The confidence mirror for this workspace.
+ * Every conversation's runs, newest first — the explicit "show me other sessions too" view.
  *
- * Cached the same way as the two stores above, and for the same reason: `GET /api/reflection` has to
- * work on a fresh process, before any session has produced an `Agent`. Each instance keeps an
- * in-memory copy of the file, so constructing a new one per request would re-read and re-parse the
- * same file on every poll.
+ * Only ever called for `scope=workspace`, which the panel asks for when the user clicks the other
+ * filter. Nothing on the default path reaches it. It exists because "what has this workspace been
+ * doing" is a real question and the answer would otherwise be lost with the shared directory; what
+ * changed is that it is now a read the user has to ask for, across directories that say whose runs
+ * they are, rather than the shape of the only file that existed.
+ *
+ * Per-session caps rather than one cap over the merge: with a single global cap, one conversation
+ * with a hundred runs would push every other conversation out of the view entirely.
  */
-let reflectionMirrors: ConfidenceMirror | null = null;
+function runsAcrossSessions(root: string, limit: number): RunSummary[] {
+  const merged: RunSummary[] = [];
+  for (const id of listSessionIds(root)) {
+    merged.push(...runTraceStore(id).list({ limit }));
+  }
+  // Newest first, on the timestamp each run recorded for itself. A run with no parseable start
+  // (a damaged first line) sorts last rather than at the epoch, so it cannot censor the list.
+  return merged
+    .sort((a, b) => (Date.parse(b.startedAt) || 0) - (Date.parse(a.startedAt) || 0))
+    .slice(0, limit);
+}
+
+/**
+ * The confidence mirror for one conversation.
+ *
+ * Cached the same way as the store above, and for the same reason: `GET /api/reflection` has to
+ * work on a fresh process, before any session has produced an `Agent`. Each instance keeps an
+ * in-memory copy of both files.
+ *
+ * The session id is what decides which per-conversation samples are readable; the cross-session
+ * verdict comes from the workspace ledger either way, so a request with no session still gets a
+ * calibration reading rather than a blank.
+ */
+const reflectionMirrors = new Map<string, ConfidenceMirror>();
 let reflectionMirrorsRoot = '';
-function reflectionMirror(): ConfidenceMirror {
+function reflectionMirror(sessionId: string | null): ConfidenceMirror {
   const root = resolve(config.workspace.root);
-  if (!reflectionMirrors || reflectionMirrorsRoot !== root) {
-    reflectionMirrors = new ConfidenceMirror(root);
+  if (reflectionMirrorsRoot !== root) {
+    reflectionMirrors.clear();
     reflectionMirrorsRoot = root;
   }
-  return reflectionMirrors;
+  const key = sessionId ?? '';
+  let mirror = reflectionMirrors.get(key);
+  if (!mirror) {
+    mirror = new ConfidenceMirror(root, sessionId);
+    reflectionMirrors.set(key, mirror);
+  }
+  return mirror;
 }
 
 /**
@@ -1901,6 +1944,23 @@ function sessionIdOf(req: import('node:http').IncomingMessage, body?: { session_
     || sessions.getActive()?.id
     || '';
   return String(raw).trim();
+}
+
+/**
+ * The session named by the request itself — deliberately WITHOUT the "current session" fallback.
+ *
+ * `sessionIdOf` answers "which conversation should this act on", and falling back to the active one
+ * is right for that question. It is the wrong answer for reading another conversation's raw
+ * material — a run's prompt, its tool arguments, its output — because the caller who forgot the id
+ * would silently be served whichever conversation the server happened to touch last, which is
+ * exactly the cross-session read this layout was built to make impossible. These routes would
+ * rather refuse loudly and name the missing parameter.
+ */
+function explicitSessionIdOf(req: import('node:http').IncomingMessage): string {
+  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const header = req.headers['x-session-id'];
+  const raw = url.searchParams.get('session_id') || (Array.isArray(header) ? header[0] : header) || '';
+  return typeof raw === 'string' ? raw.trim() : '';
 }
 
 /** Get (or lazily create) the Agent bound to a session, restoring its history. */
@@ -4334,8 +4394,15 @@ router.get('/api/fs/tree', (req, res) => {
     sendJSON(res, entry);
   });
 
-  router.delete('/api/memo/:id', (req, res, params) => {
-    const hit = memoFor(req);
+  router.delete('/api/memo/:id', async (req, res, params) => {
+    /*
+     * The body is parsed here for the same reason the reset route parses it: a caller that names a
+     * session in the body must not have the delete land on whichever session the server touched
+     * last. `sessionIdOf` falls back to the active session, and for a DELETE that fallback removes
+     * the wrong person's entry.
+     */
+    const body = await parseBody<{ session_id?: string }>(req).catch(() => ({ session_id: undefined }));
+    const hit = memoFor(req, body);
     if (!hit) throw new HttpError(400, '缺少 session_id：备忘按会话分开存');
     const ok = hit.store.remove(params.id);
     if (!ok) throw new HttpError(404, 'Memo not found');
@@ -4862,6 +4929,23 @@ router.get('/api/fs/tree', (req, res) => {
       sendJSON(res, { ok: true, marked: taskBoard.markStaleRunning(reason) });
     });
 
+  /**
+   * 哪些会话里有计划 —— 「其他会话」选择器的候选清单，且必须显式要（`?scope=workspace`）。
+   *
+   * 计划是按会话分开存的，所以当前会话看不到别的会话的计划。这个接口就是那扇门：它列出的只有会话 id
+   * 和计数，一行计划正文都不带 —— 用户点开哪个会话，才去读那个会话自己的目录。
+   *
+   * 为什么必须显式带参数：这是一个"顺带就能枚举出别人"的接口，而默认路径上不该有这种接口存在。
+   * 少一个 `scope=workspace` 就报 400，而不是悄悄给一份跨会话清单 —— 界面也只有打开选择器那一刻才发。
+   */
+  router.get('/api/plans/sessions', (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    if (url.searchParams.get('scope') !== 'workspace') {
+      throw new HttpError(400, 'scope=workspace is required: 列出别的会话的计划是一次显式动作');
+    }
+    sendJSON(res, { sessions: planSessions(config.workspace.root) });
+  });
+
   router.get('/api/plans', (req, res) => {
     const store = planStoreFor(req);
     if (!store) return sendJSON(res, { plans: [] });
@@ -4964,25 +5048,50 @@ router.get('/api/fs/tree', (req, res) => {
    */
   router.get('/api/runs', (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
-    const sessionId = url.searchParams.get('session_id');
     const limitRaw = Number(url.searchParams.get('limit'));
-    const all = runTraceStore().list({
-      sessionId: sessionId ?? undefined,
-      limit: Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 100,
-    });
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 1000) : 100;
+    const sessionId = sessionIdOf(req);
     /*
-     * Counts of the whole workspace travel with the list, not just of the filtered page.
+     * Two scopes, and the default is the private one.
+     *
+     * `scope=workspace` is what the panel's "全部会话" filter asks for. It is an explicit read across
+     * session directories — the directories say whose runs they are, and each row carries the
+     * conversation it belongs to — rather than the old behaviour where every session's runs sat in
+     * one file and the filter was the only thing between them.
+     */
+    const scope = url.searchParams.get('scope') === 'workspace' ? 'workspace' : 'session';
+
+    if (scope === 'session' && !sessionId) {
+      /*
+       * No conversation at all: an empty list rather than a 400.
+       *
+       * This route is polled by a panel on a fresh install, where there is genuinely nothing yet and
+       * "you forgot the parameter" is not the user's problem. It is NOT a fallback to a shared
+       * directory — there is no directory to fall back to, which is the point of the layout.
+       */
+      return sendJSON(res, {
+        root: join(resolve(config.workspace.root), '.she', 'sessions'),
+        runs: [], total: 0, paused: 0, failed: 0, scope, session_id: null,
+      });
+    }
+
+    const root = resolve(config.workspace.root);
+    const all = scope === 'workspace' ? runsAcrossSessions(root, limit) : runTraceStore(sessionId).list({ limit });
+    /*
+     * Counts of the whole scope travel with the list, not just of the filtered page.
      *
      * The panel says "这 20 条里 3 条失败" and needs to know whether that is all of them. Computing
      * it here from `all` for the current filter, plus an unfiltered total, keeps the panel from
      * having to make a second request to find out what it is not showing.
      */
     sendJSON(res, {
-      root: runTraceStore().directory(),
+      root: scope === 'workspace' ? join(root, '.she', 'sessions') : runTraceStore(sessionId).directory(),
       runs: all,
       total: all.length,
       paused: all.filter((r) => r.state === 'paused').length,
       failed: all.filter((r) => r.state === 'failed').length,
+      scope,
+      session_id: sessionId || null,
     });
   });
 
@@ -4995,14 +5104,31 @@ router.get('/api/fs/tree', (req, res) => {
    */
   router.get('/api/runs/corroborate', (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
-    const sessionId = url.searchParams.get('session_id');
+    const sessionId = explicitSessionIdOf(req);
     const evidence = url.searchParams.get('evidence') ?? '';
     if (!evidence.trim()) throw new HttpError(400, 'evidence is required');
-    sendJSON(res, runTraceStore().corroborate(sessionId, evidence));
+    /*
+     * The evidence is checked against the runs of the conversation it is claimed to come from, and
+     * the session is required rather than guessed. Without it the check would have nothing to read —
+     * and answering "not backed" because we did not know where to look would be a wrong answer
+     * dressed as a refusal.
+     */
+    if (!sessionId) throw new HttpError(400, 'session_id is required');
+    sendJSON(res, runTraceStore(sessionId).corroborate(evidence));
   });
-
-  router.get('/api/runs/:id', (_req, res, params) => {
-    const result = runTraceStore().read(params.id);
+  /**
+   * One run, in full.
+   *
+   * The session comes from the request, and the run id is still resolved by listing that session's
+   * own directory — so neither an id nor a session id from a URL can name a file outside it. A
+   * workspace-scoped list tells the panel which conversation each row belongs to, and the panel
+   * sends that back; "search every session for this id" is deliberately not implemented, because a
+   * read that begins by guessing which directory to look in is the shape this whole layout removed.
+   */
+  router.get('/api/runs/:id', (req, res, params) => {
+    const sessionId = explicitSessionIdOf(req);
+    if (!sessionId) throw new HttpError(400, 'session_id is required');
+    const result = runTraceStore(sessionId).read(params.id);
     if (!result) throw new HttpError(404, `Run not found: ${params.id}`);
     sendJSON(res, result);
   });
@@ -5011,25 +5137,34 @@ router.get('/api/fs/tree', (req, res) => {
    * Self-review state: drift, calibration, the critic's reading, and what was written to the book.
 
    *
-   * Two sources on purpose:
+   * Three sources on purpose, and the split is the point rather than an implementation detail:
    *
    *   - a live agent's in-memory reports, which are this session's actual last turn;
-   *   - the mirror ON DISK, which is what makes the route useful before any turn has run in this
-   *     process. Calibration is a habit across sessions, so reading it only from a live agent would
-   *     report "nothing yet" on every restart — the exact moment the history matters most.
+   *   - the workspace ledger ON DISK (`.she/reflection/confidence.json`), which is what makes the
+   *     VERDICT useful before any turn has run in this process. Calibration is a habit across
+   *     sessions, so reading it only from a live agent would report "nothing yet" on every restart —
+   *     the exact moment the history matters most. That file holds numbers and nothing else, which is
+   *     why it can be shared at all;
+   *   - this conversation's own samples, under `.she/sessions/<id>/confidence.json`, which carry the
+   *     topic text and are therefore only ever read for the session that asks.
    */
   router.get('/api/reflection', (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const sessionId = url.searchParams.get('session_id') ?? sessions.getActive()?.id ?? null;
     const agent = sessionId ? agents.get(sessionId) : undefined;
     const windowRaw = Number(url.searchParams.get('window'));
-    const report = reflectionMirror().report(
+    const mirror = reflectionMirror(sessionId);
+    const report = mirror.report(
       Number.isFinite(windowRaw) && windowRaw > 0 ? { window: windowRaw } : {},
     );
     sendJSON(res, {
+      /** The shared half: numbers only, newest last. The verdict above comes from this file. */
       root: join(resolve(config.workspace.root), REFLECTION_DIR),
       confidence: report,
-      samples: reflectionMirror().samples().slice(-50),
+      /** This conversation's samples — the only ones that carry topics. Empty without a session. */
+      samples: mirror.samples().slice(-50),
+      samples_root: sessionId ? sessionStateDir(resolve(config.workspace.root), sessionId) : null,
+      ledger: mirror.indexSamples().slice(-50),
       last: agent?.getReflection() ?? null,
       critic: agent?.getCriticReview() ?? null,
     });
@@ -5041,15 +5176,25 @@ router.get('/api/fs/tree', (req, res) => {
    * A write, and the only one in this family — the mirror is a measurement of the agent, not
    * evidence about the user's work, so a reset does not erase anything the user would want to
    * consult later. It exists because a miscalibrated history that was CORRECTED should not keep
-   * being reported, and because a workspace whose confidence file got polluted by an experiment
-   * needs a way back.
+   * being reported, and because a workspace whose ledger got polluted by an experiment or a broken
+   * caller should be recoverable without deleting files by hand.
+   *
+   * It clears the ledger AND the asking conversation's own samples: the verdict comes from the
+   * ledger, so clearing only the per-session file would leave the agent still being told about the
+   * habit it just asked to forget. Other conversations' sample files are theirs and are left alone.
+   *
+   * The asking conversation comes from the body/query/header like every other route. Reading it from
+   * the query alone used to make a `{ session_id }` in the body silently reset the ACTIVE session
+   * instead — the wrong conversation's samples, and an audit line naming the wrong session.
    */
-  router.post('/api/reflection/confidence/reset', (_req, res) => {
-    reflectionMirror().clear();
+  router.post('/api/reflection/confidence/reset', async (req, res) => {
+    const body = await parseBody<{ session_id?: string }>(req).catch(() => ({ session_id: undefined }));
+    const sessionId = sessionIdOf(req, body) || null;
+    reflectionMirror(sessionId).clear();
     // Recorded in the audit trail: forgetting a measurement changes what the agent will be told
     // about itself from now on, and that is a change to its behaviour rather than a display setting.
-    auditSafe({ kind: 'config', change: 'reset_confidence_mirror', note: '重置置信度镜像历史' });
-    sendJSON(res, { ok: true });
+    auditSafe({ kind: 'config', session_id: sessionId ?? undefined, change: 'reset_confidence_mirror', note: '重置置信度镜像历史' });
+    sendJSON(res, { ok: true, session_id: sessionId });
   });
 
   /**

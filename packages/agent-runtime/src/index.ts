@@ -27,8 +27,8 @@ export { Agent, TurnInProgressError } from './agent.js';
 export { getSystemPrompt } from './system-prompt.js';
 export { createKBTools } from './kb-tools.js';
 export { readSkillProfile, writeSkillProfile, type SkillProfile } from './system-prompt.js';
-export { PlanStore, renderPlan, createPlanTools, nextStepOf } from './plan-tools.js';
-export type { Plan, PlanStep, StepStatus, StepFailurePolicy, StepInput, StepUpdate } from './plan-tools.js';
+export { PlanStore, renderPlan, createPlanTools, nextStepOf, planSessions } from './plan-tools.js';
+export type { Plan, PlanStep, StepStatus, StepFailurePolicy, StepInput, StepUpdate, PlanSessionSummary } from './plan-tools.js';
 export {
   analyzeRequest,
   buildRecord,
@@ -131,7 +131,17 @@ export type { MemoEntry } from './memo-tools.js';
  * 会话状态目录：跨会话隔离的唯一路径解析点。见 session-state.ts 里的说明 —— 放在 barrel 上是为了
  * 让"拼会话路径"这件事只有一个入口，谁也别自己 join。
  */
-export { sessionStateDir, isSafeSessionId, encodeSessionId, assertSessionId } from './session-state.js';
+export {
+  sessionStateDir,
+  sessionStateRelDir,
+  sessionsRoot,
+  SESSIONS_REL,
+  decodeSessionId,
+  listSessionIds,
+  isSafeSessionId,
+  encodeSessionId,
+  assertSessionId,
+} from './session-state.js';
 export {
   createSubagentTools,
   composeHandoffPrompt,

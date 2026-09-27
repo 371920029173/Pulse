@@ -59,8 +59,15 @@ const check = (label, cond, detail) => {
 
 const { RunTraceStore, distinctTokens } = await import(pathToFileURL(RUNTRACE_MODULE).href);
 
-const runsDirOf = (root) => join(root, '.she', 'runs');
-const filesOf = (root) => readdirSync(runsDirOf(root)).filter((f) => f.endsWith('.jsonl')).sort();
+/*
+ * 每个 store 都属于一个会话 —— 构造时不给会话 id 就抛错，这是"轨迹不可能跨会话"的落点。
+ * 用同一个假 id，路径断言才写得清楚；`runsDirOf` 把路径写死（不问实现自己把文件放哪了，
+ * 问出来的答案永远"对"）。
+ */
+const SESSION = 'sess-a';
+const storeOn = (root, opts) => new RunTraceStore(root, SESSION, opts);
+const runsDirOf = (root, session = SESSION) => join(root, '.she', 'sessions', session, 'runs');
+const filesOf = (root, session = SESSION) => readdirSync(runsDirOf(root, session)).filter((f) => f.endsWith('.jsonl')).sort();
 const tempDir = (p) => mkdtempSync(join(tmpdir(), p));
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -71,7 +78,7 @@ const dir = tempDir('she-runs-');
 
 console.log('\n1. 一轮一个文件，写完还能再读出来');
 {
-  const store = new RunTraceStore(dir);
+  const store = storeOn(dir);
   const rec = store.begin({
     prompt: '跑一遍测试然后汇报',
     sessionId: 'sess-a',
@@ -117,7 +124,7 @@ console.log('\n1. 一轮一个文件，写完还能再读出来');
 console.log('\n2. 失败、停在人工确认、被中断——三种结局分得清');
 {
   const root = tempDir('she-runs-state-');
-  const store = new RunTraceStore(root);
+  const store = storeOn(root);
 
   const failed = store.begin({ prompt: '连不上的接口' });
   failed.error('connect ECONNREFUSED');
@@ -152,10 +159,10 @@ console.log('\n2. 失败、停在人工确认、被中断——三种结局分�
   removeTempDir(root);
 }
 
-console.log('\n3. 凭据不会在 .she/runs 里留下第二份');
+console.log('\n3. 凭据不会在轨迹文件里留下第二份');
 {
   const root = tempDir('she-runs-secret-');
-  const store = new RunTraceStore(root);
+  const store = storeOn(root);
   const rec = store.begin({ prompt: '带令牌调用' });
   rec.tool({
     name: 'http',
@@ -183,7 +190,7 @@ console.log('\n3. 凭据不会在 .she/runs 里留下第二份');
 console.log('\n4. 截断说明、损坏报告、轮转记账');
 {
   const root = tempDir('she-runs-trunc-');
-  const store = new RunTraceStore(root, { maxField: 300 });
+  const store = storeOn(root, { maxField: 300 });
   const rec = store.begin({ prompt: 'x'.repeat(900) });
   rec.tool({ name: 'shell', result: 'y'.repeat(900), ok: true });
   rec.end({ ok: true });
@@ -197,7 +204,7 @@ console.log('\n4. 截断说明、损坏报告、轮转记账');
   removeTempDir(root);
 
   const badRoot = tempDir('she-runs-bad-');
-  const badStore = new RunTraceStore(badRoot);
+  const badStore = storeOn(badRoot);
   const bad = badStore.begin({ prompt: '正常一轮' });
   bad.tool({ name: 'shell', result: 'ok', ok: true });
   // Exactly the shape a process killed mid-append leaves behind.
@@ -209,7 +216,7 @@ console.log('\n4. 截断说明、损坏报告、轮转记账');
   // A BOM is what a Windows editor leaves behind; it must not read as a damaged file, because a
   // warning that is always on is a warning nobody reads.
   const bomRoot = tempDir('she-runs-bom-');
-  const bomStore = new RunTraceStore(bomRoot);
+  const bomStore = storeOn(bomRoot);
   const bom = bomStore.begin({ prompt: '带 BOM' });
   bom.end({ ok: true });
   writeFileSync(bom.path(), '\uFEFF' + readFileSync(bom.path(), 'utf8'), 'utf8');
@@ -220,7 +227,7 @@ console.log('\n4. 截断说明、损坏报告、轮转记账');
   removeTempDir(bomRoot);
 
   const capRoot = tempDir('she-runs-cap-');
-  const capStore = new RunTraceStore(capRoot, { keep: 3 });
+  const capStore = storeOn(capRoot, { keep: 3 });
   const newest = [];
   for (let i = 0; i < 6; i++) {
     const r = capStore.begin({ prompt: `第 ${i} 轮` });
@@ -237,30 +244,40 @@ console.log('\n4. 截断说明、损坏报告、轮转记账');
   removeTempDir(capRoot);
 }
 
-console.log('\n5. 读取的边界：越界 id、空目录、会话过滤');
+console.log('\n5. 读取的边界：越界 id、空目录、跨会话拿不到');
 {
   const root = tempDir('she-runs-safe-');
-  const store = new RunTraceStore(root);
-  store.begin({ prompt: '会话 A', sessionId: 'a' }).end({ ok: true });
-  store.begin({ prompt: '会话 B', sessionId: 'b' }).end({ ok: true });
+  const store = storeOn(root);
+  store.begin({ prompt: '会话 A' }).end({ ok: true });
+  const other = new RunTraceStore(root, 'sess-b');
+  other.begin({ prompt: '会话 B' }).end({ ok: true });
 
   check('不存在的 id 返回 null（不是抛错，也不是别的文件）',
     store.read('run-0000-nope') === null, null);
   check('URL 传来的 id 不能走出目录',
     store.read('../../../etc/passwd') === null && store.read('..\\..\\secret') === null, null);
-  check('按会话过滤', store.list({ sessionId: 'a' }).length === 1, JSON.stringify(store.list({ sessionId: 'a' })));
-  check('查不到会话就是空，而不是退回全部', store.list({ sessionId: 'nobody' }).length === 0, null);
-  check('最新的一轮排在最前面', store.list()[0].prompt === '会话 B', store.list()[0].prompt);
+
+  /*
+   * 这一条以前是"按 session_id 过滤"：两个会话的轨迹在同一个文件里，过滤是唯一的分账手段。
+   * 现在断言的是结构：两份文件在两个目录里，而且对方的 id 在本地目录里根本不存在。
+   */
+  check('两个会话的轨迹在两个目录里',
+    store.list().length === 1 && other.list().length === 1
+      && store.list()[0].prompt === '会话 A' && other.list()[0].prompt === '会话 B', null);
+  check('拿对方的 run id 在自己会话里读 → 找不到（不是读到别人的）',
+    store.read(other.list()[0].id) === null && other.read(store.list()[0].id) === null, null);
+  check('工作区级 runs 目录彻底不存在了（没有"共用的那份"可退回）',
+    !existsSync(join(root, '.she', 'runs')), join(root, '.she', 'runs'));
   check('目录没建过时返回空列表而不是抛错',
-    new RunTraceStore(join(root, 'never-created')).list().length === 0, null);
+    storeOn(join(root, 'never-created')).list().length === 0, null);
   removeTempDir(root);
 }
 
 console.log('\n6. 证据核对：说得出"这个会话没跑过 shell"');
 {
   const root = tempDir('she-runs-corr-');
-  const store = new RunTraceStore(root);
-  const rec = store.begin({ prompt: '读一个文件', sessionId: 'sess-c' });
+  const store = storeOn(root);
+  const rec = store.begin({ prompt: '读一个文件' });
   rec.tool({ name: 'fs_read', args: '{"path":"src/fixtures/alpha.ts"}', result: 'export const alpha = 1', ok: true });
   rec.end({ ok: true });
 
@@ -268,24 +285,37 @@ console.log('\n6. 证据核对：说得出"这个会话没跑过 shell"');
    * The case that matters: evidence invented wholesale. `shell:` names a tool, so the prefix is
    * read as a claim about which tool produced the evidence — and this conversation never ran one.
    */
-  const invented = store.corroborate('sess-c', 'shell: pnpm test → 12 passed');
+  const invented = store.corroborate('shell: pnpm test → 12 passed');
   check('点名了没跑过的工具 → 不认这条证据',
     invented.backed === false && /没有调用过 `shell`/.test(invented.reason), invented.reason);
 
-  const real = store.corroborate('sess-c', 'fs_read: fixtures/alpha.ts → 文件读到了');
+  const real = store.corroborate('fs_read: fixtures/alpha.ts → 文件读到了');
   check('点名跑过的工具、且内容出现在轨迹里 → 认', real.backed === true, real.reason);
 
   check('没有任何轨迹的会话 → 不假装有支持',
-    store.corroborate('nobody', 'shell: ls').backed === false, null);
+    new RunTraceStore(root, 'sess-nobody').corroborate('shell: ls').backed === false, null);
   check('没有可核对内容的短句 → 不认（不能因为"没什么好查"就放行）',
-    store.corroborate('sess-c', '完成').backed === false, null);
+    store.corroborate('完成').backed === false, null);
 
   /*
    * Deliberately lenient in one direction: an honest report that paraphrases must not be blocked.
    * So `corroborate` is about catching INVENTION, and the caller acts on "nothing is backed".
    */
   check('核对是"找得到就算支持"，不核对措辞是否逐字一致',
-    store.corroborate('sess-c', 'fs_read: 读了 alpha.ts 相关的东西').backed === true, null);
+    store.corroborate('fs_read: 读了 alpha.ts 相关的东西').backed === true, null);
+
+  /*
+   * 跨会话的证据在这里只有一个结果：不认。不是因为它"识别出"那是别人的轨迹，而是因为本会话目录里
+   * 没有它 —— 识别是一次判断，路径不存在才是保证。两个会话都写、只有一个能认，差别才确实来自目录。
+   */
+  const other = new RunTraceStore(root, 'sess-other');
+  other.begin({ prompt: '另一个会话跑过 shell' }).end({ ok: true });
+  const r2 = other.begin({ prompt: '另一个会话的第二步' });
+  r2.tool({ name: 'shell', args: '{"cmd":"pnpm test"}', result: 'exit code: 0', ok: true });
+  r2.end({ ok: true });
+  check('另一个会话跑过 shell，也不改变本会话的核对结果',
+    store.corroborate('shell: pnpm test → 12 passed').backed === false
+      && other.corroborate('shell: pnpm test → 12 passed').backed === true, null);
 
   const toks = distinctTokens('exit code: 0, tests passed for fixtures/alpha.test.ts');
   check('常见词不进候选（否则核对形同虚设）',
@@ -367,14 +397,18 @@ try {
    * Write with the real recorder and read over HTTP. This is the assertion that the two halves
    * agree on a FORMAT — the server reads the file the recorder writes, not a shape of its own
    * invention that happens to look similar.
+   *
+   * `sess-live` is used everywhere below, and it has to be: the runs live in that conversation's
+   * directory, so a request without a session id is a request about whatever conversation the
+   * server considers active — which is a different question.
    */
-  const writer = new RunTraceStore(workspace);
-  const live = writer.begin({ prompt: '线上写一轮', sessionId: 'sess-live', model: 'm-live' });
+  const writer = new RunTraceStore(workspace, 'sess-live');
+  const live = writer.begin({ prompt: '线上写一轮', model: 'm-live' });
   live.tool({ name: 'shell', args: '{"cmd":"echo hi"}', result: 'hi', ms: 5, ok: true });
   live.tool({ name: 'shell', args: '{"cmd":"exit 1"}', result: 'exit code: 1', ms: 7, ok: false, failure: 'nonzero_exit' });
   live.awaiting('confirm', { ticketId: 'tk-live', tool: 'shell', summary: '要删东西' });
 
-  const listed = await (await api('/api/runs')).json();
+  const listed = await (await api('/api/runs?session_id=sess-live')).json();
   check('服务读得到 recorder 写下的那一轮',
     listed.runs.length === 1 && listed.runs[0].id === live.id,
     JSON.stringify(listed).slice(0, 240));
@@ -384,7 +418,7 @@ try {
     listed.runs[0].toolCount === 2 && listed.runs[0].failedTools === 1,
     JSON.stringify(listed.runs[0]));
 
-  const one = await (await api(`/api/runs/${live.id}`)).json();
+  const one = await (await api(`/api/runs/${live.id}?session_id=sess-live`)).json();
   check('GET /api/runs/:id 返回完整事件序列',
     Array.isArray(one.events) && one.events.map((e) => e.kind).join(',') === 'start,tool,tool,confirm',
     (one.events ?? []).map((e) => e.kind).join(','));
@@ -397,15 +431,39 @@ try {
   check('损坏行数随详情一起报告', typeof one.skipped === 'number', String(one.skipped));
 
   check('不存在的 id 是 404（不是空对象）',
-    (await api('/api/runs/run-does-not-exist')).status === 404, null);
+    (await api('/api/runs/run-does-not-exist?session_id=sess-live')).status === 404, null);
   check('越界 id 也是 404，不读目录外的文件',
-    (await api('/api/runs/..%2F..%2Fsecret')).status === 404, null);
+    (await api('/api/runs/..%2F..%2Fsecret?session_id=sess-live')).status === 404, null);
+
+  /*
+   * 跨会话：显式点名另一个会话时，本会话的 run id 在那里找不到。这一条是"服务端不会拿一个 id 去
+   * 到处猜目录"的钉子 —— 猜是能猜到的，那才是要防的。
+   */
+  const other = new RunTraceStore(workspace, 'sess-elsewhere');
+  other.begin({ prompt: '别的会话跑的一轮' }).end({ ok: true });
+  check('拿本会话的 run id 去另一个会话里读 → 404',
+    (await api(`/api/runs/${live.id}?session_id=sess-elsewhere`)).status === 404, null);
+  check('缺少 session_id 的单轮详情 → 400（不猜一个会话去读）',
+    (await api(`/api/runs/${live.id}`)).status === 400, null);
 
   check('?session_id= 只回该会话的轨迹',
     (await (await api('/api/runs?session_id=sess-live')).json()).runs.length === 1, null);
   check('?session_id= 查不到时返回空，而不是退回全部',
     (await (await api('/api/runs?session_id=nobody')).json()).runs.length === 0, null);
-  check('?limit=1 只回一条', (await (await api('/api/runs?limit=1')).json()).runs.length === 1, null);
+  check('?limit=1 只回一条', (await (await api('/api/runs?limit=1&session_id=sess-live')).json()).runs.length === 1, null);
+
+  /*
+   * 跨会话是显式动作：默认（不带参数）只看当前会话，`scope=workspace` 才跨目录读，并且每一行都带
+   * 自己所属的会话 id —— 面板要靠它把详情请求发回正确的目录。
+   */
+  const wide = await (await api('/api/runs?scope=workspace')).json();
+  check('scope=workspace 才跨会话，且每行标明属于哪个会话',
+    wide.scope === 'workspace' && wide.runs.length === 2
+      && wide.runs.every((r) => typeof r.session_id === 'string')
+      && wide.runs.map((r) => r.session_id).sort().join(',') === 'sess-elsewhere,sess-live',
+    JSON.stringify(wide.runs.map((r) => r.session_id)));
+  check('默认不带 scope 时不跨会话（隐私视图是默认的）',
+    (await (await api('/api/runs?session_id=sess-live')).json()).scope === 'session', null);
 
   /*
    * corroborate is a separate route and must be registered BEFORE `/api/runs/:id`, or it is read
@@ -419,8 +477,11 @@ try {
   const corrBad = await (await api(`/api/runs/corroborate?session_id=sess-live&evidence=${encodeURIComponent('git: push 成功')}`)).json();
   check('没跑过的工具 → 不认（这正是要拦的"编造证据"）',
     corrBad.backed === false && /git/.test(corrBad.reason), JSON.stringify(corrBad));
+  const corrElsewhere = await (await api(`/api/runs/corroborate?session_id=sess-elsewhere&evidence=${encodeURIComponent('shell: echo hi')}`)).json();
+  check('同一条证据换一个会话核对 → 不认（它只对本会话的轨迹成立）',
+    corrElsewhere.backed === false, JSON.stringify(corrElsewhere));
   check('缺 evidence 返回 400（而不是当成"无证据可查"放行）',
-    (await api('/api/runs/corroborate')).status === 400, null);
+    (await api('/api/runs/corroborate?session_id=sess-live')).status === 400, null);
 
   /*
    * Damage over HTTP: a half-line must show up as `skipped`, because a count the API never
@@ -428,7 +489,7 @@ try {
    */
   appendFileSync(live.path(), '{"seq":99,"ts":"2026-01-01T00:00:00.000Z","ki', 'utf8');
   check('损坏的行通过 skipped 报告出来',
-    (await (await api(`/api/runs/${live.id}`)).json()).skipped === 1, null);
+    (await (await api(`/api/runs/${live.id}?session_id=sess-live`)).json()).skipped === 1, null);
 
   /*
    * Read-only. A trace a client can rewrite is not evidence — the whole reason this store exists.
@@ -437,14 +498,14 @@ try {
     post('/api/runs', {}),
     api('/api/runs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}' }),
     api('/api/runs', { method: 'DELETE' }),
-    api(`/api/runs/${live.id}`, { method: 'DELETE' }),
+    api(`/api/runs/${live.id}?session_id=sess-live`, { method: 'DELETE' }),
     post('/api/runs/corroborate', {}),
   ]);
   check('没有写入 / 修改 / 清空轨迹的接口',
     writes.every((r) => r.status === 404 || r.status === 405),
     writes.map((r) => r.status).join(', '));
   check('被拒的写入没有改动文件',
-    (await (await api(`/api/runs/${live.id}`)).json()).events.length === 4, null);
+    (await (await api(`/api/runs/${live.id}?session_id=sess-live`)).json()).events.length === 4, null);
 } catch (err) {
   check('运行轨迹端点可用', false, err.message);
 }
@@ -470,7 +531,7 @@ console.log('\n8. 接线与只读界面');
    * is the failure this whole file exists to prevent.
    */
   check('每轮开始就开一份轨迹（带上提问、会话、模型、工具清单）',
-    /private beginRun\([\s\S]{0,1400}?this\.runTrace\.begin\(/.test(agentSrc), null);
+    /private beginRun\([\s\S]{0,1400}?this\.runTrace\?\.begin\(/.test(agentSrc), null);
   check('工具调用在同一个作用域里记录（名字/参数/结果/耗时/分类都在）',
     /runRecorder\?\.tool\(\{[\s\S]{0,400}?name,\s*args:[\s\S]{0,200}?ms:[\s\S]{0,120}?ok:/.test(agentSrc), null);
   check('等确认时记录，并且那一轮不会就此收尾',
@@ -501,6 +562,16 @@ console.log('\n8. 接线与只读界面');
     serverSrc.indexOf("'/api/runs/corroborate'") < serverSrc.indexOf("'/api/runs/:id'"), null);
   check('轨迹目录跟着工作区走（换项目不会混在一起）',
     /function runTraceStore[\s\S]{0,500}?config\.workspace\.root/.test(serverSrc), null);
+  /*
+   * 隔离的接线断言：轨迹的落点必须是"这个会话的目录"，而不是工作区。这一条如果松掉，上面所有关于
+   * 两个目录的断言都还在，但真实运行写出来的会是一份共用的 —— 这正是要看住的那种破法。
+   */
+  check('agent 把轨迹写进本会话自己的目录（无会话就不写）',
+    /new RunTraceStore\(config\.workspace\.root, this\.sessionId\)/.test(agentSrc), null);
+  check('server 的单轮详情必须带会话，不从 id 猜目录',
+    /\/api\/runs\/:id'[\s\S]{0,600}?session_id is required/.test(serverSrc), null);
+  check('跨会话查看是显式参数（scope=workspace），默认是隐私视图',
+    /scope === 'workspace'/.test(serverSrc) && /scope === 'session' && !sessionId/.test(serverSrc), null);
 
   check('界面用 GET /api/runs 取列表', /\/api\/runs/.test(uiSrc), null);
   check('界面面板只读：没有 POST / PUT / DELETE 调用',
@@ -508,6 +579,11 @@ console.log('\n8. 接线与只读界面');
   check('界面把损坏行数展示出来（和审计面板一致）', /skipped/.test(uiSrc), null);
   check('界面把"停在等人工"当成一个独立状态显示',
     /paused:/.test(uiSrc) && /等人工/.test(uiSrc), null);
+  check('面板默认只看本会话，跨会话要点一下',
+    /useState<'session' \| 'workspace'>\('session'\)/.test(uiSrc), null);
+  check('详情请求带上该行所属的会话（否则服务端无处去读）',
+    /\/api\/runs\/\$\{encodeURIComponent\(selected\)\}\$\{q\}/.test(uiSrc)
+      && /find\(\(r\) => r\.id === selected\)\?\.session_id/.test(uiSrc), null);
   check('面板在 App.tsx 里接上了（命令面板能打开）',
     /RunTracePanel/.test(appSrc) && /打开运行轨迹/.test(appSrc), null);
 }

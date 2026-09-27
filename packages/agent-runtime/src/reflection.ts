@@ -32,9 +32,10 @@
  * judgement call, and touching one IS a violation — so that signal is major, and it fires on
  * evidence (the excluded object appears in an action) rather than on a score.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { sessionStateDir } from './session-state.js';
 import type { Constraint } from './preflight.js';
 import { isWorthRemembering } from './errorbook.js';
 
@@ -564,7 +565,31 @@ export interface ConfidenceStoreFile {
   samples: ConfidenceSample[];
 }
 
+/**
+ * One sample as it appears in the workspace-wide ledger: numbers only.
+ *
+ * The `at` field is a timestamp, not text — it is what makes `window` mean the same thing in both
+ * files. Everything that could carry a sentence (`topic`, `runId`) is deliberately absent, and the
+ * writer builds this object key by key rather than by deleting keys from a full sample, because
+ * "forgot to delete one field" is exactly the mistake that would quietly put another conversation's
+ * task text into a file every conversation reads.
+ */
+export interface IndexedSample {
+  at: string;
+  claimed: number;
+  attempted: number;
+  succeeded: number;
+  clamped: boolean;
+}
+
+export interface ConfidenceIndexFile {
+  schema_version: number;
+  samples: IndexedSample[];
+}
+
 export const CONFIDENCE_SCHEMA = 1;
+/** The workspace ledger's schema, versioned separately: it is a different file with a different shape. */
+export const CONFIDENCE_INDEX_SCHEMA = 1;
 export const REFLECTION_DIR = join('.she', 'reflection');
 
 function clamp01(n: number): number {
@@ -573,57 +598,102 @@ function clamp01(n: number): number {
 }
 
 /**
- * The confidence mirror, on disk.
+ * The confidence mirror, on disk — in two files, because its two halves have different owners.
  *
- * File-backed rather than in-memory because the whole point is a habit observed ACROSS sessions —
- * a bias that resets on every restart is invisible, and the restart is exactly when the agent would
- * otherwise start with a clean slate and the same optimism.
+ *   - `.she/sessions/<sessionId>/confidence.json` — this conversation's samples, with the topic text.
+ *     Readable only from inside that conversation, like its plans and its notes.
+ *   - `.she/reflection/confidence.json` — the same samples reduced to numbers, workspace-wide. This is
+ *     what the VERDICT comes from, and it is the reason the mirror still works across restarts.
+ *
+ * The split exists because the old single file forced a choice between two things that are both
+ * required: a shared file is the only way to observe a habit across sessions — a bias that resets on
+ * every restart is invisible, and the restart is exactly when the agent would otherwise start with a
+ * clean slate and the same optimism — but a shared file is also a file every conversation can read
+ * in full, and this one held the task text of every run in the workspace. Numbers can be shared;
+ * sentences cannot. So the shared half keeps only what the arithmetic needs.
+ *
+ * What the split costs, stated rather than hidden: the per-topic breakdown (`worst`) can only be
+ * computed over THIS conversation's samples, because a topic label is user text. The overall verdict
+ * is a cross-session habit; the list of worst topics is a reading of the current conversation.
  *
  * Written atomically (tmp + rename) for the same reason as `.she/preflight/*`: a truncated JSON file
  * would take the entire history with it on the next read, and this file's whole value is its history.
  */
 export class ConfidenceMirror {
   private cache: ConfidenceSample[] | null = null;
+  private indexCache: IndexedSample[] | null = null;
+  private mineStamp: string | null = null;
+  private indexStamp: string | null = null;
+
+  /**
+   * A cheap identity for a file, used to notice that someone else rewrote it.
+   *
+   * There is more than one mirror over the same paths: the server keeps its own per session (so a
+   * panel poll does not re-read a file on every tick) while each `Agent` owns another. Both write.
+   * Without this, a reset served by one instance left the other one still reporting the numbers it
+   * had in memory — the file was cleared and the screen kept showing the old verdict. One stat per
+   * read is the difference between a cache and a stale copy.
+   */
+  private static stamp(file: string): string {
+    try {
+      const st = statSync(file);
+      return `${st.mtimeMs}:${st.size}`;
+    } catch {
+      return 'missing';
+    }
+  }
 
   constructor(
     private workspaceRoot: string,
+    /**
+     * The conversation whose samples are readable here. Null for an agent built without one, which
+     * can still read and extend the numeric ledger but has no per-conversation file to read or write.
+     */
+    private sessionId: string | null = null,
     private keep = DEFAULT_KEEP,
   ) {}
 
-  private file(): string {
+  /** The workspace ledger — the numbers, with no text. What `report()` reads its verdict from. */
+  private indexFile(): string {
     return join(this.workspaceRoot, REFLECTION_DIR, 'confidence.json');
   }
 
-  /** Read from disk, tolerating a missing or damaged file. */
+  /** This conversation's own samples, with topics. Null when there is no conversation. */
+  private mineFile(): string | null {
+    return this.sessionId ? join(sessionStateDir(this.workspaceRoot, this.sessionId), 'confidence.json') : null;
+  }
+
+  /**
+   * This conversation's samples, newest last.
+   *
+   * Empty rather than an error when there is no session or no file: the API route asks for this to
+   * render a list, and "nothing recorded here yet" is a normal state on a fresh conversation.
+   */
   samples(): ConfidenceSample[] {
-    if (this.cache) return this.cache;
-    try {
-      if (!existsSync(this.file())) {
-        this.cache = [];
-        return this.cache;
-      }
-      const parsed = JSON.parse(readFileSync(this.file(), 'utf8')) as Partial<ConfidenceStoreFile>;
-      const list = Array.isArray(parsed?.samples) ? parsed.samples : [];
-      // Re-validated rather than trusted: this file outlives the version that wrote it, and a
-      // hand-edited or half-written entry must not become a NaN in every average afterwards.
-      this.cache = list
-        .filter((s) => typeof s?.claimed === 'number')
-        .map((s) => ({
-          at: String(s.at ?? ''),
-          claimed: clamp01(Number(s.claimed)),
-          attempted: Math.max(0, Number(s.attempted) || 0),
-          succeeded: Math.max(0, Number(s.succeeded) || 0),
-          clamped: s.clamped === true,
-          topic: s.topic ? String(s.topic) : undefined,
-          runId: s.runId ? String(s.runId) : undefined,
-        }));
-    } catch {
+    const file = this.mineFile();
+    if (!file) {
       this.cache = [];
+      this.mineStamp = 'missing';
+      return this.cache;
     }
+    const stamp = ConfidenceMirror.stamp(file);
+    if (this.cache && this.mineStamp === stamp) return this.cache;
+    this.mineStamp = stamp;
+    this.cache = readSamplesFile(file).samples;
     return this.cache;
   }
 
-  /** Append one observation, and persist. */
+  /** The workspace ledger, newest last. Numbers only — there is no text in this file to return. */
+  indexSamples(): IndexedSample[] {
+    const file = this.indexFile();
+    const stamp = ConfidenceMirror.stamp(file);
+    if (this.indexCache && this.indexStamp === stamp) return this.indexCache;
+    this.indexStamp = stamp;
+    this.indexCache = readSamplesFile(file).samples.map(toIndexedSample);
+    return this.indexCache;
+  }
+
+  /** Append one observation, and persist both halves. */
   observe(sample: {
     claimed: number;
     attempted: number;
@@ -646,15 +716,27 @@ export class ConfidenceMirror {
       runId: sample.runId,
     };
 
-    const list = [...this.samples(), full].slice(-this.keep);
-    this.cache = list;
-    this.save(list);
+    /*
+     * The ledger first, and through `toIndexedSample` — the one place that decides which fields
+     * cross a session boundary. The full sample (with its topic) is written only under the session's
+     * own directory, and only when there is a session to write it under.
+     */
+    const indexed = [...this.indexSamples(), toIndexedSample(full)].slice(-this.keep);
+    this.save(this.indexFile(), { schema_version: CONFIDENCE_INDEX_SCHEMA, samples: indexed });
+    this.indexCache = indexed;
+    this.indexStamp = ConfidenceMirror.stamp(this.indexFile());
+
+    const mine = this.mineFile();
+    if (mine) {
+      const list = [...this.samples(), full].slice(-this.keep);
+      this.save(mine, { schema_version: CONFIDENCE_SCHEMA, samples: list });
+      this.cache = list;
+      this.mineStamp = ConfidenceMirror.stamp(mine);
+    }
     return full;
   }
 
-  private save(list: ConfidenceSample[]): void {
-    const payload: ConfidenceStoreFile = { schema_version: CONFIDENCE_SCHEMA, samples: list };
-    const target = this.file();
+  private save(target: string, payload: ConfidenceStoreFile | ConfidenceIndexFile): void {
     try {
       mkdirSync(dirname(target), { recursive: true });
       const tmp = join(dirname(target), `.confidence-${randomUUID().slice(0, 8)}.tmp`);
@@ -665,20 +747,34 @@ export class ConfidenceMirror {
     }
   }
 
-  /** Forget everything. Used by the UI's "reset calibration" and by tests. */
+  /**
+   * Forget everything: the ledger, and this conversation's samples with it.
+   *
+   * The ledger is the half the verdict comes from, so clearing only the session file would leave the
+   * agent still being told about the habit it just asked to forget. The other conversations' sample
+   * files are left alone: they hold their own text and are theirs to clear.
+   */
   clear(): void {
+    this.save(this.indexFile(), { schema_version: CONFIDENCE_INDEX_SCHEMA, samples: [] });
+    this.indexCache = [];
+    this.indexStamp = ConfidenceMirror.stamp(this.indexFile());
+    const mine = this.mineFile();
     this.cache = [];
-    this.save([]);
+    this.mineStamp = 'missing';
+    if (mine) {
+      this.save(mine, { schema_version: CONFIDENCE_SCHEMA, samples: [] });
+      this.mineStamp = ConfidenceMirror.stamp(mine);
+    }
   }
 
   /**
-   * The bias, over the most recent `window` samples.
+   * The bias, over the most recent `window` samples of the workspace ledger.
    *
    * A window rather than everything ever recorded: a habit that was corrected should stop being
    * reported, and an all-time average would keep the old bias alive forever.
    */
   report(opts: { window?: number } = {}): CalibrationReport {
-    const all = this.samples();
+    const all = this.indexSamples();
     const list = opts.window ? all.slice(-opts.window) : all;
     if (list.length < MIN_SAMPLES) {
       return {
@@ -688,7 +784,7 @@ export class ConfidenceMirror {
         bias: 0,
         bucket: 'unknown',
         clampRate: list.length ? list.filter((s) => s.clamped).length / list.length : 0,
-        worst: [],
+        worst: topicsOf(this.samples(), opts.window),
         advice: null,
       };
     }
@@ -707,31 +803,103 @@ export class ConfidenceMirror {
       bias >= BIAS_THRESHOLD ? 'overconfident' : bias <= -BIAS_THRESHOLD ? 'underconfident' : 'calibrated';
     const clampRate = list.filter((s) => s.clamped).length / list.length;
 
-    const rate = (xs: ConfidenceSample[]) => {
-      const withTools = xs.filter((s) => s.attempted > 0);
-      // No measurable run in this topic: the claim is all we have, so the bias is 0 rather than
-      // unknown — the topic simply cannot be reported as the worst offender.
-      if (!withTools.length) return mean(xs.map((s) => s.claimed));
-      return mean(withTools.map((s) => Math.min(1, s.succeeded / s.attempted)));
+    return {
+      samples: list.length,
+      meanClaimed,
+      actualRate,
+      bias,
+      bucket,
+      clampRate,
+      // From this conversation's samples, not from the ledger — a topic IS the task text, so it is
+      // the one thing that must not cross a session boundary. See the class comment.
+      worst: topicsOf(this.samples(), opts.window),
+      advice: calibrationAdvice(bucket, bias, list.length, clampRate),
     };
-    const byTopic = new Map<string, ConfidenceSample[]>();
-    for (const s of list) {
-      if (!s.topic) continue;
-      byTopic.set(s.topic, [...(byTopic.get(s.topic) ?? []), s]);
-    }
-    const worst = [...byTopic.entries()]
-      .filter(([, xs]) => xs.length >= MIN_SAMPLES)
-      .map(([topic, xs]) => ({
-        topic,
-        samples: xs.length,
-        bias: mean(xs.map((s) => s.claimed)) - rate(xs),
-      }))
-      // Worst first by absolute distance, so an over-confident topic and an under-confident one are
-      // both surfaced — the mirror is about calibration, not about pessimism.
-      .sort((a, b) => Math.abs(b.bias) - Math.abs(a.bias))
-      .slice(0, 3);
+  }
+}
 
-    return { samples: list.length, meanClaimed, actualRate, bias, bucket, clampRate, worst, advice: calibrationAdvice(bucket, bias, list.length, clampRate) };
+/**
+ * The topics this conversation is worst calibrated on, worst first.
+ *
+ * Kept separate from the verdict because they come from different files: the verdict is the
+ * workspace ledger (numbers), this is the session's own samples (text). Taking `window` from the
+ * same option keeps the two halves describing the same stretch of time.
+ */
+function topicsOf(all: ConfidenceSample[], window?: number): CalibrationReport['worst'] {
+  const list = window ? all.slice(-window) : all;
+  const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  const rate = (xs: ConfidenceSample[]) => {
+    const withTools = xs.filter((s) => s.attempted > 0);
+    // No measurable run in this topic: the claim is all we have, so the bias is 0 rather than
+    // unknown — the topic simply cannot be reported as the worst offender.
+    if (!withTools.length) return mean(xs.map((s) => s.claimed));
+    return mean(withTools.map((s) => Math.min(1, s.succeeded / s.attempted)));
+  };
+  const byTopic = new Map<string, ConfidenceSample[]>();
+  for (const s of list) {
+    if (!s.topic) continue;
+    byTopic.set(s.topic, [...(byTopic.get(s.topic) ?? []), s]);
+  }
+  return [...byTopic.entries()]
+    .filter(([, xs]) => xs.length >= MIN_SAMPLES)
+    .map(([topic, xs]) => ({
+      topic,
+      samples: xs.length,
+      bias: mean(xs.map((s) => s.claimed)) - rate(xs),
+    }))
+    // Worst first by absolute distance, so an over-confident topic and an under-confident one are
+    // both surfaced — the mirror is about calibration, not about pessimism.
+    .sort((a, b) => Math.abs(b.bias) - Math.abs(a.bias))
+    .slice(0, 3);
+}
+
+/**
+ * The only field-level translation into the shared ledger.
+ *
+ * Written as a constructor of exactly the five numeric fields, never as a copy minus `topic`: a
+ * spread with one name deleted is a line that a later field addition silently defeats, and the file
+ * it writes is readable from every conversation in the workspace.
+ */
+function toIndexedSample(s: ConfidenceSample): IndexedSample {
+  return {
+    at: s.at,
+    claimed: clamp01(s.claimed),
+    attempted: Math.max(0, Math.floor(s.attempted) || 0),
+    succeeded: Math.max(0, Math.floor(s.succeeded) || 0),
+    clamped: s.clamped === true,
+  };
+}
+
+/**
+ * Read a samples file, tolerating a missing, damaged or hand-edited one.
+ *
+ * Re-validated rather than trusted in both directions: these files outlive the version that wrote
+ * them, and a half-written entry must not become a NaN in every average afterwards. Entries are
+ * rebuilt field by field, so a key this version does not know about is DROPPED rather than carried —
+ * which is also what makes the shared ledger safe to read from a workspace where an older build left
+ * topic text in it: the text is ignored here and gone from the file the first time anything is
+ * appended.
+ */
+function readSamplesFile(file: string): { samples: ConfidenceSample[] } {
+  try {
+    if (!existsSync(file)) return { samples: [] };
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<ConfidenceStoreFile>;
+    const list = Array.isArray(parsed?.samples) ? parsed.samples : [];
+    return {
+      samples: list
+        .filter((s) => typeof s?.claimed === 'number')
+        .map((s) => ({
+          at: String(s.at ?? ''),
+          claimed: clamp01(Number(s.claimed)),
+          attempted: Math.max(0, Number(s.attempted) || 0),
+          succeeded: Math.max(0, Number(s.succeeded) || 0),
+          clamped: s.clamped === true,
+          topic: s.topic ? String(s.topic) : undefined,
+          runId: s.runId ? String(s.runId) : undefined,
+        })),
+    };
+  } catch {
+    return { samples: [] };
   }
 }
 
@@ -753,7 +921,9 @@ export function renderCalibration(r: CalibrationReport): string {
   return [
     `置信度镜像：${head}（样本 ${r.samples}，自评均值 ${r.meanClaimed.toFixed(2)}，实际成功率 ${r.actualRate.toFixed(2)}）`,
     r.advice,
-    ...(r.worst.length ? [`偏差最大的领域：${r.worst.map((w) => `${w.topic}(${w.bias >= 0 ? '+' : ''}${w.bias.toFixed(2)})`).join('、')}`] : []),
+    // 样本数与均值来自跨会话的数字账，领域名只能来自本会话 —— 标出来，否则读的人会以为"偏差最大的领域"
+    // 也是全局的，而它只可能是一个会话里的任务文本。
+    ...(r.worst.length ? [`偏差最大的领域（本会话）：${r.worst.map((w) => `${w.topic}(${w.bias >= 0 ? '+' : ''}${w.bias.toFixed(2)})`).join('、')}`] : []),
   ].join('\n');
 }
 

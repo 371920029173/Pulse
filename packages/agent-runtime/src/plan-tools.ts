@@ -3,7 +3,7 @@ import { join, resolve, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ToolDefinition } from '@she/shared';
 import { highFindings, renderGuardrailRefusal, scanOutbound } from './guardrail.js';
-import { sessionStateDir } from './session-state.js';
+import { sessionStateDir, listSessionIds } from './session-state.js';
 
 export interface KBToolSetLike {
   definitions: ToolDefinition[];
@@ -157,6 +157,7 @@ function findCycle(steps: PlanStep[]): string | null {
 
 export class PlanStore {
   private filePath: string;
+
   /**
    * 这个 store 属于哪个会话。
    *
@@ -169,11 +170,20 @@ export class PlanStore {
   readonly directory: string;
 
   constructor(workspaceRoot: string, sessionId: string) {
-    const dir = sessionStateDir(workspaceRoot, sessionId);
-    mkdirSync(dir, { recursive: true });
-    this.directory = dir;
-    this.filePath = join(dir, 'plans.json');
+    this.filePath = PlanStore.fileFor(workspaceRoot, sessionId);
+    this.directory = dirname(this.filePath);
+    mkdirSync(this.directory, { recursive: true });
     this.sessionId = sessionId;
+  }
+
+  /**
+   * 某个会话的计划文件在哪 —— 只报路径，不建目录。
+   *
+   * 给"列出哪些会话有计划"用：那个动作要从目录名出发去够别人的目录，而路径形状（含文件名）只在这
+   * 一处拼，构造器也走它 —— 两处各拼一次，就会有一处忘了校验。
+   */
+  static fileFor(workspaceRoot: string, sessionId: string): string {
+    return join(sessionStateDir(workspaceRoot, sessionId), 'plans.json');
   }
 
   private load(): Plan[] {
@@ -489,6 +499,49 @@ export class PlanStore {
     this.save(plans);
     return plan;
   }
+}
+
+/**
+ * 哪些会话里有计划 —— 给"看别的会话"的选择器用的候选清单。
+ *
+ * 为什么需要它：计划从 2026-09-27 起是**会话私有**的（`.she/sessions/<id>/plans.json`），于是"长任务
+ * 一开新对话就忘掉自己"这件事没了，但代价是**你在当前会话里看不到别的会话的计划**。把各会话的计划合并
+ * 成一份清单是错的：那正是"上一个对话的计划看起来像现在正在跟的计划"。所以给的是清单，用户自己点开。
+ *
+ * 只数自己的目录，不读别的工作区。**列目录不是读内容**：返回的是会话 id 和计数，用户点开之前一行计划
+ * 正文都不会离开那个会话的目录。解不出 id 的目录名直接跳过（见 `listSessionIds`）。
+ */
+export interface PlanSessionSummary {
+  session_id: string;
+  plans: number;
+  open: number;
+  /** 这些计划里最新的一次改动；无时间戳（旧文件）时为 null。 */
+  updated_at: string | null;
+}
+
+export function planSessions(workspaceRoot: string): PlanSessionSummary[] {
+  const out: PlanSessionSummary[] = [];
+  for (const sessionId of listSessionIds(workspaceRoot)) {
+    /*
+     * 走 `list()` 而不是自己 `JSON.parse`：旧计划文件缺字段时要补齐的默认值、以及"坏文件当成没有计划"
+     * 这件事，同样只能有一处知道 —— 第二个解析器迟早会和第一个不一致。目录已经存在（它就是列出来的
+     * 那个），所以这里构造 store 不会额外建出目录来。
+     */
+    const store = new PlanStore(workspaceRoot, sessionId);
+    const plans = store.list();
+    if (!plans.length) continue;
+    const stamps = plans
+      .map((p) => Date.parse(p.updatedAt || p.createdAt || ''))
+      .filter((n) => Number.isFinite(n));
+    out.push({
+      session_id: sessionId,
+      plans: plans.length,
+      open: plans.filter((p) => p.status === 'open').length,
+      updated_at: stamps.length ? new Date(Math.max(...stamps)).toISOString() : null,
+    });
+  }
+  // 最近动过的排在前面：选择器问的是"我上次那个长任务在哪"。
+  return out.sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? '') || a.session_id.localeCompare(b.session_id));
 }
 
 const STATUS_MARK: Record<StepStatus, string> = {

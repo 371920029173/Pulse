@@ -50,6 +50,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { PreflightRecord } from './preflight.js';
 import { redactForRecord } from './guardrail.js';
+import { sessionStateDir } from './session-state.js';
 
 /** How a run ended, as far as its own events can tell. */
 export type RunState = 'running' | 'paused' | 'done' | 'failed';
@@ -417,7 +418,7 @@ export class RunRecorder {
        * The prompt is scrubbed like every other second copy on disk.
        *
        * It reads as "the input" rather than "an output", which is why it was missed: the guardrail
-       * was written about answers and artifacts. But it lands in `.she/runs/*.jsonl`, is served back
+       * was written about answers and artifacts. But it lands in the run's `.jsonl`, is served back
        * by `GET /api/runs`, and is indexed for evidence matching — the same three things that make a
        * tool result worth scrubbing. A user pasting a key in to ask "why is this rejected" is the
        * most likely way a credential arrives here, and it is the one case where the transcript would
@@ -565,12 +566,13 @@ export class RunRecorder {
 }
 
 /**
- * The `.she/runs/` directory.
+ * One conversation's run traces: `.she/sessions/<sessionId>/runs/`.
  *
  * One file per turn, named `run-<stamp>-<hex>.jsonl` so lexical order is chronological and two
  * runs starting in the same millisecond cannot collide. Reading is by directory listing rather
  * than by joining a caller-supplied id onto a path — an id that came from a URL must not be able
- * to name a file outside this directory.
+ * to name a file outside this directory. The directory itself is per session, so that same rule
+ * now also means a URL cannot name a run belonging to someone else's conversation.
  */
 
 /**
@@ -600,8 +602,17 @@ export class RunTraceStore {
   private maxField: number;
   private dirEnsured = false;
 
-  constructor(root: string, opts: RunTraceOptions = {}) {
-    this.dir = join(root, '.she', 'runs');
+  /**
+   * `sessionId` is required, and the directory is derived from it rather than from the workspace.
+   *
+   * A trace is the most revealing file this agent writes: the user's own words, every command with
+   * its arguments, and the output. Kept in one workspace-level `.she/runs/` with a `session_id`
+   * field to sort them out, any conversation could list and read every other conversation's turns —
+   * the field only ever filtered a list that the same caller could ask for unfiltered. There is now
+   * no directory that contains two sessions' runs.
+   */
+  constructor(root: string, public readonly sessionId: string, opts: RunTraceOptions = {}) {
+    this.dir = join(sessionStateDir(root, sessionId), 'runs');
     this.keep = Math.max(1, opts.keep ?? DEFAULT_KEEP);
     this.maxField = Math.max(200, opts.maxField ?? DEFAULT_MAX_FIELD);
   }
@@ -659,7 +670,7 @@ export class RunTraceStore {
     }
 
     if (info.agent !== 'subagent') {
-      const prev = this.sessionRuns(info.sessionId ?? null, 1).filter((r) => r.id !== id)[0];
+      const prev = this.recent(1).filter((r) => r.id !== id)[0];
       if (prev) {
         recorder.previous({
           id: prev.id,
@@ -671,28 +682,34 @@ export class RunTraceStore {
       }
     }
     recorder.pruned(removed);
-    recorder.start(info);
+    /*
+     * The `start` event's `session_id` is taken from THIS store rather than from the caller.
+     *
+     * The file already lives in the session's own directory, so the field is a label rather than a
+     * permission — but it is the label every list and every evidence check reads. Letting a caller
+     * pass its own value would allow a trace to sit in one conversation's directory and claim to be
+     * another's, which is the kind of two-sources-of-truth that outlives whoever wrote it.
+     */
+    recorder.start({ ...info, sessionId: this.sessionId });
     return recorder;
   }
 
-  /** Every run, newest first, optionally filtered to one conversation. */
-  list(opts: { sessionId?: string | null; limit?: number } = {}): RunSummary[] {
+  /** Every run in this conversation's directory, newest first. */
+  list(opts: { limit?: number } = {}): RunSummary[] {
     const limit = Math.max(1, Math.min(opts.limit ?? 100, 1000));
     const out: RunSummary[] = [];
     for (const f of this.files()) {
       const parsed = this.parse(f);
       if (!parsed) continue;
-      const summary = summarise(f.replace(/\.jsonl$/, ''), parsed.events);
-      if (opts.sessionId && summary.session_id !== opts.sessionId) continue;
-      out.push(summary);
+      out.push(summarise(f.replace(/\.jsonl$/, ''), parsed.events));
       if (out.length >= limit) break;
     }
     return out;
   }
 
-  /** Runs in one conversation, newest first. */
-  sessionRuns(sessionId: string | null, limit = 20): RunSummary[] {
-    return this.list({ sessionId: sessionId ?? undefined, limit });
+  /** The newest few runs in this conversation, for chaining "what came before this one". */
+  recent(limit = 20): RunSummary[] {
+    return this.list({ limit });
   }
 
   /** One run in full, or null when the id does not name a file in this directory. */
@@ -724,12 +741,16 @@ export class RunTraceStore {
    * Deliberately lenient in one direction: the failure mode to avoid is a check that blocks honest
    * work because evidence was paraphrased. So the caller is expected to act on "NOTHING is backed",
    * not on a single unbacked line.
+   *
+   * There is no `sessionId` argument because there is nothing to filter: this store only ever sees
+   * the runs written next to its own session's other state. A run from another conversation is not
+   * an unbacked claim here, it is a file this object has no path to.
    */
-  corroborate(sessionId: string | null, evidence: string, opts: { runs?: number } = {}): {
+  corroborate(evidence: string, opts: { runs?: number } = {}): {
     backed: boolean;
     reason: string;
   } {
-    const runs = this.sessionRuns(sessionId, opts.runs ?? 20);
+    const runs = this.recent(opts.runs ?? 20);
     if (!runs.length) return { backed: false, reason: '这个会话还没有运行轨迹' };
 
     const corpus: string[] = [];

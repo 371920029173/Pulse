@@ -214,7 +214,16 @@ export class Agent {
   private runStartedAt = 0;
   /** Depth of continuations holding the trace open across several `withTurn` scopes. */
   private runHold = 0;
-  private readonly runTrace: RunTraceStore;
+  /**
+   * Where run traces are written, or null for an agent with no conversation.
+   *
+   * Null is not a degraded mode: an agent built without a session id is the read-only status path
+   * (`/api/chat/running` and friends), which answers from an agent's in-memory state and never runs
+   * a turn. There is no turn to trace, and — since a trace is per conversation — nowhere private to
+   * put one. A trace must never fall back to a shared directory, so "no session" means "no trace"
+   * rather than "somewhere everyone can read it".
+   */
+  private readonly runTrace: RunTraceStore | null;
   /**
    * This run's tool events, kept in memory alongside the file.
    *
@@ -227,8 +236,10 @@ export class Agent {
   /**
    * The confidence mirror: stated confidence against measured tool success.
    *
-   * One per agent, file-backed under `.she/reflection/`, so a bias is visible across sessions
-   * rather than resetting whenever the process restarts.
+   * One per agent. Its verdict comes from `.she/reflection/confidence.json`, a workspace-wide ledger
+   * of NUMBERS only, so a bias is visible across sessions rather than resetting whenever the process
+   * restarts; its per-topic detail comes from this conversation's own samples under
+   * `.she/sessions/<id>/`, which are the only ones that carry the task text.
    */
   private readonly confidenceMirror: ConfidenceMirror;
   /** The newest pre-flight record for the current run, kept for its stated confidence. */
@@ -313,10 +324,11 @@ export class Agent {
       /**
        * Where run traces are written.
        *
-       * Injectable so a caller can point several agents at one directory (the server does) and so
-       * a test can use a throwaway path. Defaults to `.she/runs/` under the workspace, because a
-       * turn that leaves no trace is the gap this closes — making it opt-in would mean the runs
-       * people most want to read are the ones that were never recorded.
+       * Injectable so a test can use a throwaway path. The default is the agent's OWN session
+       * directory — not one directory for the process — because a trace holds the prompt, every
+       * command and its output. A turn that leaves no trace is the gap this closes, so making it
+       * opt-in would mean the runs people most want to read are the ones that were never recorded;
+       * the only thing that turns it off is having no session to write it under.
        */
       runTrace?: RunTraceStore;
       /**
@@ -341,8 +353,14 @@ export class Agent {
      * The run trace is built here rather than in the field initialiser so the workspace root is
      * already available, and so a subagent gets one too: "who did which step" is a question the
      * trace can answer about delegated work, and a child's file records `agent: "subagent"`.
+     *
+     * The child's trace lands in the CHILD's session directory, which is the same place its
+     * transcript goes — an isolated child's whole `.she` is archived under
+     * `.she/subagent-history/<child id>/` when its worktree is reclaimed, so the steps survive the
+     * copy being deleted. Keying it by the parent instead would also mean a run recorded under
+     * someone else's session id, which the store now refuses.
      */
-    this.runTrace = opts?.runTrace ?? new RunTraceStore(config.workspace.root);
+    this.runTrace = opts?.runTrace ?? (this.sessionId ? new RunTraceStore(config.workspace.root, this.sessionId) : null);
     const level = config.llm.thinkingLevel || 'medium';
     /*
      * Which model this agent talks to.
@@ -431,7 +449,12 @@ export class Agent {
       kbEngine as unknown as ErrorbookEngineLike,
       kbStore,
     );
-    this.confidenceMirror = new ConfidenceMirror(config.workspace.root);
+    /*
+     * The mirror reads the workspace ledger (numbers only, so a verdict survives restarts) and this
+     * conversation's own samples (which carry topics). Passing the session is what makes the second
+     * half readable at all — and what keeps another conversation's task text unreachable from here.
+     */
+    this.confidenceMirror = new ConfidenceMirror(config.workspace.root, this.sessionId);
 
     for (const def of sandboxTools.definitions) {
       // `shell` is where intentional failures (a test run to watch it fail) happen, so it advertises
@@ -1716,14 +1739,14 @@ export class Agent {
     this.runPreflightConfidence = null;
     this.lastCritic = null;
 
-    const recorder = this.runTrace.begin({
+    const recorder = this.runTrace?.begin({
       prompt,
       sessionId: this.sessionId,
       model: this.modelLabel,
       agent: this.isSubagent ? 'subagent' : 'main',
       tools: this.allToolDefs.map((d) => d.name),
       mode: this.config.automationMode === false ? 'manual' : 'automation',
-    });
+    }) ?? null;
     this.runRecorder = recorder;
 
     /*
@@ -1741,7 +1764,7 @@ export class Agent {
     try {
       const rec = this.preflightRecord();
       if (rec) {
-        recorder.preflight(rec);
+        recorder?.preflight(rec);
         // The claim this run is being measured against, kept so the mirror's sample is the one
         // that was actually made for this work.
         if (typeof rec.confidence === 'number') {
@@ -1779,8 +1802,10 @@ export class Agent {
       return [
         '## Self-Review — Your Calibration',
         'The numbers below are your own stated confidences in pre-flight records, measured against how',
-        'often the tool calls in those runs actually succeeded. They are a measurement of this agent, not',
-        'of the current task:',
+        'often the tool calls in those runs actually succeeded. The verdict is accumulated across your',
+        'conversations as numbers only, so it is a measurement of this agent, not of the current task.',
+        'The list of worst topics is read from THIS conversation\'s samples, because a topic is the',
+        'task text of a single conversation.',
         '',
         text,
         '',
@@ -2514,14 +2539,10 @@ export class Agent {
   }
 
   /**
-   * The run trace store, so the server can list and replay runs.
-   *
-   * Exposed rather than proxied through per-method wrappers: the server's two read routes need
-   * `list`, `read` and `corroborate`, and a wrapper for each would be three more things to keep in
-   * step with the store. The store is read-mostly and every read is already safe on a missing
-   * directory.
+   * The run trace store, so the server can list and replay runs. Null when this agent has no
+   * conversation — see the field's comment; there is no trace to return rather than a shared one.
    */
-  getRunTraceStore(): RunTraceStore {
+  getRunTraceStore(): RunTraceStore | null {
     return this.runTrace;
   }
 

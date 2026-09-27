@@ -223,6 +223,17 @@ registerDictionary('en', {
   '未能创建并行副本：{msg}': 'Could not create the parallel copy: {msg}',
 
   // ── 长程计划 / Plan panel ──
+  '长程计划': 'Long-horizon plan',
+  '其他会话': 'Other chats',
+  '看别的会话的计划（只读）': "See another chat's plan (read-only)",
+  '别的会话里也没有计划': 'No other chat has a plan either',
+  '{n} 个计划': '{n} plan(s)',
+  '{n} 个未收口': '{n} still open',
+  '本会话': 'this chat',
+  '正在看别的会话的计划，只读。要改进度请回到那个会话。':
+    "Viewing another chat's plan, read-only. Go back to that chat to change its progress.",
+  '回到本会话': 'Back to this chat',
+  '别的会话的计划只读': "Another chat's plan is read-only",
   '完成': 'Done',
   '进行中': 'In progress',
   '已完成': 'Finished',

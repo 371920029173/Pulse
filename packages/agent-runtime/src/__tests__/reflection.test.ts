@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -364,8 +364,21 @@ describe('ConfidenceMirror', () => {
   const observe = (m: ConfidenceMirror, claimed: number, attempted: number, succeeded: number, clamped = false) =>
     m.observe({ claimed, attempted, succeeded, clamped });
 
+  /**
+   * 一个会话的镜像。
+   *
+   * 构造必须带会话 id：结论来自工作区级的数字账（跨会话可见），逐条样本来自本会话自己的文件。
+   * 测试里给一个固定的假 id，路径断言才写得清楚。
+   */
+  const SESSION = 'sess-conf';
+  const mirrorOn = (root: string, session: string | null = SESSION, keep?: number) =>
+    keep === undefined ? new ConfidenceMirror(root, session) : new ConfidenceMirror(root, session, keep);
+  const ledgerFile = (root: string) => join(root, '.she', 'reflection', 'confidence.json');
+  const mineFile = (root: string, session = SESSION) =>
+    join(root, '.she', 'sessions', session, 'confidence.json');
+
   it('样本不足三个时不下结论', () => {
-    const m = new ConfidenceMirror(dir());
+    const m = mirrorOn(dir());
     observe(m, 0.9, 4, 1);
     observe(m, 0.9, 4, 1);
     assert.equal(m.report().bucket, 'unknown');
@@ -373,7 +386,7 @@ describe('ConfidenceMirror', () => {
   });
 
   it('自评长期高于实际成功率 → 偏乐观，且给出可执行的建议', () => {
-    const m = new ConfidenceMirror(dir());
+    const m = mirrorOn(dir());
     observe(m, 0.95, 4, 2);
     observe(m, 0.9, 4, 2);
     observe(m, 0.9, 4, 3);
@@ -385,7 +398,7 @@ describe('ConfidenceMirror', () => {
   });
 
   it('自评低于实际成功率 → 偏保守，也是偏差', () => {
-    const m = new ConfidenceMirror(dir());
+    const m = mirrorOn(dir());
     observe(m, 0.3, 4, 4);
     observe(m, 0.4, 4, 4);
     observe(m, 0.3, 4, 4);
@@ -394,7 +407,7 @@ describe('ConfidenceMirror', () => {
   });
 
   it('对得上就是 calibrated，不硬找问题', () => {
-    const m = new ConfidenceMirror(dir());
+    const m = mirrorOn(dir());
     observe(m, 0.75, 4, 3);
     observe(m, 0.75, 4, 3);
     observe(m, 0.75, 4, 3);
@@ -405,7 +418,7 @@ describe('ConfidenceMirror', () => {
   });
 
   it('没有工具调用的轮次不进实际成功率（否则「什么都没做」会被读成「说对了」）', () => {
-    const m = new ConfidenceMirror(dir());
+    const m = mirrorOn(dir());
     observe(m, 0.4, 4, 1);
     observe(m, 0.4, 4, 1);
     observe(m, 0.4, 4, 1);
@@ -417,48 +430,138 @@ describe('ConfidenceMirror', () => {
   });
 
   it('成功的次数不会超过尝试的次数（调用方数错也不能造出 >1 的「成功率」）', () => {
-    const m = new ConfidenceMirror(dir());
+    const m = mirrorOn(dir());
     const s = m.observe({ claimed: 0.5, attempted: 2, succeeded: 9 });
     assert.equal(s.succeeded, 2);
     assert.equal(s.attempted, 2);
   });
 
-  it('落盘后换一个实例还能读到（习惯要跨会话才看得见）', () => {
+  it('落盘后换一个实例还能读到；换一个会话仍能看到习惯，但看不到样本', () => {
     const root = dir();
-    observe(new ConfidenceMirror(root), 0.9, 4, 2);
-    observe(new ConfidenceMirror(root), 0.9, 4, 2);
-    observe(new ConfidenceMirror(root), 0.9, 4, 2);
-    const reopened = new ConfidenceMirror(root);
+    observe(mirrorOn(root), 0.9, 4, 2);
+    observe(mirrorOn(root), 0.9, 4, 2);
+    observe(mirrorOn(root), 0.9, 4, 2);
+
+    const reopened = mirrorOn(root);
     assert.equal(reopened.samples().length, 3);
     assert.equal(reopened.report().bucket, 'overconfident');
+
+    /*
+     * 这是这套拆分存在的理由，两个方向都要钉：
+     *   - 结论（习惯）跨会话可见 —— 它是数字，重启/新会话都看得到；
+     *   - 逐条样本只属于本会话 —— 它带话题文本，别的会话在路径上取不到。
+     */
+    const other = mirrorOn(root, 'sess-other');
+    assert.equal(other.report().bucket, 'overconfident', '习惯要跨会话可见，否则重启后又是「还没有数据」');
+    assert.equal(other.samples().length, 0, '别的会话的样本不能被读到');
+  });
+
+  it('跨会话的那份只有数字，话题文本一个字都不进去', () => {
+    const root = dir();
+    observe(mirrorOn(root), 0.9, 4, 2);
+    mirrorOn(root).observe({
+      claimed: 0.9, attempted: 4, succeeded: 1, topic: '把计费模块的发票重算一遍', runId: 'run-abc',
+    });
+
+    const ledger = readFileSync(ledgerFile(root), 'utf8');
+    assert.ok(!ledger.includes('发票'), '工作区级的文件不能带任何任务文本');
+    assert.ok(!ledger.includes('run-abc'), 'run id 也是本会话的信息');
+    // 本会话的文件里有它 —— 拆分不是把数据丢掉，是搬到该在的地方。
+    const mine = readFileSync(mineFile(root), 'utf8');
+    assert.ok(mine.includes('发票'));
+    assert.ok(mine.includes('run-abc'));
+    // 数字仍然两份都有，结论这才算得出来。
+    const parsedLedger = JSON.parse(ledger) as { samples: Record<string, unknown>[] };
+    assert.deepEqual(
+      Object.keys(parsedLedger.samples[0]).sort(),
+      ['at', 'attempted', 'claimed', 'clamped', 'succeeded'],
+      '跨会话账的字段是封闭集合，多一个字段就多一条泄露通道',
+    );
+  });
+
+  it('旧的工作区级文件里的话题文本，读的时候丢掉、写的时候从盘上消失', () => {
+    const root = dir();
+    mkdirSync(join(root, '.she', 'reflection'), { recursive: true });
+    // 拆分成两份之前的样子：一个文件里既有数字也有话题。
+    writeFileSync(ledgerFile(root), JSON.stringify({
+      schema_version: 1,
+      samples: [
+        { at: '2026-01-01T00:00:00.000Z', claimed: 0.9, attempted: 4, succeeded: 1, clamped: false, topic: '迁移脚本' },
+        { at: '2026-01-02T00:00:00.000Z', claimed: 0.9, attempted: 4, succeeded: 1, clamped: false, topic: '迁移脚本' },
+      ],
+    }), 'utf8');
+
+    const m = mirrorOn(root);
+    assert.equal(m.indexSamples().length, 2, '数字照读，历史不作废');
+    assert.equal(m.samples().length, 0, '本会话没有样本文件，旧文本不当成本会话的样本');
+    for (const s of m.indexSamples()) {
+      assert.ok(!('topic' in s), '旧字段在读取时就被丢掉，不从内存里漏出去');
+    }
+    observe(m, 0.9, 4, 1);
+    assert.ok(!readFileSync(ledgerFile(root), 'utf8').includes('迁移脚本'), '追加一次就把旧文本从盘上洗掉');
   });
 
   it('文件损坏时当成空历史，不抛异常', () => {
     const root = dir();
     mkdirSync(join(root, '.she', 'reflection'), { recursive: true });
-    writeFileSync(join(root, '.she', 'reflection', 'confidence.json'), '{ 这不是 JSON', 'utf8');
-    const m = new ConfidenceMirror(root);
+    writeFileSync(ledgerFile(root), '{ 这不是 JSON', 'utf8');
+    const m = mirrorOn(root);
     assert.deepEqual(m.samples(), []);
     assert.equal(m.report().bucket, 'unknown');
   });
 
-  it('清空之后连文件里的历史一起没', () => {
+  it('清空之后连文件里的历史一起没，但别的话的样本不是我的', () => {
     const root = dir();
-    observe(new ConfidenceMirror(root), 0.9, 4, 2);
-    const m = new ConfidenceMirror(root);
+    observe(mirrorOn(root), 0.9, 4, 2);
+    const other = mirrorOn(root, 'sess-other');
+    observe(other, 0.9, 4, 2);
+
+    const m = mirrorOn(root);
     m.clear();
-    assert.equal(JSON.parse(readFileSync(join(root, '.she', 'reflection', 'confidence.json'), 'utf8')).samples.length, 0);
+    assert.equal(JSON.parse(readFileSync(ledgerFile(root), 'utf8')).samples.length, 0);
+    assert.equal(JSON.parse(readFileSync(mineFile(root), 'utf8')).samples.length, 0);
     assert.equal(m.samples().length, 0);
+    // 另一个会话自己的样本文件是它自己的，重置不该由我替它决定。
+    assert.equal(JSON.parse(readFileSync(mineFile(root, 'sess-other'), 'utf8')).samples.length, 1);
+  });
+
+  /*
+   * 同一份文件上有不止一个镜像：服务自己按会话缓存一份（面板轮询不必每次都读盘），每个 Agent 也
+   * 各持有一份，而两边都会写。没有新鲜度检查时，一边重置、另一边还拿内存里的旧账回话——盘上已经
+   * 空了，屏幕上还是那条「你偏乐观」。所以缓存必须带文件名戳，别人的写入要能被看见。
+   */
+  it('另一个实例写过之后，我这边不会拿内存里的旧账回话', () => {
+    const root = dir();
+    const writer = mirrorOn(root);
+    observe(writer, 0.9, 4, 1);
+    const reader = mirrorOn(root);
+    assert.equal(reader.samples().length, 1, '先读一次，把缓存焐热');
+    observe(writer, 0.9, 4, 1);
+    assert.equal(reader.samples().length, 2);
+    assert.equal(reader.indexSamples().length, 2);
+  });
+
+  it('一个实例重置之后，另一个实例读到的是空的（清的是文件，不是自己的缓存）', () => {
+    const root = dir();
+    const writer = mirrorOn(root);
+    for (let i = 0; i < 4; i++) observe(writer, 0.95, 4, 1);
+    const reader = mirrorOn(root);
+    assert.equal(reader.report().bucket, 'overconfident', '先确认两边读的是同一份');
+    writer.clear();
+    assert.equal(reader.indexSamples().length, 0);
+    assert.equal(reader.samples().length, 0);
+    assert.equal(reader.report().bucket, 'unknown');
   });
 
   it('只保留最近 N 条（旧习惯不该永远挂在那里）', () => {
-    const m = new ConfidenceMirror(dir(), 3);
+    const m = mirrorOn(dir(), SESSION, 3);
     for (let i = 0; i < 5; i++) observe(m, 0.5, 2, 1);
     assert.equal(m.samples().length, 3);
+    assert.equal(m.indexSamples().length, 3, '两份文件用同一个上限，窗口才不会互相错位');
   });
 
   it('窗口决定报告的是哪一段习惯', () => {
-    const m = new ConfidenceMirror(dir());
+    const m = mirrorOn(dir());
     for (let i = 0; i < 6; i++) observe(m, 0.2, 4, 4); // 偏保守的旧历史
     for (let i = 0; i < 3; i++) observe(m, 0.95, 4, 1); // 最近的偏乐观
     assert.equal(m.report({ window: 3 }).bucket, 'overconfident');
@@ -467,17 +570,30 @@ describe('ConfidenceMirror', () => {
   });
 
   it('预检被压过上限的比例也算进建议里', () => {
-    const m = new ConfidenceMirror(dir());
+    const m = mirrorOn(dir());
     for (let i = 0; i < 4; i++) observe(m, 0.9, 4, 2, true);
     assert.match(renderCalibration(m.report()), /压到上限/);
   });
 
-  it('领域偏差只在样本够时报告', () => {
-    const m = new ConfidenceMirror(dir());
-    m.observe({ claimed: 0.9, attempted: 4, succeeded: 1, clamped: false, topic: '迁移脚本' });
-    m.observe({ claimed: 0.9, attempted: 4, succeeded: 1, clamped: false, topic: '迁移脚本' });
-    m.observe({ claimed: 0.9, attempted: 4, succeeded: 1, clamped: false, topic: '迁移脚本' });
+  it('领域偏差只在样本够时报告，而且只可能来自本会话', () => {
+    const root = dir();
+    const m = mirrorOn(root);
+    for (const s of ['迁移脚本', '迁移脚本', '迁移脚本']) {
+      m.observe({ claimed: 0.9, attempted: 4, succeeded: 1, clamped: false, topic: s });
+    }
     assert.equal(m.report().worst[0].topic, '迁移脚本');
+    // 别的会话看不见这个领域名：它只在自己的样本文件里。
+    assert.equal(mirrorOn(root, 'sess-other').report().worst.length, 0);
+  });
+
+  it('没有会话的镜像能读能写数字账，但不产生任何带文本的文件', () => {
+    const root = dir();
+    const m = mirrorOn(root, null);
+    m.observe({ claimed: 0.9, attempted: 4, succeeded: 1, topic: '不该落盘的话题' });
+    assert.equal(m.samples().length, 0, '没有会话就没有"本会话的样本"');
+    assert.equal(m.report().bucket, 'unknown', '一条样本还不够下结论');
+    assert.ok(!readFileSync(ledgerFile(root), 'utf8').includes('不该落盘的话题'));
+    assert.equal(existsSync(join(root, '.she', 'sessions')), false, '不该凭空造出一个会话目录');
   });
 });
 

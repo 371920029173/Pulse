@@ -23,7 +23,7 @@ import { mkdtempSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createPlanTools, classifyToolResult, getSystemPrompt } from '../packages/agent-runtime/dist/index.js';
+import { createPlanTools, classifyToolResult, getSystemPrompt, planSessions, PlanStore } from '../packages/agent-runtime/dist/index.js';
 import { removeTempDir } from './lib/temp.mjs';
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -246,6 +246,37 @@ console.log('\n5. 提示词里写了怎么用这张图');
   check('提示词要求按「下一步」续做', /下一步:/.test(prompt) && /Resuming means reading/.test(prompt), null);
   check('提示词要求声明 depends_on', /depends_on/.test(prompt), null);
   check('提示词说明 blocked 不等于完成', /blocked\` is not a step that finished/.test(prompt), null);
+}
+
+console.log('\n6. 看别的会话：清单能列出，正文要显式点开（且只读）');
+{
+  /*
+   * 计划按会话分开存之后，「当前会话看不到别的会话的计划」是设计，不是缺陷 —— 但用户总得有条路
+   * 走回去看那个长任务。给的路是**清单**：列出哪些会话有计划、各几个，正文一行都不带；点开哪个，
+   * 才去读哪个会话的目录。把各会话的计划合并成一份视图是错的，那正是"上一个对话的计划看起来像
+   * 现在正在跟的这个"。
+   */
+  const summary = planSessions(dir);
+  const byId = new Map(summary.map((s) => [s.session_id, s]));
+  check('列出的会话里有本工作区真正有计划的那些', byId.has('sess-a') && byId.has('sess-b'), JSON.stringify(summary));
+  check('没有计划的会话不占位置（"没有"和"有 0 个"不是一回事）',
+    summary.every((s) => s.plans > 0), JSON.stringify(summary));
+  check('带计数，界面不用为每个会话再问一次',
+    (byId.get('sess-b')?.plans ?? 0) >= 1 && Number.isFinite(byId.get('sess-b')?.open), JSON.stringify(byId.get('sess-b')));
+  check('清单里只有会话 id 和计数，没有任何计划正文',
+    !JSON.stringify(summary).includes('迁移数据库'), JSON.stringify(summary).slice(0, 200));
+  check('最近动过的排在前面（选择器要回答"我上次那个长任务在哪"）',
+    summary.every((s, i) => i === 0 || (summary[i - 1].updated_at ?? '') >= (s.updated_at ?? '')), JSON.stringify(summary));
+
+  /*
+   * 读某个会话的计划，用的还是它自己的 store —— 也就是界面点开那一行之后做的事。这里确认由
+   * `session_id` 决定读哪份文件，而不是"读当前会话然后过滤"。
+   */
+  const openB = new PlanStore(dir, 'sess-b').list();
+  const openC = new PlanStore(dir, 'sess-c').list();
+  check('按会话 id 打开：sess-b 看得到自己的计划', openB.some((p) => p.title === '迁移数据库'), JSON.stringify(openB.map((p) => p.title)));
+  check('清单里没有的会话，打开也是空的（没计划就不进清单）',
+    !byId.has('sess-c') && openC.length === 0, JSON.stringify(openC.map((p) => p.title)));
 }
 
 removeTempDir(dir);

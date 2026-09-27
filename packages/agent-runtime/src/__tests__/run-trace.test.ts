@@ -1,11 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, appendFileSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, appendFileSync, readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { RunTraceStore, distinctTokens } from '../run-trace.js';
-import type { RunEvent } from '../run-trace.js';
+import type { RunEvent, RunTraceOptions } from '../run-trace.js';
 import { Agent } from '../agent.js';
 import { PendingPatchStore } from '@she/sandbox';
 import type { LLMMessage, StreamChunk, ToolDefinition, LLMProvider } from '@she/shared';
@@ -31,10 +31,23 @@ import type { LLMMessage, StreamChunk, ToolDefinition, LLMProvider } from '@she/
 const dir = () => mkdtempSync(join(tmpdir(), 'she-runs-'));
 const plain = (s: string) => s.replace(/\\/g, '/');
 
+/**
+ * The conversation every store in this file belongs to.
+ *
+ * A store cannot be built without naming one — that is the property the whole per-session layout
+ * rests on, so the tests cannot quietly be testing a workspace-level store. One fixed fake id keeps
+ * the literal path assertions readable, and `runsDir` spells the path out here rather than asking
+ * the code where it put things (an assertion that asks the implementation where it wrote is not an
+ * assertion about where it wrote).
+ */
+const SESSION = 'sess-test';
+const storeOn = (root: string, opts?: RunTraceOptions) => new RunTraceStore(root, SESSION, opts);
+const runsDir = (root: string, session = SESSION) => join(root, '.she', 'sessions', session, 'runs');
+
 describe('RunTraceStore — one file per run', () => {
   it('writes a run that reads back with all its events in order', () => {
     const root = dir();
-    const store = new RunTraceStore(root);
+    const store = storeOn(root);
     const rec = store.begin({ prompt: '跑一下测试', sessionId: 's1', model: 'm1', tools: ['shell', 'fs_read'] });
     rec.tool({ name: 'shell', args: '{"cmd":"pnpm test"}', result: 'exit code: 0', ms: 1200, ok: true });
     rec.step('准备收尾');
@@ -51,20 +64,20 @@ describe('RunTraceStore — one file per run', () => {
 
   it('keeps seq strictly increasing across a restart', () => {
     const root = dir();
-    const rec = new RunTraceStore(root).begin({ prompt: 'a' });
+    const rec = storeOn(root).begin({ prompt: 'a' });
     rec.tool({ name: 'shell', result: 'ok', ok: true });
 
     // A new store object over the same directory: the counter is per-run, so what must hold is
     // that the events of one run are numbered 1..n without gaps.
-    const id = new RunTraceStore(root).list()[0].id;
-    const read = new RunTraceStore(root).read(id)!;
+    const id = storeOn(root).list()[0].id;
+    const read = storeOn(root).read(id)!;
     const seqs = read.events.map((e) => e.seq);
     assert.deepEqual(seqs, seqs.map((_, i) => i + 1));
   });
 
   it('names files so lexical order is chronological, even within one millisecond', () => {
     const root = dir();
-    const store = new RunTraceStore(root);
+    const store = storeOn(root);
     // No awaits between them, so several land in the same millisecond. The name is what decides
     // the order, so the name has to be strictly increasing rather than merely time-based — this is
     // also what keeps the list ordered when the wall clock steps backwards.
@@ -73,7 +86,7 @@ describe('RunTraceStore — one file per run', () => {
       prompts.push(`第 ${i} 轮`);
       store.begin({ prompt: `第 ${i} 轮` }).end({ ok: true });
     }
-    const names = readdirSync(join(root, '.she', 'runs')).filter((f) => f.endsWith('.jsonl'));
+    const names = readdirSync(runsDir(root)).filter((f) => f.endsWith('.jsonl'));
     assert.equal(names.length, 6);
     const newestFirst = store.list().map((r) => r.prompt);
     assert.deepEqual(newestFirst, prompts.slice().reverse(), `实际顺序 ${newestFirst.join(', ')}`);
@@ -81,7 +94,7 @@ describe('RunTraceStore — one file per run', () => {
 
   it('does not go backwards when the clock does', () => {
     const root = dir();
-    const store = new RunTraceStore(root);
+    const store = storeOn(root);
     store.begin({ prompt: '早' }).end({ ok: true });
     const realNow = Date.now;
     try {
@@ -94,68 +107,86 @@ describe('RunTraceStore — one file per run', () => {
     assert.equal(store.list()[0].prompt, '晚', '时钟回拨后，后开始的一轮仍要排在最前');
   });
 
-  it('filters the list to one conversation', () => {
+  it('puts two conversations in two directories, neither of which lists the other', () => {
     const root = dir();
-    const store = new RunTraceStore(root);
-    store.begin({ prompt: '会话 A 的一轮', sessionId: 'a' }).end({ ok: true });
-    store.begin({ prompt: '会话 B 的一轮', sessionId: 'b' }).end({ ok: true });
+    const a = new RunTraceStore(root, 'sess-a');
+    const b = new RunTraceStore(root, 'sess-b');
+    a.begin({ prompt: '会话 A 的一轮' }).end({ ok: true });
+    b.begin({ prompt: '会话 B 的一轮' }).end({ ok: true });
 
-    assert.equal(store.list({ sessionId: 'a' }).length, 1);
-    assert.equal(store.list({ sessionId: 'a' })[0].prompt, '会话 A 的一轮');
-    assert.equal(store.list({ sessionId: 'nobody' }).length, 0);
+    /*
+     * The separation used to be a `sessionId` filter over ONE file — every conversation's runs were
+     * in it and the filter was the only thing between them. What is asserted now is the structural
+     * version: two directories, and a store cannot name the other's file even by asking for it.
+     */
+    assert.equal(a.list().length, 1);
+    assert.equal(a.list()[0].prompt, '会话 A 的一轮');
+    assert.equal(b.list().length, 1);
+    assert.equal(b.list()[0].prompt, '会话 B 的一轮');
+    assert.notEqual(plain(a.directory()), plain(b.directory()));
+
+    // The label on the event follows the directory it was written to, not the caller's argument.
+    const rec = a.begin({ prompt: 'A 的第二轮', sessionId: 'sess-b' });
+    const start = a.read(rec.id)!.events.find((e) => e.kind === 'start')!;
+    assert.equal(start.session_id, 'sess-a', '轨迹不能声称自己是另一个会话的');
   });
 
-  it('links the previous run of the same conversation, and only the same one', () => {
+  it('chains the previous run, and only within the same conversation', () => {
     const root = dir();
-    const store = new RunTraceStore(root);
-    store.begin({ prompt: '第一轮', sessionId: 'a' }).end({ ok: true, durationMs: 10 });
-    store.begin({ prompt: '另一会话', sessionId: 'b' }).end({ ok: true });
+    const a = new RunTraceStore(root, 'sess-a');
+    const b = new RunTraceStore(root, 'sess-b');
+    a.begin({ prompt: '第一轮' }).end({ ok: true, durationMs: 10 });
+    b.begin({ prompt: '另一会话' }).end({ ok: true });
 
-    const rec = store.begin({ prompt: '第二轮', sessionId: 'a' });
-    const prev = store.read(rec.id)!.events.find((e) => e.kind === 'previous');
+    const rec = a.begin({ prompt: '第二轮' });
+    const prev = a.read(rec.id)!.events.find((e) => e.kind === 'previous');
     assert.ok(prev, '第二轮应该带上第一轮的引用');
-    assert.equal(prev!.runs?.[0], store.list({ sessionId: 'a' })[1].id);
+    assert.equal(prev!.runs?.[0], a.list()[1].id);
+
+    // The other conversation's run cannot be the one chained: it is not in this directory.
+    const first = b.begin({ prompt: 'B 的第二轮' });
+    assert.equal(b.read(first.id)!.events.find((e) => e.kind === 'previous')!.runs?.[0], b.list()[1].id);
   });
 });
 
 describe('RunTraceStore — folding events into a summary', () => {
-  const stateOf = (root: string) => new RunTraceStore(root).list()[0].state;
+  const stateOf = (root: string) => storeOn(root).list()[0].state;
 
   it('reports a completed run as done', () => {
     const root = dir();
-    new RunTraceStore(root).begin({ prompt: 'x' }).end({ ok: true });
+    storeOn(root).begin({ prompt: 'x' }).end({ ok: true });
     assert.equal(stateOf(root), 'done');
   });
 
   it('reports a failed run as failed, with its reason', () => {
     const root = dir();
-    const rec = new RunTraceStore(root).begin({ prompt: 'x' });
+    const rec = storeOn(root).begin({ prompt: 'x' });
     rec.error('连不上接口');
     rec.end({ ok: false, reason: 'turn_failed', text: '连不上接口' });
-    const run = new RunTraceStore(root).list()[0];
+    const run = storeOn(root).list()[0];
     assert.equal(run.state, 'failed');
     assert.match(run.error ?? '', /连不上接口/);
   });
 
   it('reports a run stopped at a gate as paused, not finished', () => {
     const root = dir();
-    const rec = new RunTraceStore(root).begin({ prompt: 'x' });
+    const rec = storeOn(root).begin({ prompt: 'x' });
     rec.tool({ name: 'shell', result: '{"needs_confirm":{}}', ok: true });
     rec.awaiting('confirm', { ticketId: 't1', tool: 'shell' });
     // No `end`: this is the state a run is left in while a human decides.
-    const run = new RunTraceStore(root).list()[0];
+    const run = storeOn(root).list()[0];
     assert.equal(run.state, 'paused');
     assert.equal(run.reason, 'awaiting_confirm');
   });
 
   it('counts failed tool calls and names the tools used', () => {
     const root = dir();
-    const rec = new RunTraceStore(root).begin({ prompt: 'x' });
+    const rec = storeOn(root).begin({ prompt: 'x' });
     rec.tool({ name: 'shell', result: 'boom', ok: false, failure: 'nonzero_exit' });
     rec.tool({ name: 'fs_read', result: 'ok', ok: true });
     rec.tool({ name: 'shell', result: 'ok', ok: true });
     rec.end({ ok: true });
-    const run = new RunTraceStore(root).list()[0];
+    const run = storeOn(root).list()[0];
     assert.equal(run.toolCount, 3);
     assert.equal(run.failedTools, 1);
     assert.deepEqual(run.toolNames, ['shell', 'fs_read']);
@@ -165,14 +196,14 @@ describe('RunTraceStore — folding events into a summary', () => {
 describe('RunTraceStore — secrets, truncation, damage', () => {
   it('redacts credential-looking argument values but keeps the key', () => {
     const root = dir();
-    const rec = new RunTraceStore(root).begin({ prompt: 'x' });
+    const rec = storeOn(root).begin({ prompt: 'x' });
     rec.tool({
       name: 'shell',
       args: JSON.stringify({ cmd: 'curl', headers: { Authorization: 'Bearer abc123', 'x-api-key': 'sk-live' } }),
       result: 'ok',
       ok: true,
     });
-    const ev = new RunTraceStore(root).read(rec.id)!.events.find((e) => e.kind === 'tool')!;
+    const ev = storeOn(root).read(rec.id)!.events.find((e) => e.kind === 'tool')!;
     assert.ok(!ev.args!.includes('abc123'), '令牌不能落在文件里');
     assert.ok(!ev.args!.includes('sk-live'));
     assert.ok(ev.args!.includes('[redacted]'), '但键要留着，读的人才知道传了什么');
@@ -180,7 +211,7 @@ describe('RunTraceStore — secrets, truncation, damage', () => {
 
   it('redacts credentials nested inside the arguments, not just at the top level', () => {
     const root = dir();
-    const rec = new RunTraceStore(root).begin({ prompt: 'x' });
+    const rec = storeOn(root).begin({ prompt: 'x' });
     rec.tool({
       name: 'http',
       args: JSON.stringify({
@@ -191,7 +222,7 @@ describe('RunTraceStore — secrets, truncation, damage', () => {
       result: 'ok',
       ok: true,
     });
-    const ev = new RunTraceStore(root).read(rec.id)!.events.find((e) => e.kind === 'tool')!;
+    const ev = storeOn(root).read(rec.id)!.events.find((e) => e.kind === 'tool')!;
     for (const secret of ['abc123', 'sk-live', 'hunter2']) {
       assert.ok(!ev.args!.includes(secret), `嵌套的凭据也不能落盘：${secret}`);
     }
@@ -202,13 +233,13 @@ describe('RunTraceStore — secrets, truncation, damage', () => {
 
   it('does not put a confirm ticket into the trace file', () => {
     const root = dir();
-    const rec = new RunTraceStore(root).begin({ prompt: 'x' });
+    const rec = storeOn(root).begin({ prompt: 'x' });
     rec.tool({
       name: 'shell',
       result: JSON.stringify({ needs_confirm: { ticket_id: 'tkt-secret', summary: 'rm -rf' } }),
       ok: true,
     });
-    const ev = new RunTraceStore(root).read(rec.id)!.events.find((e) => e.kind === 'tool')!;
+    const ev = storeOn(root).read(rec.id)!.events.find((e) => e.kind === 'tool')!;
     // The ticket authorises the dangerous call, so a copy in a workspace file is a copy of the key.
     assert.ok(!ev.result!.includes('tkt-secret'), '工单不能出现在轨迹里');
     assert.match(ev.result!, /confirm event/);
@@ -219,9 +250,9 @@ describe('RunTraceStore — secrets, truncation, damage', () => {
 
   it('records the original length when a field is truncated', () => {
     const root = dir();
-    const rec = new RunTraceStore(root, { maxField: 300 }).begin({ prompt: 'x' });
+    const rec = storeOn(root, { maxField: 300 }).begin({ prompt: 'x' });
     rec.tool({ name: 'shell', result: 'y'.repeat(900), ok: true });
-    const ev = new RunTraceStore(root).read(rec.id)!.events.find((e) => e.kind === 'tool')!;
+    const ev = storeOn(root).read(rec.id)!.events.find((e) => e.kind === 'tool')!;
     assert.ok(ev.result!.length < 900);
     // Without `chars`, a cut record reads as a short complete result.
     assert.equal(ev.chars, 900);
@@ -229,7 +260,7 @@ describe('RunTraceStore — secrets, truncation, damage', () => {
 
   it('counts a half-written line as damage instead of dropping it silently', () => {
     const root = dir();
-    const store = new RunTraceStore(root);
+    const store = storeOn(root);
     const rec = store.begin({ prompt: '正常一轮' });
     rec.tool({ name: 'shell', result: 'ok', ok: true });
     // Exactly what a process killed mid-append leaves behind.
@@ -242,7 +273,7 @@ describe('RunTraceStore — secrets, truncation, damage', () => {
 
   it('does not treat a BOM as damage', () => {
     const root = dir();
-    const store = new RunTraceStore(root);
+    const store = storeOn(root);
     const rec = store.begin({ prompt: 'x' });
     rec.end({ ok: true });
     writeFileSync(rec.path(), '\uFEFF' + readFileSync(rec.path(), 'utf8'), 'utf8');
@@ -253,7 +284,7 @@ describe('RunTraceStore — secrets, truncation, damage', () => {
 
   it('never lets a damaged line outrank the real sequence', () => {
     const root = dir();
-    const store = new RunTraceStore(root);
+    const store = storeOn(root);
     const rec = store.begin({ prompt: 'x' });
     appendFileSync(rec.path(), '{"seq":9999,"ts":"2026-01-01T00:00:00.000Z","kind":"end","ok":true}\n', 'utf8');
     appendFileSync(rec.path(), '{"seq":', 'utf8');
@@ -268,14 +299,14 @@ describe('RunTraceStore — secrets, truncation, damage', () => {
 describe('RunTraceStore — retention', () => {
   it('keeps at most `keep` runs and records what it dropped', () => {
     const root = dir();
-    const store = new RunTraceStore(root, { keep: 3 });
+    const store = storeOn(root, { keep: 3 });
     const ids: string[] = [];
     for (let i = 0; i < 6; i++) {
       const rec = store.begin({ prompt: `第 ${i} 轮` });
       rec.end({ ok: true });
       ids.push(rec.id);
     }
-    const files = readdirSync(join(root, '.she', 'runs')).filter((f) => f.endsWith('.jsonl'));
+    const files = readdirSync(runsDir(root)).filter((f) => f.endsWith('.jsonl'));
     assert.ok(files.length <= 3, `实际保留 ${files.length} 个文件`);
 
     /*
@@ -293,14 +324,14 @@ describe('RunTraceStore — retention', () => {
 describe('RunTraceStore — read safety', () => {
   it('returns null for an id that is not a file in the directory', () => {
     const root = dir();
-    const store = new RunTraceStore(root);
+    const store = storeOn(root);
     store.begin({ prompt: 'x' }).end({ ok: true });
     assert.equal(store.read('run-0000-nope'), null);
   });
 
   it('cannot be walked out of its directory by an id', () => {
     const root = dir();
-    const store = new RunTraceStore(root);
+    const store = storeOn(root);
     store.begin({ prompt: 'x' }).end({ ok: true });
     // A URL-supplied id must never name a file outside `.she/runs`.
     assert.equal(store.read('../../../etc/passwd'), null);
@@ -309,7 +340,7 @@ describe('RunTraceStore — read safety', () => {
   });
 
   it('returns an empty list rather than throwing when nothing has run', () => {
-    const store = new RunTraceStore(join(dir(), 'never-created'));
+    const store = storeOn(join(dir(), 'never-created'));
     assert.deepEqual(store.list(), []);
     assert.equal(store.read('anything'), null);
   });
@@ -318,7 +349,7 @@ describe('RunTraceStore — read safety', () => {
 describe('RunRecorder — events the panel renders', () => {
   it('records a pre-flight record as one readable line', () => {
     const root = dir();
-    const rec = new RunTraceStore(root).begin({ prompt: 'x' });
+    const rec = storeOn(root).begin({ prompt: 'x' });
     rec.preflight({
       id: 'pf-1',
       ts: new Date().toISOString(),
@@ -333,7 +364,7 @@ describe('RunRecorder — events the panel renders', () => {
       evidence: [],
     } as never);
 
-    const ev = new RunTraceStore(root).read(rec.id)!.events.find((e) => e.kind === 'preflight')!;
+    const ev = storeOn(root).read(rec.id)!.events.find((e) => e.kind === 'preflight')!;
     assert.match(ev.text!, /预检 pf-1/);
     assert.match(ev.text!, /字面诉求: 清理日志/);
     assert.match(ev.text!, /阻断项/);
@@ -342,9 +373,9 @@ describe('RunRecorder — events the panel renders', () => {
 
   it('says which tool and ticket a confirmation was waiting on', () => {
     const root = dir();
-    const rec = new RunTraceStore(root).begin({ prompt: 'x' });
+    const rec = storeOn(root).begin({ prompt: 'x' });
     rec.awaiting('confirm', { ticketId: 'tk-9', tool: 'shell', summary: '删除目录' });
-    const ev = new RunTraceStore(root).read(rec.id)!.events.find((e) => e.kind === 'confirm')!;
+    const ev = storeOn(root).read(rec.id)!.events.find((e) => e.kind === 'confirm')!;
     assert.equal(ev.ticket_id, 'tk-9');
     assert.equal(ev.tool, 'shell');
     assert.equal(ev.reason, 'awaiting_confirm');
@@ -352,7 +383,7 @@ describe('RunRecorder — events the panel renders', () => {
 
   it('stops accepting events after end', () => {
     const root = dir();
-    const rec = new RunTraceStore(root).begin({ prompt: 'x' });
+    const rec = storeOn(root).begin({ prompt: 'x' });
     rec.end({ ok: true });
     assert.equal(rec.isClosed(), true);
     // A late event after the close would append after `end`, which reads as a run that restarted.
@@ -363,51 +394,69 @@ describe('RunRecorder — events the panel renders', () => {
 describe('corroborate — is this evidence backed by what actually ran', () => {
   const storeWith = (fn: (s: RunTraceStore) => void) => {
     const root = dir();
-    const store = new RunTraceStore(root);
+    const store = storeOn(root);
     fn(store);
     return store;
   };
 
   it('refuses evidence that names a tool this conversation never ran', () => {
     const store = storeWith((s) => {
-      const r = s.begin({ prompt: '读文件', sessionId: 'a' });
+      const r = s.begin({ prompt: '读文件' });
       r.tool({ name: 'fs_read', args: '{"path":"a.ts"}', result: 'const x = 1', ok: true });
       r.end({ ok: true });
     });
     // The failure mode that matters: evidence invented wholesale.
-    const v = store.corroborate('a', 'shell: pnpm test → 12 passed');
+    const v = store.corroborate('shell: pnpm test → 12 passed');
     assert.equal(v.backed, false);
     assert.match(v.reason, /没有调用过 `shell`/);
   });
 
   it('backs a line whose content appears in the run', () => {
     const store = storeWith((s) => {
-      const r = s.begin({ prompt: '跑测试', sessionId: 'a' });
+      const r = s.begin({ prompt: '跑测试' });
       r.tool({ name: 'shell', args: '{"cmd":"pnpm test"}', result: 'exit code: 0\nfixtures/alpha.test.ts', ok: true });
       r.end({ ok: true });
     });
-    const v = store.corroborate('a', 'shell: pnpm test → baseline-risky-token 通过');
+    const v = store.corroborate('shell: pnpm test → baseline-risky-token 通过');
     // `pnpm test` is in the recorded arguments, so the line is backed as a real call, not as an
     // accurate quote — the check's job is to catch invention, not to verify wording.
     assert.equal(v.backed, true);
   });
 
+  it('cannot be shown a claim from another conversation at all', () => {
+    const root = dir();
+    const a = new RunTraceStore(root, 'sess-a');
+    a.begin({ prompt: 'A 跑过 shell' }).end({ ok: true });
+    const r = a.begin({ prompt: 'A 的第二步' });
+    r.tool({ name: 'shell', result: 'ok', ok: true });
+    r.end({ ok: true });
+
+    /*
+     * B's store has no path to A's runs, so a claim that only A's work supports comes back
+     * unbacked — the same verdict as an invented one, because from inside B the difference is not
+     * observable. That IS the isolation: not a check that says "that is someone else's", but a
+     * directory that does not contain it.
+     */
+    const b = new RunTraceStore(root, 'sess-b');
+    const v = b.corroborate('shell: pnpm test → 12 passed');
+    assert.equal(v.backed, false);
+    assert.match(v.reason, /还没有运行轨迹/);
+  });
+
   it('reports no runs at all rather than claiming support', () => {
-    const store = storeWith((s) => {
-      s.begin({ prompt: 'x', sessionId: 'a' }).end({ ok: true });
-    });
-    const v = store.corroborate('other-session', 'shell: ls');
+    const fresh = new RunTraceStore(join(dir(), 'never-created'), 'sess-empty');
+    const v = fresh.corroborate('shell: ls');
     assert.equal(v.backed, false);
     assert.match(v.reason, /还没有运行轨迹/);
   });
 
   it('refuses a line with nothing checkable in it', () => {
     const store = storeWith((s) => {
-      const r = s.begin({ prompt: 'x', sessionId: 'a' });
+      const r = s.begin({ prompt: 'x' });
       r.tool({ name: 'shell', result: 'ok', ok: true });
       r.end({ ok: true });
     });
-    const v = store.corroborate('a', '完成');
+    const v = store.corroborate('完成');
     assert.equal(v.backed, false);
     assert.match(v.reason, /没有可核对的内容/);
   });
@@ -424,13 +473,13 @@ describe('corroborate — is this evidence backed by what actually ran', () => {
 describe('summarise — the shape the panel reads', () => {
   it('fills the fields the UI relies on even when the run never started', () => {
     const root = dir();
-    mkdirSync(join(root, '.she', 'runs'), { recursive: true });
+    mkdirSync(runsDir(root), { recursive: true });
     const events: RunEvent[] = [];
     void events;
     // A file with no `start` (only possible if a future writer changes the first event) must still
     // fold into something renderable rather than throwing.
-    writeFileSync(join(root, '.she', 'runs', 'run-x.jsonl'), '{"seq":1,"ts":"2026-01-01T00:00:00.000Z","kind":"end","ok":true}\n', 'utf8');
-    const list = new RunTraceStore(root).list();
+    writeFileSync(join(runsDir(root), 'run-x.jsonl'), '{"seq":1,"ts":"2026-01-01T00:00:00.000Z","kind":"end","ok":true}\n', 'utf8');
+    const list = storeOn(root).list();
     assert.equal(list.length, 1);
     assert.equal(list[0].state, 'done');
     assert.equal(list[0].prompt, '');
@@ -441,7 +490,7 @@ describe('summarise — the shape the panel reads', () => {
 describe('run files are plain JSONL a human can read', () => {
   it('writes one JSON object per line, newline terminated', () => {
     const root = dir();
-    const rec = new RunTraceStore(root).begin({ prompt: '一个多行\n提问' });
+    const rec = storeOn(root).begin({ prompt: '一个多行\n提问' });
     rec.end({ ok: true });
     const raw = readFileSync(rec.path(), 'utf8');
     assert.ok(raw.endsWith('\n'), '追加式写入必须以换行结束，否则半行会粘在下一行上');
@@ -451,10 +500,12 @@ describe('run files are plain JSONL a human can read', () => {
     assert.ok(!raw.split('\n')[0].includes('一个多行\n'), '换行要被转义');
   });
 
-  it('lives under .she/runs of the workspace it was given', () => {
+  it('lives under this conversation\'s own directory, not a shared one', () => {
     const root = dir();
-    const store = new RunTraceStore(root);
-    assert.equal(plain(store.directory()), plain(join(root, '.she', 'runs')));
+    const store = storeOn(root);
+    assert.equal(plain(store.directory()), plain(join(root, '.she', 'sessions', SESSION, 'runs')));
+    // And a walk of `.she/` shows no directory that holds two conversations' runs.
+    assert.equal(existsSync(join(root, '.she', 'runs')), false, '工作区级 runs 目录不能再出现');
   });
 });
 
@@ -522,7 +573,7 @@ describe('Agent writes the trace, including across continuations', () => {
     const agent = makeAgent(root, new ScriptedProvider([]));
     await agent.chat('你好', () => { /* chunks unused here */ });
 
-    const store = agent.getRunTraceStore();
+    const store = agent.getRunTraceStore()!;
     const runs = store.list();
     assert.equal(runs.length, 1);
     assert.equal(runs[0].state, 'done');
@@ -532,6 +583,29 @@ describe('Agent writes the trace, including across continuations', () => {
     assert.equal(events[0].kind, 'start');
     assert.equal(events[events.length - 1].kind, 'end');
     assert.equal(events[events.length - 1].ok, true);
+  });
+
+  it('gives an agent with no conversation NO store, rather than a shared one', async () => {
+    const root = dir();
+    /*
+     * The read-only status path builds an agent with no session id. A trace holds the user's words
+     * and every command, so "somewhere everyone can read it" is not an acceptable default — the
+     * only safe answer is that there is nowhere to write, and this pins that it is not silently
+     * replaced by a workspace-level directory.
+     */
+    const agent = new Agent(
+      cfgFor(root) as never,
+      {} as never,
+      { definitions: [] as ToolDefinition[], execute: async () => 'ok' } as never,
+      null,
+    );
+    assert.equal(agent.getRunTraceStore(), null);
+
+    (agent as unknown as { provider: LLMProvider }).provider = new ScriptedProvider([]);
+    await agent.chat('你好', () => { /* chunks unused here */ });
+
+    assert.equal(existsSync(join(root, '.she', 'runs')), false, '工作区级轨迹目录不能在无会话时冒出来');
+    assert.equal(existsSync(join(root, '.she', 'sessions')), false, '也不该凭空造一个会话目录');
   });
 
   it('leaves the run PAUSED, not finished, when a turn stages patches', async () => {
@@ -552,7 +626,7 @@ describe('Agent writes the trace, including across continuations', () => {
 
     await agent.chat('改三个文件', () => { /* chunks unused here */ });
 
-    const store = agent.getRunTraceStore();
+    const store = agent.getRunTraceStore()!;
     const runs = store.list();
     assert.equal(runs.length, 1);
     // No `end` yet: a person has not decided. Recording this as finished is what would make the
@@ -581,7 +655,7 @@ describe('Agent writes the trace, including across continuations', () => {
 
     await agent.applyAllPatches();
 
-    const store = agent.getRunTraceStore();
+    const store = agent.getRunTraceStore()!;
     const runs = store.list();
     // Three patches go through three separate `withTurn` scopes. A trace that stopped after the
     // first would either be a second file or a run left open — both are a lie about what happened.
@@ -663,7 +737,7 @@ describe('Agent — a run the spare endpoint answered says so', () => {
     // The user still gets an answer: the switch is absorbed, and that is the point.
     assert.equal(reply.content, '兜底的回答');
 
-    const run = agent.getRunTraceStore().list()[0];
+    const run = agent.getRunTraceStore()!.list()[0];
     assert.equal(run.state, 'done');
     assert.equal(run.fallbackUsed, true, JSON.stringify(run));
     assert.equal(run.fallbackTo, 'openai/spare-model');
@@ -674,7 +748,7 @@ describe('Agent — a run the spare endpoint answered says so', () => {
     assert.match(status, /spare-model/);
     assert.match(status, /ECONNREFUSED/);
 
-    const end = agent.getRunTraceStore().read(run.id)!.events.find((e) => e.kind === 'end')!;
+    const end = agent.getRunTraceStore()!.read(run.id)!.events.find((e) => e.kind === 'end')!;
     assert.equal(end.fallback?.from, 'openai/stub');
     assert.equal(end.fallback?.to, 'openai/spare-model');
   });
@@ -685,7 +759,7 @@ describe('Agent — a run the spare endpoint answered says so', () => {
 
     await agent.chat('你好', () => { /* unused */ });
 
-    const run = agent.getRunTraceStore().list()[0];
+    const run = agent.getRunTraceStore()!.list()[0];
     // Absent rather than `false`: a reader has to be able to tell "the spare was not needed" from
     // "this build did not record it", and only the absence of the field says the former.
     assert.equal(run.fallbackUsed, undefined, JSON.stringify(run));
@@ -703,7 +777,7 @@ describe('Agent — a run the spare endpoint answered says so', () => {
     priv.provider = answering('第二轮正常');
     await agent.chat('第二轮', () => { /* unused */ });
 
-    const runs = agent.getRunTraceStore().list();
+    const runs = agent.getRunTraceStore()!.list();
     assert.equal(runs.length, 2);
     assert.equal(runs[0].prompt, '第二轮');
     assert.equal(runs[0].fallbackUsed, undefined, JSON.stringify(runs[0]));

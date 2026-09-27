@@ -145,9 +145,14 @@ function ms(n: number | undefined): string {
 /**
  * The run traces.
  *
- * Two panes because the two questions are different: the list answers "what has this workspace been
- * doing" and one run answers "what exactly happened". Rendering them in a single scroller meant the
- * reader had to hold the summary in their head while scrolling for the detail.
+ * Two panes because the two questions are different: the list answers "what has this conversation
+ * been doing" and one run answers "what exactly happened". Rendering them in a single scroller meant
+ * the reader had to hold the summary in their head while scrolling for the detail.
+ *
+ * The list is scoped to THIS conversation by default, and the trace files live inside it
+ * (`.she/sessions/<id>/runs/`). Looking at every conversation at once is a deliberate second click:
+ * the runs are the user's own words and every command with its output, so the private view is the
+ * one you get without asking, and the wide view says which conversation each row came from.
  *
  * Read-only, like the audit panel. Nothing here can retract a run or edit a step.
  */
@@ -157,12 +162,19 @@ export function RunTracePanel({ onClose, sessionId }: { onClose: () => void; ses
   const [root, setRoot] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<RunReadResponse | null>(null);
-  const [onlyThisSession, setOnlyThisSession] = useState(false);
+  const [scope, setScope] = useState<'session' | 'workspace'>('session');
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const q = onlyThisSession && sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+      /*
+       * The scope is in the request rather than applied to one big list, because there is no one
+       * big list: each conversation's runs are in its own directory, and the wide view is the server
+       * reading across them.
+       */
+      const q = scope === 'workspace'
+        ? '?scope=workspace'
+        : (sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '');
       const data = await fetchJSON<RunsResponse>(`/api/runs${q}`);
       const list = data.runs ?? [];
       setRuns(list);
@@ -175,7 +187,7 @@ export function RunTracePanel({ onClose, sessionId }: { onClose: () => void; ses
     } catch (e) {
       setError((e as Error).message);
     }
-  }, [onlyThisSession, sessionId]);
+  }, [scope, sessionId]);
 
   useEffect(() => {
     void refresh();
@@ -188,17 +200,26 @@ export function RunTracePanel({ onClose, sessionId }: { onClose: () => void; ses
       setDetail(null);
       return;
     }
+    /*
+     * The detail request names the conversation the run belongs to.
+     *
+     * The server will not search for an id: it reads the conversation's own directory and nothing
+     * else, so an id alone is not enough to find a run — which is the property that makes the wide
+     * view safe to offer. In the wide view the row carries its session, so the panel passes it back.
+     */
+    const owningSession = runs.find((r) => r.id === selected)?.session_id ?? sessionId ?? '';
     let cancelled = false;
     void (async () => {
       try {
-        const data = await fetchJSON<RunReadResponse>(`/api/runs/${encodeURIComponent(selected)}`);
+        const q = owningSession ? `?session_id=${encodeURIComponent(owningSession)}` : '';
+        const data = await fetchJSON<RunReadResponse>(`/api/runs/${encodeURIComponent(selected)}${q}`);
         if (!cancelled) setDetail(data);
       } catch (e) {
         if (!cancelled) setError((e as Error).message);
       }
     })();
     return () => { cancelled = true; };
-  }, [selected, runs]);
+  }, [selected, runs, sessionId]);
 
   const events = detail?.events ?? [];
 
@@ -219,20 +240,23 @@ export function RunTracePanel({ onClose, sessionId }: { onClose: () => void; ses
       <div className={styles.filters}>
         <button
           type="button"
-          className={`${styles.filter} ${!onlyThisSession ? styles.filterActive : ''}`}
-          onClick={() => setOnlyThisSession(false)}
+          className={`${styles.filter} ${scope === 'session' ? styles.filterActive : ''}`}
+          onClick={() => setScope('session')}
         >
-          {t('全部会话')}
+          {t('本会话')}
         </button>
         <button
           type="button"
-          className={`${styles.filter} ${onlyThisSession ? styles.filterActive : ''}`}
-          onClick={() => setOnlyThisSession(true)}
-          disabled={!sessionId}
+          className={`${styles.filter} ${scope === 'workspace' ? styles.filterActive : ''}`}
+          onClick={() => setScope('workspace')}
         >
-          {t('只看当前会话')}
+          {t('全部会话')}
         </button>
-        <span className={styles.note}>{t('只读：一轮跑完就不变了')}</span>
+        <span className={styles.note}>
+          {scope === 'workspace'
+            ? t('其它会话的轨迹只在你点开时才读，每一行都标了它属于哪个会话')
+            : t('只读：一轮跑完就不变了')}
+        </span>
       </div>
 
       {runs.length === 0 ? (
@@ -240,7 +264,9 @@ export function RunTracePanel({ onClose, sessionId }: { onClose: () => void; ses
           <div className={styles.emptyIcon}>◷</div>
           <div className={styles.emptyText}>{t('还没有运行轨迹')}</div>
           <div className={styles.emptyHint}>
-            {t('每轮对话都会追加一个文件到 {dir}，记录每一步工具调用、用时和结果。', { dir: '.she/runs/' })}
+            {t('每轮对话都会追加一个文件到本会话自己的目录 {dir}，记录每一步工具调用、用时和结果。', {
+              dir: '.she/sessions/<会话>/runs/',
+            })}
           </div>
         </div>
       ) : (
@@ -263,6 +289,9 @@ export function RunTracePanel({ onClose, sessionId }: { onClose: () => void; ses
                   ) : null}
                   <span className={styles.itemPrompt}>{r.prompt || t('（无提问文本）')}</span>
                   <span className={styles.itemMeta}>
+                    {/* In the wide view the row has to say whose run it is: with several
+                        conversations in one list, an unlabelled prompt is unattributable. */}
+                    {scope === 'workspace' && r.session_id ? `${r.session_id} · ` : ''}
                     {hhmmss(r.startedAt)}
                     {r.state === 'running' || r.state === 'paused' ? ` · ${since(r.startedAt)}` : ''}
                     {' · '}
