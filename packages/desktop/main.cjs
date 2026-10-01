@@ -13,9 +13,22 @@ if (process.platform === 'win32') {
   try { app.setAppUserModelId('com.she.bot'); } catch { /* ignore */ }
 }
 
-const UI_DEV_URL = process.env.SHE_UI_URL || 'http://127.0.0.1:5578';
-const API_ORIGIN = process.env.SHE_API_ORIGIN || 'http://127.0.0.1:5577';
+/*
+ * Where the two services are.
+ *
+ * These used to be pinned to 5577/5578, and `API_ORIGIN` recognised only `SHE_API_ORIGIN` — a
+ * variable nothing else in the project sets. Every other part uses `SHE_PORT`: the launcher passes
+ * it to the server it spawns, `.env.example` documents it, and the packaged path below reads it. So
+ * the shell was the one component that could not be told where the backend actually was.
+ *
+ * That is not hypothetical. Windows/Hyper-V reserves 5541-5640 on this machine, so 5577 cannot be
+ * bound at all and `resolvePreferredPort` moves the API elsewhere. Measured: `/api/health` answered
+ * 200 on the moved port at the same moment this shell logged 「API 未运行」 and drew the failure page.
+ */
+const API_ORIGIN = process.env.SHE_API_ORIGIN || `http://127.0.0.1:${process.env.SHE_PORT || '5577'}`;
 const API_HEALTH = `${API_ORIGIN}/api/health`;
+/** Same convention for the Vite dev server; only consulted when this shell starts on its own. */
+const UI_DEV_URL = process.env.SHE_UI_URL || `http://127.0.0.1:${process.env.SHE_UI_PORT || '5578'}`;
 /** When '0', the desktop will not spawn anything — it only attaches. */
 const START_OWN = IS_PACKAGED ? true : process.env.SHE_ELECTRON_SPAWN !== '0';
 /** pnpm is a .cmd shim on Windows; naming it explicitly avoids PATH surprises. */
@@ -264,7 +277,9 @@ async function ensureBackend() {
     log('API already up');
   } catch {
     if (!START_OWN) {
-      problems.push('API 未运行（SHE_ELECTRON_SPAWN=0，已禁用自动启动）');
+      // Name the address that was probed. Without it the only way to tell "the backend is down"
+      // from "the backend is up somewhere else" is to go read the log and reconstruct the port.
+      problems.push(`API 未运行（SHE_ELECTRON_SPAWN=0，已禁用自动启动）— 已在 ${API_ORIGIN} 探测`);
     } else if (await portInUse(5577)) {
       problems.push('端口 5577 已被占用，但 /api/health 无响应 — 可能是上次残留进程');
     } else if (IS_PACKAGED) {
@@ -407,7 +422,7 @@ function errorPage(problems) {
      <ul>${problems.map((p) => `<li>${p}</li>`).join('')}</ul>
      <p class="hint">排查：查看 <code>.she/desktop.log</code> 与
      <code>.she/desktop-server.err.log</code>；<br>
-     或手动运行 <code>start.cmd</code> 后重开桌面版。</p>`,
+     或手动运行 <code>SHE.bat</code> 后重开桌面版。</p>`,
   );
 }
 
