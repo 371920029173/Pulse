@@ -3,7 +3,14 @@ import { join, resolve, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ToolDefinition } from '@she/shared';
 import { highFindings, renderGuardrailRefusal, scanOutbound } from './guardrail.js';
-import { sessionStateDir, listSessionIds } from './session-state.js';
+import {
+  sessionStateDir,
+  listSessionIds,
+  workspaceStateFile,
+  isWorkspaceScope,
+  WORKSPACE_SCOPE,
+  CHAT_SESSION_PREFIX,
+} from './session-state.js';
 
 export interface KBToolSetLike {
   definitions: ToolDefinition[];
@@ -159,31 +166,41 @@ export class PlanStore {
   private filePath: string;
 
   /**
-   * 这个 store 属于哪个会话。
+   * 这个 store 读写哪个作用域的计划。
    *
-   * 从 2026-09-27 起它是**必需的**，而且只用来标注来源 —— 文件本身已经是会话私有的
-   * （`sessionStateDir(root, id)/plans.json`），所以"别的会话的计划"不是被过滤掉的，是根本不在这个文件里。
-   * 原来这里是"一份 `plans.json` 装所有会话 + 读的时候按 sessionId 过滤"，那对"读"不成立：文件是同一份。
+   * 聊天用 `WORKSPACE_SCOPE`（`.she/plans.json`，一个项目一份，所有会话共享），群用 `cluster:<roomId>`
+   * （各自一个目录，`createGroupPlanTools` 传进来）。**作用域是必需参数**，不给就抛错：让"忘了传"
+   * 落到一份共享文件上，正是要根除的形态。
+   */
+  private scope: string;
+  /**
+   * 计划记下"是哪个会话建的"，**只用于溯源，不参与读写**。
+   *
+   * 和 `scope` 分开是这次改动的要点：以前一个字段干两件事（既决定文件在哪，又决定谁能看见），于是
+   * "工作区级文件"和"按会话过滤"必须绑在一起。现在文件按作用域分，来源只是一个可追溯的标记 ——
+   * 用户看到一份计划时可以知道它是哪次对话留下的。
    */
   private sessionId: string;
-  /** 本会话状态目录（`.she/sessions/<id>`），供需要把相邻文件放一起的调用方复用。 */
+  /** 本作用域的状态目录，供需要把相邻文件放一起的调用方复用。 */
   readonly directory: string;
 
-  constructor(workspaceRoot: string, sessionId: string) {
-    this.filePath = PlanStore.fileFor(workspaceRoot, sessionId);
+  constructor(workspaceRoot: string, scope: string, createdBy?: string) {
+    this.filePath = PlanStore.fileFor(workspaceRoot, scope);
     this.directory = dirname(this.filePath);
     mkdirSync(this.directory, { recursive: true });
-    this.sessionId = sessionId;
+    this.scope = scope;
+    this.sessionId = createdBy ?? scope;
   }
 
   /**
-   * 某个会话的计划文件在哪 —— 只报路径，不建目录。
+   * 某个作用域的计划文件在哪 —— 只报路径，不建目录。
    *
    * 给"列出哪些会话有计划"用：那个动作要从目录名出发去够别人的目录，而路径形状（含文件名）只在这
    * 一处拼，构造器也走它 —— 两处各拼一次，就会有一处忘了校验。
    */
-  static fileFor(workspaceRoot: string, sessionId: string): string {
-    return join(sessionStateDir(workspaceRoot, sessionId), 'plans.json');
+  static fileFor(workspaceRoot: string, scope: string): string {
+    if (isWorkspaceScope(scope)) return workspaceStateFile(workspaceRoot, 'plans.json');
+    return join(sessionStateDir(workspaceRoot, scope), 'plans.json');
   }
 
   private load(): Plan[] {
@@ -238,6 +255,16 @@ export class PlanStore {
     renameSync(tmp, this.filePath);
   }
 
+  /**
+   * 整份写回（迁移用）。
+   *
+   * 存在是因为迁移要写的是"合并后的全集"，而 `create` / `updateStep` 都是"改一份再存"。用一个只做写
+   * 的入口，迁移就没法顺手改计划的内容 —— 它只该搬运。
+   */
+  replaceAll(plans: Plan[]): void {
+    this.save(plans);
+  }
+
   list(): Plan[] {
     return this.load().sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
   }
@@ -258,11 +285,11 @@ export class PlanStore {
   }
 
   /**
-   * THIS conversation's open plan.
+   * 本作用域里那个进行中的计划 —— 对聊天来说就是**本工作区的**。
    *
-   * 曾经它和 `active()` 是两条规则（`active()` 会伸到别的会话里去），因为那时"计划是工作区状态"。
-   * 现在文件本身按会话分开，两条规则合成了一条；保留这个名字是因为调用点读起来更清楚 —— 交付检查问的
-   * 是"本会话有没有未完成的计划"，而不是"工作区里有没有"。
+   * `active()` 和它是同一条规则：文件按作用域分开，作用域里没有"别人的计划"这回事。名字留着是因为
+   * 交付检查读起来清楚（"我这边有没有没做完的计划"），而不是因为它是会话私有的 —— 对聊天来说它是
+   * 工作区级的，另一个会话留下的未收口计划在这里**看得见**，也正因为看得见才拦得住。
    */
   mine(): Plan | undefined {
     return this.active();
@@ -502,14 +529,14 @@ export class PlanStore {
 }
 
 /**
- * 哪些会话里有计划 —— 给"看别的会话"的选择器用的候选清单。
+ * 哪些**目录作用域**里有计划 —— 今天只有讨论群（`cluster:<roomId>`）。
  *
- * 为什么需要它：计划从 2026-09-27 起是**会话私有**的（`.she/sessions/<id>/plans.json`），于是"长任务
- * 一开新对话就忘掉自己"这件事没了，但代价是**你在当前会话里看不到别的会话的计划**。把各会话的计划合并
- * 成一份清单是错的：那正是"上一个对话的计划看起来像现在正在跟的计划"。所以给的是清单，用户自己点开。
+ * 聊天计划是工作区级的（`.she/plans.json`），不在 `.she/sessions/<id>/` 下面，所以这个函数不会再列出
+ * 任何一个聊天 —— 那正是这次改动的目的：一个项目里的计划本来就该在普通视图里全部看得见，而不是藏在
+ * "哪些别的会话有计划"的选择器后面（那个选择器就是为按会话分文件而存在的）。
  *
  * 只数自己的目录，不读别的工作区。**列目录不是读内容**：返回的是会话 id 和计数，用户点开之前一行计划
- * 正文都不会离开那个会话的目录。解不出 id 的目录名直接跳过（见 `listSessionIds`）。
+ * 正文都不会离开那个目录。解不出 id 的目录名直接跳过（见 `listSessionIds`）。
  */
 export interface PlanSessionSummary {
   session_id: string;
@@ -542,6 +569,42 @@ export function planSessions(workspaceRoot: string): PlanSessionSummary[] {
   }
   // 最近动过的排在前面：选择器问的是"我上次那个长任务在哪"。
   return out.sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? '') || a.session_id.localeCompare(b.session_id));
+}
+
+/**
+ * 把 2026-09-27 拆出去的计划收回到工作区那一份里。
+ *
+ * 那次改动把计划切成会话私有，而迁移**只搬了进行中的那一份**：实测这个工作区里 12 份已收口的计划留在了
+ * `.she/plans.json`，agent 再也看不见它们（`plan_list` 只读当前会话的文件），而会话目录里只有 1 份。
+ * 改回工作区级之后必须把那 12 份并回来，否则这次改动只是把问题掉了个方向 —— 丢的换成会话目录里的那些。
+ *
+ * 合并规则：按 id 取并集；同一个 id 以 `updatedAt` 更新的那份为准（迁移之后又被改过的那份才是真的）。
+ * 原文件不删：迁移不该是单向门，而且这些文件很小。可重复执行，第二次是空操作。
+ *
+ * 只看**聊天**会话目录（`sess_*`）：群计划用自己的作用域（`cluster:<roomId>`），不属于工作区那一份。
+ *
+ * 返回收回了多少份，供启动日志说明发生了什么。
+ */
+export function adoptSessionPlansIntoWorkspace(workspaceRoot: string): { adopted: number; updated: number } {
+  const workspaceStore = new PlanStore(workspaceRoot, WORKSPACE_SCOPE);
+  const byId = new Map(workspaceStore.list().map((p) => [p.id, p]));
+  let adopted = 0;
+  let updated = 0;
+  for (const sessionId of listSessionIds(workspaceRoot)) {
+    if (!sessionId.startsWith(CHAT_SESSION_PREFIX)) continue;
+    for (const plan of new PlanStore(workspaceRoot, sessionId).list()) {
+      const current = byId.get(plan.id);
+      if (!current) {
+        byId.set(plan.id, plan);
+        adopted += 1;
+      } else if ((plan.updatedAt || '') > (current.updatedAt || '')) {
+        byId.set(plan.id, plan);
+        updated += 1;
+      }
+    }
+  }
+  if (adopted || updated) workspaceStore.replaceAll([...byId.values()]);
+  return { adopted, updated };
 }
 
 const STATUS_MARK: Record<StepStatus, string> = {
@@ -778,12 +841,26 @@ export function nextStepOf(plan: Plan): { step: PlanStep; why: string } | undefi
  *   - report_write: turn findings into a shareable artifact
  *   - ask_user: explicitly request clarification instead of guessing
  */
-export function createPlanTools(workspaceRoot: string, sessionId: string): KBToolSetLike & { store: PlanStore } {
+/**
+ * `scope` 决定计划存在哪：聊天用工作区那一份（默认），讨论群传自己的 `cluster:<roomId>`。
+ *
+ * 默认值是工作区，因为那是**唯一**用户可见的粒度 —— 群是另一个聚合，它需要自己的作用域这件事由
+ * `createGroupPlanTools` 显式说出来，而不是让每个调用点自己记得传。
+ */
+export function createPlanTools(
+  workspaceRoot: string,
+  sessionId: string,
+  scope: string = WORKSPACE_SCOPE,
+): KBToolSetLike & { store: PlanStore } {
   /*
-   * 会话 id 来自**这个 agent 的上下文**，不是工具参数 —— 工具层没有"指定别的会话的计划"这个入口。
-   * 这是必需的参数（不是可选）：可选的 id 会让"忘了传"变成"落到一个共享文件"，正是要根除的形态。
+   * 计划对聊天来说是**工作区级**的：一个项目一份 `.she/plans.json`，项目里每条会话都读写同一份 —— 于是
+   * "昨天那个长任务"在新开一个对话之后还在，接着做就是了。会话 id 只作为**来源**写进计划
+   * （`plan.sessionId`），不再决定文件在哪：用户脑子里的边界是项目，不是某一条对话。
+   *
+   * 会话 id 依然是**必需**参数（不是可选）：它现在是来源标记，可选就会让"忘了传"变成一条查不出出处的
+   * 计划。工具层也依然没有"指定别的会话/别的工作区"这个入口 —— 能看见的就是本作用域的那一份。
    */
-  const plans = new PlanStore(workspaceRoot, sessionId);
+  const plans = new PlanStore(workspaceRoot, scope, sessionId);
   const toolMap = new Map<string, { def: ToolDefinition; fn: (a: Record<string, unknown>) => Promise<string> }>();
 
   const reg = (def: ToolDefinition, fn: (a: Record<string, unknown>) => Promise<string>) =>
@@ -1126,15 +1203,19 @@ export function createPlanTools(workspaceRoot: string, sessionId: string): KBToo
          * place where "is it really done?" has an answer that does not come from the model.
          *
          * Computed for every status, not just `done`: a partial delivery has to carry the list
-         * of what is left, or the reader has to go and look it up. Scoped to THIS conversation's
-         * plan: an old open plan from an unrelated chat must not block today's delivery, or the
-         * cheapest way past the refusal would be to mark those steps done — exactly the behavior
-         * being prevented.
+         * of what is left, or the reader has to go and look it up.
+         *
+         * Scoped to the WORKSPACE, which means a plan left open by another conversation in this
+         * project blocks today's `done` too. That is deliberate and it is the price of one plan
+         * per project: "leftover" is now a thing the next conversation can see, resume, or close
+         * properly, instead of a private note that expires when its chat scrolls away. The refusal
+         * names the steps, and closing them honestly (done, or dropped with a reason) is the
+         * intended way past it — marking them done to unlock the word "done" is what this checks.
          */
         const mine = plans.mine();
         const unmet = mine ? mine.steps.filter((s) => s.status !== 'done' && s.status !== 'dropped') : [];
         if (status === 'done' && unmet.length) {
-          return `Error: status=done 但本会话的计划还没有做完：`
+          return `Error: status=done 但本工作区的计划还没有做完：`
             + `${unmet.map((s) => `${s.id} ${s.title}（${s.status}）`).join('、')}——`
             + '要么把这些步骤做完或明确标成 dropped，要么这次交付写成 partial 并把它们放进 open';
         }

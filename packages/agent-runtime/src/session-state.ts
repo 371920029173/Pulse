@@ -38,8 +38,49 @@ export function sessionStateRelDir(sessionId: string): string {
   return join(SESSIONS_REL, encodeSessionId(sessionId));
 }
 
+/** 所有工作区私有状态的父目录（相对工作区）：`.she/`。 */
+export const STATE_REL = '.she';
+
 /** 所有会话私有状态的父目录（相对工作区）：`.she/sessions/`。 */
-export const SESSIONS_REL = join('.she', 'sessions');
+export const SESSIONS_REL = join(STATE_REL, 'sessions');
+
+/**
+ * "整个工作区"这个作用域的名字。
+ *
+ * 边界该划在哪是产品决定的，不是存储决定的：2026-09-27 把计划、备忘、轨迹都切成会话私有，理由是"别的
+ * 会话不该读到我的东西"；但那条边界划错了 —— 它不是用户脑子里的边界。用户脑子里的边界是**项目**：
+ * 在同一个工作区里开一个新对话，昨天那份计划还在，接着做就是了；只有换一个工作区，才该看不见。
+ *
+ * 所以计划（`plans.json`）和备忘（`memo.json`）现在用这个作用域：一个工作区一份，所有会话共享。
+ * 它**不是会话 id**（解不出目录名，也不会出现在 `listSessionIds` 里），只是一个作用域名。
+ */
+export const WORKSPACE_SCOPE = 'workspace';
+
+/** 这个作用域是不是"整个工作区"。 */
+export function isWorkspaceScope(scope: string): boolean {
+  return scope === WORKSPACE_SCOPE;
+}
+
+/**
+ * 聊天会话 id 的前缀（`sess_<hex>`）。
+ *
+ * 存在的理由不是"验证 id 形状"（那是 `sessionIdProblem` 的事），而是让按目录名分辨"这是一条聊天"成为
+ * 可能：群计划的作用域是 `cluster:<roomId>`，历史迁移必须只搬聊天目录，不能把群的那份也算进工作区。
+ */
+export const CHAT_SESSION_PREFIX = 'sess_';
+
+/**
+ * 工作区级状态文件在哪：`.she/<name>`。
+ *
+ * 和 `sessionStateDir` 并列的**唯一**拼法：工作区级的状态落点也只在这里拼一次。名字是调用点写死的
+ * 常量（`plans.json` / `memo.json`），仍然校验，因为"调用点都写死了"正是再加一个调用点时会失效的假设。
+ */
+export function workspaceStateFile(workspaceRoot: string, name: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) || name.includes('..')) {
+    throw new Error(`工作区级状态文件名不合法: ${JSON.stringify(name)}`);
+  }
+  return join(workspaceRoot, STATE_REL, name);
+}
 
 /** 所有会话私有状态的父目录：`.she/sessions/`。 */
 export function sessionsRoot(workspaceRoot: string): string {

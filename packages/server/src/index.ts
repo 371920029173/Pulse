@@ -13,7 +13,19 @@ import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLin
 import { SandboxShell, createTools, ConfirmTicketStore } from '@she/sandbox';
 import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, subagentWrapUpScheduleMs, composeWrapUpNudge, selectHarvestNotes } from '@she/agent-runtime';
 import type { SubagentRunner, SubagentResult, SubagentKbHarvest } from '@she/agent-runtime';
-import { PlanStore, MemoStore, nextStepOf, planSessions, encodeSessionId, sessionStateDir, sessionStateRelDir, listSessionIds } from '@she/agent-runtime';
+import {
+  PlanStore,
+  MemoStore,
+  nextStepOf,
+  planSessions,
+  encodeSessionId,
+  sessionStateDir,
+  sessionStateRelDir,
+  listSessionIds,
+  WORKSPACE_SCOPE,
+  adoptSessionPlansIntoWorkspace,
+  adoptSessionMemosIntoWorkspace,
+} from '@she/agent-runtime';
 import { RunTraceStore, ConfidenceMirror, REFLECTION_DIR } from '@she/agent-runtime';
 import type { RunSummary } from '@she/agent-runtime';
 import { retireKnownFalsePositives } from '@she/agent-runtime';
@@ -31,6 +43,7 @@ import { Router, HttpError, sendJSON, sendError, sendSSEEvent, startSSE, endSSE,
 import { SessionStore, chooseStartupSession } from './sessions.js';
 import type { ChatSession, ImportedConversation } from './sessions.js';
 import { ClusterStore, runClusterWave, stopClusterRun, initClusterIdentitySkills, ROLE_PRESETS, generateRoleSkill } from './cluster.js';
+import { CLUSTER_PLAN_SCOPE_PREFIX } from './cluster-auto.js';
 import type { ClusterRole } from './cluster.js';
 import { listMcpServers, probeMcpServer, writeMcpServer, removeMcpServer, setMcpServerEnabled } from './mcp.js';
 import { PluginManager, KNOWN_PERMISSIONS, type PluginManifest } from './plugins.js';
@@ -2133,6 +2146,29 @@ function mountWorkspace(root: string, sessionId?: string): ChatSession {
     if (chosen.messages?.length) a.setHistory(chosen.messages);
     agents.set(chosen.id, a);
   }
+
+  /*
+   * 把 2026-09-27 拆出去、按会话存的计划和备忘收回到工作区那一份里。
+   *
+   * 放在 mount 里而不是"启动时跑一次"：工作区可以在运行期切换，而"该并回来的东西"是随工作区走的 ——
+   * 启动时只并了当初那个工作区，之后切到另一个，它自己的历史条目会一直留在没人读的路径上。迁移可重复
+   * 执行（没有可并的就是空操作），所以每次 mount 都跑得起。
+   *
+   * 失败不阻断启动：迁移是修历史数据，不该让一个坏文件把工作区卡住 —— 但要说出来，否则"计划怎么还是
+   * 少了"会变成下一次同样的排查。
+   */
+  try {
+    const plans = adoptSessionPlansIntoWorkspace(config.workspace.root);
+    const memos = adoptSessionMemosIntoWorkspace(config.workspace.root);
+    if (plans.adopted || plans.updated || memos.adopted || memos.updated) {
+      log.info(
+        `状态迁移到工作区级：计划 新增${plans.adopted}/更新${plans.updated}，备忘 新增${memos.adopted}/更新${memos.updated}`,
+      );
+    }
+  } catch (err) {
+    log.warn(`工作区级状态迁移失败（不影响启动）: ${(err as Error).message}`);
+  }
+
   return chosen;
 }
 
@@ -4367,56 +4403,41 @@ router.get('/api/fs/tree', (req, res) => {
     sendJSON(res, { ok });
   });
 
-  // ── per-session memo (scratchpad for user + agent) ──
+  // ── workspace memo (scratchpad for user + agent) ──
   /*
-   * 备忘按会话分开存（`.she/sessions/<id>/memo.json`），2026-09-27 起。
+   * 备忘是**工作区级**的（`.she/memo.json`），2026-10-01 起。
    *
-   * 原来是工作区级单文件 `memo.json`，于是任何会话都能读到别的会话记下的东西；分账只靠"读的时候
-   * 过滤"，而文件是同一份 —— 那对"读"不成立。现在路径就不同。
+   * 2026-09-27 曾把它切成会话私有，理由是"别的会话不该读到我的东西"。那条边界划错了：用户脑子里的边界
+   * 是**项目** —— 在一个项目里新开一个对话，昨天记的待办当然还在；按对话分账等于每次开新对话都从空开始
+   * 记。跨工作区仍然是路径上不存在（另一个工作区有自己的 `.she/`），边界没变松，只是挪到了用户认识的那
+   * 条线上。
    *
-   * 没有会话时不给兜底：读返回空、写直接拒绝。兜底桶（一个所有会话共享的备忘本）正是这一层要根除的
-   * 形态，而且它出错时没人会发现。
+   * 因此这些接口**不再要 `session_id`**：本工作区就一份，没有"归属哪个会话"这回事。仍然每次请求现构造
+   * store —— 工作区可以在运行期切换（`/api/workspaces/switch`），缓存一个启动期的 root 会把读写落到
+   * 上一个工作区上。
    */
-  const memoFor = (req: import('node:http').IncomingMessage, body?: { session_id?: string }) => {
-    const id = sessionIdOf(req, body);
-    return id ? { id, store: new MemoStore(config.workspace.root, id) } : null;
-  };
+  const memoStore = () => new MemoStore(config.workspace.root);
 
-  router.get('/api/memo', (req, res) => {
-    const hit = memoFor(req);
-    sendJSON(res, { entries: hit ? hit.store.list() : [] });
+  router.get('/api/memo', (_req, res) => {
+    sendJSON(res, { entries: memoStore().list() });
   });
 
   router.post('/api/memo', async (req, res) => {
-    const body = await parseBody<{ text?: string; session_id?: string }>(req);
-    const hit = memoFor(req, body);
-    if (!hit) throw new HttpError(400, '缺少 session_id：备忘按会话分开存，没有会话就没有可归属的本子');
+    const body = await parseBody<{ text?: string }>(req);
     const text = String(body.text ?? '').trim();
     if (!text) throw new HttpError(400, 'Missing text');
-    sendJSON(res, hit.store.add(text, 'user'), 201);
+    sendJSON(res, memoStore().add(text, 'user'), 201);
   });
 
   router.put('/api/memo/:id', async (req, res, params) => {
-    const body = await parseBody<{ text?: string; done?: boolean; session_id?: string }>(req);
-    const hit = memoFor(req, body);
-    if (!hit) throw new HttpError(400, '缺少 session_id：备忘按会话分开存');
-    const entry = hit.store.update(params.id, body);
+    const body = await parseBody<{ text?: string; done?: boolean }>(req);
+    const entry = memoStore().update(params.id, body);
     if (!entry) throw new HttpError(404, 'Memo not found');
     sendJSON(res, entry);
   });
 
-  router.delete('/api/memo/:id', async (req, res, params) => {
-    /*
-     * The body is parsed here for the same reason the reset route parses it: a caller that names a
-     * session in the body must not have the delete land on whichever session the server touched
-     * last. `sessionIdOf` falls back to the active session, and for a DELETE that fallback removes
-     * the wrong person's entry.
-     */
-    const body = await parseBody<{ session_id?: string }>(req).catch(() => ({ session_id: undefined }));
-    const hit = memoFor(req, body);
-    if (!hit) throw new HttpError(400, '缺少 session_id：备忘按会话分开存');
-    const ok = hit.store.remove(params.id);
-    if (!ok) throw new HttpError(404, 'Memo not found');
+  router.delete('/api/memo/:id', (_req, res, params) => {
+    if (!memoStore().remove(params.id)) throw new HttpError(404, 'Memo not found');
     sendJSON(res, { ok: true });
   });
 
@@ -4902,16 +4923,20 @@ router.get('/api/fs/tree', (req, res) => {
 
   // ── long-horizon plans (written by the agent's plan_* tools) ──
   /*
-   * 计划按会话分开存（`.she/sessions/<id>/plans.json`），客户端传 session_id。
+   * 计划是**工作区级**的（`.she/plans.json`），2026-10-01 起：一个项目一份，项目里每条会话读到的是同一
+   * 份，于是"昨天那个长任务"在新开一个对话里还在，接着做就行。会话 id 只作为来源标记写进
+   * `plan.sessionId`，不再决定文件在哪 —— 用户脑子里的边界是项目，不是某一条对话。
    *
-   * 2026-09-27 之前这是一份工作区级 `plans.json` 加"读的时候按 sessionId 过滤"，于是任何会话都能读到
-   * 别的会话的计划全文，还能接着改。现在文件本身按会话分开，"别人的计划"不是被过滤掉的，是不在文件里。
+   * 2026-09-27 曾按会话分开（`.she/sessions/<id>/plans.json`），边界划在了对话之间，那不是用户认识的
+   * 边界。代价是明确的：一个项目同时只有一个进行中计划，别处留下的未收口计划会拦住本会话的
+   * `report_write status=done`（工具层会点名是哪几步）。
    *
-   * 没有会话时读返回空、写拒绝 —— 不退回"看全部"。
+   * 群计划仍然用自己的作用域（`cluster:<roomId>`）：群是另一个聚合，不是"另一条会话"。
    */
   const planStoreFor = (req: import('node:http').IncomingMessage, body?: { session_id?: string }) => {
     const id = sessionIdOf(req, body);
-    return id ? new PlanStore(config.workspace.root, id) : null;
+    const scope = id && id.startsWith(CLUSTER_PLAN_SCOPE_PREFIX) ? id : WORKSPACE_SCOPE;
+    return new PlanStore(config.workspace.root, scope, id ?? scope);
   };
 
   
@@ -4951,25 +4976,24 @@ router.get('/api/fs/tree', (req, res) => {
     });
 
   /**
-   * 哪些会话里有计划 —— 「其他会话」选择器的候选清单，且必须显式要（`?scope=workspace`）。
+   * 哪些**目录作用域**里有计划 —— 今天只剩讨论群（`cluster:<roomId>`）。
    *
-   * 计划是按会话分开存的，所以当前会话看不到别的会话的计划。这个接口就是那扇门：它列出的只有会话 id
-   * 和计数，一行计划正文都不带 —— 用户点开哪个会话，才去读那个会话自己的目录。
+   * 聊天计划是工作区级的（`.she/plans.json`），本来就在 `/api/plans` 里全部看得见，所以这个接口不再是
+   * "看别的会话的那扇门"：那个选择器是为"按会话分文件"而存在的，现在没有必须靠它才能看到的东西了。
+   * 留着是因为群计划仍然在自己的目录里，面板要能说出"哪个群有在跟的计划"。
    *
-   * 为什么必须显式带参数：这是一个"顺带就能枚举出别人"的接口，而默认路径上不该有这种接口存在。
-   * 少一个 `scope=workspace` 就报 400，而不是悄悄给一份跨会话清单 —— 界面也只有打开选择器那一刻才发。
+   * 参数仍然必须显式带上：它枚举的是目录名，默认路径上不该有这种接口。
    */
   router.get('/api/plans/sessions', (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
     if (url.searchParams.get('scope') !== 'workspace') {
-      throw new HttpError(400, 'scope=workspace is required: 列出别的会话的计划是一次显式动作');
+      throw new HttpError(400, 'scope=workspace is required: 枚举目录作用域是一次显式动作');
     }
     sendJSON(res, { sessions: planSessions(config.workspace.root) });
   });
 
   router.get('/api/plans', (req, res) => {
     const store = planStoreFor(req);
-    if (!store) return sendJSON(res, { plans: [] });
     /*
      * The resume point is computed here, from `nextStepOf`, rather than in the panel.
      *
@@ -5001,7 +5025,6 @@ router.get('/api/fs/tree', (req, res) => {
       throw new HttpError(400, 'invalid status');
     }
     const store = planStoreFor(req, body);
-    if (!store) throw new HttpError(400, '缺少 session_id：计划按会话分开存');
     const result = store.setStepStatus(planId, stepId, status as StepStatus, body.note);
     if (!result.ok) {
       /*

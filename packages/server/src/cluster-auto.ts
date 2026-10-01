@@ -325,8 +325,17 @@ export function renderContinuationNote(
 export const GROUP_PLAN_TOOLS = ['plan_create', 'plan_update', 'plan_add_steps', 'plan_get'] as const;
 
 /** Plans are stored in the workspace plan file, stamped with this pseudo session id per room. */
+/**
+ * 群计划的作用域前缀。群计划存在 `.she/sessions/cluster:<roomId>/plans.json` 里，和聊天共用的那份
+ * 工作区计划（`.she/plans.json`）并存 —— 群是另一个聚合，不是"另一条会话"。
+ *
+ * 导出它是为了让服务端识得"这个 id 是群的作用域"（`/api/plans` 要决定读哪一份），而不是在第二处再拼一次
+ * 前缀字符串；拼错一个字符就会静默读到工作区那一份。
+ */
+export const CLUSTER_PLAN_SCOPE_PREFIX = 'cluster:';
+
 export function groupPlanSession(roomId: string): string {
-  return `cluster:${roomId}`;
+  return `${CLUSTER_PLAN_SCOPE_PREFIX}${roomId}`;
 }
 
 /**
@@ -348,7 +357,11 @@ export function createGroupPlanTools(workspaceRoot: string, roomId: string): {
   current: () => Plan | undefined;
 } {
   const session = groupPlanSession(roomId);
-  const inner = createPlanTools(workspaceRoot, session);
+  /*
+   * 群计划用自己的作用域（`cluster:<roomId>`），不是工作区那一份：群是另一个聚合，一个项目里可以同时
+   * 有一个"当前计划"和一个"本群正在推的计划"而不打架。第三个参数是来源标记，这里和 scope 相同。
+   */
+  const inner = createPlanTools(workspaceRoot, session, session);
   const allowed = new Set<string>(GROUP_PLAN_TOOLS);
   const definitions = inner.definitions.filter((d) => allowed.has(d.name));
   const current = () => inner.store.mine();

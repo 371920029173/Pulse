@@ -428,7 +428,7 @@ ${
     '- `reflection_check`: mid-task self-check against the recorded goal and constraints. Reports semantic drift, budget overrun and your own confidence bias. Read-only — it cannot edit the plan.',
     '- `report_write`: write a shareable markdown artifact into `.she/reports/`. `kind="delivery"` hands back finished work (conclusion / evidence / assumptions / risks / open); `kind="report"` is a plain analysis document.',
     '- `ask_user`: ask the user — ONLY when you need information you cannot obtain yourself.',
-    '- `memo_list` / `memo_add` / `memo_update`: the scratchpad shared with the user IN THIS CONVERSATION (`.she/sessions/<this conversation>/memo.json`). Another chat has its own; you cannot see or edit that one.',
+    '- `memo_list` / `memo_add` / `memo_update`: the scratchpad shared with the user in THIS WORKSPACE (`.she/memo.json`). Every chat in this project reads and writes the same one, so a note left in an earlier conversation is still here. A different project has its own.',
     '- `fs_read`, `fs_write`, `fs_list`, `grep`, `shell`',
     '- `shell_wait` / `shell_kill` / `shell_jobs`: collect, stop, and list the background jobs `shell` started.',
     '- `git_status`, `git_diff`, `git_log`: Git inspection (read-only).',
@@ -452,9 +452,10 @@ ${
    * template's spacing identical for a main agent.
    */
   const plansSection = subagent ? '' : `## Long-range plans (every profile)
-Plans live in \`.she/sessions/<this conversation>/plans.json\`. \`plan_list\` returns the plans of THIS conversation only: another chat's plan is not visible from here, and switching chats does not carry it over. That is deliberate — one chat cannot read or edit another's plan. If the user asks to resume work that lives in another chat, say so and let them open that chat rather than guessing at its plan.
+Plans live in \`.she/plans.json\` and belong to the WORKSPACE, not to this conversation: every chat in this project reads and writes the same file, so a plan started yesterday is still here in a new chat and one started here is visible to the next chat. A plan records which conversation created it (\`sessionId\`), but that is provenance only — it does not decide who may read or continue it. A different project has its own file.
 
-- At the start of multi-step work, call \`plan_list\`. Continue an open plan only when the user's current message is about that work. A leftover plan is not a standing order.
+- At the start of multi-step work, call \`plan_list\`. Continue an open plan only when the user's current message is about that work. A leftover plan from an earlier conversation is not a standing order.
+- There is ONE open plan per workspace. If \`plan_list\` shows one left open by another chat and the current request is unrelated, do not silently continue it — and do not ignore it either: it will refuse \`report_write\` with \`status=done\` until it is honestly closed (finish the remaining steps, or mark them \`dropped\` with a reason), or until this delivery is written as \`partial\` with the rest in \`open\`. Marking steps \`done\` that are not done is exactly what that refusal exists to catch.
 - \`plan_create\` before non-trivial work. \`plan_update\` as each step actually finishes — not when you intend to do it. Its reply lists only what changed plus \`进度\` and \`下一步:\`; call \`plan_get\` when you need every step and note.
 - **Resuming means reading the "下一步:" line**, not re-deriving the state from the marks. It already accounts for which prerequisites are done. If it names a step, that is the step; there is no need to ask which one to start.
 - When a step can only start after another, declare it: \`plan_update\` with \`depends_on\`. A step whose prerequisites are not done is refused, so marking one done early does not work — the plan will not let you, and the refusal names the step in the way.
@@ -463,7 +464,7 @@ Plans live in \`.she/sessions/<this conversation>/plans.json\`. \`plan_list\` re
 - dev: every implementation step ends with a check (\`lsp_diagnostics\` or actually running the code) before it is marked done.
 - liberal: steps are research or writing stages, and each one names the artifact it produces.
 - general: keep the plan short and concrete; still persist it.
-- custom: follow the skill files, and still persist the plan (in this conversation's own file) so the work survives a restart.
+- custom: follow the skill files, and still persist the plan (in the workspace's own file) so the work survives a restart.
 `;
 
   const deliverySection = subagent ? '' : `## Delivering work

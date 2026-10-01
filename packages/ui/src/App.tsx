@@ -1191,7 +1191,7 @@ export function App() {
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <Memo sessionId={activeSessionId} />
+            <Memo />
           </div>
         </div>
       )}

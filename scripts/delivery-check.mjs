@@ -11,8 +11,11 @@
  *   1. The template: conclusion and evidence are required, brief and full differ, and every
  *      refusal classifies as something the model can act on.
  *   2. Unconfirmed is not done: `done` is refused while anything is open, and while this
- *      conversation's plan has unfinished steps — naming them.
- *   3. A plan from another conversation neither blocks a delivery here nor gets claimed by it.
+ *      WORKSPACE's plan has unfinished steps — naming them.
+ *   3. The plan is the workspace's, not the conversation's: an unfinished plan in another
+ *      workspace neither blocks a delivery here nor gets claimed by it, while one left open by
+ *      another conversation in the SAME project does — and closing it honestly (done, or dropped
+ *      with a reason) is what lets the delivery through.
  *   4. The artifact on disk says what the tool said, including what is still outstanding.
  *   5. `kind=report` is unchanged, so an analysis document is not forced through a delivery form.
  */
@@ -141,19 +144,44 @@ console.log('\n2. 未确认不标完成');
   check('通过后产物里不再有「还没做完的步骤」', !/还没做完的步骤/.test(allowed.text), allowed.text.slice(-200));
 }
 
-console.log('\n3. 别会话的计划不该拦住这次交付，也不该被冒充');
+console.log('\n3. 别的工作区的计划不拦；同一项目里别人留下的未收口计划该拦，且能收口');
 {
-  const other = toolsFor('sess-other');
-  await other.execute('plan_create', { title: '别人的活', steps: ['a', 'b'] });
+  /*
+   * 另一个**工作区**：路径上不存在，所以既不拦这次交付，也不会被冒充成"我的步骤"。
+   */
+  const otherRoot = mkdtempSync(join(tmpdir(), 'she-delivery-other-'));
+  const other = createPlanTools(otherRoot, 'sess-other');
+  await other.execute('plan_create', { title: '别的项目里的活', steps: ['a', 'b'] });
 
   const tools = toolsFor('sess-mine');
   const out = await deliver(tools, { kind: 'delivery', title: '无关交付', status: 'done', conclusion, evidence });
-  check('另一个会话没做完的计划不拦这次交付', !out.out.startsWith('Error: '), out.out);
+  check('另一个工作区没做完的计划不拦这次交付', !out.out.startsWith('Error: '), out.out);
   check('也不用它的步骤来吓唬人', !/还没做完的步骤/.test(out.text), out.text.slice(-200));
+  removeTempDir(otherRoot);
 
-  await call(tools, 'plan_create', { title: '本会话的活', steps: ['a'] });
-  const blocked = await deliver(tools, { kind: 'delivery', title: '本会话', status: 'done', conclusion, evidence });
-  check('本会话自己的计划才会拦', blocked.out.startsWith('Error: '), blocked.out);
+  /*
+   * 同一个工作区里，**另一条会话**留下的未收口计划：看得见，所以拦得住。
+   *
+   * 这正是"一个项目一份计划"的代价，也是它买来的东西 —— 上一轮对话没做完的活，这一轮能接着做，
+   * 而不是随对话消失。所以这里不是"要隔离掉"的噪声，而是必须兑现的承诺：拦住，并且点名。
+   */
+  const peer = toolsFor('sess-peer');
+  await peer.execute('plan_create', { title: '同事没做完的活', steps: ['起服务', '验接口'] });
+
+  const blocked = await deliver(tools, { kind: 'delivery', title: '本工作区', status: 'done', conclusion, evidence });
+  check('【关键】同一工作区里别人留下的未收口计划会拦住这次 done', blocked.out.startsWith('Error: '), blocked.out);
+  check('拒绝里点名那些步骤（能接着做，不是只被拦住）',
+    /起服务/.test(blocked.out) && /验接口/.test(blocked.out), blocked.out);
+
+  /*
+   * 出口是"诚实地收口"，不是"把 done 写进去"：标成 dropped 并给出理由，剩下那步做完 —— 之后才过。
+   */
+  await call(tools, 'plan_update', { step_id: 's1', status: 'dropped', note: '这块改由运维窗口执行，本轮不做' });
+  const stillBlocked = await deliver(tools, { kind: 'delivery', title: '只收了一半', status: 'done', conclusion, evidence });
+  check('只 dropped 一步还不够：剩下那步没做完仍然拦着', stillBlocked.out.startsWith('Error: '), stillBlocked.out);
+  await call(tools, 'plan_update', { step_id: 's2', status: 'done' });
+  const after = await deliver(tools, { kind: 'delivery', title: '收口后', status: 'done', conclusion, evidence });
+  check('把步骤收口（dropped 带理由 + done）之后 done 通过', !after.out.startsWith('Error: '), after.out);
 }
 
 console.log('\n4. 简版 / 详版：区别在「有没有想过」，不在字数');
@@ -209,6 +237,16 @@ console.log('\n6. 提示词里写了这套交付规则');
   check('提示词写明「未验证的不能算 done」', /Not verified is not \`done\`/.test(prompt), null);
   check('提示词写明简版/详版的取舍', /mode: "brief"/.test(prompt) && /mode: "full"/.test(prompt), null);
   check('提示词区分 delivery 与 report', /kind: "report"/.test(prompt), null);
+  /*
+   * 交付闸门读的是**工作区**的计划文件，所以提示词必须说同一件事：不然模型会以为"别人的计划拦住了
+   * 我"是 bug 而去绕过它，或者反过来以为换个对话就能把没做完的活甩掉。
+   */
+  check('提示词写明计划属于工作区、不是这条对话的',
+    /\.she\/plans\.json/.test(prompt) && /belong to the WORKSPACE/.test(prompt), null);
+  check('提示词写明别的对话留下的未收口计划会拦住这次的 done',
+    /left open by another chat/.test(prompt) && /report_write/.test(prompt), null);
+  check('提示词写明备忘是工作区共享的一本',
+    /\.she\/memo\.json/.test(prompt) && /Every chat in this project reads and writes the same one/.test(prompt), null);
 }
 
 removeTempDir(dir);

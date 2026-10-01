@@ -1,22 +1,24 @@
 /**
- * Plan store: durable, **per-session** progress tracking.
+ * Plan store: durable progress tracking, scoped to the **workspace**.
  *
- * 计划是 agent 用来管自己长任务的东西，所以这里要紧的性质是：计划活过一次重启（同一会话内）。
+ * 计划是 agent 用来管自己长任务的东西，所以这里要紧的性质是：计划活过一次重启。
  *
- * 2026-09-27 起"每个会话都看得见"这条**被反过来了**：原来一份 `plans.json` 装所有会话、读的时候
- * 按 sessionId 过滤，于是任何会话都能读到别的会话的计划全文。现在文件按会话分开，别的会话的计划
- * **不在这个文件里**。长任务要跨会话续做走显式动作（打开那个会话），不再靠 `plan_list` 顺手捞。
+ * 2026-10-01 起边界是**工作区**：一个项目一份 `.she/plans.json`，项目里每条会话读写同一份 —— 在一个项目
+ * 里新开一个对话，昨天那个长任务还在，接着做就行。2026-09-27 曾把边界划在对话之间（每会话一个文件），
+ * 那不是用户脑子里的边界：它让"同一个项目里的历史计划"对新对话不可见，一次只搬"进行中那份"的迁移还把
+ * 12 份已收口的计划留在了没人读的路径上。
  *
- * 文件头这句原本写的是 "stays visible to every conversation (a long task must not vanish when the
- * chat changes)" —— 那句是旧行为的说明书，留着就是撒谎，所以改了。
+ * 文件头这句原本写的是 "stays visible to every conversation"（旧行为），中途改成了 "per-session"，现在
+ * 又回到工作区级 —— 两次都是被行为推翻的说明书，所以这里连着"为什么"一起写清楚。
  */
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { PlanStore, renderPlan, createPlanTools } from '../plan-tools.js';
+import { PlanStore, renderPlan, createPlanTools, adoptSessionPlansIntoWorkspace } from '../plan-tools.js';
 import type { StepStatus } from '../plan-tools.js';
+import { WORKSPACE_SCOPE } from '../session-state.js';
 import { classifyToolResult } from '../tool-result.js';
 
 /** 本文件默认的会话；需要第二个会话时用 `SESS_B`。 */
@@ -62,34 +64,67 @@ describe('PlanStore', () => {
     assert.equal(found!.title, '持久化');
   });
 
-  it('【关键】每个会话只看得到自己的计划（两个文件，不是一个文件加过滤）', () => {
-    const storeA = new PlanStore(dir, 'sess-A');
-    const storeB = new PlanStore(dir, 'sess-B');
-    const a = storeA.create('属于 A', ['x']);
-    storeB.create('属于 B', ['y']);
-    // 旧行为（2026-09-27 之前）：A 看得到 B 的计划，还能接着改 —— 那是"工作区计划"，也是跨会话读的入口。
-    assert.deepEqual(storeA.list().map((p) => p.title), ['属于 A']);
-    assert.deepEqual(storeB.list().map((p) => p.title), ['属于 B']);
-    assert.equal(storeB.get(a.id), undefined, 'B 不该看得到 A 的计划');
-    assert.equal(storeA.active()?.id, a.id);
-    // 它自己的计划照旧能接着改 —— 分离的是"别人的"，不是"我的"。
-    const updated = setStep(storeA, a.id, a.steps[0].id, 'done');
-    assert.equal(updated?.status, 'done');
-    // 两个文件各在各的目录里。
-    assert.equal(existsSync(join(dir, '.she', 'sessions', 'sess-A', 'plans.json')), true);
-    assert.equal(existsSync(join(dir, '.she', 'sessions', 'sess-B', 'plans.json')), true);
+  it('【关键】同一个工作区的会话共用同一份计划（一份文件，不是每会话一份）', () => {
+    // 这是本层现在的边界。用户脑子里的边界是项目，不是某一条对话。
+    const a = createPlanTools(dir, 'sess-A');
+    const b = createPlanTools(dir, 'sess-B');
+    const created = a.store.create('属于 A 的活', ['x']);
+
+    assert.deepEqual(b.store.list().map((p) => p.title), ['属于 A 的活'], '同项目的另一条会话应看到同一份');
+    assert.ok(b.store.get(created.id), '并且能接着做');
+    // 来源被记下来了，但它**不决定**谁能看见 —— 这正是这次改动的要点。
+    assert.equal(b.store.get(created.id)!.sessionId, 'sess-A', '来源要留着，供用户分辨是哪次对话留下的');
+    // 只有一份文件，就在工作区级的位置。
+    assert.equal(existsSync(join(dir, '.she', 'plans.json')), true);
+    assert.equal(
+      existsSync(join(dir, '.she', 'sessions', 'sess-A', 'plans.json')),
+      false,
+      '聊天不该再建会话级计划文件',
+    );
   });
 
-  it('【关键】构造 store 必须给它一个会话 —— 不给就没法"看到全部"', () => {
-    // 旧行为里有一条测试专门断言「未绑定会话的 store 看得到全部计划」。`sessionId` 现在是必需参数，
-    // 所以那条路没有了：忘了传 id 是抛错，不是"落到共享文件"。兜底桶是所有会话共享的记忆，且没人会发现。
+  it('【关键】换一个工作区就看不见了（隔离在项目上，不在对话上）', () => {
+    createPlanTools(dir, 'sess-A').store.create('这个项目的活', ['x']);
+    const otherRoot = mkdtempSync(join(tmpdir(), 'she-plan-other-'));
+    try {
+      assert.deepEqual(createPlanTools(otherRoot, 'sess-Z').store.list(), [], '另一个工作区不该看到这份计划');
+      assert.equal(existsSync(join(otherRoot, '.she', 'plans.json')), false, '隔离靠路径，不是靠读的时候过滤');
+    } finally {
+      rmSync(otherRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('构造 store 必须给它一个作用域 —— 不给不落到共享文件上', () => {
+    // `''` 一旦落进某个兜底桶，那个桶就是所有会话共享的记忆，且没人会发现。
     assert.throws(() => new PlanStore(dir, ''), /不合法/);
     assert.throws(() => new PlanStore(dir, '../..'), /不合法/);
-    // 两个会话各自建了计划，第三个会话看不到它们。
+    // 作用域是显式的：目录作用域（讨论群用 `cluster:<roomId>`）仍然各占一份文件。
     new PlanStore(dir, 'sess-A').create('A 的', ['x']);
     new PlanStore(dir, 'sess-B').create('B 的', ['y']);
     assert.deepEqual(new PlanStore(dir, 'sess-C').list(), []);
     assert.notEqual(SESS, SESS_B);
+  });
+
+  it('迁移：把 2026-09-27 留在会话目录里的计划并回工作区那一份', () => {
+    /*
+     * 那次迁移只搬了"进行中"的那一份，于是同一个工作区里 12 份已收口的计划留在旧文件里，新会话的计划
+     * 留在会话目录里。改回工作区级必须把后者并回来，否则这次改动只是把"丢失"换了个方向。
+     */
+    const stranded = new PlanStore(dir, 'sess_old').create('会话目录里的活', ['x']);
+    new PlanStore(dir, WORKSPACE_SCOPE).create('工作区里已经有的活', ['y']);
+
+    const first = adoptSessionPlansIntoWorkspace(dir);
+    assert.equal(first.adopted, 1, '应收回 1 份');
+    const workspace = new PlanStore(dir, WORKSPACE_SCOPE);
+    assert.deepEqual(
+      workspace.list().map((p) => p.title).sort(),
+      ['工作区里已经有的活', '会话目录里的活'].sort(),
+      '两边的计划都该在',
+    );
+    assert.ok(workspace.get(stranded.id), '按 id 能查到收回来那份');
+    // 原文件不删，且可重复执行。
+    assert.equal(existsSync(join(dir, '.she', 'sessions', 'sess_old', 'plans.json')), true, '迁移后原文件应保留');
+    assert.deepEqual(adoptSessionPlansIntoWorkspace(dir), { adopted: 0, updated: 0 }, '再跑一次应是空操作');
   });
 
   it('completing a step auto-advances the next one', () => {
@@ -671,15 +706,28 @@ describe('交付模板', () => {
     assert.ok(!ok.startsWith('Error'), `计划做完后应该通过: ${ok.slice(0, 200)}`);
   });
 
-  it('别的会话没做完的计划不拦这次交付', async () => {
+  it('【关键】同一工作区里别处留下的未收口计划会拦这次交付（工作区级计划的代价）', async () => {
+    /*
+     * 改回工作区级就必然如此：一个项目只有一份计划，所以"别的对话留下的未收口计划"在这里**看得见**，
+     * 也正因为看得见才拦得住。这是有意的取舍，不是 bug —— 它是"计划属于项目"的另一面。拦不住才是
+     * 更糟的：那意味着计划只是摆设，"做完了"可以随时自称。
+     *
+     * 出路是**诚实收口**（把剩下的做完，或标 dropped 并写原因），而不是把它们标成 done 来解锁。
+     */
     const other = createPlanTools(dir, 'sess-9');
     await other.execute('plan_create', { title: '别人的活', steps: ['a', 'b'] });
 
     const { out } = await report('T', { status: 'done', conclusion: '做完了', evidence });
-    assert.ok(
-      !out.startsWith('Error'),
-      `别会话的计划不该拦住交付（否则模型会学会把步骤标 done 来解锁）: ${out.slice(0, 200)}`,
-    );
+    assert.match(out, /^Error: /, `同项目的未收口计划应拦住 done: ${out.slice(0, 200)}`);
+    assert.match(out, /s1 a/, '要点名是哪几步没做完');
+
+    // 这些步骤属于这个项目，所以从这里接着做完是正当的 —— 收口之后就该放行。
+    const store = new PlanStore(dir, WORKSPACE_SCOPE);
+    const open = store.active()!;
+    for (const step of open.steps) setStep(store, open.id, step.id, 'done');
+
+    const after = await report('T', { status: 'done', conclusion: '做完了', evidence });
+    assert.ok(!after.out.startsWith('Error'), `收口后应该通过: ${after.out.slice(0, 200)}`);
   });
 
   it('简版不印空小节，详版印（无）', async () => {

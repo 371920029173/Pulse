@@ -617,10 +617,11 @@ export class Agent {
 
     // Shared scratchpad, editable by both the user and the agent.
     /*
-     * 备忘（草稿板）也按会话分文件，理由同计划工具：没有会话就不注册，不给共享兜底。
+     * 备忘是**工作区级**的（`.she/memo.json`）：一个项目一份，项目里的会话共用，所以不再需要 sessionId。
+     * 跨工作区仍然读不到 —— 另一个工作区有自己的 `.she/`。
      */
-    if (this.sessionId) {
-      const memoTools = createMemoTools(config.workspace.root, this.sessionId);
+    {
+      const memoTools = createMemoTools(config.workspace.root);
       for (const def of memoTools.definitions) {
         this.allToolDefs.push(def);
         this.executors.set(def.name, (args) => memoTools.execute(def.name, args));

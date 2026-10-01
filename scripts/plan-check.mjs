@@ -15,20 +15,47 @@
  *
  *   1. A dependency graph created through `plan_create` schedules the right step.
  *   2. Out-of-order updates are refused, and the refusal is classifiable.
- *   3. Resume: a NEW toolset (new store, different session) names the correct next step.
+ *   3. Resume: a NEW toolset names the correct next step, and another conversation in the SAME
+ *      workspace continues the same plan.
  *   4. Failure policies: skip cascades, stop parks, retry counts, ask defers.
  *   5. The completion count never overstates what happened.
+ *   6. The boundary itself: one plan per workspace, provenance recorded, another workspace blind.
+ *
+ * ## Why each section gets its own temp workspace
+ *
+ * 2026-10-01 起计划是**工作区级**的（`.she/plans.json`）：一个项目里所有会话读写同一份。这个检查里的
+ * "会话"（sess-a / sess-b …）因此**不再隔离**任何东西 —— 它们只是来源标记。如果整份检查共用一个
+ * 临时目录，第 3 节建的计划会留在盘上，第 5 节的 `plan_update`（不带 plan_id 时解析到"最近动过的
+ * 那份")就可能落到它上面。那不是被测代码的问题，是这份检查假设了已经不存在的隔离。
+ *
+ * 所以每节用一个新的工作区目录：节与节之间看不见，正是模型本身要的性质。
  */
-import { mkdtempSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createPlanTools, classifyToolResult, getSystemPrompt, planSessions, PlanStore } from '../packages/agent-runtime/dist/index.js';
+import {
+  createPlanTools,
+  classifyToolResult,
+  getSystemPrompt,
+  planSessions,
+  PlanStore,
+  adoptSessionPlansIntoWorkspace,
+  WORKSPACE_SCOPE,
+} from '../packages/agent-runtime/dist/index.js';
 import { removeTempDir } from './lib/temp.mjs';
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const dir = mkdtempSync(join(tmpdir(), 'she-plan-'));
-mkdirSync(join(dir, '.she'), { recursive: true });
+void PROJECT_ROOT;
+
+const workspaces = [];
+/** 一个新的工作区目录 —— 一节一个，节与节之间互相看不见。 */
+function makeWorkspace() {
+  const d = mkdtempSync(join(tmpdir(), 'she-plan-'));
+  mkdirSync(join(d, '.she'), { recursive: true });
+  workspaces.push(d);
+  return d;
+}
 
 let failures = 0;
 const check = (label, cond, detail) => {
@@ -39,27 +66,28 @@ const check = (label, cond, detail) => {
   }
 };
 
-/** One conversation's tools. A second call is a second conversation, or a restart. */
-const toolsFor = (session) => createPlanTools(dir, session);
+/**
+ * Tools bound to one conversation. `session` is now only a provenance stamp — every call in
+ * `dir` reads and writes the same `.she/plans.json`. A second call stands in for a restart.
+ */
+const toolsFor = (dir, session) => createPlanTools(dir, session);
 
 const call = async (tools, name, args) => tools.execute(name, args);
 
 /**
  * The plan as stored on disk — not the object the tool just returned.
  *
- * 2026-09-27 起计划按会话分文件（`.she/sessions/<id>/plans.json`），所以这里要带上会话 id：
- * 读错文件会让这一段"验证落盘"变成验证空气。id 在磁盘上要经 `encodeSessionId`，这里用的都是
- * 普通 ASCII 会话名，编码后原样保留。
+ * 工作区级：只有一份 `.she/plans.json`。读错位置会让这一段"验证落盘"变成验证空气，所以路径写死。
  */
-const onDisk = (session = 'sess-a') =>
-  JSON.parse(readFileSync(join(dir, '.she', 'sessions', session, 'plans.json'), 'utf8'));
+const onDisk = (dir) => JSON.parse(readFileSync(join(dir, '.she', 'plans.json'), 'utf8'));
 
 const mark = (planText, stepId) =>
   planText.split('\n').find((l) => new RegExp(`\\s${stepId}\\s`).test(l))?.trim() ?? '';
 
 console.log('1. 依赖图：该开始的是「前置都做完」的那一步');
 {
-  const tools = toolsFor('sess-a');
+  const dir = makeWorkspace();
+  const tools = toolsFor(dir, 'sess-a');
   const created = await call(tools, 'plan_create', {
     title: '发版',
     goal: '把 2.0 发出去',
@@ -84,7 +112,7 @@ console.log('1. 依赖图：该开始的是「前置都做完」的那一步');
     classifyToolResult('plan_update', refused).kind === 'precondition',
     classifyToolResult('plan_update', refused).kind,
   );
-  const afterRefusal = onDisk()[0];
+  const afterRefusal = onDisk(dir)[0];
   check(
     '被拒绝后盘上的状态没变（没有「标了但没记」）',
     afterRefusal.steps[1].status === 'pending' && afterRefusal.steps[0].status === 'active',
@@ -114,24 +142,18 @@ console.log('1. 依赖图：该开始的是「前置都做完」的那一步');
   check('完成数不会超过实际做完的步数', /4\/4 完成/.test(doneFull), doneFull);
 }
 
-console.log('\n2. 断点恢复：换一个 store、换一个会话，还知道从哪继续');
+console.log('\n2. 断点恢复：换一个 store 还知道从哪继续；同工作区的另一条会话也能接着做');
 {
-  const tools = toolsFor('sess-b');
+  const dir = makeWorkspace();
+  const tools = toolsFor(dir, 'sess-b');
   await call(tools, 'plan_create', {
     title: '迁移数据库',
     steps: ['备份', { title: '跑迁移', dependsOn: ['s1'] }, { title: '验证', dependsOn: ['s2'] }],
   });
   await call(tools, 'plan_update', { step_id: 's1', status: 'done' });
 
-  /*
-   * Everything in memory is gone: a new toolset over the SAME session stands in for a process
-   * restart.
-   *
-   * 2026-09-27 之前这里写的是"换一个 store、**换一个会话**"，因为那时计划是一份工作区文件，
-   * 换个会话照样看得见 —— 那条正是跨会话读的入口。断点恢复要证明的性质其实是"进程没了计划还在"，
-   * 与"别的会话能不能看见"无关，所以这里改成同一个会话；跨会话那条路另加断言钉死（本节末尾）。
-   */
-  const restarted = toolsFor('sess-b');
+  // Everything in memory is gone: a new toolset over the same workspace stands in for a restart.
+  const restarted = toolsFor(dir, 'sess-b');
   const listed = await call(restarted, 'plan_list', {});
   check('重启后仍看得见计划', /迁移数据库/.test(listed), listed);
   check('重启后直接指出从哪一步继续', /下一步: s2 跑迁移/.test(listed), listed);
@@ -143,28 +165,54 @@ console.log('\n2. 断点恢复：换一个 store、换一个会话，还知道�
    * come back as `active` — not as `pending` (which reads as "never started" and loses the fact
    * that half the work may be on disk) and not as `done`.
    */
-  const raw = onDisk('sess-b').find((p) => p.title === '迁移数据库');
+  const raw = onDisk(dir).find((p) => p.title === '迁移数据库');
   check('盘上记的是步骤状态，不是渲染出来的文本', raw.steps[1].status === 'active', JSON.stringify(raw.steps));
 
   const next = await call(restarted, 'plan_update', { step_id: 's2', status: 'done' });
   check('恢复后能接着正常推进', /下一步: s3 验证/.test(next), next);
 
   /*
-   * 【关键】另一个会话看不到这份计划，也改不动它。
+   * 【关键】同一个工作区的另一条会话**看得见**这份计划，也**能接着做**。
    *
-   * 旧行为：看得见，还能接着改。现在计划按会话分文件，所以这里是"读不到"，而不是"读到了然后拒绝"。
-   * 这一条要是被改回去，整个会话隔离就等于没做 —— 钉在这里，将来改错了门禁会响。
+   * 这一条的方向和 2026-09-27 那版是相反的，所以值得写清楚为什么：边界划在"对话之间"不是用户脑子
+   * 里的边界。用户在一个项目里新开一个对话，期待的是昨天那个长任务还在；把它藏起来才是意外。改回
+   * "按会话隔离"会让这一条变红 —— 这是有意的，不是失手。
    */
-  const other = toolsFor('sess-c');
+  const other = toolsFor(dir, 'sess-c');
   const otherListed = await call(other, 'plan_list', {});
-  check('【关键】换一个会话看不到这份计划', !/迁移数据库/.test(otherListed), otherListed);
+  check('【关键】同工作区的另一条会话看得见这份计划', /迁移数据库/.test(otherListed), otherListed);
   const otherEdit = await call(other, 'plan_update', { plan_id: raw.id, step_id: 's3', status: 'done' });
-  check('【关键】也改不动它（计划不在这个会话的文件里）', /^Error:/.test(otherEdit), otherEdit);
+  check('【关键】并且能接着往里推进度', !otherEdit.startsWith('Error: '), otherEdit);
+  check('推进度真的写进了同一份文件', onDisk(dir).find((p) => p.id === raw.id).steps[2].status === 'done');
+
+  // 来源被记下来了：用户看到一份计划时要能分辨它是哪次对话留下的。
+  check(
+    '计划带着创建它的会话 id（来源，不是所有权）',
+    raw.sessionId === 'sess-b',
+    JSON.stringify({ sessionId: raw.sessionId }),
+  );
 }
 
-console.log('\n3. 失败策略：写下来的处置办法要真的执行');
+console.log('\n3. 工作区就是边界：换一个工作区什么都看不见');
 {
-  const tools = toolsFor('sess-d');
+  const dir = makeWorkspace();
+  const otherRoot = makeWorkspace();
+  await call(toolsFor(dir, 'sess-a'), 'plan_create', { title: '这个项目的活', steps: ['x'] });
+
+  check('本工作区看得到', /这个项目的活/.test(await call(toolsFor(dir, 'sess-z'), 'plan_list', {})), null);
+  const blind = await call(toolsFor(otherRoot, 'sess-z'), 'plan_list', {});
+  check('【关键】另一个工作区看不到', !/这个项目的活/.test(blind), blind);
+  check(
+    '【关键】隔离靠路径而不是过滤：另一个工作区连文件都没有',
+    !existsSync(join(otherRoot, '.she', 'plans.json')),
+    null,
+  );
+}
+
+console.log('\n4. 失败策略：写下来的处置办法要真的执行');
+{
+  const dir = makeWorkspace();
+  const tools = toolsFor(dir, 'sess-d');
   const created = await call(tools, 'plan_create', {
     title: '装依赖',
     steps: [
@@ -185,7 +233,8 @@ console.log('\n3. 失败策略：写下来的处置办法要真的执行');
 }
 
 {
-  const tools = toolsFor('sess-e');
+  const dir = makeWorkspace();
+  const tools = toolsFor(dir, 'sess-e');
   await call(tools, 'plan_create', { title: '停', steps: [{ title: 'a' }, { title: 'b', dependsOn: ['s1'] }] });
   const blocked = await call(tools, 'plan_update', { step_id: 's1', status: 'blocked', note: '装不上' });
   check('stop 策略下这一步停在 blocked', mark(blocked, 's1').includes('[!]'), blocked);
@@ -197,7 +246,8 @@ console.log('\n3. 失败策略：写下来的处置办法要真的执行');
 }
 
 {
-  const tools = toolsFor('sess-f');
+  const dir = makeWorkspace();
+  const tools = toolsFor(dir, 'sess-f');
   await call(tools, 'plan_create', { title: '重试', steps: [{ title: '拉取', onFailure: 'retry' }] });
   const first = await call(tools, 'plan_update', { step_id: 's1', status: 'blocked', note: '超时' });
   check('retry 明确说「换个做法再试一次」，不是含糊的失败', /换个做法再试一次/.test(first), first);
@@ -209,27 +259,29 @@ console.log('\n3. 失败策略：写下来的处置办法要真的执行');
 }
 
 {
-  const tools = toolsFor('sess-g');
+  const dir = makeWorkspace();
+  const tools = toolsFor(dir, 'sess-g');
   await call(tools, 'plan_create', { title: '问', steps: [{ title: '删表', onFailure: 'ask' }] });
   const asked = await call(tools, 'plan_update', { step_id: 's1', status: 'blocked', note: '要不要删' });
   check('ask 策略指明该调用 ask_user', /ask_user/.test(asked), asked);
 }
 
-console.log('\n4. 图的形状本身不能被写坏');
+console.log('\n5. 图的形状本身不能被写坏');
 {
-  const tools = toolsFor('sess-h');
+  const dir = makeWorkspace();
+  const tools = toolsFor(dir, 'sess-h');
   const created = await call(tools, 'plan_create', { title: '图', steps: ['a', 'b'] });
   check('创建时依赖了不存在的步骤会被丢掉而不是留下死引用', !/依赖: s9/.test(created), created);
 
   const badDep = await call(tools, 'plan_update', { step_id: 's2', depends_on: ['s9'] });
   check('事后声明一个不存在的依赖会被拒绝', badDep.startsWith('Error: '), badDep);
-  const stillClean = onDisk('sess-h').find((p) => p.title === '图');
+  const stillClean = onDisk(dir).find((p) => p.title === '图');
   check('拒绝后盘上没有半截依赖', stillClean.steps[1].dependsOn.length === 0, JSON.stringify(stillClean.steps[1]));
 
   await call(tools, 'plan_update', { step_id: 's1', depends_on: ['s2'] });
   const cycle = await call(tools, 'plan_update', { step_id: 's2', depends_on: ['s1'] });
   check('成环会被拒绝（成环 = 没有任何一步能开始）', /成环/.test(cycle), cycle);
-  const afterCycle = onDisk('sess-h').find((p) => p.title === '图');
+  const afterCycle = onDisk(dir).find((p) => p.title === '图');
   check('成环的依赖不会落盘', afterCycle.steps[1].dependsOn.length === 0, JSON.stringify(afterCycle.steps[1]));
 
   const reOpened = await call(tools, 'plan_create', { title: '做完又发现活', steps: ['a'] });
@@ -240,45 +292,67 @@ console.log('\n4. 图的形状本身不能被写坏');
   check('新加的步骤接着开始', /下一步: s2 b/.test(added), added);
 }
 
-console.log('\n5. 提示词里写了怎么用这张图');
+console.log('\n6. 提示词里写了怎么用这张图，也写清了边界在哪');
 {
   const prompt = getSystemPrompt('dev');
   check('提示词要求按「下一步」续做', /下一步:/.test(prompt) && /Resuming means reading/.test(prompt), null);
   check('提示词要求声明 depends_on', /depends_on/.test(prompt), null);
   check('提示词说明 blocked 不等于完成', /blocked\` is not a step that finished/.test(prompt), null);
+  check(
+    '【关键】提示词说清计划属于工作区，不是本对话私有',
+    /belong to the WORKSPACE/.test(prompt) && /\.she\/plans\.json/.test(prompt),
+    null,
+  );
+  check(
+    '【关键】提示词说清"别处留下的未收口计划会拦 done"以及出路',
+    /ONE open plan per workspace/.test(prompt) && /report_write/.test(prompt),
+    null,
+  );
 }
 
-console.log('\n6. 看别的会话：清单能列出，正文要显式点开（且只读）');
+console.log('\n7. 清单只列目录作用域（群）；聊天计划本来就在普通视图里');
 {
-  /*
-   * 计划按会话分开存之后，「当前会话看不到别的会话的计划」是设计，不是缺陷 —— 但用户总得有条路
-   * 走回去看那个长任务。给的路是**清单**：列出哪些会话有计划、各几个，正文一行都不带；点开哪个，
-   * 才去读哪个会话的目录。把各会话的计划合并成一份视图是错的，那正是"上一个对话的计划看起来像
-   * 现在正在跟的这个"。
-   */
-  const summary = planSessions(dir);
-  const byId = new Map(summary.map((s) => [s.session_id, s]));
-  check('列出的会话里有本工作区真正有计划的那些', byId.has('sess-a') && byId.has('sess-b'), JSON.stringify(summary));
-  check('没有计划的会话不占位置（"没有"和"有 0 个"不是一回事）',
-    summary.every((s) => s.plans > 0), JSON.stringify(summary));
-  check('带计数，界面不用为每个会话再问一次',
-    (byId.get('sess-b')?.plans ?? 0) >= 1 && Number.isFinite(byId.get('sess-b')?.open), JSON.stringify(byId.get('sess-b')));
-  check('清单里只有会话 id 和计数，没有任何计划正文',
-    !JSON.stringify(summary).includes('迁移数据库'), JSON.stringify(summary).slice(0, 200));
-  check('最近动过的排在前面（选择器要回答"我上次那个长任务在哪"）',
-    summary.every((s, i) => i === 0 || (summary[i - 1].updated_at ?? '') >= (s.updated_at ?? '')), JSON.stringify(summary));
+  const dir = makeWorkspace();
+  await call(toolsFor(dir, 'sess-a'), 'plan_create', { title: '聊天里的活', steps: ['x'] });
+  new PlanStore(dir, 'cluster:r1').create('群里的活', ['y']);
 
+  const summary = planSessions(dir);
+  const ids = summary.map((s) => s.session_id);
   /*
-   * 读某个会话的计划，用的还是它自己的 store —— 也就是界面点开那一行之后做的事。这里确认由
-   * `session_id` 决定读哪份文件，而不是"读当前会话然后过滤"。
+   * 聊天计划是工作区级的，不在 `.she/sessions/<id>/` 下面，所以清单**不该**列出 sess-a —— 它本来就
+   * 在普通视图里全部可见，不需要"点开哪个会话"这扇门。群计划仍在自己的目录里，所以列得出来。
    */
-  const openB = new PlanStore(dir, 'sess-b').list();
-  const openC = new PlanStore(dir, 'sess-c').list();
-  check('按会话 id 打开：sess-b 看得到自己的计划', openB.some((p) => p.title === '迁移数据库'), JSON.stringify(openB.map((p) => p.title)));
-  check('清单里没有的会话，打开也是空的（没计划就不进清单）',
-    !byId.has('sess-c') && openC.length === 0, JSON.stringify(openC.map((p) => p.title)));
+  check('聊天会话不进清单（它的计划本来就看得到）', !ids.includes('sess-a'), JSON.stringify(summary));
+  check('目录作用域（群）列得出来', ids.includes('cluster:r1'), JSON.stringify(summary));
+  check('带计数，界面不用为每个作用域再问一次', (summary.find((s) => s.session_id === 'cluster:r1')?.plans ?? 0) === 1, JSON.stringify(summary));
+  check('清单里没有任何计划正文', !JSON.stringify(summary).includes('群里的活'), JSON.stringify(summary).slice(0, 200));
 }
 
-removeTempDir(dir);
+console.log('\n8. 迁移：2026-09-27 留在会话目录里的计划要收回来');
+{
+  const dir = makeWorkspace();
+  // 那版迁移只搬了"进行中"的那份，已收口的留在了旧的工作区文件里，新会话的计划留在会话目录里。
+  const stranded = new PlanStore(dir, 'sess_old').create('会话目录里的活', ['x']);
+  new PlanStore(dir, WORKSPACE_SCOPE).create('本来就在工作区里的活', ['y']);
+
+  const first = adoptSessionPlansIntoWorkspace(dir);
+  check('收回了 1 份', first.adopted === 1, JSON.stringify(first));
+  const titles = new PlanStore(dir, WORKSPACE_SCOPE).list().map((p) => p.title).sort();
+  check(
+    '两边的计划都在同一份里了（不再有看不见的历史计划）',
+    titles.join('|') === ['本来就在工作区里的活', '会话目录里的活'].sort().join('|'),
+    JSON.stringify(titles),
+  );
+  check('按 id 能查到收回来那份', !!new PlanStore(dir, WORKSPACE_SCOPE).get(stranded.id), null);
+  check(
+    '原文件保留（迁移不是单向门）',
+    existsSync(join(dir, '.she', 'sessions', 'sess_old', 'plans.json')),
+    null,
+  );
+  const second = adoptSessionPlansIntoWorkspace(dir);
+  check('可重复执行：再跑一次是空操作', second.adopted === 0 && second.updated === 0, JSON.stringify(second));
+}
+
+for (const d of workspaces) removeTempDir(d);
 console.log(`\n${failures === 0 ? 'PASS' : `FAIL (${failures})`}  plan-check`);
 process.exit(failures === 0 ? 0 : 1);

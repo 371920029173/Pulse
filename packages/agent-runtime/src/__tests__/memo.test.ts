@@ -1,29 +1,30 @@
 /**
- * 会话私有的草稿板（memo）—— 用户和这个会话的 agent 都能改。
+ * 工作区级的草稿板（memo）—— 用户和这个工作区里的 agent 都能改。
  *
  * 小接口，但它是"双方并发写"的唯一一处，所以顺序与持久化保证才是重点。
  *
- * 2026-09-27 起它按会话分文件（`.she/sessions/<id>/memo.json`）。这一点在本文件里被钉成性质：
- * 两个会话 id 写入的东西互不可见 —— 不是"读的时候过滤掉"，是**两个文件**。
+ * 2026-10-01 起它按**工作区**分文件（`.she/memo.json`）：同一个项目里所有会话共用一本 —— 在一个项目里
+ * 新开一个对话，昨天记的待办还在。2026-09-27 曾按会话分文件，那条边界划错了：备忘记的本来就是"这个项目
+ * 里还没做的事"，按对话分账等于每次开新对话都从空开始。跨工作区仍然是两个根目录下的两份文件，路径上就
+ * 看不见对方，所以本文件把"同项目共享 / 跨项目隔离"钉成性质。
  */
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
-import { MemoStore } from '../memo-tools.js';
-
-/** 本文件默认的会话；需要第二个会话时用 `OTHER`。 */
-const SESS = 'sess_memo';
-const OTHER = 'sess_other';
+import { MemoStore, adoptSessionMemosIntoWorkspace } from '../memo-tools.js';
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'she-memo-')); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
+/** 工作区级备忘的落点。写死在这里，是为了让"换了位置"时这个文件先红。 */
+const MEMO_FILE = () => join(dir, '.she', 'memo.json');
+
 describe('MemoStore', () => {
   it('adds an entry and reads it back', () => {
-    const store = new MemoStore(dir, SESS);
+    const store = new MemoStore(dir);
     const e = store.add('记得改配置', 'user');
     assert.equal(e.text, '记得改配置');
     assert.equal(e.author, 'user');
@@ -32,7 +33,7 @@ describe('MemoStore', () => {
   });
 
   it('keeps insertion order (oldest first)', () => {
-    const store = new MemoStore(dir, SESS);
+    const store = new MemoStore(dir);
     store.add('第一条');
     store.add('第二条');
     // Append order, not newest-first: the list is a log, and both the UI and
@@ -42,7 +43,7 @@ describe('MemoStore', () => {
   });
 
   it('distinguishes authors', () => {
-    const store = new MemoStore(dir, SESS);
+    const store = new MemoStore(dir);
     store.add('用户写的', 'user');
     store.add('模型写的', 'agent');
     const byAuthor = Object.fromEntries(store.list().map((e) => [e.text, e.author]));
@@ -51,22 +52,22 @@ describe('MemoStore', () => {
   });
 
   it('toggling done persists', () => {
-    const store = new MemoStore(dir, SESS);
+    const store = new MemoStore(dir);
     const e = store.add('待办');
     const updated = store.update(e.id, { done: true })!;
     assert.equal(updated.done, true);
-    assert.equal(new MemoStore(dir, SESS).list()[0].done, true, '重载后应保持 done');
+    assert.equal(new MemoStore(dir).list()[0].done, true, '重载后应保持 done');
   });
 
   it('editing text persists', () => {
-    const store = new MemoStore(dir, SESS);
+    const store = new MemoStore(dir);
     const e = store.add('旧文案');
     store.update(e.id, { text: '新文案' });
-    assert.equal(new MemoStore(dir, SESS).list()[0].text, '新文案');
+    assert.equal(new MemoStore(dir).list()[0].text, '新文案');
   });
 
   it('removing an entry reports whether anything was removed', () => {
-    const store = new MemoStore(dir, SESS);
+    const store = new MemoStore(dir);
     const e = store.add('要删的');
     assert.equal(store.remove(e.id), true);
     assert.equal(store.list().length, 0);
@@ -74,15 +75,15 @@ describe('MemoStore', () => {
   });
 
   it('updating a missing id returns undefined instead of throwing', () => {
-    const store = new MemoStore(dir, SESS);
+    const store = new MemoStore(dir);
     assert.equal(store.update('memo_nonexistent', { done: true }), undefined);
   });
 
   it('a corrupt store file degrades to empty rather than crashing', () => {
-    const store = new MemoStore(dir, SESS);
+    const store = new MemoStore(dir);
     store.add('先写一条'); // creates the file
     // Simulate a half-written file (e.g. process killed mid-save).
-    writeFileSync(join(dir, '.she', 'sessions', SESS, 'memo.json'), '{ not json', 'utf8');
+    writeFileSync(MEMO_FILE(), '{ not json', 'utf8');
     assert.deepEqual(store.list(), [], '坏文件应降级为空列表而不是抛异常');
     // And the store must still be usable afterwards.
     store.add('仍然可用');
@@ -90,32 +91,67 @@ describe('MemoStore', () => {
   });
 
   it('tolerates a UTF-8 BOM in the store file', () => {
-    const store = new MemoStore(dir, SESS);
+    const store = new MemoStore(dir);
     store.add('原始');
-    const p = join(dir, '.she', 'sessions', SESS, 'memo.json');
-    const body = readFileSync(p, 'utf8');
+    const body = readFileSync(MEMO_FILE(), 'utf8');
     // PowerShell's Set-Content writes a BOM; an earlier parser choked on it.
-    writeFileSync(p, '\uFEFF' + body, 'utf8');
+    writeFileSync(MEMO_FILE(), '\uFEFF' + body, 'utf8');
     assert.equal(store.list().length, 1, '带 BOM 的文件应能被解析');
   });
 
-  it('【关键】两个会话的备忘是两个文件，互相看不见', () => {
-    // 这是本层存在的理由。原来只有一个 `memo.json`，任何会话都能读到别人的备忘 —— 分账靠"读的时候
-    // 过滤"，而文件是同一份。现在路径就不同。
-    new MemoStore(dir, SESS).add('A 会话记的', 'user');
-    const other = new MemoStore(dir, OTHER);
-    assert.deepEqual(other.list(), [], 'B 会话不该看到 A 的备忘');
-    other.add('B 会话记的', 'agent');
-    assert.deepEqual(new MemoStore(dir, SESS).list().map((e) => e.text), ['A 会话记的'], 'A 也不该看到 B 的');
-    // 两个文件都在盘上，各自只有自己的内容。
-    assert.equal(existsSync(join(dir, '.she', 'sessions', SESS, 'memo.json')), true);
-    assert.equal(existsSync(join(dir, '.she', 'sessions', OTHER, 'memo.json')), true);
+  it('【关键】同一个项目的会话共用一本备忘', () => {
+    new MemoStore(dir).add('A 会话记的', 'user');
+    // 同一个工作区里再开一个 store，等价于"新开一个对话"：看到的是同一本，不是空的。
+    assert.deepEqual(
+      new MemoStore(dir).list().map((e) => e.text),
+      ['A 会话记的'],
+      '同一项目里新开一个对话不该看不到昨天记的东西',
+    );
   });
 
-  it('【关键】非法会话 id 直接抛错，不会落到共享文件上', () => {
-    // 兜底桶是所有会话共享的记忆，而且没人会发现 —— 这一层就是来根除这个形态的。
-    assert.throws(() => new MemoStore(dir, ''), /不合法/);
-    assert.throws(() => new MemoStore(dir, '../evil'), /不合法/);
+  it('【关键】换一个工作区就看不见了（边界在项目上，不在对话上）', () => {
+    new MemoStore(dir).add('这个项目记的', 'user');
+    const otherRoot = mkdtempSync(join(tmpdir(), 'she-memo-other-'));
+    try {
+      assert.deepEqual(new MemoStore(otherRoot).list(), [], '另一个工作区不该看到这份备忘');
+      // 它连文件都还没有 —— 隔离是靠路径，不是靠读的时候过滤。
+      assert.equal(existsSync(join(otherRoot, '.she', 'memo.json')), false);
+    } finally {
+      rmSync(otherRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('落点是 `.she/memo.json`，不再建会话目录', () => {
+    new MemoStore(dir).add('x');
+    assert.equal(existsSync(MEMO_FILE()), true);
+    assert.equal(existsSync(join(dir, '.she', 'sessions')), false, '工作区级的备忘不该再建会话目录');
+  });
+
+  it('迁移：把 2026-09-27 留下的会话私有备忘并回工作区那一份', () => {
+    // 模拟那段时间留下的文件：`.she/sessions/<id>/memo.json`。
+    const legacy = join(dir, '.she', 'sessions', 'sess_old', 'memo.json');
+    mkdirSync(dirname(legacy), { recursive: true });
+    writeFileSync(legacy, JSON.stringify([{
+      id: 'm_legacy1',
+      text: '旧会话记的',
+      author: 'user',
+      done: false,
+      createdAt: '2026-09-27T00:00:00.000Z',
+      updatedAt: '2026-09-27T00:00:00.000Z',
+    }]), 'utf8');
+    new MemoStore(dir).add('工作区已经有的');
+
+    const first = adoptSessionMemosIntoWorkspace(dir);
+    assert.equal(first.adopted, 1, '应收回 1 条');
+    assert.deepEqual(
+      new MemoStore(dir).list().map((e) => e.text).sort(),
+      ['工作区已经有的', '旧会话记的'].sort(),
+      '两边的条目都该在',
+    );
+    // 原文件不删：迁移不该是单向门。
+    assert.equal(existsSync(legacy), true, '迁移后原文件应保留');
+    // 可重复执行。
+    assert.deepEqual(adoptSessionMemosIntoWorkspace(dir), { adopted: 0, updated: 0 }, '再跑一次应是空操作');
   });
 
   it('rejects blank text at the tool and API boundary', async () => {    /*
@@ -125,12 +161,12 @@ describe('MemoStore', () => {
      * failure instead of an invisible row in the memo panel.
      */
     const { createMemoTools } = await import('../memo-tools.js');
-    const tools = createMemoTools(dir, SESS);
+    const tools = createMemoTools(dir);
     const out = await tools.execute('memo_add', { text: '   ' });
     assert.match(out, /required|error/i, `空文本应被工具拒绝，实际: ${out}`);
     const viaMissing = await tools.execute('memo_add', {});
     assert.match(viaMissing, /required|error/i, '缺参数也应被拒绝');
-    assert.equal(new MemoStore(dir, SESS).list().length, 0, '被拒绝的内容不应落盘');
+    assert.equal(new MemoStore(dir).list().length, 0, '被拒绝的内容不应落盘');
   });
 });
 
@@ -147,13 +183,13 @@ describe('MemoStore', () => {
 describe('memo_list 的诚实性', () => {
   it('全部完成时不能谎称「为空」，要说出被折叠的条数', async () => {
     const { createMemoTools } = await import('../memo-tools.js');
-    const store = new MemoStore(dir, SESS);
+    const store = new MemoStore(dir);
     const a = store.add('用户记的待办', 'user');
     const b = store.add('agent 记的待办', 'agent');
     store.update(a.id, { done: true });
     store.update(b.id, { done: true });
 
-    const tools = createMemoTools(dir, SESS);
+    const tools = createMemoTools(dir);
     const out = await tools.execute('memo_list', {});
     assert.doesNotMatch(out, /备忘录为空/, `两条已完成被当成了空本子: ${out}`);
     assert.match(out, /2/, `应说出被折叠的条数，实际: ${out}`);
@@ -162,7 +198,7 @@ describe('memo_list 的诚实性', () => {
 
   it('真的空才说空', async () => {
     const { createMemoTools } = await import('../memo-tools.js');
-    const tools = createMemoTools(dir, SESS);
+    const tools = createMemoTools(dir);
     assert.match(await tools.execute('memo_list', {}), /备忘录为空/);
   });
 
@@ -172,12 +208,12 @@ describe('memo_list 的诚实性', () => {
      * includeDone=true 必须逐字还原，和 kb_query 的 full=true 是同一个约定。
      */
     const { createMemoTools } = await import('../memo-tools.js');
-    const store = new MemoStore(dir, SESS);
+    const store = new MemoStore(dir);
     const done = store.add('这条已经完成但内容要紧：端口是 5577', 'user');
     store.update(done.id, { done: true });
     store.add('这条还没做', 'agent');
 
-    const tools = createMemoTools(dir, SESS);
+    const tools = createMemoTools(dir);
     const plain = await tools.execute('memo_list', {});
     assert.doesNotMatch(plain, /端口是 5577/, '默认视图不该列出已完成条目');
     assert.match(plain, /1/, `没做完的那条要列出来，实际: ${plain}`);

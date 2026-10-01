@@ -27,22 +27,15 @@ export interface Plan {
   steps: PlanStep[];
   /** Where the plan resumes, computed server-side from the same rule the agent reads. */
   next?: { stepId: string; title: string; why: string } | null;
+  /**
+   * The conversation that created this plan.
+   *
+   * Plans are workspace-level, so this is **provenance, not ownership** — it lets the panel say
+   * "this one was started in the other chat" without restricting who may read or continue it.
+   */
+  sessionId?: string;
   createdAt: string;
   updatedAt: string;
-}
-
-/**
- * 一个"别的会话里有计划"的候选行。
- *
- * `title` 不在服务端那份响应里 —— 它是界面从会话列表里配上去的：服务端只保证计数和会话 id，
- * 会话标题属于会话，不属于计划。
- */
-export interface PlanSessionSummary {
-  session_id: string;
-  plans: number;
-  open: number;
-  updated_at: string | null;
-  title?: string;
 }
 
 /**
@@ -84,63 +77,42 @@ const LABEL: Record<StepStatus, string> = {
 /**
  * Long-horizon plan view. Plans are written by the agent via plan_* tools.
  *
- * Plans belong to ONE conversation (`.she/sessions/<id>/plans.json`), so this panel is showing the
- * current chat's plan — that is what makes a long task survive opening another chat without its
- * plan showing up as if it were the one being followed now. The cost is that a plan written in
- * another chat is not here, so there is an explicit picker for it: the list is one click, the
- * reading is read-only, and no conversation's plans are ever merged into another's view.
+ * Plans belong to the WORKSPACE (`.she/plans.json`): every chat in this project reads and writes the
+ * same file, so this panel shows the PROJECT's plans — a long task started in another conversation is
+ * right here, and progress made here is visible to the next chat. Each plan carries the conversation
+ * that created it, shown as provenance: it says where the work came from without deciding who may
+ * continue it.
+ *
+ * 这里曾经有「其他会话」选择器和只读模式，那是"计划按会话分文件"的产物：别的会话的计划不在当前文件
+ * 里，所以要么开一扇门去看（只读），要么看不见。现在本工作区的计划全部就在这里，没有需要靠那扇门才
+ * 能看到的东西，也就可以直接在这里改进度。
  */
 export function PlanPanel({ onClose, sessionId }: { onClose: () => void; sessionId?: string | null }) {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  /** null = 选择器关着；打开才去问"哪些会话有计划"（那个动作要显式发生）。 */
-  const [picker, setPicker] = useState<PlanSessionSummary[] | null>(null);
-  /** 正在看哪个会话的计划：null = 本会话（可改）；别的会话只读。 */
-  const [viewing, setViewing] = useState<string | null>(null);
-
-  const shownSession = viewing ?? sessionId ?? null;
 
   const refresh = useCallback(async () => {
-    if (!shownSession) {
-      setPlans([]);
-      return;
-    }
     try {
-      const data = await fetchJSON<{ plans: Plan[] }>(`/api/plans?session_id=${encodeURIComponent(shownSession)}`);
+      /*
+       * 不带 session_id：服务端按**工作区作用域**解析，拿到的就是本项目的全部计划。带上 id 也不会
+       * 改变读的范围（它只是来源标记），不带反而更能说明这里读的是"这个项目的计划"。
+       */
+      const data = await fetchJSON<{ plans: Plan[] }>('/api/plans');
       setPlans(data.plans ?? []);
       setError(null);
       setSelected((cur) => (cur && data.plans?.some((p) => p.id === cur) ? cur : data.plans?.[0]?.id ?? null));
     } catch (e) {
       setError((e as Error).message);
     }
-  }, [shownSession]);
+  }, []);
 
   useEffect(() => {
     void refresh();
     const timer = window.setInterval(() => void refresh(), 5000);
     return () => window.clearInterval(timer);
   }, [refresh]);
-
-  /** 打开/关闭"其他会话"：打开的这一刻才发那一次跨会话的列表请求。 */
-  const togglePicker = useCallback(async () => {
-    if (picker) {
-      setPicker(null);
-      return;
-    }
-    try {
-      const [list, named] = await Promise.all([
-        fetchJSON<{ sessions: PlanSessionSummary[] }>('/api/plans/sessions?scope=workspace'),
-        fetchJSON<{ sessions: Array<{ id: string; title?: string }> }>('/api/sessions?all=1').catch(() => ({ sessions: [] })),
-      ]);
-      const titles = new Map((named.sessions ?? []).map((s) => [s.id, s.title || '']));
-      setPicker((list.sessions ?? []).map((s) => ({ ...s, title: titles.get(s.session_id) || '' })));
-      setError(null);
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  }, [picker]);
 
   const setStepStatus = useCallback(
     async (planId: string, stepId: string, status: StepStatus) => {
@@ -162,63 +134,15 @@ export function PlanPanel({ onClose, sessionId }: { onClose: () => void; session
 
   const current = plans.find((p) => p.id === selected) ?? plans[0] ?? null;
   const doneCount = current ? current.steps.filter((s) => s.status === 'done').length : 0;
-  /*
-   * 别的会话的计划是只读的。
-   *
-   * 写它要发到那个会话的目录里，而那个会话的 agent 可能正拿着同一个计划在跑 —— 用户在这里点一下
-   * "完成"，那边读到的进度就和它自己写的对不上了。看是看，改要回到那个会话里改。
-   */
-  const readOnly = viewing !== null;
 
   return (
     <div className={styles.panel} data-surface="panel">
       <div className={styles.header}>
         <span className={styles.title}>{t('长程计划')}</span>
         <div className={styles.headerActions}>
-          <button
-            type="button"
-            className={`${styles.scopeBtn} ${picker ? styles.scopeBtnActive : ''}`}
-            onClick={() => void togglePicker()}
-            title={t('看别的会话的计划（只读）')}
-          >
-            {t('其他会话')}
-          </button>
           <button type="button" className={styles.close} onClick={onClose} title={t('关闭')}>×</button>
         </div>
       </div>
-
-      {picker ? (
-        <div className={styles.picker}>
-          {picker.length === 0 ? (
-            <div className={styles.pickerEmpty}>{t('别的会话里也没有计划')}</div>
-          ) : (
-            picker.map((s) => (
-              <button
-                key={s.session_id}
-                type="button"
-                className={`${styles.pickerRow} ${viewing === s.session_id ? styles.pickerRowActive : ''}`}
-                onClick={() => setViewing(viewing === s.session_id ? null : s.session_id)}
-              >
-                <span className={styles.pickerTitle}>{s.title || s.session_id}</span>
-                <span className={styles.pickerMeta}>
-                  {t('{n} 个计划', { n: s.plans })}
-                  {s.open ? ` · ${t('{n} 个未收口', { n: s.open })}` : ''}
-                  {s.session_id === sessionId ? ` · ${t('本会话')}` : ''}
-                </span>
-              </button>
-            ))
-          )}
-        </div>
-      ) : null}
-
-      {readOnly ? (
-        <div className={styles.readonlyNote}>
-          {t('正在看别的会话的计划，只读。要改进度请回到那个会话。')}
-          <button type="button" className={styles.readonlyBack} onClick={() => setViewing(null)}>
-            {t('回到本会话')}
-          </button>
-        </div>
-      ) : null}
 
       {error ? <div className={styles.error}>{error}</div> : null}
 
@@ -259,6 +183,18 @@ export function PlanPanel({ onClose, sessionId }: { onClose: () => void; session
                 </div>
                 {current.goal ? <div className={styles.planGoal}>{current.goal}</div> : null}
                 {/*
+                  Which conversation started this plan.
+
+                  Shown because the plan is the project's, not this chat's: without this line a plan
+                  resumed from yesterday looks as if it were created here. It is provenance, so it
+                  does not gate anything — the steps below are editable either way.
+                */}
+                {current.sessionId && current.sessionId !== sessionId ? (
+                  <div className={styles.planOrigin}>
+                    {t('来自其他会话 · {id}', { id: current.sessionId })}
+                  </div>
+                ) : null}
+                {/*
                   The resume point, next to the marks rather than left for the reader to derive.
                   This is the line that answers "where does it continue" after a restart, and it
                   comes from the server so it cannot disagree with what the agent is told.
@@ -279,7 +215,7 @@ export function PlanPanel({ onClose, sessionId }: { onClose: () => void; session
                     <button
                       type="button"
                       className={styles.stepMark}
-                      disabled={busy || readOnly}
+                      disabled={busy}
                       onClick={() =>
                         void setStepStatus(
                           current.id,
@@ -287,7 +223,7 @@ export function PlanPanel({ onClose, sessionId }: { onClose: () => void; session
                           s.status === 'done' ? 'pending' : 'done',
                         )
                       }
-                      title={readOnly ? t('别的会话的计划只读') : s.status === 'done' ? t('标记为未完成') : t('标记为完成')}
+                      title={s.status === 'done' ? t('标记为未完成') : t('标记为完成')}
                     >
                       {MARK[s.status]}
                     </button>

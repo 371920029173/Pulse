@@ -1,20 +1,25 @@
 /**
- * 会话隔离：一个会话的私有状态，另一个会话读不到、写不动 —— 离线为主，最后真起一次服务。
+ * 状态边界：哪些东西是**一个会话私有**的，哪些是**一个工作区共享**的 —— 离线为主，最后真起一次服务。
  *
- * 为什么单独有这一份：这条性质以前**每一层都各自"做了"**（计划里带 session_id 过滤、备忘里带、轨迹里带），
- * 而它们是各自失败的，失败方式还都一样 —— 静默。文件的路径上没有会话，过滤只是"读的时候比一下"，
- * 于是任何一处忘了带上过滤、或者任何一次直接读文件，隔离就没了，而且从外面看不出来：界面照常显示，
- * 只是显示的是别人的东西。实测就是这样（见 2026-09-27 的专项检查）。
+ * 2026-10-01 之前这里只钉一条边界："会话私有"，五个维度（计划 / 备忘 / 预检 / 轨迹 / 置信度样本）全都在
+ * `.she/sessions/<id>/` 下面。那条边界**划错了一半**：计划和备忘记的是"这个项目里的活"，用户在一个项目里
+ * 新开一个对话，期待的是昨天那份计划还在。把它们藏进会话目录，用户看到的是"我的计划丢了"。
  *
- * 所以这份检查不问"有没有过滤"，问三件别的事：
+ * 现在有两条边界，各有各的理由，这份检查把它们分开钉：
  *
- *   1. **路径**：五个维度（计划 / 备忘 / 预检 / 轨迹 / 置信度样本）的落点是不是都在
- *      `.she/sessions/<id>/` 下面，两个会话两条不同的路径，且 `.she/` 顶层不再有它们；
- *   2. **读**：A 把五个维度都写满，B 一个字段都读不到 —— 而不是"读到了然后拒绝"；
- *   3. **写**：拿着 A 的 id 从 B 改，改不动，且 A 的文件一个字节都没变。
+ *   A. **工作区级**（计划 / 备忘）：一个项目一份，项目里每条会话读写同一份；**跨工作区**读不到，因为
+ *      另一个工作区有自己的 `.she/`。
+ *   B. **会话级**（预检 / 轨迹 / 置信度样本）：一条对话的推理原文、跑过的命令、话题文本，不该被另一条
+ *      对话读到 —— 这里的分账仍然是"路径上不存在"。
  *
- * 再加上一层**反向钉子**：工作区顶层不许出现这些文件/目录。回归通常不是"过滤写漏了"，而是"顺手又建了
- * 一份工作区级文件" —— 那一条必须响。
+ * 每条边界问三件事：
+ *
+ *   1. **路径**：A 类落在 `.she/` 顶层，B 类落在 `.she/sessions/<id>/` 下面；
+ *   2. **读**：同工作区的另一条会话读得到 A 类、读不到 B 类；
+ *   3. **写**：同工作区的另一条会话改得动 A 类（那是同一个项目的计划），改不动 B 类。
+ *
+ * 再加一层**反向钉子**：回归通常不是"过滤写漏了"，而是"顺手又建了一份工作区级文件"。所以两边都要响 ——
+ * `.she/` 顶层不许出现 B 类那三样，会话目录里也不许再出现 A 类那两样。
  *
  * 唯一的例外是**跨会话的数字账**（`.she/reflection/confidence.json`），它是刻意共用的：习惯要跨重启才
  * 看得出来，而那里只有数字、没有一个字的话题文本。这份检查把这个例外也钉住：它的收益（B 能读到结论）
@@ -58,64 +63,79 @@ const check = (label, cond, detail) => {
 const samePath = (a, b) => resolve(String(a)).toLowerCase() === resolve(String(b)).toLowerCase();
 const tempDir = (p) => mkdtempSync(join(tmpdir(), p));
 
-const { PlanStore, MemoStore, RunTraceStore, ConfidenceMirror } =
+const { PlanStore, MemoStore, RunTraceStore, ConfidenceMirror, WORKSPACE_SCOPE } =
   await import(pathToFileURL(RUNTIME_ENTRY).href);
 const { PreflightStore } = await import(pathToFileURL(PREFLIGHT_ENTRY).href);
 
 const A = 'sess-alpha';
 const B = 'sess-beta';
 
-/** 五个维度的落点 —— 写死的期望值，和实现自己报出来的路径分开比对。 */
+/**
+ * 五个维度的落点 —— 写死的期望值，和实现自己报出来的路径分开比对。
+ *
+ * 前两个只跟工作区有关（所以签名里有 `s` 也不用），后三个必须落在自己的会话目录里。把这两类**并排写在
+ * 一起**是有意的：边界一旦被改动，这张表就是最先要改的东西。
+ */
 const dims = {
-  计划: (root, s) => join(root, '.she', 'sessions', s, 'plans.json'),
-  备忘: (root, s) => join(root, '.she', 'sessions', s, 'memo.json'),
+  计划: (root) => join(root, '.she', 'plans.json'),
+  备忘: (root) => join(root, '.she', 'memo.json'),
   预检: (root, s) => join(root, '.she', 'sessions', s, 'preflight'),
   轨迹: (root, s) => join(root, '.she', 'sessions', s, 'runs'),
   样本: (root, s) => join(root, '.she', 'sessions', s, 'confidence.json'),
 };
+const WORKSPACE_DIMS = ['计划', '备忘'];
+const SESSION_DIMS = ['预检', '轨迹', '样本'];
 
 /**
  * 这些 store 实际把文件放哪了。
  *
- * 和 `dims` 是两套：`dims` 是"应该在哪"，这里是"实现说它在哪"。两边一旦分叉，下面所有读/写断言
- * 都会对着空气，而且全是绿的 —— 所以先比这两套。
+ * 和 `dims` 是两套：`dims` 是"应该在哪"，这里是"实现说它在哪"。两边一旦分叉，下面所有读/写断言都会对着
+ * 空气，而且全是绿的 —— 所以先比这两套。
  *
- * 报法不统一（计划报的是会话目录本身、轨迹报的是 runs 子目录、备忘什么都不报），所以这里返回
- * "它报出来的那个位置"，由调用方对着 `dims` 里对应的那一项做包含判断：文件的那一项要落在它下面。
+ * 报法不统一（计划报的是所在目录、轨迹报的是 runs 子目录、备忘什么都不报），所以这里返回"它报出来的那个
+ * 位置"，由调用方对着 `dims` 里对应的那一项做包含判断：文件的那一项要落在它下面。
  */
 const reportedDirs = (root, sessionId) => ({
-  计划: new PlanStore(root, sessionId).directory,
+  计划: new PlanStore(root, WORKSPACE_SCOPE).directory,
   轨迹: new RunTraceStore(root, sessionId).directory(),
-  // 预检和样本不报路径，只能从它们写出来的东西反推（见本节末尾）。
 });
 
 const dir = tempDir('she-isolation-');
+const otherWorkspace = tempDir('she-isolation-other-');
 
 /* ══════════════════════════════════════════════════════════════════════════
- * 1. 路径：五个维度的落点都带会话 id，两个会话两条不同的路径
+ * 1. 路径：两类的落点各自正确
  * ══════════════════════════════════════════════════════════════════════════ */
 
-console.log('\n1. 路径：私有状态落在自己的会话目录里');
+console.log('\n1. 路径：工作区级的在 `.she/` 顶层，会话级的在自己的会话目录里');
 {
   const reported = reportedDirs(dir, A);
   for (const [name, where] of Object.entries(reported)) {
     /*
-     * 每个 store 报出来的位置含义不一样（计划报会话目录、轨迹报 runs 目录），但要求是同一条：
-     * `dims` 里写死的那条路径必须落在它报出来的位置**下面**。报的比期望的大一级没关系（它报的是
-     * 目录），报成别的地方就有关系了。
+     * 每个 store 报出来的位置含义不一样（计划报所在目录、轨迹报 runs 目录），但要求是同一条：`dims` 里
+     * 写死的那条路径必须落在它报出来的位置**下面**。报的比期望的大一级没关系（它报的是目录），报成别的
+     * 地方就有关系了。
      */
     check(`${name}：写死的那条路径确实在它报出来的目录下`,
       resolve(dims[name](dir, A)).startsWith(resolve(where)), `${dims[name](dir, A)} vs ${where}`);
   }
-  for (const name of Object.keys(dims)) {
-    check(`${name}：两个会话不是同一条路径`,
+
+  for (const name of SESSION_DIMS) {
+    check(`${name}（会话级）：两个会话不是同一条路径`,
       !samePath(dims[name](dir, A), dims[name](dir, B)), dims[name](dir, A));
+  }
+  for (const name of WORKSPACE_DIMS) {
+    check(`${name}（工作区级）：跟会话无关，两条会话就是同一份`,
+      samePath(dims[name](dir, A), dims[name](dir, B)), dims[name](dir, A));
+  }
+  for (const name of Object.keys(dims)) {
     check(`${name}：路径确实在工作区里`,
       resolve(dims[name](dir, A)).startsWith(resolve(dir)), dims[name](dir, A));
   }
+
   /*
-   * PreflightStore / ConfidenceMirror 不报路径，只能从它们写出来的文件反推 —— 这两样是"文件真的
-   * 落在会话目录里"而不是"getter 说的是"。
+   * PreflightStore / ConfidenceMirror 不报路径，只能从它们写出来的文件反推 —— 这两样是"文件真的落在
+   * 会话目录里"而不是"getter 说的是"。
    */
   new PreflightStore(dir, A).save({
     id: 'pf-alpha', createdAt: new Date().toISOString(), stated_intent: 'x', inferred_constraints: [],
@@ -128,14 +148,14 @@ console.log('\n1. 路径：私有状态落在自己的会话目录里');
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * 2. A 写满五个维度，B 一个字段都读不到
+ * 2. 读：同工作区的另一条会话读得到工作区级的，读不到会话级的
  * ══════════════════════════════════════════════════════════════════════════ */
 
-console.log('\n2. 读：A 写满五个维度，B 一个字段都读不到');
+console.log('\n2. 读：同工作区的另一条会话 —— 计划/备忘看得到，预检/轨迹/样本看不到');
 let seeded;
 {
-  const plan = new PlanStore(dir, A).create('把数据从 MySQL 搬到 Postgres', ['导出', '校验', '切流量']);
-  const memo = new MemoStore(dir, A).add('迁移期间先停写', 'user');
+  const plan = new PlanStore(dir, WORKSPACE_SCOPE).create('把数据从 MySQL 搬到 Postgres', ['导出', '校验', '切流量']);
+  const memo = new MemoStore(dir).add('迁移期间先停写', 'user');
   const run = new RunTraceStore(dir, A).begin({ prompt: '导出生产库', model: 'm-iso' });
   run.tool({ name: 'shell', args: '{"cmd":"pg_dump"}', result: 'ok', ms: 3, ok: true });
   run.end({ ok: true });
@@ -143,42 +163,65 @@ let seeded;
   seeded = { plan, memo, run };
 
   // A 自己读得到 —— 否则下面"B 读不到"可能只是因为什么都没写进去。
-  check('A 读得到自己的计划', new PlanStore(dir, A).list().some((p) => p.title.includes('搬')), null);
-  check('A 读得到自己的备忘', new MemoStore(dir, A).list().length === 1, null);
+  check('A 读得到自己的计划', new PlanStore(dir, WORKSPACE_SCOPE).list().some((p) => p.title.includes('搬')), null);
+  check('A 读得到自己的备忘', new MemoStore(dir).list().length === 1, null);
   check('A 读得到自己的预检', new PreflightStore(dir, A).list().length === 1, null);
   check('A 读得到自己的轨迹', new RunTraceStore(dir, A).list().length === 1, null);
   check('A 读得到自己的样本', new ConfidenceMirror(dir, A).samples().length === 2, null);
 
-  check('B 读不到 A 的计划（不是"读到再过滤"）', new PlanStore(dir, B).list().length === 0, null);
-  check('B 读不到 A 的备忘', new MemoStore(dir, B).list().length === 0, null);
+  /*
+   * 工作区级：另一条**会话**（不是另一个工作区）看得到。这就是"在一个项目里新开一个对话，昨天那份计划
+   * 还在"这条承诺的实现方式 —— 它靠的不是过滤，是两边读同一份文件。
+   */
+  check('【关键】同工作区的 B 看得到这份计划（计划属于项目）',
+    new PlanStore(dir, WORKSPACE_SCOPE).list().length === 1, null);
+  check('【关键】同工作区的 B 看得到这份备忘',
+    new MemoStore(dir).list().length === 1, null);
+
+  // 会话级：仍然读不到，而且是"路径上不存在"。
   check('B 读不到 A 的预检', new PreflightStore(dir, B).list().length === 0, null);
   check('B 读不到 A 的轨迹', new RunTraceStore(dir, B).list().length === 0, null);
   check('B 读不到 A 的样本（话题文本是 A 的）', new ConfidenceMirror(dir, B).samples().length === 0, null);
-  check('B 的目录里没有被凭空造出来的文件',
-    !existsSync(dims.计划(dir, B)) && !existsSync(dims.备忘(dir, B)) && !existsSync(dims.样本(dir, B)), null);
+  check('B 的会话目录里没有被凭空造出来的文件',
+    !existsSync(dims.预检(dir, B)) && !existsSync(dims.样本(dir, B)), null);
+
+  /*
+   * 工作区级：换一个**工作区**就什么都读不到了 —— 边界只是挪到了用户认识的那条线上，并没有变松。
+   */
+  check('【关键】另一个工作区读不到这份计划', new PlanStore(otherWorkspace, WORKSPACE_SCOPE).list().length === 0, null);
+  check('【关键】另一个工作区读不到这份备忘', new MemoStore(otherWorkspace).list().length === 0, null);
+  check('【关键】隔离靠路径：另一个工作区连文件都没有',
+    !existsSync(dims.计划(otherWorkspace)) && !existsSync(dims.备忘(otherWorkspace)), null);
 
   /* ══════════════════════════════════════════════════════════════════════
-   * 3. 写：拿着 A 的 id 从 B 改，改不动，且 A 的文件没被碰过
+   * 3. 写：工作区级的改得动，会话级的改不动
    * ══════════════════════════════════════════════════════════════════════ */
-  console.log('\n3. 写：从 B 拿着 A 的 id 改，改不动，A 的文件也没被碰');
+  console.log('\n3. 写：同项目的计划/备忘改得动；别人的预检/轨迹改不动');
 
-  const before = {
-    plans: readFileSync(dims.计划(dir, A), 'utf8'),
-    memo: readFileSync(dims.备忘(dir, A), 'utf8'),
-  };
-  const refusedPlan = new PlanStore(dir, B).setStepStatus(plan.id, plan.steps[0].id, 'done');
-  check('改 A 的步骤：被拒（不是静默改到别处）', refusedPlan.ok === false, JSON.stringify(refusedPlan).slice(0, 200));
-  check('拒了之后 B 的文件里没有半截改动', new PlanStore(dir, B).list().length === 0, null);
+  const preflightBefore = readFileSync(join(dims.预检(dir, A), readdirSync(dims.预检(dir, A))[0]), 'utf8');
 
-  const refusedMemo = new MemoStore(dir, B).update(memo.id, { done: true });
-  check('改 A 的备忘：返回"没有这条"，不是改到同 id 的别的条目', refusedMemo === undefined, null);
-  check('删 A 的备忘也删不掉', new MemoStore(dir, B).remove(memo.id) === false, null);
+  /*
+   * 计划：同工作区就是同一份，所以"改"是正当的，而且是这次改动的**目的**。用户在一个项目里换一条
+   * 对话接着做，本来就该能推进度。
+   */
+  const advanced = new PlanStore(dir, WORKSPACE_SCOPE).setStepStatus(plan.id, plan.steps[0].id, 'done');
+  check('【关键】同工作区的另一条会话推得动这份计划的进度', advanced.ok === true, JSON.stringify(advanced).slice(0, 200));
+  check('进度真的落到同一份文件里',
+    new PlanStore(dir, WORKSPACE_SCOPE).get(plan.id)?.steps[0].status === 'done', null);
+
+  const memoEdit = new MemoStore(dir).update(memo.id, { done: true });
+  check('【关键】同工作区的另一条会话改得动这条备忘', memoEdit?.done === true, null);
+
+  // 另一个工作区：既读不到也改不动（它读的是自己的文件，所以这里是"没有这条"）。
+  const foreignEdit = new PlanStore(otherWorkspace, WORKSPACE_SCOPE).setStepStatus(plan.id, plan.steps[0].id, 'done');
+  check('【关键】另一个工作区改不动这份计划', foreignEdit.ok === false, JSON.stringify(foreignEdit).slice(0, 200));
+  const foreignMemo = new MemoStore(otherWorkspace).update(memo.id, { done: false });
+  check('【关键】另一个工作区也找不到这条备忘', foreignMemo === undefined, null);
+
+  // 会话级：从 B 拿 A 的轨迹 id 读不到；A 的预检文件一个字节没变。
   check('拿 A 的轨迹 id 从 B 读：读不到', new RunTraceStore(dir, B).read(run.id) == null, null);
-
-  check('A 的计划文件一个字节都没变',
-    readFileSync(dims.计划(dir, A), 'utf8') === before.plans, null);
-  check('A 的备忘文件一个字节都没变',
-    readFileSync(dims.备忘(dir, A), 'utf8') === before.memo, null);
+  check('A 的预检文件一个字节都没变',
+    readFileSync(join(dims.预检(dir, A), readdirSync(dims.预检(dir, A))[0]), 'utf8') === preflightBefore, null);
 
   /* ══════════════════════════════════════════════════════════════════════
    * 4. 唯一的例外：跨会话的数字账（只有数字，没有说话）
@@ -193,37 +236,54 @@ let seeded;
   check('B 的结论里也不点名话题（那是 A 的样本）', bReport.worst.length === 0, JSON.stringify(bReport.worst));
 
   /* ══════════════════════════════════════════════════════════════════════
-   * 5. 反向钉子：工作区顶层不许再出现这五样
+   * 5. 反向钉子：两条边界都不能长歪
    * ══════════════════════════════════════════════════════════════════════ */
-  console.log('\n5. 反向钉子：工作区顶层不许再出现这些文件/目录');
+  console.log('\n5. 反向钉子：工作区级的留在顶层，会话级的不许上顶层，也不许再回落进会话目录');
 
   const top = readdirSync(join(dir, '.she'));
-  for (const name of ['plans.json', 'memo.json', 'preflight', 'runs']) {
-    check(`.she/ 顶层没有 ${name}`, !top.includes(name), top.join(', '));
+  for (const name of ['plans.json', 'memo.json']) {
+    check(`.she/ 顶层有 ${name}（工作区级就该在这里）`, top.includes(name), top.join(', '));
   }
-  check('.she/ 顶层没有一个装所有会话的 confidence.json',
-    !top.includes('confidence.json'), top.join(', '));
-  check('这五样都只长在会话目录里',
-    existsSync(dims.计划(dir, A)) && existsSync(dims.备忘(dir, A))
-      && existsSync(dims.预检(dir, A)) && existsSync(dims.轨迹(dir, A)) && existsSync(dims.样本(dir, A)), null);
+  check('.she/ 顶层没有一个装所有会话的 confidence.json', !top.includes('confidence.json'), top.join(', '));
+  check('.she/ 顶层没有 preflight / runs', !top.includes('preflight') && !top.includes('runs'), top.join(', '));
+
+  /*
+   * 另一半：2026-09-27 那版把这两样塞进了会话目录，改回来之后**不许**再有会话级副本 —— 否则同一份计划
+   * 会出现两个来源，读的写的是哪一个就说不清了。
+   */
+  check('会话目录里不再有 plans.json（计划只有工作区那一份）',
+    !existsSync(join(dir, '.she', 'sessions', A, 'plans.json')), null);
+  check('会话目录里不再有 memo.json（备忘只有工作区那一份）',
+    !existsSync(join(dir, '.she', 'sessions', A, 'memo.json')), null);
+  /*
+   * 上面两条只证明"没人在会话目录里写过这两个文件"。真正要钉的是**规则**：非工作区作用域（群、以及
+   * 将来任何按会话分的作用域）必须落在会话目录里，工作区作用域必须落在顶层。用 `fileFor` 直接问，
+   * 就不依赖"某个 store 恰好没被创建过"。
+   */
+  check('作用域决定落点：非工作区作用域落在会话目录里',
+    samePath(PlanStore.fileFor(dir, A), join(dir, '.she', 'sessions', A, 'plans.json')),
+    PlanStore.fileFor(dir, A));
+  check('作用域决定落点：工作区作用域落在顶层',
+    samePath(PlanStore.fileFor(dir, WORKSPACE_SCOPE), join(dir, '.she', 'plans.json')),
+    PlanStore.fileFor(dir, WORKSPACE_SCOPE));
+  check('会话级的那三样仍然长在会话目录里',
+    existsSync(dims.预检(dir, A)) && existsSync(dims.轨迹(dir, A)) && existsSync(dims.样本(dir, A)), null);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * 6. 真起服务：跨会话的读要显式，写要落到点名的那份
+ * 6. 真起服务：接口层跟 store 层说同一件事
  * ══════════════════════════════════════════════════════════════════════════ */
 
 const PORT = String(await pickSafePort(Number(process.env.SHE_ISOLATION_TEST_PORT || 18171), [18172, 18173, 18174, 19192]));
 const workspace = tempDir('she-isolation-live-');
 
-// 先在线下把两个会话的状态写好，服务起来就有东西可读。
-const seedPlan = new PlanStore(workspace, 'sess-a').create('把网关换成新版本', ['灰度', '全量']);
-const seedMemo = new MemoStore(workspace, 'sess-a').add('网关切换前先备份路由表', 'user');
-const seedRun = new RunTraceStore(workspace, 'sess-a').begin({ prompt: '切网关', model: 'm-iso' });
-seedRun.tool({ name: 'shell', args: '{"cmd":"reload"}', result: 'ok', ms: 2, ok: true });
+// 先在线下把状态写好，服务起来就有东西可读。
+const seedPlan = new PlanStore(workspace, WORKSPACE_SCOPE, 'sess-a').create('把网关换成新版本', ['灰度', '全量']);
+const seedMemo = new MemoStore(workspace).add('网关切换前先备份路由表', 'user');
+const seedRun = new RunTraceStore(workspace, 'sess-a').begin({ prompt: '导出生产库', model: 'm-iso' });
+seedRun.tool({ name: 'shell', args: '{"cmd":"pg_dump prod"}', result: 'ok', ms: 2, ok: true });
 seedRun.end({ ok: true });
 new ConfidenceMirror(workspace, 'sess-a').observe({ claimed: 0.9, attempted: 4, succeeded: 1, topic: '网关切换' });
-new PlanStore(workspace, 'sess-b').create('另一件事', ['一步']);
-
 const child = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
   env: {
@@ -269,46 +329,64 @@ function cleanup() {
   removeTempDir(workspace);
 }
 
-console.log('\n6. /api：跨会话的读要显式，写落到点名的那份');
+console.log('\n6. /api：接口层跟 store 层说同一件事');
 if (!(await waitForHealth())) {
   console.log('  FAIL  服务在 30 秒内就绪');
   console.log(`        ${serverOut.slice(-800)}`);
   cleanup();
   removeTempDir(dir);
+  removeTempDir(otherWorkspace);
   console.log('\nFAIL (1)  session-isolation-check');
   process.exit(1);
 }
 
 try {
+  /*
+   * 计划：不管点名哪条会话，回的都是**本工作区那一份**。这正是"计划属于项目"在接口上的样子 ——
+   * 2026-09-27 那版这里回的是"点名那个会话的文件"。
+   */
   const aPlans = await get('/api/plans?session_id=sess-a');
   const bPlans = await get('/api/plans?session_id=sess-b');
-  check('/api/plans 只回点名那个会话的计划',
-    aPlans.body.plans.length === 1 && aPlans.body.plans[0].id === seedPlan.id
-      && bPlans.body.plans.length === 1 && bPlans.body.plans[0].title === '另一件事',
-    JSON.stringify({ a: aPlans.body.plans, b: bPlans.body.plans }).slice(0, 300));
+  const noSessionPlans = await get('/api/plans');
+  check('【关键】点名的会话不同，读到的计划是同一份（工作区级）',
+    aPlans.body.plans.length === 1 && bPlans.body.plans.length === 1
+      && aPlans.body.plans[0].id === seedPlan.id && bPlans.body.plans[0].id === seedPlan.id,
+    JSON.stringify({ a: aPlans.body.plans?.map((p) => p.id), b: bPlans.body.plans?.map((p) => p.id) }).slice(0, 300));
+  check('不带 session_id 也读得到（边界是工作区，不是会话）',
+    noSessionPlans.body.plans.length === 1 && noSessionPlans.body.plans[0].id === seedPlan.id,
+    JSON.stringify(noSessionPlans.body.plans?.map((p) => p.id)).slice(0, 200));
+  check('计划带着创建它的会话 id（来源标记）',
+    aPlans.body.plans[0].sessionId === 'sess-a', JSON.stringify(aPlans.body.plans[0].sessionId));
 
   /*
-   * 看别的会话的选择器：必须显式带 `scope=workspace`，而且清单里**只有会话 id 和计数** ——
-   * 计划正文要点头开那一行才读得到。
+   * 备忘同样是工作区级：两条会话读到同一份，改也改得动同一份。
+   */
+  const aMemo = await get('/api/memo?session_id=sess-a');
+  const bMemo = await get('/api/memo?session_id=sess-b');
+  check('【关键】两条会话读到的是同一本备忘',
+    aMemo.body.entries.length === 1 && bMemo.body.entries.length === 1
+      && aMemo.body.entries[0].id === bMemo.body.entries[0].id,
+    JSON.stringify({ a: aMemo.body.entries, b: bMemo.body.entries }).slice(0, 300));
+  const bWritesMemo = await send('PUT', `/api/memo/${seedMemo.id}`, { done: true, session_id: 'sess-b' });
+  check('【关键】从另一条会话改得动这条备忘（同一个项目的本子）', bWritesMemo.status === 200, `status=${bWritesMemo.status}`);
+  const aMemoAfter = await get('/api/memo?session_id=sess-a');
+  check('改动在两条会话里都看得见', aMemoAfter.body.entries[0]?.done === true, JSON.stringify(aMemoAfter.body.entries));
+
+  /*
+   * 清单接口：它现在只枚举**目录作用域**（讨论群）。聊天计划本来就在上面那条接口里全部可见，所以
+   * 清单里**不该**出现任何聊天会话 —— 否则界面上会多出一扇没有必要的门。
    */
   const pickerBare = await get('/api/plans/sessions');
-  check('不带 scope=workspace 时选择器接口直接 400（不是悄悄给一份跨会话清单）',
+  check('不带 scope=workspace 时清单接口直接 400（枚举目录名是显式动作）',
     pickerBare.status === 400, `status=${pickerBare.status}`);
   const picker = await get('/api/plans/sessions?scope=workspace');
-  const listed = picker.body?.sessions ?? [];
-  check('显式要了才列（这一步是用户点开选择器）', picker.status === 200 && listed.length >= 2, JSON.stringify(listed));
-  check('清单带计数，界面不用为每个会话再问一次',
-    listed.every((s) => typeof s.plans === 'number' && s.plans > 0), JSON.stringify(listed));
-  check('清单里没有计划正文（只有 id 和计数）',
-    !JSON.stringify(listed).includes('网关') && !JSON.stringify(listed).includes('另一件事'), JSON.stringify(listed));
+  check('聊天会话不进清单（它的计划本来就看得到）',
+    picker.status === 200 && !(picker.body?.sessions ?? []).some((s) => s.session_id.startsWith('sess_')),
+    JSON.stringify(picker.body?.sessions).slice(0, 240));
 
-  const bMemo = await get('/api/memo?session_id=sess-b');
-  check('/api/memo 只回点名那个会话的备忘', bMemo.body.entries.length === 0, JSON.stringify(bMemo.body).slice(0, 200));
-  const crossWrite = await send('PUT', `/api/memo/${seedMemo.id}`, { done: true, session_id: 'sess-b' });
-  check('拿 A 的备忘 id 从 B 改 → 404（改不到，也不会改到同名 id）', crossWrite.status === 404, `status=${crossWrite.status}`);
-  const aMemoAfter = await get('/api/memo?session_id=sess-a');
-  check('A 的备忘没有被 B 改过', aMemoAfter.body.entries[0]?.done === false, JSON.stringify(aMemoAfter.body.entries));
-
+  /*
+   * 会话级那三样：接口层必须仍然是"点名的会话才看得到"。
+   */
   const bRuns = await get('/api/runs?session_id=sess-b');
   check('/api/runs 默认只看点名那个会话', bRuns.body.runs.length === 0, JSON.stringify(bRuns.body.runs));
   const crossRun = await get(`/api/runs/${seedRun.id}?session_id=sess-b`);
@@ -319,8 +397,8 @@ try {
   check('点对了会话就读得到（上面那些 404 不是因为功能坏了）',
     ownRun.status === 200 && (ownRun.body.events ?? []).length >= 2, `status=${ownRun.status}`);
   /*
-   * 证据核对：A 跑过 shell，B 没跑过。"B 的轨迹里有 shell"这句话不该成立 —— 拿别人的轨迹给
-   * 我的说法背书，是这条接口最要防的方向（它存在的意义就是拦住编造的引用）。
+   * 证据核对：A 跑过 shell，B 没跑过。"B 的轨迹里有 shell"这句话不该成立 —— 拿别人的轨迹给我的说法
+   * 背书，是这条接口最要防的方向（它存在的意义就是拦住编造的引用）。
    */
   const quote = encodeURIComponent('shell 跑过 pg_dump');
   const inB = await get(`/api/runs/corroborate?evidence=${quote}&session_id=sess-b`);
@@ -337,8 +415,8 @@ try {
     String(bReflect.body.samples_root).includes('sess-b'), bReflect.body.samples_root);
 
   /*
-   * 重置的边界（有意为之，写清楚而不是让它变成惊讶）：数字账是不分会话的，所以在任何一个会话里
-   * 重置都会清掉那本账；但**别人的样本文件不动** —— 那里面有它自己的文本，轮不到我来替它决定。
+   * 重置的边界（有意为之，写清楚而不是让它变成惊讶）：数字账是不分会话的，所以在任何一个会话里重置都会
+   * 清掉那本账；但**别人的样本文件不动** —— 那里面有它自己的文本，轮不到我来替它决定。
    */
   const reset = await send('POST', '/api/reflection/confidence/reset', { session_id: 'sess-b' });
   check('重置接口认识 body 里的 session_id（不是静默重置了"当前会话"）', reset.status === 200, `status=${reset.status}`);
@@ -352,6 +430,7 @@ try {
 
 cleanup();
 removeTempDir(dir);
+removeTempDir(otherWorkspace);
 
 console.log(`\n${failures === 0 ? 'PASS' : `FAIL (${failures})`}  session-isolation-check`);
 process.exit(failures === 0 ? 0 : 1);

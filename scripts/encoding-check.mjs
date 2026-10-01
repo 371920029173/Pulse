@@ -329,14 +329,15 @@ const SAMPLES = {
 // ── 4. Memo ──
 {
   /*
-   * 备忘现在按会话存（`.she/sessions/<id>/memo.json`，2026-09-27 起），所以要显式指明会话：
-   * 不带 session_id 时服务端按"没有会话"处理（写请求直接 400），不会退回一份所有会话共享的本子。
+   * 备忘按**工作区**存（`.she/memo.json`，2026-10-01 起）：一个项目一本。接口不接受也不要求
+   * `session_id`，因为"这个项目记的待办"跟哪条对话记的无关 —— 换个对话进来，昨天记的还在。
    */
   const s = await api('/api/sessions', { method: 'POST', body: { title: 'memo-enc' } });
   const sid = s.data?.id;
-  const m = await api('/api/memo', { method: 'POST', body: { text: SAMPLES.mixed, session_id: sid } });
+  void sid;
+  const m = await api('/api/memo', { method: 'POST', body: { text: SAMPLES.mixed } });
   check('备忘往返一致', m.data?.text === SAMPLES.mixed, JSON.stringify(m.data?.text));
-  const back = await api(`/api/memo?session_id=${sid}`);
+  const back = await api('/api/memo');
   check('备忘回读一致', (back.data?.entries ?? []).some((e) => e.text === SAMPLES.mixed),
     JSON.stringify((back.data?.entries ?? []).map((e) => e.text)));
 }
