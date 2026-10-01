@@ -104,6 +104,33 @@ function makeWorkspace(label, sessions) {
   return dir;
 }
 
+/**
+ * Wait until nothing answers on PORT any more.
+ *
+ * Replaces a fixed `await sleep(800)` after the kill, which encoded an assumption about how fast the
+ * machine is — and that assumption is what fails under load. Every `bootOnce` in this file reuses the
+ * same `PORT`, so if the previous server is still shutting down, the NEXT section's health poll is
+ * answered by the PREVIOUS process: `healthy` comes back true, but it is a server on another
+ * workspace, and the section then reads the wrong directory.
+ *
+ * Observed exactly that in a full `check:offline` run: `损坏的讨论组文件同样被留底` failed with
+ * `原文没有保留` while the same file passed 6/6 standalone, and the neighbouring assertions about the
+ * same quarantine (read back through the API, i.e. against a server the section did talk to) passed —
+ * the giveaway that two different servers were involved.
+ */
+async function waitForPortClosed(timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      await fetch(`http://127.0.0.1:${PORT}/api/health`, { signal: AbortSignal.timeout(500) });
+    } catch {
+      return true; // nothing is listening: the port is genuinely free
+    }
+    if (Date.now() > deadline) return false;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+}
+
 /** Start the server on a throwaway workspace, wait for boot, then stop it. */
 /**
  * Boot the server on a throwaway workspace, let recovery finish, then stop it.
@@ -116,6 +143,15 @@ function makeWorkspace(label, sessions) {
  * process (a workspace switch, say) rather than a single boot-and-look.
  */
 async function bootOnce(workspace, probe) {
+  /*
+   * Refuse to start on a port that something else is holding. Without this, a leftover server makes
+   * the health poll below succeed against the wrong process, and every assertion in the section is
+   * then about a workspace we never booted.
+   */
+  if (!await waitForPortClosed()) {
+    console.error(`端口 ${PORT} 在本段启动前仍被占用 —— 以下断言可能读到别的服务，不能当成有效结果`);
+  }
+
   const child = spawn('node', [SERVER_ENTRY], {
     cwd: SERVER_DIR,
     // Pinned in the child environment, not only in the workspace: ambient variables win over the
@@ -157,7 +193,14 @@ async function bootOnce(workspace, probe) {
   // Recovery runs during boot; give it a moment to finish writing.
   await new Promise((r) => setTimeout(r, 2000));
   killTree(child.pid);
-  await new Promise((r) => setTimeout(r, 800));
+  /*
+   * Wait for the port to actually close rather than for a fixed interval. The child we killed is the
+   * one that answered above, so this is the handshake that makes the NEXT section's health poll
+   * meaningful. If it does not close, say so instead of letting the next section read a stray server.
+   */
+  if (!await waitForPortClosed()) {
+    console.error(`端口 ${PORT} 在 15 秒内仍被占用 —— 下一段可能读到本段这个服务`);
+  }
   return { healthy, out, sessionsProbe };
 }
 
