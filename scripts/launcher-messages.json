@@ -26,6 +26,8 @@
     "startBackend":  "[3/4] 启动后端服务",
     "portAlready":  "端口已在监听，跳过启动",
     "startingWait":  "已启动，等待就绪…",
+    "backendStale":  "后端运行的是旧版本，正在重启它",
+    "portStuck":  "[警告] 旧后端没有及时释放端口，仍继续启动。",
     "healthStep":  "[4/4] 等待服务响应",
     "healthTimeout":  "[错误] 服务在 48 秒内没有就绪。",
     "logLabel":  "日志",

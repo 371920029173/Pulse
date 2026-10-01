@@ -27,7 +27,7 @@
  *
  *   node scripts/session-isolation-check.mjs
  */
-import { mkdtempSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, readdirSync, mkdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -605,8 +605,241 @@ if (!(await liveReady())) {
   liveCleanup();
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * 8. 「建了却看不见」：创建和列表必须落在同一个 store
+ *
+ * 这一节是 2026-10-01 补的，和第 7 节同一个病根的另一半。
+ *
+ * 第 6 节把 `SHE_STATE_DIR` 设成**和 workspace 一模一样**，第 7 节干脆不设 —— 两种情况里
+ * `stateDir === config.workspace.root` 都成立，于是"创建用哪个 store、列表读哪个 store"这个问题
+ * 从来没被问过。而 `SHE_STATE_DIR` 的整个用途就是**让它和 workspace 不一样**：
+ *
+ *     POST /api/sessions    → storeFor(config.workspace.root)   ← 写在 <workspace>/.she
+ *     GET  /api/conversations → sessions（挂载的 stateDir）      ← 读 <stateDir>/.she
+ *
+ * 实测（本地 2026-10-01，隔离实例 5878）：连续 4 次 `POST /api/sessions` 全部 201，行落在
+ * `_e2e_ws/.she/sessions.json`，而会话栈一直是"暂无会话"，同时 `GET /api/sessions/:id` 对每个 id 都
+ * 回 200 —— 创建成功、单条可读、列表里永远没有。用户看到的就是"我新建的对话不见了"，而强刷页面
+ * 救不了它：两边在磁盘上就不一致，不在内存里。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+console.log('\n8. 建了就要看得见：创建与列表落在同一个 store（SHE_STATE_DIR ≠ workspace）');
+
+const splitWorkspace = tempDir('she-split-ws-');
+const splitState = tempDir('she-split-state-');
+const SPLIT_PORT = String(await pickSafePort(Number(process.env.SHE_SPLIT_TEST_PORT || 18195), [18196, 18197]));
+
+const splitChild = spawn('node', [SERVER_ENTRY], {
+  cwd: SERVER_DIR,
+  env: {
+    ...process.env,
+    SHE_WORKSPACE: splitWorkspace,
+    SHE_PORT: SPLIT_PORT,
+    SHE_ENV_FILE: join(splitWorkspace, '.env'),
+    SHE_APP_DIR: join(splitWorkspace, 'appdir'),
+    // 关键：状态目录**故意**不等于工作区。这是这个变量的正常用法，不是边角情况。
+    SHE_STATE_DIR: splitState,
+  },
+  stdio: ['ignore', 'pipe', 'pipe'],
+  windowsHide: true,
+});
+let splitOut = '';
+splitChild.stdout.on('data', (c) => { splitOut += c; });
+splitChild.stderr.on('data', (c) => { splitOut += c; });
+
+const splitGet = async (path) => {
+  const r = await fetch(`http://127.0.0.1:${SPLIT_PORT}${path}`, { signal: AbortSignal.timeout(8000) });
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+const splitPost = async (path, body) => {
+  const r = await fetch(`http://127.0.0.1:${SPLIT_PORT}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+    signal: AbortSignal.timeout(8000),
+  });
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+
+async function splitReady() {
+  const t0 = Date.now();
+  for (;;) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${SPLIT_PORT}/api/health`, { signal: AbortSignal.timeout(1500) });
+      if (r.ok) return true;
+    } catch { /* not up yet */ }
+    if (Date.now() - t0 > 30_000) return false;
+    await new Promise((r) => setTimeout(r, 400));
+  }
+}
+
+const splitCleanup = () => {
+  killTree(splitChild.pid);
+  removeTempDir(splitWorkspace);
+  removeTempDir(splitState);
+};
+
+if (!(await splitReady())) {
+  check('第一个服务在 30 秒内就绪', false, splitOut.slice(-800));
+  splitCleanup();
+} else {
+  try {
+    const created = await splitPost('/api/sessions', { title: '状态目录在别处' });
+    check('创建会话返回 201', created.status === 201, `${created.status} ${JSON.stringify(created.body).slice(0, 200)}`);
+    const id = created.body?.id;
+
+    const one = await splitGet(`/api/sessions/${id}`);
+    check('按 id 能读到刚建的那条', one.status === 200, String(one.status));
+
+    const rail = await splitGet('/api/conversations');
+    const listed = (rail.body?.items ?? []).some((s) => s.id === id);
+    check('【关键】刚建的会话出现在会话栈里（创建与列表同一个 store）',
+      listed, `rail=${JSON.stringify((rail.body?.items ?? []).map((s) => s.title))}`);
+
+    const list = await splitGet('/api/sessions');
+    check('【关键】/api/sessions 也列得出来',
+      (list.body?.sessions ?? []).some((s) => s.id === id),
+      JSON.stringify((list.body?.sessions ?? []).map((s) => s.title)));
+
+    /*
+     * 落点必须**只有一个**。两边都写一份是最坏的结果：文件看起来都在，而会话栈只认其中一份，
+     * 于是"我的对话有时在有时不在"。这里直接问磁盘。
+     */
+    const inState = existsSync(join(splitState, '.she', 'sessions.json'))
+      && JSON.parse(readFileSync(join(splitState, '.she', 'sessions.json'), 'utf8')).sessions.some((s) => s.id === id);
+    const wsFile = join(splitWorkspace, '.she', 'sessions.json');
+    const inWorkspace = existsSync(wsFile)
+      && (JSON.parse(readFileSync(wsFile, 'utf8')).sessions ?? []).some((s) => s.id === id);
+    check('会话写在状态目录的那份文件里', inState, `state=${inState} workspace=${inWorkspace}`);
+    check('工作区那份文件里没有再写一份（否则两份清单会各说各话）', !inWorkspace, String(inWorkspace));
+  } catch (err) {
+    check('状态目录分家的接口检查没有抛异常', false, err?.stack ?? String(err));
+  }
+  splitCleanup();
+}
+
 removeTempDir(dir);
 removeTempDir(otherWorkspace);
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 9. 临时工作区不许变成"下次启动就回到这里"
+ *
+ * 这一节是 2026-10-01 补的，原因是真机上发生的事：应用被切到 `D:\AGI\_she-live-test_2`（两条测试
+ * 对话），而用户自己的项目还在盘上、对话也还在，只是界面上哪儿都看不到。
+ *
+ * 机制是这样的：`mountWorkspace` 会把 `SHE_WORKSPACE` 写进**安装目录真正的 `.env`**，这样下次启动
+ * 回到你上次待的项目。对项目是对的，对临时目录是错的 —— 只要被指过去一次，之后每次启动都从那里
+ * 开始，而界面上没有任何东西说明这件事。
+ *
+ * 所以这里钉两条，缺一不可：
+ *   - 切到临时目录：`.env` **不能**被改成它（否则一次误点变成永久默认）；
+ *   - 切到普通目录：`.env` **必须**被改成它（否则"永远不写"也能让上一条通过，而那样等于把
+ *     "记住上次的工作区"这个功能整个删掉）。
+ *
+ * 普通目录用仓库里 `.she/check-ws/` 下的一个空目录：它不在系统 temp 里，名字也不匹配任何测试夹具
+ * 约定，所以判定上就是"一个正常项目"。用完删掉。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+console.log('\n9. 临时工作区不写进 .env 默认（切走就忘），普通项目照常记住');
+
+{
+  const envWorkspace = tempDir('she-env-scratch-');
+  const envScratch = tempDir('she-env-target-');
+  const ENV_PORT = String(await pickSafePort(Number(process.env.SHE_ENV_TEST_PORT || 18201), [18202, 18203]));
+  const envFile = join(envWorkspace, '.env');
+
+  /*
+   * 这个目标目录是"正常项目"那一半的对照。建在仓库的 `.she/` 下面是为了可控：不在 tmpdir 里
+   * （`isScratchWorkspace` 的两条判据都不成立），用完能一次删干净。
+   */
+  const normalDir = join(ROOT, '.she', 'check-ws', 'proj');
+  mkdirSync(normalDir, { recursive: true });
+
+  const envChild = spawn('node', [SERVER_ENTRY], {
+    cwd: SERVER_DIR,
+    env: {
+      ...process.env,
+      SHE_WORKSPACE: envWorkspace,
+      SHE_PORT: ENV_PORT,
+      SHE_ENV_FILE: envFile,
+      SHE_APP_DIR: join(envWorkspace, 'appdir'),
+      SHE_STATE_DIR: '',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let envOut = '';
+  envChild.stdout.on('data', (c) => { envOut += c; });
+  envChild.stderr.on('data', (c) => { envOut += c; });
+
+  const envReady = await (async () => {
+    const t0 = Date.now();
+    for (;;) {
+      try {
+        const r = await fetch(`http://127.0.0.1:${ENV_PORT}/api/health`, { signal: AbortSignal.timeout(1500) });
+        if (r.ok) return true;
+      } catch { /* not up yet */ }
+      if (Date.now() - t0 > 30_000) return false;
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  })();
+
+  if (!envReady) {
+    check('第 9 节的服务在 30 秒内就绪', false, envOut.slice(-800));
+  } else {
+    try {
+      const switchTo = (root) => fetch(`http://127.0.0.1:${ENV_PORT}/api/workspaces/switch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root }),
+        signal: AbortSignal.timeout(8000),
+      });
+
+      /*
+       * 基准取"切换前那一行"，而不是断言它一定存在。
+       *
+       * 启动不写这一行（只有**切换**才写），所以断言"启动时已经有 SHE_WORKSPACE"是在赌启动路径的
+       * 实现。真正的不变量是"切到临时目录**不改动**这一行"：它可能是空、可能指向别的目录，切完
+       * 必须还是原样。
+       */
+      const lineOf = (text) => text.split('\n').find((l) => l.startsWith('SHE_WORKSPACE=')) ?? null;
+      const before = existsSync(envFile) ? readFileSync(envFile, 'utf8') : '';
+      const beforeLine = lineOf(before);
+
+      const sw = await switchTo(envScratch);
+      check('切到临时目录成功（否则下面的断言无从谈起）', sw.status === 200, `status=${sw.status}`);
+      await new Promise((r) => setTimeout(r, 900));
+
+      const afterScratch = existsSync(envFile) ? readFileSync(envFile, 'utf8') : '';
+      const afterLine = lineOf(afterScratch);
+      check('【关键】切到临时目录后 .env 那一行原样没动（不会被记成默认）',
+        afterLine === beforeLine,
+        `${beforeLine ?? '(没有这一行)'} -> ${afterLine ?? '(没有这一行)'}`);
+
+      /*
+       * 对照：普通项目目录**必须**被记住。
+       *
+       * 这一条防的是"把 `updateEnvFile` 整个删掉"这种假绿 —— 那样上面那条也会过，而功能没了。
+       */
+      const sw2 = await switchTo(normalDir);
+      check('切到普通项目目录成功', sw2.status === 200, `status=${sw2.status}`);
+      await new Promise((r) => setTimeout(r, 900));
+
+      const afterNormal = existsSync(envFile) ? readFileSync(envFile, 'utf8') : '';
+      const line = lineOf(afterNormal) ?? '';
+      check('【关键】切到普通项目后 .env 记下了它（说明上面那条不是"永远不写"）',
+        line.includes('check-ws') && line.includes('proj'),
+        line);
+    } catch (err) {
+      check('临时工作区的 .env 检查没有抛异常', false, err?.stack ?? String(err));
+    }
+  }
+
+  killTree(envChild.pid);
+  removeTempDir(envWorkspace);
+  removeTempDir(envScratch);
+  removeTempDir(join(ROOT, '.she', 'check-ws'));
+}
 
 console.log(`\n${failures === 0 ? 'PASS' : `FAIL (${failures})`}  session-isolation-check`);
 process.exit(failures === 0 ? 0 : 1);

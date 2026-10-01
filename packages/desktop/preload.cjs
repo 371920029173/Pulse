@@ -33,6 +33,24 @@ contextBridge.exposeInMainWorld('sheDesktop', {
   /** Open another independent window (own conversation, same backend). */
   newWindow: () => ipcRenderer.invoke('she:newWindow'),
   /**
+   * Move this window onto the backend for a workspace, starting one if needed.
+   *
+   * Resolves to that backend's origin, or null when the shell cannot do it (no pool) — the renderer
+   * then falls back to switching inside the current backend, which is still correct, just shared.
+   */
+  openWorkspace: (root) => ipcRenderer.invoke('she:openWorkspace', root),
+  /**
+   * Tell the shell that settings were just written, so the other windows' backends catch up.
+   *
+   * Settings live in one `.env`, but each backend reads it only at startup — without this, saving in
+   * one window left every other window on its old values until restart.
+   *
+   * Pass the **same body** that was sent to `PUT /api/settings`; the shell replays it to the other
+   * backends through that same handler (it knows to strip workspace-scoped fields). Fire-and-forget:
+   * the write itself already succeeded, so the renderer does not wait on this.
+   */
+  settingsChanged: (body) => ipcRenderer.invoke('she:settingsChanged', body),
+  /**
    * Fired by the File > 新建会话 menu item.
    * Returns an unsubscribe function so React effects can clean up.
    */

@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const net = require('node:net');
 const path = require('node:path');
 const http = require('node:http');
+const { BackendPool } = require('./backend-pool.cjs');
 
 const IS_PACKAGED = app.isPackaged;
 /** Monorepo root in dev; unused for module resolution when packaged. */
@@ -52,6 +53,32 @@ let mainWindow = null;
  * @type {Set<BrowserWindow>}
  */
 const windows = new Set();
+/**
+ * One backend per workspace, for the windows on it.
+ *
+ * Null until the first backend is reachable, because the pool can only adopt an existing server
+ * once it knows where that server is. See `backend-pool.cjs` for why the key is the workspace
+ * rather than the window.
+ */
+let pool = null;
+/**
+ * Settings fields that must never be forwarded to another backend.
+ *
+ * These describe *which* project a backend serves. Forwarding `workspaceRoot` would move another
+ * window's backend to a different project — exactly the cross-window contamination the pool exists
+ * to remove.
+ */
+const SETTINGS_NOT_FORWARDED = ['workspaceRoot', 'kbDbPath'];
+/**
+ * Which origin each window is showing.
+ *
+ * The window that opens a project first owns its backend; a second window on the same project must
+ * load *that* origin rather than `appUrl`, or the two would end up on different servers for one
+ * workspace — the split-brain the pool exists to prevent. A WeakMap rather than a field on the
+ * window object so a destroyed window is not kept alive by this table.
+ * @type {WeakMap<BrowserWindow, string>}
+ */
+const windowOrigin = new WeakMap();
 /**
  * The app URL once the backend is reachable.
  *
@@ -384,6 +411,103 @@ async function ensureBackend() {
   return { url: API_ORIGIN, problems };
 }
 
+// ─── per-workspace backends ─────────────────────────────────────────────────
+
+/**
+ * Start a server for one workspace.
+ *
+ * Mirrors the launcher's own spawn (same cwd, same entry, same "run the build" contract) because a
+ * second way of starting the server would be a second thing to keep in step — and the launcher's
+ * one is known to produce a working backend.
+ */
+function spawnWorkspaceBackend(root, port) {
+  const serverDir = IS_PACKAGED
+    ? path.join(process.resourcesPath, 'runtime', 'server')
+    : path.join(ROOT, 'packages', 'server');
+  const nodeBin = IS_PACKAGED
+    ? path.join(process.resourcesPath, 'runtime', 'node.exe')
+    : (process.platform === 'win32' ? 'node.exe' : 'node');
+
+  // One log per workspace backend. Sharing the launcher's log would interleave several servers'
+  // startup lines, which is the moment you most need to read them separately.
+  let out = 'ignore';
+  try {
+    ensureLogDir();
+    out = fs.openSync(path.join(LOG_DIR, `desktop-ws-${port}.log`), 'a');
+  } catch { /* keep ignoring output rather than failing to start */ }
+
+  const env = {
+    ...process.env,
+    SHE_PORT: String(port),
+    SHE_HOST: '127.0.0.1',
+    // This is the whole trick: the config loader reads SHE_WORKSPACE into `config.workspace.root`
+    // at boot, so a process started for W *is* the W backend — no switch request needed.
+    SHE_WORKSPACE: root,
+  };
+  /*
+   * Drop the storage overrides, so state follows the workspace.
+   *
+   * With SHE_STATE_DIR unset the conversations live in `<ws>/.she/`, which is what makes the pool
+   * key — the workspace — also the unit of ownership. Inheriting a shared state directory would put
+   * two servers on one sessions file, which is the data loss this design exists to avoid.
+   * SHE_KB_PATH goes for the same reason: one global knowledge base makes every project see the
+   * same notes, which is a bug this project already fixed once.
+   */
+  delete env.SHE_STATE_DIR;
+  delete env.SHE_KB_PATH;
+  if (IS_PACKAGED) env.SHE_UI_DIR = path.join(process.resourcesPath, 'runtime', 'ui');
+
+  const child = spawn(nodeBin, ['dist/index.js'], {
+    cwd: serverDir,
+    stdio: ['ignore', out, out],
+    windowsHide: true,
+    env,
+  });
+  child.on('error', (e) => log(`workspace backend ${port} spawn error: ${e.message}`));
+  child.on('exit', (code) => log(`workspace backend ${port} exited code=${code}`));
+  return child;
+}
+
+/** Which workspace a running server is mounted on, for adopting the launcher's backend. */
+function fetchCurrentWorkspace(origin) {
+  return new Promise((resolve) => {
+    const req = http.get(`${origin}/api/workspaces`, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(body).current ?? null); } catch { resolve(null); }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(4000, () => { req.destroy(); resolve(null); });
+  });
+}
+
+/** Send JSON and read the reply, for shell→backend calls that are not a window navigation. */
+function postJSON(origin, path, body, method = 'POST') {
+  return new Promise((resolve) => {
+    const payload = JSON.stringify(body ?? {});
+    const req = http.request(`${origin}${path}`, {
+      method,
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) },
+    }, (res) => {
+      let out = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { out += c; });
+      res.on('end', () => {
+        let json = null;
+        try { json = JSON.parse(out); } catch { /* a non-JSON reply is still a reply */ }
+        resolve({ ok: res.statusCode < 400, status: res.statusCode, json });
+      });
+    });
+    req.on('error', (e) => resolve({ ok: false, error: e.message }));
+    req.setTimeout(8000, () => { req.destroy(); resolve({ ok: false, error: 'timeout' }); });
+    req.write(payload);
+    req.end();
+  });
+}
+
 // ─── window ─────────────────────────────────────────────────────────────────
 
 function statusPage(title, body) {
@@ -426,7 +550,7 @@ function errorPage(problems) {
   );
 }
 
-function createWindow() {
+function createWindow(origin) {
   const win = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -466,7 +590,13 @@ function createWindow() {
 
   // Show a real status page immediately so a slow/failed boot is never a blank
   // window; if the backend is already up, go straight to the app.
-  win.loadURL(appUrl ?? loadingPage());
+  //
+  // `origin` is the backend this window is tied to. It is passed in rather than read from `appUrl`
+  // because with one server per workspace, "the app" is no longer a single URL — a window opened
+  // while looking at project B must join B's server, not the one the app happened to start with.
+  const target = origin ?? appUrl;
+  if (target) windowOrigin.set(win, target);
+  win.loadURL(target ?? loadingPage());
   win.once('ready-to-show', () => win.show());
 
   windows.add(win);
@@ -538,15 +668,48 @@ function showMainWindow() {
   mainWindow.focus();
 }
 
-/** Open an additional independent window (own session, same backend). */
+/**
+ * Open an additional window.
+ *
+ * It joins the backend the window you were just using is on, rather than whatever the app started
+ * with. That is the user's rule for two windows on one project: the window that got there first owns
+ * it, and the new one attaches without moving anything. Opening a window on a *different* project is
+ * then a deliberate act — picking that workspace — and only then does this window get its own
+ * server.
+ */
 function openNewWindow() {
-  const win = createWindow();
+  const from = focused();
+  const origin = (from && windowOrigin.get(from)) || appUrl;
+  const win = createWindow(origin);
   // Offset slightly so a second window does not land exactly on the first.
   try {
     const [x, y] = win.getPosition();
     win.setPosition(x + 28, y + 28);
   } catch { /* ignore */ }
   return win;
+}
+
+/**
+ * Move a window onto the backend for `root`, starting one if this workspace has none yet.
+ *
+ * Returns the origin it ended up on, or null when the pool is unavailable (Vite dev server, an
+ * older shell) so the caller can fall back to the in-page switch instead of doing nothing.
+ */
+async function openWorkspaceInWindow(win, root) {
+  if (!pool || !win || win.isDestroyed() || !root) return null;
+  const entry = await pool.ensure(root);
+  windowOrigin.set(win, entry.origin);
+  /*
+   * `?ws=` carries the target across the navigation.
+   *
+   * Changing origin is unavoidable here — the backend for another workspace is a different port —
+   * and per-origin `sessionStorage` means the "I already entered a workspace" flag does not survive
+   * it. Without the parameter the window would land on the landing page and the user would have to
+   * pick the folder they just picked again.
+   */
+  await win.loadURL(`${entry.origin}/?ws=${encodeURIComponent(entry.root)}`);
+  log(`window moved to backend for ${entry.root} (${entry.origin})`);
+  return entry.origin;
 }
 
 function createTray() {
@@ -620,6 +783,69 @@ function registerIpc() {
 
   /** Open another window; lets the renderer offer it from the UI. */
   ipcMain.handle('she:newWindow', () => { openNewWindow(); });
+
+  /**
+   * Switch this window to a workspace, using that workspace's own backend.
+   *
+   * The renderer used to POST `/api/workspaces/switch`, which moves the *server's* workspace root.
+   * With one shared server that moved every window at once — the reported "window A changes when
+   * window B runs something". Routing it here means the switch is scoped to one window: it gets the
+   * backend for that workspace, and no other window's server is touched.
+   *
+   * Two failure modes, deliberately kept apart:
+   *
+   *   · Returns **null** when there is no pool at all (dev-server UI, an older shell). Only this
+   *     means "this shell cannot do per-workspace backends", and only this may fall back to the
+   *     in-page switch.
+   *   · **Throws** when the pool exists but could not deliver — no port, spawn failed, health
+   *     timeout. That must NOT fall back. Falling back would move the shared backend, which is the
+   *     cross-window pollution this whole mechanism removes; and it would do it precisely when
+   *     something is already wrong, i.e. silently, which is how it went unnoticed the first time.
+   *     The renderer surfaces the error instead.
+   */
+  ipcMain.handle('she:openWorkspace', async (_e, root) => {
+    if (!pool) return null;
+    return (await openWorkspaceInWindow(focused(), root)) ?? null;
+  });
+
+  /**
+   * The renderer just wrote settings; let the other workspaces' backends catch up.
+   *
+   * Settings live in one `.env`, but each backend keeps its own `config` in memory and reads that
+   * file only at startup — so a change made in one window took effect in that window alone until the
+   * others were restarted. Measured before this existed: window A set the input price to 7 and read
+   * back 7, while window B went on reading 1.
+   *
+   * The body is **replayed through the same `PUT /api/settings`** the writing window just called,
+   * rather than applied by a bespoke "reload" endpoint: that handler already syncs `process.env`,
+   * decides whether a change is structural enough to rebuild agents, and relocates state when the
+   * workspace moves. A second implementation of those rules would be a second place for them to
+   * drift apart.
+   *
+   * Workspace-scoped fields are stripped — see `SETTINGS_NOT_FORWARDED`. Best-effort by design: the
+   * write already succeeded, and a backend that could not be reached still reads the file on its
+   * next start, so a failure here is logged rather than surfaced as an error.
+   */
+  ipcMain.handle('she:settingsChanged', async (e, body) => {
+    if (!pool) return { sent: 0, failed: 0 };
+    const payload = { ...(body || {}) };
+    for (const key of SETTINGS_NOT_FORWARDED) delete payload[key];
+    if (Object.keys(payload).length === 0) return { sent: 0, failed: 0 };
+
+    const sender = e.sender ? windowOrigin.get(BrowserWindow.fromWebContents(e.sender)) : null;
+    let sent = 0;
+    let failed = 0;
+    await Promise.all(pool.list().map(async (entry) => {
+      // The sender's own backend has already applied this; re-sending would rebuild its agents.
+      if (entry.origin === sender) return;
+      const r = await postJSON(entry.origin, '/api/settings', payload, 'PUT');
+      if (r.ok) { sent++; return; }
+      failed++;
+      log(`settings broadcast to ${entry.origin} failed: ${r.error ?? `HTTP ${r.status}`}`);
+    }));
+    if (sent || failed) log(`settings broadcast: ${sent} ok, ${failed} failed`);
+    return { sent, failed };
+  });
 
   ipcMain.handle('she:minimize', () => {
     const w = focused();
@@ -716,9 +942,36 @@ app.whenReady().then(async () => {
   if (problems.length) log('warnings:', problems.join(' | '));
   log(`loading ${url}`);
   appUrl = url;
+  /*
+   * The pool can only be built once we know where the first backend is, and only when that backend
+   * also serves the UI.
+   *
+   * Against the Vite dev server the UI origin is not an API origin, so a window's `/api/...` calls
+   * would keep going through Vite's proxy to the single launcher backend no matter which server this
+   * window was "moved" to — a pool would look like it worked while changing nothing. Better to leave
+   * it off and say so than to move windows around for no effect.
+   */
+  if (url === API_ORIGIN) {
+    /*
+     * No port range is configured, on purpose.
+     *
+     * The first version scanned a fixed window (5700–5739) and on this machine every one of those was
+     * unavailable — Windows/Hyper-V had reserved 5641–5740 — so every workspace switch failed. The
+     * pool now asks the OS for a free port (bind port 0, read it back, close), which cannot land in a
+     * reserved range because the OS never hands one out.
+     */
+    pool = new BackendPool({ spawnChild: spawnWorkspaceBackend, log });
+    const current = await fetchCurrentWorkspace(url);
+    if (current) pool.register(current, url);
+    else log('pool: 未能确认当前工作区，新窗口将回退到共享后端');
+  } else {
+    log('pool: 界面由开发服务器提供，逐工作区后端已禁用（窗口共享同一后端）');
+  }
   // Point every open window at the app, not just the first one.
   for (const w of windows) {
-    if (!w.isDestroyed()) w.loadURL(url).catch(() => { /* closed mid-navigation */ });
+    if (w.isDestroyed()) continue;
+    if (!windowOrigin.has(w)) windowOrigin.set(w, url);
+    w.loadURL(url).catch(() => { /* closed mid-navigation */ });
   }
 
   app.on('activate', () => {
@@ -728,6 +981,9 @@ app.whenReady().then(async () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  // Workspace backends are children of this process, so they go down with it. The launcher's own
+  // backend is adopted, not spawned, so the pool leaves it to `she stop`.
+  try { if (pool) pool.stopAll(); } catch { /* ignore */ }
   stopChildren();
 });
 

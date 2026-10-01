@@ -34,6 +34,27 @@ let HEALTH_URL = `http://127.0.0.1:${API_PORT}/api/health`;
 const STATE_DIR = join(ROOT, '.she');
 const PID_FILE = join(STATE_DIR, 'server.pid');
 /*
+ * Which port we started the backend on.
+ *
+ * Not derivable after the fact — see `resolveApiPort`, where recomputing it produced a different
+ * answer depending on what happened to be listening. The launcher chose the port, so it writes it
+ * down and trusts its own note while the recorded PID is alive.
+ */
+const PORT_FILE = join(STATE_DIR, 'server.port');
+/*
+ * When the launcher last started a backend, and which build it was running.
+ *
+ * The backend is spawned detached, so it outlives the launcher window. That is deliberate — but it
+ * means a rebuild does NOT reach the running process: `pnpm build` rewrites `packages/server/dist`
+ * while the old code stays loaded in memory. Re-running the shortcut found the port already
+ * answered, skipped the start, and the user got a new window talking to an old backend.
+ *
+ * The reported symptom is exactly this: server-side copy, thresholds and API shapes stay at the
+ * previous build while the front-end is new, so the app looks half updated and "I ran it again"
+ * changes nothing. The stamp makes that detectable without asking the OS when a process started.
+ */
+const BUILD_STAMP_FILE = join(STATE_DIR, 'server.build');
+/*
  * Two logs, two purposes, and they used to be one file.
  *
  * The captured stderr stream went to `.she/crash.log` — the SAME path the server appends real
@@ -90,6 +111,28 @@ function applyPort(p) {
 }
 
 function resolveApiPort() {
+  /*
+   * 已经起过一个后端时，**沿用它的端口**，不要再算一次。
+   *
+   * 这里踩过坑：`resolvePreferredPort` 会跳过"已经有人在听"的端口，于是答案取决于**此刻谁在听**，
+   * 同一个安装跑两次会得出两个不同的端口。在这台机器上 5577（.env 里写的）落在 Windows 保留段
+   * 里，所以它一路跳过 5677 落到 5777 —— 后端在 5777 上跑得好好的，而随后任何一次 `status`
+   * 都会算出 5877（因为 5777 正在被监听，被当成"别人占了"跳过），于是报"后端未运行"。
+   * 用户看到的就是"窗口开着、后端说没运行、界面报连不上"，而服务其实一直在跑。
+   *
+   * 端口是**我们自己选的**，所以记下来就够了，不需要去问操作系统谁在监听（那也会让启动器依赖
+   * netstat/lsof，正好是 portability 检查要防的）。
+   */
+  const pid = readPid();
+  if (pid) {
+    const remembered = readPort();
+    if (remembered) return remembered;
+  }
+  /*
+   * 注意这里**不写**端口文件：`status` / `stop` 也会走到这行，而它们没有启动任何东西。
+   * 之前写在解析阶段，结果是查一次状态就落下一个"这次算出来的端口"，把真正的端口覆盖掉 ——
+   * 一个只读的命令不该留下副作用。写文件放在真正启动后端的地方（`startServer`）。
+   */
   try {
     return resolvePreferredPort(process.env.SHE_PORT, 5577);
   } catch (e) {
@@ -137,6 +180,8 @@ Object.assign(M, {
   startBackend: '[3/4] Starting backend',
   portAlready: 'Port already listening, skipping start',
   startingWait: 'Started, waiting for readiness...',
+  backendStale: 'Backend is running an older build; restarting it',
+  portStuck: '[WARN] The old backend did not release the port in time; starting anyway.',
   healthStep: '[4/4] Waiting for the service',
   healthTimeout: '[ERROR] Service was not ready within 48 seconds.',
   logLabel: 'log',
@@ -215,6 +260,108 @@ function readPid() {
 function writePid(pid) {
   mkdirSync(STATE_DIR, { recursive: true });
   writeFileSync(PID_FILE, String(pid), 'utf8');
+}
+
+/** The port we recorded when we last started a backend, or null. */
+function readPort() {
+  try {
+    const p = Number(readFileSync(PORT_FILE, 'utf8').trim());
+    return Number.isInteger(p) && p > 1024 && p < 65535 ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePort(port) {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(PORT_FILE, String(port), 'utf8');
+  } catch {
+    // A read-only install directory must not stop the app from starting; the
+    // worst case is the old behaviour of recomputing the port.
+  }
+}
+
+/**
+ * Newest mtime across the server-side build output, or 0 when it is not built.
+ *
+ * Only the server packages matter here: the UI is served from
+ * `packages/ui/dist` on every request, so a rebuilt front-end needs no restart. It is the
+ * long-lived backend process that holds old code in memory.
+ */
+function backendBuildMtime() {
+  let newest = 0;
+  for (const dir of ['server', 'agent-runtime', 'kb', 'sandbox', 'shared']) {
+    const dist = join(ROOT, 'packages', dir, 'dist');
+    if (!existsSync(dist)) continue;
+    const m = newestMtime(dist);
+    if (m > newest) newest = m;
+  }
+  return newest;
+}
+
+/** Record which build the backend we are about to start will be running. */
+function writeBuildStamp() {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(BUILD_STAMP_FILE, String(backendBuildMtime()), 'utf8');
+  } catch { /* non-fatal: worst case we restart once more than needed */ }
+}
+
+/**
+ * Is the backend that is answering holding older code than what is on disk?
+ *
+ * Two sources of evidence, in order: the stamp we wrote when we started it, and — for a backend
+ * started by an older launcher, which wrote no stamp — the pid file's own mtime, which is set at
+ * almost exactly the moment that process started.
+ */
+function backendIsStale() {
+  const built = backendBuildMtime();
+  if (built <= 0) return false;
+  let recorded = null;
+  try {
+    const n = Number(readFileSync(BUILD_STAMP_FILE, 'utf8').trim());
+    if (Number.isFinite(n) && n > 0) recorded = n;
+  } catch { /* no stamp: older launcher */ }
+  if (recorded !== null) return built > recorded + 1000;
+  try {
+    return built > statSync(PID_FILE).mtimeMs + 1000;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Stop only the backend, leaving the desktop windows alone.
+ *
+ * `stopAll` is the user-facing "close Pulse" and takes the windows with it; this one exists for the
+ * restart path, where killing the window the user just opened would be absurd.
+ */
+function stopBackend() {
+  const pid = readPid();
+  if (pid) {
+    killTree(pid);
+    rmSync(PID_FILE, { force: true });
+    return pid;
+  }
+  // Orphan: the pid file is gone but something still holds the port (crash, manual kill).
+  const orphan = pidListeningOn(API_PORT);
+  if (orphan) {
+    killTree(orphan);
+    rmSync(PID_FILE, { force: true });
+    return orphan;
+  }
+  return null;
+}
+
+/** Wait for the port to stop answering, so the fresh process can take it. */
+async function waitPortFree(timeoutMs = 10000) {
+  const t0 = Date.now();
+  while (await serverUp()) {
+    if (Date.now() - t0 > timeoutMs) return false;
+    await sleep(300);
+  }
+  return true;
 }
 
 /** Kill a process and its children, portably. */
@@ -339,6 +486,9 @@ function stopAll() {
   if (pid) {
     killTree(pid);
     rmSync(PID_FILE, { force: true });
+    // 端口也一起忘掉：留着一个"上次用过的端口"，下次启动会想去复用它，而那个端口可能已经被
+    // 别的程序占了（或者反过来，被 Windows 新划进了保留段）。
+    rmSync(PORT_FILE, { force: true });
     ok(`${M.stoppedBackend} (PID ${pid})`);
   } else {
     info(`${M.backendNotRunning} ${API_PORT}`);
@@ -402,6 +552,22 @@ async function launch(openInBrowser) {
   ok(M.ready);
 
   head(M.startBackend);
+  /*
+   * Restart a backend that is running older code.
+   *
+   * Order matters: check staleness BEFORE deciding "already up, skip". The skip is what made the
+   * shortcut look broken — a detached backend keeps serving the previous build forever, so a
+   * rebuild without a restart produced a new window running against old server code.
+   *
+   * The port is deliberately kept: it is released by the stop and immediately re-taken by the fresh
+   * process. Re-resolving here would hand out a different port on every rebuild, and the desktop
+   * shell (and any bookmark) points at the old one.
+   */
+  if (await serverUp() && backendIsStale()) {
+    const killed = stopBackend();
+    info(`${M.backendStale} (PID ${killed})`);
+    if (!(await waitPortFree())) warn(M.portStuck);
+  }
   if (await serverUp()) {
     ok(`${M.portAlready} ${API_PORT}`);
   } else {
@@ -433,7 +599,17 @@ async function launch(openInBrowser) {
     closeSync(outFd);
     closeSync(errFd);
 
-    if (child.pid) writePid(child.pid);
+    if (child.pid) {
+      writePid(child.pid);
+      /*
+       * 记下这次真正用的端口，而且**只在真的启动了一个后端时**写。
+       *
+       * `resolveApiPort` 的规则是"记着 pid 还活着就用记着的端口"，所以这一行是那条规则的另一半：
+       * 没有它，下次 `status` 会重新算一个（跳过"正在被监听"的 5777），报错说后端没运行。
+       */
+      writePort(API_PORT);
+      writeBuildStamp();
+    }
     child.unref();
     info(M.startingWait);
   }
