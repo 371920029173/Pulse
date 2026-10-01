@@ -15,7 +15,7 @@
  * The tests also pin the OPPOSITE failure, because over-splitting is a bug too: splitting on `(`
  * and `)` broke the legitimate `node -e "console.log(1)"` into three segments and refused it.
  */
-import { describe, it } from 'node:test';
+import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -23,9 +23,19 @@ import { tmpdir } from 'node:os';
 import { SandboxShell, splitShellCommands, hasUninspectableRedirection, hasCommandSubstitution } from '../shell.js';
 import { createTools } from '../tools.js';
 
+/**
+ * Every workspace this file creates, removed once the file finishes.
+ *
+ * These used to be left to "the process" — and the process does not clean the system temp folder,
+ * so by 2026-09-29 this file had left 553 `she-inject-*` directories behind. Each one holds a
+ * `.she/` tree, so the leak is not free: see `scripts/temp-sweep.mjs`.
+ */
+const created: string[] = [];
+after(() => { for (const d of created) rmSync(d, { recursive: true, force: true }); });
+
 function shell(allowed?: string[]) {
   const root = mkdtempSync(join(tmpdir(), 'she-inject-'));
-  // Keep the workspace around for the duration of the test; cleanup happens with the process.
+  created.push(root);
   return new SandboxShell(root, {
     allowAllCommands: false,
     denyDestructiveByDefault: true,

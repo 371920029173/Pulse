@@ -24,12 +24,20 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
+import { pickSafePort } from './safe-port.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
 const SERVER_DIR = join(ROOT, 'packages', 'server');
 const SERVER_ENTRY = join(SERVER_DIR, 'dist', 'index.js');
-const PORT = process.env.SHE_TEST_PORT || '5598';
+/*
+ * The app port is picked, not hardcoded, using the same helper the app itself uses.
+ *
+ * A fixed number can land in a Windows-reserved TCP block (see the note on the stub's port below),
+ * which turns this suite into `listen EACCES` for reasons that have nothing to do with data safety.
+ * `pickSafePort` skips excluded ranges and probes an actual bind.
+ */
+const PORT = String(await pickSafePort(Number(process.env.SHE_TEST_PORT) || 5598));
 /*
  * The install's own `.env` must not be part of a test run.
  *
@@ -56,9 +64,6 @@ function isolatedEnv(workspace) {
     SHE_APP_DIR: join(workspace, 'appdir'),
   };
 }
-/** Port for the stub model in section 9 — the server is pointed at it instead of a real provider. */
-const LLM_PORT = Number(PORT) + 1;
-
 if (!existsSync(SERVER_ENTRY)) {
   console.error(`找不到 ${SERVER_ENTRY}\n请先 pnpm -r build`);
   process.exit(1);
@@ -385,13 +390,23 @@ console.log('\n数据安全回归（会启动真实服务，用临时工作区�
       }));
     });
   });
-  await new Promise((r) => stub.listen(LLM_PORT, '127.0.0.1', r));
+  await new Promise((r) => stub.listen(0, '127.0.0.1', r));
+  /*
+   * The stub's port comes from the OS, not from `PORT + 1`.
+   *
+   * Windows reserves blocks of TCP ports (Hyper-V/WSL roll a fresh set every time the VM starts) and
+   * binding inside one fails with EACCES while nothing is listening. `PORT + 1` landed in such a
+   * block on 2026-09-29 — reserved range 5545-5644 — so this suite died with `listen EACCES:
+   * 127.0.0.1:5599`, which reads like a defect in the code under test and is nothing of the sort.
+   * Listening on 0 cannot collide: the OS only hands out ports that are free and not excluded.
+   */
+  const llmPort = stub.address().port;
   const child = spawn('node', [SERVER_ENTRY], {
     cwd: SERVER_DIR,
     env: {
       ...isolatedEnv(ws),
       SHE_LLM_PROVIDER: 'openai',
-      OPENAI_BASE_URL: `http://127.0.0.1:${LLM_PORT}/v1`,
+      OPENAI_BASE_URL: `http://127.0.0.1:${llmPort}/v1`,
       OPENAI_MODEL: 'stub',
       OPENAI_API_KEY: 'stub-key',
     },
@@ -747,6 +762,109 @@ if (process.platform === 'win32') {
   );
   removeTempDir(wsA);
   removeTempDir(wsB);
+}
+
+// ── 13. 隔离不能只写在日志里：接口要说出来，而且要说对 ──
+//
+// 第 5 段盯的是「启动日志里有提示」。日志对用户不等于提示：文件被隔离之后，界面只是少了几条
+// 会话 —— 和应用把聊天记录删了长得一模一样，差别只在日志里，而用户不会去看日志。真实后果是
+// 用户以为数据被删了，然后重新开始用，备份文件从此没人管。
+//
+// 所以这一段钉的是「磁盘 → 接口」这条链上必须成立的三件事：健康的项目不能谎报；损坏时必须
+// 报出被留底的那一份；报出来的路径必须真的存在、里面真的是原文（指路必须可执行，否则提示
+// 只是让人更着急）。另外顺带钉一条写入侧的不变量：跑完之后磁盘上的文件必须是「能被原样读回」
+// 的形状 —— 加载器会静默丢掉的记录，我们不该写出去。
+{
+  // (a) 健康项目不报：常驻的假警告会让真警告失效。
+  const ws = makeWorkspace('notice-ok', WITH_MESSAGES);
+  const file = join(ws, '.she', 'sessions.json');
+  let body = null;
+  const { healthy } = await bootOnce(ws, async (base) => {
+    const r = await fetch(`${base}/api/sessions`, { signal: AbortSignal.timeout(3000) });
+    body = await r.json();
+  });
+  record(
+    '健康项目不谎报隔离（recovery 为空）',
+    healthy && body !== null && !body.recovery,
+    `recovery=${JSON.stringify(body?.recovery)}`,
+  );
+
+  /*
+   * 写入侧的不变量：刚刚启动、刚刚写过文件的这个状态，必须是加载器能原样读回的。
+   *
+   * 这正是 `assertWritableSessions` 在运行时挡的那一类形状（缺 id 的记录会被加载器丢掉、
+   * messages 不是数组会被换成空）。在这里从磁盘上再验一遍，是因为它同时看住了「加载器将来
+   * 变宽容」这条路：只要写出去的形状还是能被读回，两边就不会悄悄错开。
+   */
+  const onDisk = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null;
+  const writable = Array.isArray(onDisk?.sessions)
+    && onDisk.sessions.every((s) => typeof s.id === 'string' && s.id && Array.isArray(s.messages));
+  record(
+    '服务自己写的 sessions.json 是「能原样读回」的形状（没有加载器会丢掉的记录）',
+    healthy && writable,
+    writable ? '' : `落盘形状不合法: ${JSON.stringify(onDisk?.sessions)?.slice(0, 200)}`,
+  );
+  removeTempDir(ws);
+}
+
+{
+  // (b) 损坏的会话文件：接口必须报出备份，而且指的路要能走通。
+  const ws = makeWorkspace('notice-bad', null);
+  const file = join(ws, '.she', 'sessions.json');
+  const broken = '{"schema_version":"she-sessions/0.2","active_id":null,"sessions":[{"id":"s1"';
+  writeFileSync(file, broken, 'utf8');
+
+  let body = null;
+  const { healthy } = await bootOnce(ws, async (base) => {
+    const r = await fetch(`${base}/api/sessions`, { signal: AbortSignal.timeout(3000) });
+    body = await r.json();
+  });
+  const notice = body?.recovery ?? null;
+  record(
+    '【关键】损坏会话文件时接口给出 recovery（用户才分得清"被留底"和"被删除"）',
+    healthy && Boolean(notice) && typeof notice.reason === 'string',
+    notice ? '' : `recovery=${JSON.stringify(body?.recovery)}`,
+  );
+
+  const backupExists = Boolean(notice?.backup) && existsSync(notice.backup);
+  const backupIsOriginal = backupExists && readFileSync(notice.backup, 'utf8') === broken;
+  record(
+    '【关键】接口报出的备份路径真实存在，且内容就是原文（提示要能照着做）',
+    backupIsOriginal,
+    backupIsOriginal ? '' : `backup=${notice?.backup} exists=${backupExists}`,
+  );
+  removeTempDir(ws);
+}
+
+{
+  // (c) 讨论组同理：群文件被留底之后，轨道的接口也要说得出来。
+  const ws = makeWorkspace('notice-rooms', null);
+  const dir = join(ws, '.she', 'cluster');
+  mkdirSync(dir, { recursive: true });
+  const broken = '{"schema_version":"2","rooms":[{"id":"r1","title":"重要讨论组"';
+  writeFileSync(join(dir, 'rooms.json'), broken, 'utf8');
+
+  let body = null;
+  const { healthy } = await bootOnce(ws, async (base) => {
+    const r = await fetch(`${base}/api/conversations`, { signal: AbortSignal.timeout(3000) });
+    body = await r.json();
+  });
+  const list = Array.isArray(body?.recoveries) ? body.recoveries : [];
+  const clusterNotice = list.find((n) => n.kind === 'cluster') ?? null;
+  const pointsAtOriginal = Boolean(clusterNotice?.backup)
+    && existsSync(clusterNotice.backup)
+    && readFileSync(clusterNotice.backup, 'utf8') === broken;
+  record(
+    '【关键】讨论组文件被留底时，会话轨道的接口报出它（否则群看起来就是被删了）',
+    healthy && clusterNotice !== null,
+    clusterNotice ? '' : `recoveries=${JSON.stringify(body?.recoveries)}`,
+  );
+  record(
+    '讨论组的备份路径同样真实存在且内容为原文',
+    pointsAtOriginal,
+    pointsAtOriginal ? '' : `backup=${clusterNotice?.backup}`,
+  );
+  removeTempDir(ws);
 }
 
 const failed = results.filter((r) => !r.pass);

@@ -264,8 +264,8 @@ const RULES: Rule[] = [
    */
   {
     kind: 'precondition',
-    re: /没有可用的|当前没有|no matching pending|尚未|还没有/i,
-    from: 'preflight.ts `当前没有可分析的用户请求`, report/batch tools `没有可用的 batch`',
+    re: /没有可用的|当前没有|no matching pending|尚未|还没有|后台任务已达上限/i,
+    from: 'preflight.ts `当前没有可分析的用户请求`, report/batch tools `没有可用的 batch`, sandbox shell.ts background-job capacity',
   },
   /*
    * An external MCP server answered a tool call with `isError` (or a JSON-RPC error). Last on

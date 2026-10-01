@@ -210,7 +210,13 @@ console.log('\n=== 进程终止的分平台处理 ===');
   const shellTs = join(ROOT, 'packages', 'sandbox', 'src', 'shell.ts');
   if (existsSync(shellTs)) {
     const src = read(shellTs);
-    check('sandbox 在 POSIX 上用进程组终止', /process\.kill\(-child\.pid/.test(src));
+    /*
+     * The property, not one spelling of it: a negative pid passed to `process.kill` is what
+     * reaches the whole process GROUP, and `killProcess` computes that pid into a local before
+     * use. Matching the literal `-child.pid` failed a refactor that kept the property — the same
+     * trap the `detached` assertion below already documents.
+     */
+    check('sandbox 在 POSIX 上用进程组终止', /process\.kill\(\s*-\s*[\w.]*pid\b/.test(src));
     // portability-check:allow — this line NAMES the command in an assertion; it is not an
     // invocation. The rule scans every shipped .mjs, including this one, so it flags its own
     // test data. The marker is the repo's escape hatch for exactly this case (see also

@@ -73,7 +73,22 @@ before(() => {
   script = join(dir, 'fake-mcp.mjs');
   writeFileSync(script, FAKE_SERVER, 'utf8');
 });
-after(() => { rmSync(dir, { recursive: true, force: true }); });
+/*
+ * Removal that cannot fail the file.
+ *
+ * This test spawns a real MCP server child process, and the directory cannot be removed while that
+ * child holds it. `bridge?.shutdown()` narrows the window but cannot close it — on a loaded machine
+ * a killed child takes seconds to release its handle, and a bare `rmSync` here would then report
+ * `hookFailed` for a file whose assertions all passed. A leftover temp directory is harmless
+ * (`pnpm check:temp` sweeps it); a red suite that passed is not.
+ */
+after(() => {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
+  } catch (err) {
+    console.warn(`[mcp-bridge.test] 临时目录没删掉，留给 check:temp: ${dir} (${(err as Error).message})`);
+  }
+});
 afterEach(() => { bridge?.shutdown(); bridge = null; logs.length = 0; });
 
 function server(name: string, extra: Partial<McpServerConfig> = {}, env: Record<string, string> = {}): McpServerConfig {

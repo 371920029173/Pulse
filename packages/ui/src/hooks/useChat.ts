@@ -88,6 +88,13 @@ export interface StreamChunk {
     | 'tool_call_delta'
     | 'tool_call_end'
     | 'tool_result'
+    /**
+     * Progress from a call that is still running (shared StreamChunk type).
+     *
+     * Local copy of the server's union so a chunk that arrives over the wire is not a type error;
+     * the two are kept in step by hand, which is why the comment names the original.
+     */
+    | 'tool_progress'
     | 'kb_result'
     | 'done'
     | 'error'
@@ -205,6 +212,15 @@ function normalizeHistory(raw: ServerHistoryMessage[]): ChatMessage[] {
 export function useChat(sessionId?: string | null) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  /**
+   * Live progress of a tool call that has not finished yet, keyed by `tool_call_id`.
+   *
+   * A separate map rather than a field on the tool call: a `ToolCallData` is the provider's shape
+   * and is echoed back to the API on some paths, so an extra key there would travel further than
+   * the screen. Entries are dropped when the call's result arrives — the result is the answer, and
+   * a stale "still waiting" line under a finished card is worse than no line at all.
+   */
+  const [toolProgress, setToolProgress] = useState<Map<string, string>>(new Map());
   const [latestKBResult, setLatestKBResult] = useState<KBQueryResultData | null>(null);
   const [pendingConfirm, setPendingConfirm] = useState<ConfirmTicket | null>(null);
   const [pendingPatch, setPendingPatch] = useState<PendingPatch | null>(null);
@@ -480,6 +496,26 @@ export function useChat(sessionId?: string | null) {
             }
             break;
 
+          case 'tool_progress':
+            /*
+             * A call that is still running, saying so.
+             *
+             * Deliberately NOT a `system` message: a five-minute `shell_wait` reports every few
+             * seconds, and appending each line would fill the transcript with a hundred rows saying
+             * the same thing — the reader would scroll past the one line that matters. It updates the
+             * card it belongs to instead.
+             */
+            if (chunk.toolCallId && chunk.content) {
+              const id = chunk.toolCallId;
+              const text = chunk.content;
+              setToolProgress((prev) => {
+                const next = new Map(prev);
+                next.set(id, text);
+                return next;
+              });
+            }
+            break;
+
           case 'tool_result':
             /*
              * Mirrors what normalizeHistory produces for a stored `tool` row, so
@@ -488,6 +524,15 @@ export function useChat(sessionId?: string | null) {
              * looked empty until the page was reloaded.
              */
             if (chunk.toolCallId || chunk.content) {
+              if (chunk.toolCallId) {
+                const id = chunk.toolCallId;
+                setToolProgress((prev) => {
+                  if (!prev.has(id)) return prev;
+                  const next = new Map(prev);
+                  next.delete(id);
+                  return next;
+                });
+              }
               setMessages((prev) => [
                 ...prev,
                 {
@@ -749,6 +794,7 @@ export function useChat(sessionId?: string | null) {
     await fetchJSON(withSid('/api/chat/history'), { method: 'DELETE' });
     setMessages([]);
     setLatestKBResult(null);
+    setToolProgress(new Map());
     setPendingConfirm(null);
     setPendingPatch(null);
     setPendingPatches([]);
@@ -979,6 +1025,7 @@ export function useChat(sessionId?: string | null) {
     setIsPaused(false);
     setMessages([]);
     setLatestKBResult(null);
+    setToolProgress(new Map());
     setPendingConfirm(null);
     setPendingPatch(null);
     setPendingPatches([]);
@@ -1110,6 +1157,7 @@ export function useChat(sessionId?: string | null) {
     isLoading,
     isPaused,
     latestKBResult,
+    toolProgress,
     pendingConfirm,
     pendingPatch,
     sendMessage,

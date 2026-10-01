@@ -19,8 +19,42 @@ before(async () => {
   await writeFile(join(tempDir, 'search-me.ts'), 'const foo = 42;\nconst bar = "hello";\nfoo + bar;\n');
 });
 
+/**
+ * Remove the fixture directory — and never turn a passing file red.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY THIS SWALLOWS THE ERROR
+ *
+ * This hook used to end in a bare `rm(...)`. On 2026-09-29 the gate ran this file while the machine
+ * was busy with an unrelated training job, a killed command took longer than the 20 retries to let
+ * go of its working directory, and `rm` threw EBUSY — reported as `hookFailed`, with every assertion
+ * in the file having passed. That is the worst kind of red: it is not reproducible in isolation
+ * (running this file alone passes), so it trains people to re-run until green, and a gate people
+ * re-run until green is not a gate.
+ *
+ * A leftover temp directory is harmless: `pnpm check:temp` sweeps what earlier runs leave. A check
+ * that reports failure after passing is not. So this one is reported, not thrown.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+async function cleanupTempDir(dir: string): Promise<void> {
+  try {
+    await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
+  } catch (err) {
+    console.warn(`[sandbox.test] 临时目录没删掉，留给 check:temp: ${dir} (${(err as Error).message})`);
+  }
+}
+
 after(async () => {
-  await rm(tempDir, { recursive: true, force: true });
+  /*
+   * Stop the shell before deleting its directory: a timed-out command is killed, and on Windows the
+   * process keeps the working directory locked until it is really gone. `rm` without retries failed
+   * with EBUSY and turned a passing file into a failed one.
+   *
+   * Stopping first narrows that window but cannot close it, so the removal itself must not be the
+   * thing that decides whether this file passed.
+   */
+  await shell.stopAll();
+  await cleanupTempDir(tempDir);
 });
 
 describe('控制台编码', () => {
@@ -336,9 +370,13 @@ describe('Confirm tickets', () => {
 });
 
 describe('ToolSet definitions', () => {
-  it('should have all 8 tool definitions', () => {
+  it('should have all 11 tool definitions', () => {
     const tools = createTools(shell, tempDir);
-    assert.equal(tools.definitions.length, 8);
+    /*
+     * The count is asserted so a tool cannot be added or dropped silently: the model's whole
+     * vocabulary is this list, and a missing entry is a capability it will report not having.
+     */
+    assert.equal(tools.definitions.length, 11);
     const names = tools.definitions.map(d => d.name);
     assert.ok(names.includes('shell'));
     assert.ok(names.includes('fs_read'));
@@ -348,6 +386,10 @@ describe('ToolSet definitions', () => {
     assert.ok(names.includes('git_status'));
     assert.ok(names.includes('git_diff'));
     assert.ok(names.includes('git_log'));
+    // The background half of `shell`: start, collect, stop, list.
+    assert.ok(names.includes('shell_wait'));
+    assert.ok(names.includes('shell_kill'));
+    assert.ok(names.includes('shell_jobs'));
   });
 
   it('should mark dangerous tools', () => {

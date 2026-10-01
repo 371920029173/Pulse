@@ -3,8 +3,11 @@ import { resolve, relative, join, dirname } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { platform } from 'node:os';
-import type { ToolDefinition } from '@she/shared';
+import type {
+  ToolDefinition, SandboxResult, SandboxJobView, SandboxJobKillReason,
+} from '@she/shared';
 import type { SandboxShell } from './shell.js';
+import { codeExecutionDisclosure } from './shell.js';
 import { ConfirmTicketStore } from './tickets.js';
 import { computerClick, computerKey, computerScroll, computerType, computerUseEnabled } from './computer.js';
 import { PendingPatchStore } from './patches.js';
@@ -66,6 +69,182 @@ function withoutBom(text: string): string {
 export interface ToolSet {
   definitions: ToolDefinition[];
   execute: (name: string, args: Record<string, unknown>) => Promise<string>;
+  /**
+   * Stop anything this toolset started that outlives a single call.
+   *
+   * Background jobs today. A dropped reference does not stop a process, so an agent that is
+   * disposed (session deleted, workspace switched, process shutting down) has to hand the kill
+   * down to whoever owns the children. Without this, every job a finished session left behind runs
+   * until its lifetime cap with nobody able to see it.
+   */
+  dispose?: () => void;
+  /** Jobs still running, for the end-of-turn notice that says work is still happening. */
+  runningJobs?: () => { id: string; command: string; elapsedMs: number }[];
+  /**
+   * Where a blocked call reports progress, while it is still blocked.
+   *
+   * Set per tool call by the agent (it is the only place that knows which call is running) and
+   * cleared after. A five-minute silent wait is indistinguishable from a hang, and the difference
+   * a reader needs is one line saying it is still waiting.
+   */
+  setProgressSink?: (sink: ((text: string) => void) | null) => void;
+}
+
+/** `timeout_ms` as the tool accepts it: one second to ten minutes, or the sandbox default. */
+function timeoutOf(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  return Math.min(Math.max(Math.trunc(value), 1_000), 600_000);
+}
+
+/** `stdout:` / `stderr:` blocks, rendered the way the foreground path always has. */
+function outputBlocks(stdout: string, stderr: string): string[] {
+  const parts: string[] = [];
+  if (stdout) parts.push(`stdout:\n${stdout}`);
+  if (stderr) parts.push(`stderr:\n${stderr}`);
+  return parts;
+}
+
+const seconds = (ms: number) => (ms / 1000).toFixed(1);
+
+/**
+ * A foreground shell result.
+ *
+ * The two non-obvious branches, both about not lying to the reader:
+ *
+ *   - a command that became a background job has NO exit code yet. Printing one (`exit code: 124`,
+ *     the shell's own timeout convention) reads as "it ran and failed", and the model's next move
+ *     would be to run it again — a second copy of a job that is already working.
+ *   - a refusal must be a refusal, once. `DENIED: DENIED: …` is what the old double prefix looked
+ *     like, and a reader who is told something twice starts doubting which part is the reason.
+ */
+function renderShellResult(result: SandboxResult): string {
+  if (result.denied) {
+    const reason = result.stderr.replace(/^DENIED:\s*/, '');
+    return `DENIED: ${reason}`;
+  }
+  /*
+   * The disclosure is appended to every shape of answer, and it is appended LAST so it is not buried
+   * between stdout and the exit code. A command whose program was inline is not refused (see
+   * `INLINE_CODE_INTERPRETERS` in the sandbox), so the statement of what the jail did NOT cover is
+   * the only thing standing between "it ran" and "therefore it was contained".
+   */
+  const disclosure = result.codeExecution ? [codeExecutionDisclosure(result.codeExecution)] : [];
+  if (result.jobId) {
+    return [
+      `命令还在跑，已经转到后台（job_id=${result.jobId}，已运行 ${seconds(result.durationMs)} 秒）。`,
+      `用 shell_wait id=${result.jobId} 等它结束；要等多久给 wait_ms（例如 180000）。`,
+      ...outputBlocks(result.stdout, result.stderr),
+      ...disclosure,
+    ].join('\n');
+  }
+  const parts = outputBlocks(result.stdout, result.stderr);
+  parts.push(`exit code: ${result.exitCode}`);
+  if (result.timedOut) parts.push('(timed out)');
+  parts.push(...disclosure);
+  return parts.join('\n');
+}
+
+/** The answer to `shell background:true`. */
+function renderJobStarted(job: SandboxJobView): string {
+  const parts = [
+    `已在后台启动（job_id=${job.id}，已运行 ${seconds(job.elapsedMs)} 秒）。`,
+    `用 shell_wait id=${job.id} 等它结束，或 shell_kill id=${job.id} 停掉。`,
+    ...outputBlocks(job.stdout, job.stderr),
+  ];
+  if (job.codeExecution) parts.push(codeExecutionDisclosure(job.codeExecution));
+  return parts.join('\n');
+}
+
+/** A `shell` call that could not become a job, either refused by policy or over capacity. */
+function renderJobRefused(r: { denied?: SandboxResult; reason?: string }): string {
+  if (r.denied) return `DENIED: ${r.denied.stderr.replace(/^DENIED:\s*/, '')}`;
+  return `Error: ${r.reason}`;
+}
+
+/**
+ * The answer to `shell_wait` / `shell_kill`.
+ *
+ * Every branch states where the job stands in words AND in the numbers a reader can act on (exit
+ * code, elapsed, unread bytes). The elapsed time is not decoration: a wait that returns the same
+ * text twice would be a poll loop the stuck-loop detector cannot tell from a real one, and the
+ * clock is what makes two consecutive status checks honestly different.
+ */
+function renderJobView(view: SandboxJobView): string {
+  if (!view.found) {
+    return `Error: 找不到这个后台任务（${view.id}）。用 shell_jobs 看还在跑的是哪些；`
+      + '进程重启后旧 job_id 不再有效。';
+  }
+  const head: string[] = [];
+  if (view.status === 'running') {
+    head.push(`job_id=${view.id} 还在运行（已运行 ${seconds(view.elapsedMs)} 秒`
+      + `${view.pendingBytes ? `，还有 ${view.pendingBytes} 字节没读` : ''}）。`);
+    head.push(`继续用 shell_wait id=${view.id} 等，或 shell_kill id=${view.id} 停掉。`);
+  } else if (view.status === 'killed') {
+    head.push(`job_id=${view.id} 已被终止（原因：${killReasonText(view.killedBy)}；`
+      + `已运行 ${seconds(view.elapsedMs)} 秒）。`);
+    if (view.killedBy === 'lifetime') {
+      head.push('这是单个后台任务的运行上限，不是命令写错了：要跑更久就把工作拆成几段，'
+        + '每段用 shell_wait 收一次。');
+    }
+  } else {
+    head.push(`job_id=${view.id} 已结束（耗时 ${seconds(view.elapsedMs)} 秒）。`);
+  }
+  if (view.matched) head.push('（pattern 匹配到了，所以提前返回；任务本身可能还在跑。）');
+  if (view.droppedBytes) {
+    head.push(`（较早的 ${view.droppedBytes} 字节输出因为缓冲上限被丢弃，下面看到的是最近的。）`);
+  }
+  const parts = [...head, ...outputBlocks(view.stdout, view.stderr)];
+  /*
+   * The exit code is printed only for a job that ENDED ON ITS OWN.
+   *
+   * Not for a killed one. A killed process's code is an artifact of the signal (1, 137, whatever the
+   * platform chose), and printing it makes the whole result look like a shell result — which the
+   * classifier reads as `nonzero_exit`, whose remedy is "the command ran and failed, do not retry".
+   * That is the wrong advice twice over here: nothing failed, and the reason for stopping (a
+   * decision, a limit) is in the line above.
+   */
+  if (view.status === 'done') {
+    parts.push(`exit code: ${view.exitCode ?? 1}`);
+  }
+  /*
+   * Repeated on every wait, not only on the first answer. A reader that comes back to a job three
+   * `shell_wait` calls later is looking at a fresh result with no memory of the earlier one, and the
+   * question "was this process path-contained?" has the same answer every time.
+   */
+  if (view.codeExecution) parts.push(codeExecutionDisclosure(view.codeExecution));
+  return parts.join('\n');
+}
+
+function killReasonText(reason: SandboxJobKillReason | undefined): string {
+  switch (reason) {
+    case 'lifetime': return '到达单任务运行上限';
+    case 'capacity': return '后台任务数到达上限';
+    case 'shutdown': return '会话结束，沙箱回收';
+    case 'timeout': return '等待超时';
+    default: return '你调用了 shell_kill';
+  }
+}
+
+/** The answer to `shell_jobs`. */
+function renderJobList(jobs: SandboxJobView[]): string {
+  if (jobs.length === 0) {
+    return 'No background jobs found.';
+  }
+  const running = jobs.filter((j) => j.status === 'running');
+  const finished = jobs.filter((j) => j.status !== 'running');
+  const line = (j: SandboxJobView) => {
+    const state = j.status === 'running'
+      ? `运行中 ${seconds(j.elapsedMs)}s`
+      : j.status === 'killed'
+        ? `已终止(${killReasonText(j.killedBy)})`
+        : `已结束 退出码 ${j.exitCode ?? 1}`;
+    const unread = j.pendingBytes ? ` 未读 ${j.pendingBytes}B` : '';
+    return `- ${j.id}  ${state}${unread}  ${j.command.slice(0, 120)}`;
+  };
+  const parts: string[] = [];
+  if (running.length) parts.push(`正在运行（${running.length} 个）：`, ...running.map(line));
+  if (finished.length) parts.push(`最近结束（${finished.length} 个）：`, ...finished.map(line));
+  return parts.join('\n');
 }
 
 
@@ -88,6 +267,9 @@ export function createTools(
 ): ToolSet {
   const allowAll = Boolean(opts?.allowAllCommands);
   const root = resolve(workspaceRoot);
+
+  /** Where a blocked call says "still waiting"; set per call by the agent. */
+  let progress: ((text: string) => void) | null = null;
 
   // Off-limits to `shell` and `fs_*`; reachable through the `kb_*` tools that own it.
   if (opts?.kbDbPath) shell.protectDatabase(opts.kbDbPath, KB_DIRECT_ACCESS_REASON);
@@ -116,15 +298,42 @@ export function createTools(
   }
 
   // ── shell ─────────────────────────────────────────────────────────────────
+  /*
+   * One tool, two modes — the same shape Cursor's terminal tool has.
+   *
+   * `background: true` for a job the model knows will take a while (a dev server, a watch, a long
+   * build), and an automatic promotion for one that merely takes longer than the wait cap. Both
+   * answer with a job id, and `shell_wait` is how the answer is collected. What this replaces is
+   * the old dead end: the sandbox killed any command that passed `timeout`, the tool had no way to
+   * ask for longer, and the model's only move was to start over with the same 30 seconds — so a
+   * three-minute computation could not be run at all.
+   */
   reg(
     {
       name: 'shell',
-      description: 'Run a shell command in the sandbox workspace. Returns stdout, stderr, and exit code.',
+      description:
+        'Run a shell command in the sandbox workspace. Returns stdout, stderr, and exit code. '
+        + 'If it takes longer than timeout_ms it keeps running in the background and the result names '
+        + 'the job id — collect it with shell_wait. Use background:true for a command you already know '
+        + 'is long-running, so the turn is not blocked while it starts. '
+        + 'A command whose program is inline (node -e, python -c, powershell -Command, sh -c …) is '
+        + 'allowed but reported: the workspace boundary is checked over the command text, so paths '
+        + 'inside that program are not inspected and the child process is not contained.',
       parameters: {
         type: 'object',
         properties: {
           command: { type: 'string', description: 'The shell command to execute' },
           cwd: { type: 'string', description: 'Working directory relative to workspace root (optional)' },
+          timeout_ms: {
+            type: 'number',
+            description: 'How long to wait before it becomes a background job (default 30000, max 600000). '
+              + 'Set it for a command you expect to take minutes; you do not have to guess, the job survives the wait either way.',
+          },
+          background: {
+            type: 'boolean',
+            description: 'Start it as a background job and return immediately with a job id (default false). '
+              + 'For servers, watchers, and anything that does not end on its own.',
+          },
         },
         required: ['command'],
       },
@@ -133,17 +342,99 @@ export function createTools(
     async (args) => {
       const command = args.command as string;
       const cwd = (args.cwd as string) ?? '.';
-      const result = await shell.exec(command, { cwd });
-      if (result.denied) {
-        return `DENIED: ${result.stderr}`;
+      const timeout = timeoutOf(args.timeout_ms);
+      if (args.background === true) {
+        const started = await shell.startJob(command, { cwd, timeout });
+        return started.ok ? renderJobStarted(started.job) : renderJobRefused(started);
       }
-      const parts: string[] = [];
-      if (result.stdout) parts.push(`stdout:\n${result.stdout}`);
-      if (result.stderr) parts.push(`stderr:\n${result.stderr}`);
-      parts.push(`exit code: ${result.exitCode}`);
-      if (result.timedOut) parts.push('(timed out)');
-      return parts.join('\n');
+      /*
+       * `backgroundOnTimeout` is on for the agent's shell — and only here. A command that outlives
+       * the wait is not a mistake to undo: the work is real, it is still happening, and killing it
+       * to satisfy a stopwatch is how a turn loses an hour of computation and reports a timeout.
+       */
+      const result = await shell.exec(command, { cwd, timeout, backgroundOnTimeout: true });
+      return renderShellResult(result);
     },
+  );
+
+  // ── shell_wait / shell_kill / shell_jobs ─────────────────────────────────
+  reg(
+    {
+      name: 'shell_wait',
+      description:
+        'Wait for a background job started by `shell`, and return what it printed since the last read. '
+        + 'Returns as soon as the job ends, when new output matches `pattern`, or after wait_ms. '
+        + 'wait_ms: 0 just asks for the current status. Blocking is the point: do not poll in a loop, '
+        + 'and never re-run the command to "check on it".',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'The job id from `shell` (job_1, job_2, …)' },
+          wait_ms: {
+            type: 'number',
+            description: 'How long to wait at most, in ms (default 120000, max 600000, 0 = status only). '
+              + 'Waiting again is cheap and picks up where the last read stopped.',
+          },
+          pattern: {
+            type: 'string',
+            description: 'Optional regular expression: return as soon as the output matches it '
+              + '(for a server: "listening on"). Still answers if the line already scrolled past.',
+          },
+        },
+        required: ['id'],
+      },
+    },
+    async (args) => {
+      const id = String(args.id ?? '').trim();
+      if (!id) return 'Error: id 必填：shell_wait 需要 shell 返回的 job_id。';
+      const pattern = typeof args.pattern === 'string' && args.pattern ? args.pattern : undefined;
+      if (pattern) {
+        try {
+          new RegExp(pattern);
+        } catch (err) {
+          return `Error: pattern 不合法（不是有效的正则：${(err as Error).message}）。`
+            + '改成合法表达式再试，或者不给 pattern、用 wait_ms 等它结束。';
+        }
+      }
+      const view = await shell.waitJob(id, {
+        waitMs: typeof args.wait_ms === 'number' ? args.wait_ms : undefined,
+        pattern,
+        // A blocked wait that reports nothing looks like a hang. The UI shows these under the
+        // running tool card, which is how "still waiting, 42s" is visible while it happens.
+        onTick: (elapsedMs) => progress?.(`等 shell 任务 ${id}：已运行 ${Math.round(elapsedMs / 1000)} 秒`),
+      });
+      return renderJobView(view);
+    },
+  );
+
+  reg(
+    {
+      name: 'shell_kill',
+      description: 'Stop a background job and its children. Returns the output produced since the last read.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'The job id to stop' },
+        },
+        required: ['id'],
+      },
+    },
+    async (args) => {
+      const id = String(args.id ?? '').trim();
+      if (!id) return 'Error: id 必填：shell_kill 需要 shell 返回的 job_id。';
+      return renderJobView(await shell.killJob(id, 'user'));
+    },
+  );
+
+  reg(
+    {
+      name: 'shell_jobs',
+      description:
+        'List the background jobs of this session: what is still running, and what recently finished. '
+        + 'Does not read any output, so it is free to call and safe between waits.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+    async () => renderJobList(shell.listJobs()),
   );
 
   // ── fs_read ───────────────────────────────────────────────────────────────
@@ -659,7 +950,13 @@ async function execute(name: string, args: Record<string, unknown>): Promise<str
     }
   }
 
-  return { definitions, execute };
+  return {
+    definitions,
+    execute,
+    dispose: () => shell.dispose(),
+    runningJobs: () => shell.runningJobs().map((j) => ({ id: j.id, command: j.command, elapsedMs: j.elapsedMs })),
+    setProgressSink: (sink) => { progress = sink; },
+  };
 }
 
 /**

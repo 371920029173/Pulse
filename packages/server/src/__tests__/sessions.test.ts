@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { SessionStore, chooseStartupSession } from '../sessions.js';
+import { SessionStore, chooseStartupSession, assertWritableSessions } from '../sessions.js';
 import type { ChatSession } from '../sessions.js';
 import type { LLMMessage } from '@she/shared';
 
@@ -336,5 +336,83 @@ describe('会话标题的归属', () => {
     const s = store.create('旧名字');
     store.update(s.id, { title: '新名字', messages: [msg('user', '随便说点什么')] });
     assert.equal(store.get(s.id)?.title, '新名字');
+  });
+});
+
+/**
+ * 写入前的拒绝。
+ *
+ * `normalizeSessionFile` 是刻意宽容的，因为它还要读这个构建没写过的文件。但宽容是静默的，
+ * 放到写入侧就是丢数据：它会把 id 不是非空字符串的记录**丢掉**，把不是数组的 messages
+ * 换成 `[]`。这两样一旦写进磁盘，文件看起来完全健康 —— 没有隔离、没有报错、没有备份，
+ * 下次启动那段对话就是没了。
+ *
+ * 所以下面每条都是「加载器的静默修复」反过来写成拒绝，而且要求失败时磁盘上的旧副本不受影响。
+ */
+describe('assertWritableSessions：加载器会静默丢掉的形状，必须在写入前拒绝', () => {
+  const file = () => join(dir, '.she', 'sessions.json');
+  const sess = (over: Partial<ChatSession> = {}): ChatSession => ({
+    id: 's1',
+    title: '标题',
+    created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: '2026-01-01T00:00:00.000Z',
+    messages: [],
+    ...over,
+  });
+  const fileWith = (sessions: ChatSession[], active_id: string | null = null) => ({
+    schema_version: 'she-sessions/0.2', active_id, sessions,
+  });
+
+  it('缺 id 的会话被拒绝（加载时会连整段对话一起丢掉）', () => {
+    assert.throws(
+      () => assertWritableSessions(fileWith([sess({ id: '' })])),
+      /没有 id/,
+    );
+  });
+
+  it('messages 不是数组被拒绝（加载时会变成空对话，内容无声消失）', () => {
+    assert.throws(
+      () => assertWritableSessions(fileWith([sess({ messages: 'not-an-array' as unknown as LLMMessage[] })])),
+      /messages 不是数组/,
+    );
+  });
+
+  it('id 重复被拒绝（哪条活下来取决于加载顺序）', () => {
+    assert.throws(() => assertWritableSessions(fileWith([sess(), sess()])), /重复/);
+  });
+
+  it('active_id 指向不存在的会话被拒绝（等于悄悄忘了用户开着哪条）', () => {
+    assert.throws(
+      () => assertWritableSessions(fileWith([sess()], 'sess_gone')),
+      /不存在的会话/,
+    );
+  });
+
+  it('title / updated_at 类型不对被拒绝', () => {
+    assert.throws(() => assertWritableSessions(fileWith([sess({ title: 7 as unknown as string })])), /title/);
+    assert.throws(() => assertWritableSessions(fileWith([sess({ updated_at: undefined as unknown as string })])), /updated_at/);
+  });
+
+  it('正常数据通过，包括 active_id 为 null', () => {
+    assert.doesNotThrow(() => assertWritableSessions(fileWith([])));
+    assert.doesNotThrow(() => assertWritableSessions(fileWith([sess()], 's1')));
+  });
+
+  // 端到端：走真实的 store，确认拒绝之后磁盘上那份好数据还在。
+  it('【关键】store 拒绝写入时，磁盘上的旧内容一字未动', () => {
+    const store = new SessionStore(dir);
+    const good = store.create('好会话');
+    const before = readFileSync(file(), 'utf8');
+    assert.match(before, new RegExp(good.id), '前提：好会话已经落盘');
+
+    assert.throws(
+      () => store.adopt(sess({ id: '' })),
+      /拒绝写入/,
+      '缺 id 的会话被写进了磁盘',
+    );
+
+    assert.equal(readFileSync(file(), 'utf8'), before, '拒绝写入却改动了磁盘上的文件');
+    const reread = new SessionStore(dir);
+    assert.deepEqual(reread.list().sessions.map((s) => s.id), [good.id], '重开后好会话不见了');
   });
 });

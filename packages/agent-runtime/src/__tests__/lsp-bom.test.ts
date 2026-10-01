@@ -1,10 +1,29 @@
-import { describe, it } from 'node:test';
+import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { KNOWN_SERVERS, resolveServer } from '../lsp-client.js';
 import { LspManager, executeLspTool, stripBom } from '../lsp-tools.js';
+
+/*
+ * Workspace root, removed when the file finishes — including when the test below is SKIPPED, which
+ * no `try/finally` inside it can cover (see the longer note in `lsp-open-cache.test.ts` for why this
+ * used to leak one directory per run).
+ */
+const roots: string[] = [];
+function lspRoot(prefix: string): string {
+  const d = mkdtempSync(join(tmpdir(), prefix));
+  roots.push(d);
+  return d;
+}
+after(async () => {
+  for (const root of roots) {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      try { rmSync(root, { recursive: true, force: true }); break; } catch { await new Promise((r) => { setTimeout(r, 250); }); }
+    }
+  }
+});
 
 /*
  * Regression: LSP positions were off by one column on line 1 of a file starting with a UTF-8 BOM.
@@ -23,7 +42,7 @@ describe('lsp: UTF-8 BOM does not shift columns', () => {
   });
 
   const spec = KNOWN_SERVERS.find((s) => s.id === 'typescript');
-  const root = mkdtempSync(join(tmpdir(), 'she-lsp-bom-'));
+  const root = lspRoot('she-lsp-bom-');
   const launch = spec ? resolveServer(spec, root) : null;
 
   it('definition, hover and diagnostics use BOM-less columns', { skip: !launch, timeout: 60_000 }, async () => {
@@ -53,7 +72,6 @@ describe('lsp: UTF-8 BOM does not shift columns', () => {
       assert.match(String(self?.output), /main\.ts:1:45/, String(self?.output));
     } finally {
       await manager.dispose().catch(() => undefined);
-      try { rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* ignore */ }
     }
   });
 });

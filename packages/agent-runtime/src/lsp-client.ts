@@ -550,16 +550,81 @@ export class LspServer {
     this.send({ jsonrpc: '2.0', id, result });
   }
 
+  /**
+   * Shut the server down and wait until its process is actually gone.
+   *
+   * ─────────────────────────────────────────────────────────────────────────────
+   * TWO BUGS LIVED HERE, both invisible because both fail quietly.
+   *
+   * 1. **The handshake was never sent.** `this.disposed = true` came first, and both `rawRequest`
+   *    and `notify` return early once `disposed` is set — so `shutdown` rejected locally and `exit`
+   *    was never written to the pipe. The `try/catch` around each swallowed the evidence. Every
+   *    "graceful" stop was really "abandon the pipe and kill it 1.5s later".
+   *
+   * 2. **It did not wait for the exit.** `proc.kill()` was scheduled on a timer and `stop()`
+   *    resolved immediately, so a caller that needed the process gone before touching its files
+   *    could not get that guarantee. Two costs were paid for this: language servers could outlive a
+   *    shut-down app (the timer is `unref`'d, so it never fires if the loop is otherwise empty), and
+   *    the LSP tests could never delete their workspace directory — they removed it while the server
+   *    still held it open, the EBUSY was swallowed by a `catch`, and that is why ~65 `she-lsp-*`
+   *    directories per prefix were sitting in the system temp folder. `proc.killed` is not a
+   *    substitute: it says a signal was SENT. The repo already learned this once for background
+   *    jobs — wait for `exit`, not for `close`.
+   * ─────────────────────────────────────────────────────────────────────────────
+   */
   async stop(): Promise<void> {
+    const proc = this.proc;
+    if (!proc) {
+      this.disposed = true;
+      this.ready = false;
+      return;
+    }
+
+    // While `disposed` is still false, so these are actually transmitted. Bounded, because a
+    // wedged server must not turn a stop into a 20s wait: LSP answers `shutdown` immediately.
+    try {
+      await Promise.race([this.rawRequest('shutdown', null).catch(() => undefined), sleep(SHUTDOWN_MS)]);
+    } catch { /* server may be gone */ }
+    try { this.notify('exit', null); } catch { /* ignore */ }
+
     this.disposed = true;
     this.ready = false;
-    if (!this.proc) return;
-    try { await this.rawRequest('shutdown', null); } catch { /* server may be gone */ }
-    try { this.notify('exit', null); } catch { /* ignore */ }
-    const proc = this.proc;
     this.proc = null;
-    setTimeout(() => { if (!proc.killed) proc.kill(); }, 1_500).unref?.();
+
+    if (await waitForExit(proc, EXIT_GRACE_MS)) return;
+    try { proc.kill(); } catch { /* already gone */ }
+    await waitForExit(proc, KILL_GRACE_MS);
   }
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => { setTimeout(r, ms); });
+
+/** How long a healthy server gets to answer `shutdown` before we stop waiting on it. */
+const SHUTDOWN_MS = 1_000;
+/** How long it gets to exit on its own after the handshake before being killed. */
+const EXIT_GRACE_MS = 1_500;
+/** How long after the kill before we give up on it and let the OS finish the job. */
+const KILL_GRACE_MS = 2_000;
+
+/**
+ * Resolve `true` when the child has exited, `false` on timeout.
+ *
+ * Deliberately keyed on `exitCode`/`signalCode` rather than `killed`, which only reports that a
+ * signal was sent. The timer is NOT unref'd: this promise is awaited, and an unref'd timer can let
+ * the loop drain and strand the awaiter.
+ */
+function waitForExit(proc: ChildProcessWithoutNullStreams, ms: number): Promise<boolean> {
+  if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const done = (exited: boolean) => {
+      clearTimeout(timer);
+      proc.removeListener('exit', onExit);
+      resolve(exited);
+    };
+    const onExit = () => done(true);
+    const timer = setTimeout(() => done(false), ms);
+    proc.once('exit', onExit);
+  });
 }
 
 interface RawDiagnostic {

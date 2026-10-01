@@ -65,7 +65,7 @@ export interface ImportedConversation {
   importedFrom?: ChatSession['imported_from'];
 }
 
-interface SessionStoreFile {
+export interface SessionStoreFile {
   schema_version: string;
   active_id: string | null;
   sessions: ChatSession[];
@@ -109,6 +109,57 @@ function normalizeSessionFile(raw: SessionStoreFile): SessionStoreFile {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/**
+ * Refuse to write session state the loader would not read back intact.
+ *
+ * `normalizeSessionFile` is deliberately forgiving, because it also reads files
+ * this build did not write. That forgiveness is silent, and on the write side
+ * silence means loss: it DROPS a record whose `id` is not a non-empty string,
+ * and it replaces a non-array `messages` with `[]`. Either one, written to disk,
+ * looks like a perfectly healthy file — and the conversation is simply gone at
+ * the next start, with no quarantine notice, because nothing ever looked
+ * malformed.
+ *
+ * So the checks below are exactly the loader's silent repairs, turned into
+ * refusals. Throwing here leaves the previous file untouched, which is the
+ * recoverable outcome.
+ *
+ * Exported so the rule can be tested on its own, without a store or a disk.
+ */
+export function assertWritableSessions(data: SessionStoreFile): void {
+  if (!data || typeof data !== 'object') throw new Error('会话状态不是对象，拒绝写入');
+  if (!Array.isArray(data.sessions)) throw new Error('会话列表不是数组，拒绝写入');
+
+  const ids = new Set<string>();
+  for (const [i, s] of data.sessions.entries()) {
+    if (!s || typeof s !== 'object') {
+      throw new Error(`第 ${i} 条会话不是对象，写下去下次加载会被丢掉，拒绝写入`);
+    }
+    if (typeof s.id !== 'string' || !s.id) {
+      throw new Error(`第 ${i} 条会话没有 id，写下去下次加载会被丢掉，拒绝写入`);
+    }
+    if (ids.has(s.id)) {
+      // Two records with one id: one of them is unreachable, and which one wins
+      // depends on load order.
+      throw new Error(`会话 id 重复: ${s.id}，拒绝写入`);
+    }
+    ids.add(s.id);
+    if (!Array.isArray(s.messages)) {
+      throw new Error(`会话 ${s.id} 的 messages 不是数组，写下去整段对话会变成空，拒绝写入`);
+    }
+    if (typeof s.title !== 'string') {
+      throw new Error(`会话 ${s.id} 的 title 不是字符串，写下去会被改名，拒绝写入`);
+    }
+    if (typeof s.updated_at !== 'string') {
+      throw new Error(`会话 ${s.id} 的 updated_at 不是字符串，拒绝写入`);
+    }
+  }
+
+  if (data.active_id !== null && !ids.has(data.active_id)) {
+    throw new Error(`active_id 指向不存在的会话: ${data.active_id}，拒绝写入`);
+  }
 }
 
 /**
@@ -252,8 +303,15 @@ export class SessionStore {
     return this.migratedFrom;
   }
 
+  /**
+   * Persist.
+   *
+   * Validated before the file is touched: the alternative — writing state the
+   * loader would then repair — is how a healthy-looking `sessions.json` ends up
+   * holding fewer conversations than the user had. See `assertWritableSessions`.
+   */
   private save(): void {
-    saveStateFile(this.path, this.data);
+    saveStateFile(this.path, this.data, { validate: assertWritableSessions });
   }
 
   /**

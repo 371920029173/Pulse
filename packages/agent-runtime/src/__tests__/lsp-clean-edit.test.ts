@@ -1,9 +1,29 @@
-﻿import { describe, it } from 'node:test';
+﻿import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { KNOWN_SERVERS, resolveServer, LspServer } from '../lsp-client.js';
+
+/*
+ * Workspace roots, removed when the file finishes — including a root created for a test that then
+ * got SKIPPED, which no `try/finally` inside it can cover. See `lsp-open-cache.test.ts` for why this
+ * used to leak one directory per run; briefly, `stop()` did not wait for the server process to exit,
+ * so the removal raced a process that still held the directory, and the EBUSY went into a `catch`.
+ */
+const roots: string[] = [];
+function lspRoot(prefix: string): string {
+  const d = mkdtempSync(join(tmpdir(), prefix));
+  roots.push(d);
+  return d;
+}
+after(async () => {
+  for (const root of roots) {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      try { rmSync(root, { recursive: true, force: true }); break; } catch { await new Promise((r) => { setTimeout(r, 250); }); }
+    }
+  }
+});
 
 /*
  * Regression: an edit that keeps a file clean must not make diagnostics time out.
@@ -15,7 +35,7 @@ import { KNOWN_SERVERS, resolveServer, LspServer } from '../lsp-client.js';
  */
 describe('lsp: diagnostics after a clean-to-clean edit', () => {
   const spec = KNOWN_SERVERS.find((s) => s.id === 'typescript');
-  const root = mkdtempSync(join(tmpdir(), 'she-lsp-edit-'));
+  const root = lspRoot('she-lsp-edit-');
   const launch = spec ? resolveServer(spec, root) : null;
 
   it('answers for clean, erroring and re-cleaned edits', { skip: !launch, timeout: 60_000 }, async () => {
@@ -44,12 +64,11 @@ describe('lsp: diagnostics after a clean-to-clean edit', () => {
       assert.deepEqual(await srv.diagnosticsFor(file, 'typescript', t1), []);
     } finally {
       await srv.stop().catch(() => undefined);
-      try { rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* ignore */ }
     }
   });
 
   it('reports not-alive after stop so the manager can respawn it', { skip: !launch, timeout: 30_000 }, async () => {
-    const r2 = mkdtempSync(join(tmpdir(), 'she-lsp-alive-'));
+    const r2 = lspRoot('she-lsp-alive-');
     const srv = new LspServer(spec!, r2, resolveServer(spec!, r2)!);
     await srv.start();
     assert.equal(srv.isAlive, true);

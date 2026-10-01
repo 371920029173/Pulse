@@ -798,6 +798,24 @@
   to { transform: translateX(250%); }
 }
 
+/*
+ * The live line under a call that is waiting (a shell_wait blocked on a job).
+ *
+ * Muted and single-line on purpose: it changes every few seconds, so anything louder would pull
+ * attention from the transcript it is only reporting on. `tabular-nums` keeps the seconds counter
+ * from making the line jitter as digits change width.
+ */
+.toolCallLiveProgress {
+  padding: 3px 12px 6px 27px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted, var(--text-secondary));
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .searchIcon, .dots i, .toolCallProgress::after { animation: none !important; }
 }

@@ -1490,6 +1490,17 @@ function makeAgent(cfg: SheConfig, sessionId?: string | null): Agent {
       }
       return plugins.execute(name, args, local.workspace.root);
     },
+    /*
+     * The three job hooks are forwarded, not dropped.
+     *
+     * `merged` is a new object, so anything it does not name does not exist as far as the agent is
+     * concerned. Forgetting these would leave every background job of a cached agent running after
+     * the session is deleted — the process outlives the reference by design, which is why disposal
+     * has to reach the shell that owns it.
+     */
+    dispose: () => base.dispose?.(),
+    runningJobs: () => base.runningJobs?.() ?? [],
+    setProgressSink: (sink: ((text: string) => void) | null) => base.setProgressSink?.(sink),
   };
 
   const agent = new Agent(local, engineFor(local.kb.dbPath), merged, sessionId ?? null, {
@@ -4576,14 +4587,24 @@ router.get('/api/fs/tree', (req, res) => {
     });
   });
 
+  /**
+   * Session list.
+   *
+   * `recovery` / `migrated` are carried on the response, not just written to the
+   * log, because a quarantined file and a deleted one look identical in the UI
+   * otherwise: the list is simply shorter, with nothing anywhere explaining why.
+   * The banner the UI shows for this is the difference between "the app lost my
+   * chats" and "the app kept my chats, here is the file".
+   */
   router.get('/api/sessions', (req, res) => {
     // `?all=1` returns closed sessions too, which the history view needs.
     // `?scope=all` also includes sessions that live in other known projects.
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     const includeClosed = url.searchParams.get('all') === '1';
+    const notices = { recovery: sessions.recoveryNotice, migrated: sessions.migratedNotice };
     if (url.searchParams.get('scope') !== 'all') {
       const own = sessions.list(includeClosed);
-      sendJSON(res, { ...own, sessions: visibleToTenant(own.sessions) });
+      sendJSON(res, { ...own, sessions: visibleToTenant(own.sessions), ...notices });
       return;
     }
     const mine = sessions.list(includeClosed);
@@ -4598,7 +4619,7 @@ router.get('/api/fs/tree', (req, res) => {
         extra.push({ ...s, directory: s.directory || root });
       }
     }
-    sendJSON(res, { active_id: mine.active_id, sessions: [...mineVisible, ...extra] });
+    sendJSON(res, { active_id: mine.active_id, sessions: [...mineVisible, ...extra], ...notices });
   });
 
   /** Closed sessions only (history view). */
@@ -5502,7 +5523,11 @@ router.get('/api/fs/tree', (req, res) => {
   router.get('/api/cluster/rooms', (_req, res) => {
     // Across every known project, for the same reason as the rail: a room filed in another
     // project's state directory is still a room the user can see and open.
-    sendJSON(res, { rooms: clusterStoresForRail().flatMap((c) => c.list()) });
+    const stores = clusterStoresForRail();
+    const recoveries = stores
+      .map((c) => c.recoveryNotice)
+      .filter((n): n is { backup: string; reason: string } => n !== null);
+    sendJSON(res, { rooms: stores.flatMap((c) => c.list()), recoveries });
   });
 
   /**
@@ -5579,7 +5604,23 @@ router.get('/api/fs/tree', (req, res) => {
     const activeId = sessions.list().active_id;
     const activeVisible = activeId !== null
       && (!tenancy.enabled || visibleToTenant([{ id: activeId }]).length > 0);
-    sendJSON(res, { items: all, active_id: activeVisible ? activeId : null });
+    /*
+     * Quarantined state is reported here too, because this is the list the user actually looks at.
+     *
+     * A quarantined file makes the rail shorter and nothing on screen says why, which is exactly
+     * what a deleted conversation looks like. Each notice carries the backup path, so "where did my
+     * chat go" has an answer that does not require reading a log file.
+     */
+    const recoveries: Array<{ kind: 'sessions' | 'cluster'; root: string; backup: string; reason: string }> = [];
+    for (const root of roots) {
+      const notice = storeFor(root).recoveryNotice;
+      if (notice) recoveries.push({ kind: 'sessions', root, ...notice });
+    }
+    for (const c of clusterStoresForRail()) {
+      const notice = c.recoveryNotice;
+      if (notice) recoveries.push({ kind: 'cluster', root: c.rootDir, ...notice });
+    }
+    sendJSON(res, { items: all, active_id: activeVisible ? activeId : null, recoveries });
   });
 
   router.post('/api/cluster/rooms', async (req, res) => {

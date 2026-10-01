@@ -78,7 +78,7 @@ export interface ClusterRoom {
   workspace?: string;
 }
 
-interface ClusterFile {
+export interface ClusterFile {
   schema_version: string;
   rooms: ClusterRoom[];
 }
@@ -114,6 +114,42 @@ function normalizeClusterFile(raw: ClusterFile): ClusterFile {
   }
 
   return { schema_version: SCHEMA, rooms };
+}
+
+/**
+ * Refuse to write work-group state the loader would not read back intact.
+ *
+ * Mirror of `assertWritableSessions`, and for the same reason: `normalizeClusterFile`
+ * silently skips a room with no `id` and coerces missing arrays. Written down,
+ * that is a work group — with its members and its discussion — that exists on
+ * disk as far as the file is concerned and nowhere as far as the app is
+ * concerned. The write is refused instead, leaving the previous file readable.
+ *
+ * Exported so the rule is testable without a store.
+ */
+export function assertWritableRooms(data: ClusterFile): void {
+  if (!data || typeof data !== 'object') throw new Error('讨论组状态不是对象，拒绝写入');
+  if (!Array.isArray(data.rooms)) throw new Error('讨论组列表不是数组，拒绝写入');
+
+  const ids = new Set<string>();
+  for (const [i, r] of data.rooms.entries()) {
+    if (!r || typeof r !== 'object') {
+      throw new Error(`第 ${i} 个讨论组不是对象，写下去下次加载会被丢掉，拒绝写入`);
+    }
+    if (typeof r.id !== 'string' || !r.id) {
+      throw new Error(`第 ${i} 个讨论组没有 id，写下去下次加载会被丢掉，拒绝写入`);
+    }
+    if (ids.has(r.id)) throw new Error(`讨论组 id 重复: ${r.id}，拒绝写入`);
+    ids.add(r.id);
+    for (const field of ['messages', 'members', 'roles'] as const) {
+      if (!Array.isArray(r[field])) {
+        throw new Error(`讨论组 ${r.id} 的 ${field} 不是数组，写下去会被清空，拒绝写入`);
+      }
+    }
+    if (typeof r.title !== 'string') {
+      throw new Error(`讨论组 ${r.id} 的 title 不是字符串，拒绝写入`);
+    }
+  }
 }
 
 /** The built-in roles: the five original ones plus an independent critic. */
@@ -228,6 +264,8 @@ export function expandMembers(roles: ClusterRole[]): ClusterMember[] {
 
 export class ClusterStore {
   private path: string;
+  /** Project directory this file belongs to. Same role as on `SessionStore`. */
+  readonly rootDir: string;
   private data: ClusterFile;
   /** Set when the previous file could not be used and was moved aside. */
   private recovery: { backup: string; reason: string } | null = null;
@@ -235,6 +273,7 @@ export class ClusterStore {
   constructor(baseDir: string) {
     const dir = join(baseDir, '.she', 'cluster');
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    this.rootDir = baseDir;
     this.path = join(dir, 'rooms.json');
     this.data = { schema_version: SCHEMA, rooms: [] };
     this.load();
@@ -282,8 +321,15 @@ export class ClusterStore {
     return this.recovery;
   }
 
+  /**
+   * Persist.
+   *
+   * Validated before the file is touched — see `assertWritableRooms`. A room the
+   * loader would skip is a room the user loses silently, and the file it leaves
+   * behind looks healthy.
+   */
   private persist(): void {
-    saveStateFile(this.path, this.data);
+    saveStateFile(this.path, this.data, { validate: assertWritableRooms });
   }
 
   list(): ClusterRoom[] {

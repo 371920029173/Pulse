@@ -43,6 +43,8 @@ const THINK_LEVELS: { id: ThinkingLevel; short: string; title: string }[] = [
 interface ChatProps {
   messages: ChatMessage[];
   isLoading: boolean;
+  /** tool_call_id -> progress line for a call that has not returned yet (a blocked shell_wait). */
+  toolProgress?: Map<string, string>;
   pendingConfirm: ConfirmTicket | null;
   pendingPatch: PendingPatch | null;
   pendingPatches?: PendingPatch[];
@@ -276,10 +278,13 @@ function ToolCallCard({
   toolCall,
   denied,
   result,
+  progress,
 }: {
   toolCall: ToolCallData;
   denied?: boolean;
   result?: string;
+  /** Live line from a call that has not returned yet (e.g. a shell_wait blocking on a job). */
+  progress?: string;
 }) {
   const [open, setOpen] = useState(false);
   const name = toolCall.function.name;
@@ -352,6 +357,16 @@ function ToolCallCard({
 
       {/* Sweep bar while the call is in flight, so a slow lookup is visibly alive. */}
       {running ? <div className={styles.toolCallProgress} aria-hidden /> : null}
+
+      {/*
+        What a still-running call is waiting for.
+
+        Only shown while `running`: once the result exists this line is stale, and a card that says
+        "still waiting" under a finished output is worse than one that says nothing.
+      */}
+      {running && progress ? (
+        <div className={styles.toolCallLiveProgress}>{progress}</div>
+      ) : null}
 
       {/* Collapsed: show the change itself, so edits are visible at a glance. */}
       {!open && diff ? <DiffView unified={diff} lang={langFromPath(written?.path ?? summary)} /> : null}
@@ -593,6 +608,7 @@ const MessageBubble = memo(function MessageBubble({
   index,
   onRewind,
   toolResults,
+  toolProgress,
   renderedCallIds,
   onContinue,
 }: {
@@ -603,6 +619,8 @@ const MessageBubble = memo(function MessageBubble({
   onContinue?: () => void;
   /** tool_call_id -> result text, so a call can show what it returned. */
   toolResults?: Map<string, string>;
+  /** tool_call_id -> progress line, for a call that has not returned yet. */
+  toolProgress?: Map<string, string>;
   /** Tool-call ids whose own card is on screen (suppresses the duplicate row). */
   renderedCallIds?: Set<string>;
 }) {
@@ -697,7 +715,7 @@ const MessageBubble = memo(function MessageBubble({
         )}
         {msg.toolCalls.map((tc) => (
           <div key={tc.id} className={`${styles.messageRow} ${styles.messageRowAssistant}`}>
-            <ToolCallCard toolCall={tc} result={toolResults?.get(tc.id)} />
+            <ToolCallCard toolCall={tc} result={toolResults?.get(tc.id)} progress={toolProgress?.get(tc.id)} />
           </div>
         ))}
       </>
@@ -815,6 +833,7 @@ function mentionQuery(value: string, caret: number): { kind: 'file' | 'folder' |
 export function Chat({
   messages,
   isLoading,
+  toolProgress,
   isPaused = false,
   pendingConfirm,
   pendingPatch,
@@ -1305,6 +1324,7 @@ export function Chat({
                 index={i}
                 onRewind={onRewindTo}
                 toolResults={toolResults}
+                toolProgress={toolProgress}
                 renderedCallIds={renderedCallIds}
                 onContinue={msg.notice?.action === 'continue' && i > lastUserIdx && !isLoading ? handleContinue : undefined}
               />

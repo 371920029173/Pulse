@@ -1,6 +1,6 @@
-import { describe, it } from 'node:test';
+import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, appendFileSync, readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, appendFileSync, readFileSync, readdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -28,7 +28,25 @@ import type { LLMMessage, StreamChunk, ToolDefinition, LLMProvider } from '@she/
  * recording looks exactly like a quiet turn.
  */
 
-const dir = () => mkdtempSync(join(tmpdir(), 'she-runs-'));
+/**
+ * Temp workspace factory, one per test case, all removed when the file finishes.
+ *
+ * The directory is created where it is used rather than in a `beforeEach`, because most of these
+ * tests assert on ABSOLUTE paths — a fresh root per case keeps those literals readable.
+ *
+ * The removal is not tidiness: nothing used to remove these, and this single file had left 5,264
+ * directories in the system temp folder by 2026-09-29 (`repro: get-childitem $env:TEMP -Filter
+ * she-runs-*`). A suite that leaks a directory per test makes "how much temp space does the gate
+ * need" grow with every test anyone adds, which is a strange thing for a gate to be unable to say.
+ */
+const created: string[] = [];
+const dir = () => {
+  const d = mkdtempSync(join(tmpdir(), 'she-runs-'));
+  created.push(d);
+  return d;
+};
+after(() => { for (const d of created) rmSync(d, { recursive: true, force: true }); });
+
 const plain = (s: string) => s.replace(/\\/g, '/');
 
 /**

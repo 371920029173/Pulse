@@ -135,8 +135,41 @@ console.log('\n=== 真实工具产出的结果 ===');
   const slow = createTools(impatient, dir, { allowAllCommands: true });
   const slowCommand = IS_WINDOWS ? 'ping -n 6 127.0.0.1' : 'sleep 5';
   const timedOut = await run(slow, 'shell', { command: slowCommand });
-  check('shell 超时 → timeout', classifyToolResult('shell', timedOut).kind === 'timeout',
-    `实际 ${classifyToolResult('shell', timedOut).kind}\n原始返回: ${String(timedOut).slice(0, 200)}`);
+
+  /*
+   * A command that outlives its wait is PROMOTED to a background job, not killed — so the result is
+   * no longer a timeout and must not be read as one.
+   *
+   * This assertion used to require `timeout`, which was right when the only thing the sandbox could
+   * do was give up. It is wrong now for a specific reason: `timeout`'s remedy is "retry with a
+   * smaller request", and the command is still running, so following that advice starts a SECOND
+   * copy of work that is already happening.
+   *
+   * `none` — not `empty`, not `unknown` — is the honest reading: the call produced usable data (a
+   * job id and the one instruction that matters), the loop must not count it as a failed tool call,
+   * and the remedy is null because the tool's own text already says what to do.
+   */
+  const promoted = classifyToolResult('shell', timedOut);
+  check('前台超时转后台 → 不是失败，也不劝重试', promoted.kind === 'none' && promoted.ok === true
+    && promoted.retryable === false && promoted.remedy === null,
+  `实际 ${promoted.kind} ok=${promoted.ok} retryable=${promoted.retryable}\n原始返回: ${String(timedOut).slice(0, 200)}`);
+  check('转后台的结果自带 job_id 与 shell_wait 指令',
+    /job_id=job_\d+/.test(String(timedOut)) && /shell_wait/.test(String(timedOut)),
+    String(timedOut).slice(0, 200));
+  await impatient.stopAll();
+
+  /*
+   * The genuine timeout did not disappear, so it keeps a live assertion rather than riding on the
+   * case above.
+   *
+   * It is still reachable two ways: `sandbox.exec` called directly, and the agent's `shell` tool
+   * when the job table is full and the promotion has nowhere to go (it degrades to the old
+   * give-up answer rather than handing back an id that cannot be waited on). Both render the same
+   * shape: the exit code first, `(timed out)` last.
+   */
+  check('真的被杀掉的超时仍然是 timeout，且可重试',
+    classifyToolResult('shell', 'stderr:\nping interrupted\nexit code: 124\n(timed out)').kind === 'timeout'
+    && classifyToolResult('shell', 'stderr:\nping interrupted\nexit code: 124\n(timed out)').retryable === true);
 
   /*
    * The refusal path, taken from the shell itself rather than through the tool wrapper.
@@ -169,8 +202,13 @@ console.log('\n=== 真实工具产出的结果 ===');
    * worth retrying with a smaller request, and the exit-code check used to shadow this
    * because a timed-out command also carries `exit code: -1`.
    */
-  check('超时是可重试的，失败的命令不是',
-    classifyToolResult('shell', timedOut).retryable === true
+  /*
+   * Retryability has to survive the change above: a promoted command must not be retried, while a
+   * genuinely failed command must not be either — and the two are different kinds for different
+   * reasons, which is what this pins.
+   */
+  check('转后台不劝重试，失败的命令也不劝重试',
+    classifyToolResult('shell', timedOut).retryable === false
     && classifyToolResult('shell', 'exit code: 1').retryable === false);
 
   /*

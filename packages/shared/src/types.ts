@@ -231,6 +231,15 @@ export interface StreamChunk {
        * normalizeHistory rebuilds them from stored history.
        */
       | 'tool_result'
+    /**
+     * Progress from a tool call that is STILL running.
+     *
+     * `tool_result` cannot carry this: it arrives when the call is over, and the case that needs a
+     * line on screen is exactly the one where the call is not over — a `shell_wait` blocking on a
+     * three-minute job. Carried per `toolCallId` so the UI can show it under the call it belongs to
+     * instead of appending another transcript row.
+     */
+      | 'tool_progress'
     /** Structured result of a KB query, so the UI can render the trace panel. */
     | 'kb_result'
     | 'done'
@@ -296,6 +305,37 @@ export interface SandboxResult {
   timedOut: boolean;
   durationMs: number;
   denied?: boolean;
+  /**
+   * Set when the command handed a program to an interpreter on the command line.
+   *
+   * The workspace jail reads the command TEXT: it resolves paths it can see and refuses the ones that
+   * leave the workspace. Code passed as an argument — `node -e "…writeFileSync('C:/x')"` — is a
+   * string, and no textual scan can say what paths it will touch. The command is therefore allowed
+   * (refusing every `node -e` would break ordinary work) and the FACT is carried in the result, so
+   * the model and the transcript can state that this child process was not path-contained rather
+   * than implying it was. See `detectInlineCodeExecution` in the sandbox.
+   */
+  codeExecution?: CodeExecutionOnCommandLine;
+  /**
+   * Set when the command did not finish and is now running as a background job.
+   *
+   * `timedOut` is true in that case too (the wait really did end without an exit code), but the
+   * command was NOT killed — the process is alive and `jobId` refers to it. The two fields answer
+   * different questions ("did we give up waiting" / "is the work still happening"), and a caller
+   * that conflates them either reports a killed command that is still writing files, or starts a
+   * duplicate of something that is still running.
+   */
+  jobId?: string;
+}
+
+/** An interpreter invoked with its program inline, where the path jail cannot see the paths. */
+export interface CodeExecutionOnCommandLine {
+  /** The interpreter as the policy resolved it, e.g. `node`, `python3`, `powershell`. */
+  interpreter: string;
+  /** The flag that made it inline code, e.g. `-e`, `-c`, `-Command`. */
+  flag: string;
+  /** The command segment that matched, for the reader and for the audit trail. */
+  segment: string;
 }
 
 export interface SandboxOptions {
@@ -305,4 +345,56 @@ export interface SandboxOptions {
   env?: Record<string, string>;
   /** When true, bypass denyDestructiveByDefault (after confirm ticket). */
   allowDestructive?: boolean;
+  /**
+   * Keep the process alive past `timeout` and hand back a job instead of killing it.
+   *
+   * Off by default: `exec()` is used by callers that want a bounded answer (the terminal endpoint,
+   * tests, ingest probes), and a command that quietly outlives its timeout would be a process leak
+   * they never agreed to. The agent's `shell` tool turns it on, because "give up waiting" and
+   * "throw away the work" are not the same decision.
+   */
+  backgroundOnTimeout?: boolean;
 }
+
+/** A background command's state. `running` until the process exits or is killed. */
+export type SandboxJobStatus = 'running' | 'done' | 'killed';
+
+/**
+ * What a reader learns about a background job.
+ *
+ * `stdout` / `stderr` are the output produced SINCE the previous read of this job, not the whole
+ * log: a build that prints the same progress bar for three minutes would otherwise be re-sent on
+ * every wait, and the reader (a model with a context budget) pays for it every time.
+ */
+export interface SandboxJobView {
+  id: string;
+  command: string;
+  status: SandboxJobStatus;
+  /** null while running. */
+  exitCode: number | null;
+  /** Milliseconds since the job started (frozen at the exit time once finished). */
+  elapsedMs: number;
+  stdout: string;
+  stderr: string;
+  /** Bytes dropped from the front of the unread output because the buffer cap was reached. */
+  droppedBytes: number;
+  /** Bytes of output written that no reader has taken yet. */
+  pendingBytes: number;
+  /** How it ended, when `status` is `killed`. */
+  killedBy?: SandboxJobKillReason;
+  /** Set by a wait that ended because `pattern` matched, rather than because the job ended. */
+  matched?: boolean;
+  /** The same disclosure as on `SandboxResult`: this job's program was inline, so the jail did not see it. */
+  codeExecution?: CodeExecutionOnCommandLine;
+  found: boolean;
+}
+
+/**
+ * Why a job was killed.
+ *
+ * Recorded rather than collapsed into "killed", because the remedies differ: `lifetime` means the
+ * job ran longer than this sandbox allows and the work has to be split, `capacity` means too many
+ * jobs are open, and `user` is a decision someone made.
+ */
+export type SandboxJobKillReason = 'timeout' | 'lifetime' | 'capacity' | 'user' | 'shutdown';
+

@@ -21,9 +21,27 @@
  * Recovery is then a matter of renaming one file back, which is something a user
  * can do without us. That is why the reason and the backup path are returned
  * rather than only logged.
+ *
+ * The write side needs its own rule, because the read side is deliberately
+ * forgiving — it repairs what it can (drops an entry with no id, coerces a
+ * missing array) so that reading somebody else's slightly odd file still gets
+ * the user their data. Applied to our OWN writes that forgiveness turns into
+ * silent loss: a record the loader would drop is a record that disappears on the
+ * next start, with the file on disk looking healthy the whole time.
+ *
+ *   Never write a value the loader would not read back intact.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+
+/**
+ * Makes each temp file unique within this process.
+ *
+ * Per-process alone was not enough: two stores opened on one path share a pid,
+ * so their temp files collided and one could rename the other's partial write
+ * into place.
+ */
+let writeSeq = 0;
 
 export interface LoadOutcome<T> {
   data: T;
@@ -46,6 +64,18 @@ export interface StateFileSpec<T> {
    * the next step (or `parse`) can consume.
    */
   migrations?: Record<string, (raw: Record<string, unknown>) => Record<string, unknown>>;
+  /**
+   * Reject a value that must not reach the disk.
+   *
+   * Called before every write. Throwing leaves the existing file exactly as it
+   * was — the previous good copy stays readable, which is the whole point: a
+   * bug in memory must not be able to destroy what is already stored.
+   *
+   * This is NOT `parse`. `parse` is the load-side repair function and is allowed
+   * to normalise; a validator decides whether the data survives a round trip
+   * unchanged, and should reject anything `parse` would quietly drop.
+   */
+  validate?: (data: T) => void;
 }
 
 /** The version recorded in a state file, if it is readable at all. */
@@ -193,12 +223,41 @@ export function loadStateFile<T>(spec: StateFileSpec<T>): LoadOutcome<T> {
  * A partially written file is one of the ways the state above gets corrupted in
  * the first place, so the write goes to a temporary file that is then renamed
  * over the target.
+ *
+ * Two further rules, both learned from failures of this store:
+ *
+ *   - Validation happens BEFORE the file is touched. The failure mode being
+ *     prevented is "we wrote something the loader would then reject or repair",
+ *     and after the rename it is too late to take that back.
+ *   - The temporary name is unique per call, not just per process. Two stores
+ *     opened on one path (the shape of a real defect here: a workspace switch
+ *     that left the old instance writing) would otherwise share a temp file and
+ *     rename each other's half-written bytes into place.
+ *
+ * A failed write removes its temp file: a stray `sessions.json.<pid>.tmp` beside
+ * the real one is indistinguishable from state to anyone looking, and the next
+ * reader would have to guess which file is live.
  */
-export function saveStateFile<T>(path: string, data: T): void {
+export function saveStateFile<T>(
+  path: string,
+  data: T,
+  opts: { validate?: (data: T) => void } = {},
+): void {
+  if (opts.validate) opts.validate(data);
+
   mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8');
-  renameSync(tmp, path);
+  const tmp = `${path}.${process.pid}.${++writeSeq}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8');
+    renameSync(tmp, path);
+  } catch (err) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // Nothing further to do; the target still holds the previous good copy.
+    }
+    throw err;
+  }
 }
 
 /** Path a quarantined file would be written to for a given reason, for messages. */

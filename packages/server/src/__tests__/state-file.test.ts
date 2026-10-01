@@ -260,3 +260,48 @@ describe('saveStateFile', () => {
     assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).items, ['一', '二']);
   });
 });
+
+/**
+ * 写入前的校验。
+ *
+ * 读取端是宽容的（能修就修），这在读别人的文件时是对的；用在写自己人身上就变成静默丢数据：
+ * 一条加载时会被丢掉的记录，写下去之后磁盘上的文件看起来完全健康，下次启动却少了一段对话。
+ *
+ * 所以这里钉住的是一条不对称的规则：**读可以修，写不能修**。校验失败必须什么都不改，
+ * 磁盘上那份上一个好副本原样留着 —— 这是唯一可恢复的结果。
+ */
+describe('saveStateFile：校验失败时磁盘上的旧数据必须原样留着', () => {
+  const reject = () => { throw new Error('校验不通过'); };
+
+  it('【关键】校验失败：抛出，且目标文件一字未动', () => {
+    saveStateFile(file, { schema_version: 'v2', items: ['上一个好副本'] });
+    const before = readFileSync(file, 'utf8');
+
+    assert.throws(() => saveStateFile(file, { schema_version: 'v2', items: ['坏数据'] }, { validate: reject }), /校验不通过/);
+
+    assert.equal(readFileSync(file, 'utf8'), before, '校验失败却改动了磁盘上的文件');
+  });
+
+  it('【关键】校验先于写入：文件还不存在时，失败不能留下一个文件', () => {
+    const fresh = join(dir, 'sub', 'never-written.json');
+    assert.throws(() => saveStateFile(fresh, { schema_version: 'v2', items: [] }, { validate: reject }));
+    assert.equal(existsSync(fresh), false, '校验失败却创建了文件');
+  });
+
+  it('校验通过时照常写入', () => {
+    saveStateFile(file, { schema_version: 'v2', items: ['ok'] }, { validate: () => {} });
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).items, ['ok']);
+  });
+
+  it('不传校验函数时行为不变', () => {
+    saveStateFile(file, { schema_version: 'v2', items: ['no-validator'] });
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).items, ['no-validator']);
+  });
+
+  it('写入本身失败时也不留临时文件（半个临时文件会被当成状态）', () => {
+    // The rename cannot land: the target path is a directory.
+    mkdirSync(file, { recursive: true });
+    assert.throws(() => saveStateFile(file, { schema_version: 'v2', items: [] }));
+    assert.deepEqual(siblings().filter((f) => f.includes('.tmp')), [], '留下了临时文件');
+  });
+});

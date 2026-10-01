@@ -165,6 +165,8 @@ export class Agent {
    * entry to each public method and cleared in a finally block.
    */
   private toolEventSink: ((chunk: StreamChunk) => void) | null = null;
+  /** Whether this request has already been told about still-running background jobs. */
+  private jobsNoticeSent = false;
   /** Delegation runner; null means this agent cannot spawn children. */
   private subagentRunner: SubagentRunner | null = null;
   /** Scheduling bridge; null means this agent cannot schedule work. */
@@ -287,7 +289,7 @@ export class Agent {
   constructor(
     private config: SheConfig,
     kbEngine: GroupKBEngine,
-    sandboxTools: ToolSet,
+    private sandboxTools: ToolSet,
     /** Conversation this agent serves; scopes per-chat state such as plans. */
     private sessionId: string | null = null,
     opts?: {
@@ -456,11 +458,11 @@ export class Agent {
      */
     this.confidenceMirror = new ConfidenceMirror(config.workspace.root, this.sessionId);
 
-    for (const def of sandboxTools.definitions) {
+    for (const def of this.sandboxTools.definitions) {
       // `shell` is where intentional failures (a test run to watch it fail) happen, so it advertises
       // the error book's `expect_failure` switch; every tool honours it (see `recordMistake` callers).
       this.allToolDefs.push(def.name === 'shell' ? withExpectFailureParam(def) : def);
-      this.executors.set(def.name, (args) => sandboxTools.execute(def.name, args));
+      this.executors.set(def.name, (args) => this.sandboxTools.execute(def.name, args));
     }
 
     const kbTools = createKBTools(kbEngine, {
@@ -1194,7 +1196,23 @@ export class Agent {
                 result = early.text;
                 toolMs = early.ms;
               } else {
-                result = await executor(args);
+                /*
+                 * A blocked tool call can say what it is waiting for.
+                 *
+                 * `shell_wait` on a long job is silent for as long as the job takes, and a silent
+                 * five-minute tool call is indistinguishable from a hang — for the person watching,
+                 * and for whatever governs the transport. The sink is set here because this is the
+                 * only scope that knows WHICH call is running; it is cleared in the same `finally`
+                 * so a later, unrelated call cannot inherit it.
+                 */
+                this.sandboxTools.setProgressSink?.((text) => {
+                  onChunk?.({ type: 'tool_progress', content: text, toolCallId: tc.id });
+                });
+                try {
+                  result = await executor(args);
+                } finally {
+                  this.sandboxTools.setProgressSink?.(null);
+                }
                 if (typeof result !== 'string') result = JSON.stringify(result ?? '');
               }
               /*
@@ -1731,6 +1749,7 @@ export class Agent {
     }
     this.runPaused = null;
     this.runFailure = null;
+    this.jobsNoticeSent = false;
     this.runFallback = null;
     this.runStartedAt = Date.now();
     // A new run starts with no tool events of its own, and no inherited pre-flight confidence: the
@@ -2165,6 +2184,15 @@ export class Agent {
       if (this.aborter === controller) this.aborter = null;
       this.turnActive = false;
       /*
+       * Before the trace closes: say out loud that the turn is over but the work is not.
+       *
+       * A background job is the one thing this agent can leave running after it answers. Without
+       * this line the user reads "done", closes the window, and the computation they asked for is
+       * still going with nothing on screen saying so — the same silence that made a killed command
+       * look like a finished one.
+       */
+      this.announceRunningJobs();
+      /*
        * Close the trace here rather than in each entry point.
        *
        * Every turn goes through this method, including the confirm and patch-apply continuations,
@@ -2175,6 +2203,26 @@ export class Agent {
        */
       this.closeRunIfDone();
     }
+  }
+
+  /**
+   * Tell the user which background jobs are still running as the turn ends.
+   *
+   * Once per user request, not once per `withTurn`: a batch of staged patches runs several turn
+   * scopes, and repeating the same sentence three times reads as three batches of work rather than
+   * one. The flag is reset in `beginRun`, which is exactly "a new request started".
+   */
+  private announceRunningJobs(): void {
+    if (this.jobsNoticeSent) return;
+    const jobs = this.sandboxTools.runningJobs?.() ?? [];
+    if (jobs.length === 0) return;
+    this.jobsNoticeSent = true;
+    this.toolEventSink?.({
+      type: 'status',
+      content: `这一轮已经答完，但还有 ${jobs.length} 个后台任务在跑：`
+        + jobs.map((j) => `${j.id}（${Math.round(j.elapsedMs / 1000)} 秒）`).join('、')
+        + '。用 shell_wait 等它结束，或 shell_jobs 看详情。',
+    });
   }
 
   /**
@@ -2651,6 +2699,15 @@ export class Agent {
   }
 
   async dispose(): Promise<void> {
+    /*
+     * Background jobs first, and synchronously.
+     *
+     * Disposal is called when a session is deleted, a workspace is switched, and the process is
+     * shutting down. In all three the jobs' processes have to end with it — a dropped reference
+     * does not stop a process, and a job whose owner is gone is one nobody can wait on, kill, or
+     * even see.
+     */
+    this.sandboxTools.dispose?.();
     await this.lsp?.dispose();
     this.lsp = null;
   }

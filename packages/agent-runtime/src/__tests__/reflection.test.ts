@@ -1,6 +1,6 @@
-import { describe, it } from 'node:test';
+import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -29,7 +29,19 @@ import type { CalibrationReport, DriftReport, ReflectionSources } from '../refle
  *   3. 反思只把测出来的东西写成教训，清白的一轮什么都不写。
  */
 
-const dir = () => mkdtempSync(join(tmpdir(), 'she-reflect-'));
+/*
+ * Temp workspace per test case, removed when the file finishes. Nothing removed these before, and
+ * this file had left 1,019 directories behind in the system temp folder by 2026-09-29 — see the
+ * longer note in `run-trace.test.ts`, and `scripts/temp-sweep.mjs` for the sweep that clears what
+ * earlier runs already leaked.
+ */
+const created: string[] = [];
+const dir = () => {
+  const d = mkdtempSync(join(tmpdir(), 'she-reflect-'));
+  created.push(d);
+  return d;
+};
+after(() => { for (const d of created) rmSync(d, { recursive: true, force: true }); });
 
 // ─── 漂移 ───────────────────────────────────────────────────────────────────
 

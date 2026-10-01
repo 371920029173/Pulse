@@ -1,4 +1,8 @@
-export { SandboxShell, DESTRUCTIVE_PATTERNS, resolveInsideWorkspace, splitShellCommands, hasCommandSubstitution, hasUninspectableRedirection } from './shell.js';
+export {
+  SandboxShell, DESTRUCTIVE_PATTERNS, resolveInsideWorkspace, splitShellCommands,
+  hasCommandSubstitution, hasUninspectableRedirection, workspaceEscapeReason,
+  detectInlineCodeExecution, codeExecutionDisclosure,
+} from './shell.js';
 export { createTools } from './tools.js';
 export type { ToolSet } from './tools.js';
 export { ConfirmTicketStore } from './tickets.js';

@@ -16,6 +16,64 @@
   overflow: hidden;
 }
 
+/*
+ * Quarantine notice.
+ *
+ * Deliberately NOT a toast. This message says the app did not delete the user's conversations, and
+ * that claim has to still be on screen when they come back an hour later to ask — a toast would
+ * have faded and left exactly the silent-loss impression this layer exists to remove.
+ *
+ * Accent-tinted rather than `--danger`: nothing is broken, one file needs to be renamed back.
+ * `flex: 0 0 auto` keeps it from stealing height from the panes, and the paths wrap instead of
+ * widening the layout.
+ */
+.stateNotice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex: 0 0 auto;
+  padding: 8px 14px;
+  max-height: 30vh;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary, var(--fg));
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.stateNoticeText {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.stateNoticeItem {
+  min-width: 0;
+  color: var(--text-secondary, var(--fg-dim));
+  /* A Windows backup path is long; wrapping keeps it readable and copyable. */
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+.stateNoticeClose {
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text-secondary, var(--fg-dim));
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 5px;
+}
+
+.stateNoticeClose:hover {
+  color: var(--text-primary, var(--fg));
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
 .sidebar {
   /*
    * `0 0 auto`, not `0 1 auto`: with flex-shrink the layout overrode the width

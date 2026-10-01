@@ -54,7 +54,51 @@ const ROOT = resolve(HERE, '..');
  * Escapes are still stripped before matching: belt and braces, and it costs nothing.
  * ─────────────────────────────────────────────────────────────────────────────
  */
-function measureUnitTests() {
+/**
+ * Read JSON, tolerating a leading BOM.
+ *
+ * PowerShell's `Set-Content`/`Out-File` and Notepad write one on Windows, and `JSON.parse` rejects
+ * it — so a file a user saved by hand parses as invalid rather than as JSON. That is not a cosmetic
+ * gap here: this is the read that decides how many suites MUST report, and a package quietly dropped
+ * from that list turns an incomplete measurement into a certified-correct one. (Found by writing
+ * exactly such a file: a probe package created with `Set-Content -Encoding utf8` was not counted, and
+ * the check went on claiming "应有 6 套" while seven had a `test` script.)
+ */
+function readJson(file) {
+  const text = readFileSync(file, 'utf8');
+  return JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+}
+
+/** Packages that declare a `test` script — the set that MUST report a count. */
+function packagesWithTests() {
+  return readdirSync(join(ROOT, 'packages'), { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .filter((d) => {
+      const pkg = join(ROOT, 'packages', d.name, 'package.json');
+      if (!existsSync(pkg)) return false;
+      try { return Boolean(readJson(pkg).scripts?.test); } catch { return false; }
+    })
+    .map((d) => d.name);
+}
+
+/**
+ * How long the whole `pnpm -r test` run may take before it is abandoned.
+ *
+ * There was no timeout here, and that is how the gate hung for 65 minutes once. `spawnSync` does not
+ * return when the child exits — it returns when the child's STDOUT PIPE CLOSES, and a grandchild that
+ * inherited that pipe keeps it open after its parent is gone. One stuck language server or background
+ * job anywhere under the test tree is therefore enough to make this call wait forever, with the
+ * machine pinned and nothing printed to say why. (That is the same class of problem as the `close`
+ * vs `exit` wait in the sandbox teardown.)
+ *
+ * A normal run of all six suites measures 45–70s on this machine, and several minutes under load, so
+ * this is generous. The choice on hitting it is deliberate: report a FAILED MEASUREMENT, which the
+ * assertions above already handle by skipping the doc comparison — never a hang.
+ */
+const SUITE_RUN_TIMEOUT_MS = 15 * 60_000;
+
+/** Run every suite once and hand back its output. */
+function runSuites() {
   const env = { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' };
   delete env.CI;
 
@@ -64,48 +108,106 @@ function measureUnitTests() {
     shell: true,
     maxBuffer: 512 * 1024 * 1024,
     env,
+    timeout: SUITE_RUN_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   });
+  /*
+   * On Windows this kills the `pnpm` shell, and a grandchild that is holding the pipe may outlive the
+   * kill — so the timeout makes the gate finish, it does not guarantee the tree is gone. That is the
+   * right trade here (this script is a measurement, and `check:temp` sweeps what is left), and saying
+   * so is better than implying a cleanup that does not happen.
+   */
+  const timedOut = out.error?.code === 'ETIMEDOUT';
   const raw = `${out.stdout ?? ''}\n${out.stderr ?? ''}`;
-  const text = raw.replace(/\u001b\[[0-9;]*m/g, '').replace(/[ \t]+/g, ' ');
+  return {
+    text: raw.replace(/\u001b\[[0-9;]*m/g, '').replace(/[ \t]+/g, ' '),
+    error: timedOut
+      ? `pnpm -r test 超过 ${Math.round(SUITE_RUN_TIMEOUT_MS / 60_000)} 分钟未返回，已放弃`
+      : (out.error ? String(out.error.message ?? out.error) : ''),
+    timedOut,
+  };
+}
 
+/**
+ * Sum the totals the runners report, and record WHICH package reported each one.
+ *
+ * The attribution is the point. `pnpm -r` prefixes every line with `packages/<name> <script>: `, so a
+ * summary line carries the name of the suite that produced it — and then "which suite is missing?" is
+ * answerable instead of a guess.
+ */
+function parseSuiteOutput(text) {
   let total = 0;
   let nodeTestSuites = 0;
   let vitestSuites = 0;
+  const counted = new Set();
 
-  for (const m of text.matchAll(/# tests (\d+)/g)) { total += Number(m[1]); nodeTestSuites++; }
-  for (const m of text.matchAll(/Tests (\d+)(?: passed| skipped| failed)?/g)) { total += Number(m[1]); vitestSuites++; }
+  for (const line of text.split('\n')) {
+    const prefixed = /^packages\/([\w.-]+) [^:]*: ?(.*)$/.exec(line);
+    const pkg = prefixed ? prefixed[1] : null;
+    const body = (prefixed ? prefixed[2] : line).trim();
 
-  /*
-   * How many packages SHOULD have reported. A partial count is the dangerous case: it is
-   * larger than zero, so it reads as a real measurement, and the failure surfaces as "the
-   * docs quote a stale number" when the docs are right and the measurement is not. Observed
-   * once for real — a run reported 514 instead of 716, exactly the server package missing,
-   * and the check blamed the documentation.
-   *
-   * Counting the packages that declare a `test` script is the only fact available here that
-   * the parsed output cannot fake, so it is what the count is checked against.
-   */
-  const expectedSuites = readdirSync(join(ROOT, 'packages'), { withFileTypes: true })
-    .filter((d) => d.isDirectory())
-    .filter((d) => {
-      const pkg = join(ROOT, 'packages', d.name, 'package.json');
-      if (!existsSync(pkg)) return false;
-      try { return Boolean(JSON.parse(readFileSync(pkg, 'utf8')).scripts?.test); } catch { return false; }
-    })
-    .length;
+    const node = /^# tests (\d+)/.exec(body);
+    if (node) { total += Number(node[1]); nodeTestSuites++; if (pkg) counted.add(pkg); continue; }
 
-  const suites = nodeTestSuites + vitestSuites;
-  const complete = expectedSuites > 0 && suites === expectedSuites;
+    const vitest = /^Tests +(\d+)/.exec(body);
+    if (vitest) { total += Number(vitest[1]); vitestSuites++; if (pkg) counted.add(pkg); }
+  }
+
+  return { total, nodeTestSuites, vitestSuites, counted };
+}
+
+/**
+ * How many packages SHOULD have reported. A partial count is the dangerous case: it is larger than
+ * zero, so it reads as a real measurement, and the failure surfaces as "the docs quote a stale
+ * number" when the docs are right and the measurement is not. Observed twice for real — a run
+ * reported 514 instead of 716 (the server package missing), and a later run reported exactly
+ * `shared + kb + sandbox + ui`, so the two heavy suites (`agent-runtime`, `server`) had produced no
+ * summary at all.
+ *
+ * Counting the packages that declare a `test` script is the only fact available here that the parsed
+ * output cannot fake, so it is what the count is checked against.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * A PARTIAL RUN IS RETRIED, AND IS NOT ALLOWED TO CONDEMN THE DOCS
+ *
+ * This is the second time the same shape of failure has been reported as "文档写的是 1433，实测 512".
+ * 512 was not a measurement of the documentation's truthfulness; it was four suites out of six. The
+ * run is therefore repeated once when it comes back short — under load a suite can fail to start and
+ * say nothing, which is transient — and if it STILL comes back short the check fails on the
+ * incomplete measurement, naming the missing packages, and the doc comparison is skipped rather than
+ * judged with a number that is known to be wrong.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+function measureUnitTests() {
+  const expected = packagesWithTests();
+  let measured = null;
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const { text, error } = runSuites();
+    const parsed = parseSuiteOutput(text);
+    const attributed = parsed.counted.size > 0;
+    const missing = attributed ? expected.filter((n) => !parsed.counted.has(n)) : [];
+    const suites = parsed.nodeTestSuites + parsed.vitestSuites;
+    const complete = expected.length > 0 && suites === expected.length && missing.length === 0;
+
+    measured = { ...parsed, suites, missing, attributed, complete, attempts: attempt, error };
+    if (complete) break;
+    console.log(`        第 ${attempt} 次测量不完整（${suites}/${expected.length} 套`
+      + `${missing.length ? `，没报告的是：${missing.join('、')}` : ''}`
+      + `${error ? `，${error}` : ''}）${attempt < 2 ? '—— 重跑一次' : ''}`);
+  }
 
   /*
    * Report the composition. When the number is wrong, the first useful question is "which runner was
    * missed?", and a bare total cannot answer it — the failure mode that made this hard to diagnose.
    */
-  console.log(`        实测单元测试 ${total} 项（node:test ${nodeTestSuites} 套 + vitest ${vitestSuites} 套，应有 ${expectedSuites} 套）`);
-  if (!complete) {
-    console.log('        !! 计数不完整 —— 可能是测量本身失败，而不是文档写错了');
+  console.log(`        实测单元测试 ${measured.total} 项`
+    + `（node:test ${measured.nodeTestSuites} 套 + vitest ${measured.vitestSuites} 套，`
+    + `应有 ${expected.length} 套${measured.complete && measured.attempts > 1 ? `，第 ${measured.attempts} 次才完整` : ''}）`);
+  if (!measured.complete) {
+    console.log('        !! 计数不完整 —— 是测量本身失败了，不是文档写错了');
   }
-  return { total, complete, suites, expectedSuites };
+  return { ...measured, expectedSuites: expected.length };
 }
 
 let failures = 0;
@@ -225,7 +327,7 @@ console.log('=== 文档里引用的文件是否真的存在 ===');
 // ─── 2. Quoted counts match reality ───
 console.log('\n=== 文档里引用的数字与实际一致 ===');
 {
-  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+  const pkg = readJson(join(ROOT, 'package.json'));
 
   /*
    * Count the gate's steps by RESOLVING delegation.
@@ -310,26 +412,37 @@ console.log('\n=== 文档里引用的数字与实际一致 ===');
   const quoted = [...new Set([...testCounts].map((s) => Number(s.split(':')[1])))];
   /*
    * Asserted BEFORE the comparison, because a partial measurement would otherwise be
-   * reported as the documentation being stale. That happened: a run counted 514 instead of
-   * 716 — one package short — and the message pointed at the docs.
+   * reported as the documentation being stale. That happened twice: a run counted 514 instead of 716
+   * — one package short — and a later one counted 512 of 1458 with two suites silent. Both times the
+   * message pointed at the docs.
    */
   check(
     `测试总数是从全部套件测出来的（${measured.suites}/${measured.expectedSuites} 套）`,
     measured.complete,
-    `少测到包，${realTotal} 这个数字不可信：这是测量失败，不是文档写错。重跑一次再判断`,
+    `${realTotal} 这个数字不可信：${measured.missing.length ? `没有报告的是 ${measured.missing.join('、')}` : '有套件没有报数'}，`
+    + '这是测量失败，不是文档写错。重跑一次再判断',
   );
-  check(
-    `文档里的单元测试总数是真实的（实测 ${realTotal}，文档写 ${quoted.join(' / ') || '未引用'}）`,
-    realTotal > 0 && quoted.every((n) => n === realTotal),
-    quoted.length === 0
-      ? '没有任何文档引用总数，无法校验'
-      : `文档写的是 ${quoted.join(' / ')}，实测 ${realTotal}`,
-  );
-  check(
-    '引用到的测试数量彼此一致',
-    quoted.length <= 1,
-    [...testCounts].join('\n        '),
-  );
+  /*
+   * The doc comparison runs ONLY on a complete measurement. With a known-incomplete total, every
+   * answer it could give is wrong: it fails the docs for the measurement's fault, or — if the numbers
+   * happen to agree — it certifies a count nobody actually verified.
+   */
+  if (!measured.complete) {
+    console.log('        测量不完整，跳过「文档里的测试总数」比对（不拿一个已知不可信的数字去判文档的对错）');
+  } else {
+    check(
+      `文档里的单元测试总数是真实的（实测 ${realTotal}，文档写 ${quoted.join(' / ') || '未引用'}）`,
+      realTotal > 0 && quoted.every((n) => n === realTotal),
+      quoted.length === 0
+        ? '没有任何文档引用总数，无法校验'
+        : `文档写的是 ${quoted.join(' / ')}，实测 ${realTotal}`,
+    );
+    check(
+      '引用到的测试数量彼此一致',
+      quoted.length <= 1,
+      [...testCounts].join('\n        '),
+    );
+  }
 
   console.log(`        门禁步数 ${gateSteps}，检查脚本 ${checkScripts} 个`);
 }
@@ -363,7 +476,7 @@ console.log('\n=== 检查脚本是否都在文档里提到 ===');
     .filter((f) => f.endsWith('.mjs') && f !== 'she.mjs')
     .map((f) => f.replace(/\.mjs$/, ''));
 
-  const pkgScripts = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).scripts ?? {};
+  const pkgScripts = readJson(join(ROOT, 'package.json')).scripts ?? {};
   /** The `check:*` alias that runs a given script, if any. */
   const aliasFor = (script) => Object.entries(pkgScripts)
     .find(([, cmd]) => String(cmd).includes(`scripts/${script}.mjs`))?.[0];

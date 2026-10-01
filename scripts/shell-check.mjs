@@ -147,6 +147,85 @@ console.log('\n=== 黑名单仍然生效（白名单是叠加，不是替换）=
   check('已知破坏性命令被拒绝', r.denied === true, JSON.stringify(r).slice(0, 160));
 }
 
+/* ─── 6. Arbitrary code execution: detected, allowed, disclosed ─── */
+console.log('\n=== 任意代码执行：识别出来并如实说明（不假装沙箱拦得住）===');
+{
+  const { detectInlineCodeExecution, codeExecutionDisclosure, workspaceEscapeReason, createTools } =
+    await import('../packages/sandbox/dist/index.js');
+  const shell = new SandboxShell(workspace, { allowAllCommands: true, denyDestructiveByDefault: false });
+  const tools = createTools(shell, workspace, { allowAllCommands: true });
+
+  /*
+   * Every form that carries a program, checked through the BUILT artifact. The unit tests assert the
+   * same table against `src/`; this one is here because a dist that was not rebuilt passes the unit
+   * tests and fails the user.
+   */
+  const FORMS = [
+    ['node -e "console.log(1)"', 'node', '-e'],
+    ['node --eval=console.log(1)', 'node', '--eval'],
+    ['node -p "1+1"', 'node', '-p'],
+    ['python -c "print(1)"', 'python', '-c'],
+    ['python3 -c "print(1)"', 'python3', '-c'],
+    ['powershell -Command "Get-Date"', 'powershell', '-Command'],
+    ['powershell -EncodedCommand ZQBoAG8A', 'powershell', '-EncodedCommand'],
+    ['pwsh -c "Get-Date"', 'pwsh', '-c'],
+    ['cmd /c dir', 'cmd', '/c'],
+    ['sh -c "cat /etc/passwd"', 'sh', '-c'],
+    ['bash -c "ls"', 'bash', '-c'],
+    ['perl -e "print 1"', 'perl', '-e'],
+    ['ruby -e "puts 1"', 'ruby', '-e'],
+    ['php -r "echo 1;"', 'php', '-r'],
+    ['deno eval "console.log(1)"', 'deno', 'eval'],
+    ['bun -e "console.log(1)"', 'bun', '-e'],
+  ];
+  for (const [command, interpreter, flag] of FORMS) {
+    const hit = detectInlineCodeExecution(command);
+    check(
+      `${flag} 被识别为任意代码执行（${interpreter}）`,
+      hit?.interpreter === interpreter && hit?.flag.toLowerCase() === flag.toLowerCase(),
+      `实际 ${JSON.stringify(hit)}`,
+    );
+  }
+
+  /*
+   * The gap that makes the disclosure necessary, asserted as a FACT rather than described.
+   *
+   * This path is outside the workspace and the command is still allowed. If a future change makes the
+   * jail read inside code strings, this check goes red — which is the signal to remove the disclosure
+   * path, not to delete the check.
+   */
+  const outside = "node -e \"require('fs').writeFileSync('" + workspace.replace(/\\/g, '/') + "-outside/x','1')\"";
+  check('【关键】路径检查看不见代码字符串里的越界路径（所以只能披露，不能声称拦住了）',
+    workspaceEscapeReason(outside, workspace) === null && detectInlineCodeExecution(outside) !== null);
+
+  // Chains: only looking at the first segment is the same as not looking.
+  check('【关键】链式命令里任意一段都算', detectInlineCodeExecution('echo ok && node -e "console.log(1)"')?.interpreter === 'node');
+
+  // And the negatives, which are what keep the line readable.
+  for (const command of ['node script.js', 'npm run build', 'echo "node -e hello"', 'git -c core.autocrlf=false status']) {
+    check(`不误报：${command}`, detectInlineCodeExecution(command) === null);
+  }
+
+  check('披露文案说明「不受工作区边界约束」', /不受工作区边界约束/.test(
+    codeExecutionDisclosure({ interpreter: 'node', flag: '-e', segment: 'node -e x' })));
+
+  // Through a real process, all the way to the text the model reads.
+  const ran = await tools.execute('shell', { command: 'node -e "console.log(7)"' });
+  check('node -e 真的跑了（识别不等于拦截）', ran.includes('7') && ran.includes('exit code: 0'),
+    JSON.stringify(ran).slice(0, 200));
+  check('【关键】回执里明说了子进程不受约束', ran.includes('任意代码执行') && ran.includes('不受工作区边界约束'),
+    JSON.stringify(ran).slice(0, 200));
+
+  const plain = await tools.execute('shell', { command: 'node -v' });
+  check('普通命令不添加这句（否则等于没说明）', !plain.includes('任意代码执行'));
+
+  const denied = await shell.exec('cd C:\\');
+  check('看得见的越界路径照旧被拒（新检查没有放松旧边界）', denied.denied === true);
+  check('被拒的命令不带披露（它没有子进程）', denied.codeExecution === undefined);
+
+  await shell.stopAll();
+}
+
 removeTempDir(workspace);
 
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`);

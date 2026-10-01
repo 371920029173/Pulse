@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, beforeEach, afterEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -7,10 +7,20 @@ import { KBStore } from '../store.js';
 import { GroupKBEngine } from '../engine.js';
 import type { SheConfig } from '@she/shared';
 
+/**
+ * A fresh database in a fresh directory, and the directory is remembered so the file can remove it.
+ *
+ * Both `beforeEach` blocks above used to build one of these per test case and remove neither the
+ * directory nor its `-wal`/`-shm` siblings. By 2026-09-29 that was 3,061 directories — the second
+ * largest pile in the system temp folder — because a kb test case runs many times per gate.
+ */
+const createdDirs: string[] = [];
 function makeTempDb(): string {
   const dir = mkdtempSync(join(tmpdir(), 'she-kb-test-'));
+  createdDirs.push(dir);
   return join(dir, 'test.sqlite');
 }
+after(() => { for (const d of createdDirs) rmSync(d, { recursive: true, force: true }); });
 
 const defaultKbConfig: SheConfig['kb'] = {
   dbPath: '',

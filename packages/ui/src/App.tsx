@@ -34,6 +34,7 @@ import { WorktreePanel } from './components/WorktreePanel';
 import { ThemeStudio } from './components/ThemeStudio';
 import { useUserTheme } from './hooks/useUserTheme';
 import { pickActiveSession, isSessionKnown } from './lib/sessionChoice';
+import { StateRecoveryNotice, type StateRecovery } from './components/StateRecoveryNotice';
 import { getLocale, setLocale, t } from './lib/i18n';
 import type { Locale } from './lib/i18n';
 import { SkillManager } from './components/SkillManager';
@@ -213,6 +214,26 @@ export function App() {
     localStorage.getItem('she.theme') === 'light' ? 'light' : 'dark',
   );
   const [focusChat, setFocusChat] = useState(() => readLayout('focusChat', '0') === '1');
+  /**
+   * "A state file could not be read and was kept aside instead of discarded."
+   *
+   * Shown, not just logged. A quarantined `sessions.json` leaves the rail shorter with nothing on
+   * screen to explain it, which is indistinguishable from the app having deleted the user's chats —
+   * the exact complaint this whole layer exists to answer. The banner names the backup file, so
+   * recovery is a rename the user can do without us.
+   *
+   * A toast would be wrong here: it disappears on its own, and this is the kind of message that must
+   * still be there when the user comes back and asks where their conversations went.
+   */
+  const [stateRecoveries, setStateRecoveries] = useState<StateRecovery[]>([]);
+  /** Dismissed per backup path, so a new quarantine still shows after an old one was waved away. */
+  const [dismissedRecoveries, setDismissedRecoveries] = useState<string[]>(() => {
+    try {
+      const raw = sessionStorage.getItem('she.dismissedRecoveries');
+      const parsed: unknown = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+    } catch { return []; }
+  });
   const layoutRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<null | { kind: 'sidebar' | 'trace' | 'terminal'; startX: number; startY: number; startW: number; startH: number }>(null);
   /** Live values during a drag; committed to state on mouseup. */
@@ -269,16 +290,35 @@ export function App() {
   const refreshSessions = useCallback(async () => {
     // Combined list: normal chats + work groups, so groups are reachable from
     // the session rail instead of only from the cluster panel.
-    const data = await fetchJSON<{ active_id: string | null; items?: SessionMeta[]; sessions?: SessionMeta[] }>(
-      '/api/conversations',
-    );
+    const data = await fetchJSON<{
+      active_id: string | null;
+      items?: SessionMeta[];
+      sessions?: SessionMeta[];
+      recoveries?: StateRecovery[];
+    }>('/api/conversations');
     setSessions(data.items ?? data.sessions ?? []);
     setActiveSessionId((cur) => pickActiveSession(cur, clusterRoomRef.current !== null, data.active_id));
+    // Absent on an older server, hence the default.
+    setStateRecoveries(Array.isArray(data.recoveries) ? data.recoveries : []);
   }, []);
 
   // Mirrored into a ref so `refreshSessions` can stay dependency-free (it is called from many
   // effects, and rebuilding it on every cluster change would restart the polling loops).
   useEffect(() => { clusterRoomRef.current = clusterRoomId; }, [clusterRoomId]);
+
+  /** Notices still worth showing: everything the server reported that was not waved away already. */
+  const visibleRecoveries = stateRecoveries.filter((r) => !dismissedRecoveries.includes(r.backup));
+
+  const dismissRecoveries = useCallback(() => {
+    const paths = stateRecoveries.map((r) => r.backup);
+    setDismissedRecoveries((cur) => {
+      const next = [...new Set([...cur, ...paths])];
+      // Per window, like the rest of this window's view state: dismissing in one window should not
+      // hide the notice in another window that is looking at a different project.
+      try { sessionStorage.setItem('she.dismissedRecoveries', JSON.stringify(next)); } catch { /* ignore */ }
+      return next;
+    });
+  }, [stateRecoveries]);
 
   /**
    * Remember this window's conversation, and drop it if it no longer exists.
@@ -924,6 +964,13 @@ export function App() {
     >
       {backgroundLayer}
 
+      {/*
+        Sits above the panes, not inside one: a quarantine can concern chats or work groups, and
+        hiding it in whichever panel the user happens not to be looking at is the same as not
+        showing it. Persists until dismissed — it is the answer to "where did my conversations go".
+      */}
+      <StateRecoveryNotice recoveries={visibleRecoveries} onDismiss={dismissRecoveries} />
+
       <div className={styles.layoutBody}>
         {!focusChat && sidebarCollapsed ? (
           <div className={styles.sidebarRail}>
@@ -977,6 +1024,7 @@ export function App() {
             <Chat
               messages={inGroupMode ? clusterChat.messages : chat.messages}
               isLoading={inGroupMode ? clusterChat.isLoading : chat.isLoading}
+              toolProgress={inGroupMode ? undefined : chat.toolProgress}
               isPaused={chat.isPaused}
               pendingConfirm={inGroupMode ? null : chat.pendingConfirm}
               pendingPatch={inGroupMode ? null : chat.pendingPatch}
