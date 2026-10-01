@@ -45,6 +45,29 @@ const check = (label, cond, detail) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * Why a turn never reached the stub.
+ *
+ * `stubRequests=0` says the model was never called, and that is where the old output stopped —
+ * leaving the two facts that decide it unprinted: the address the server was TOLD to call, and
+ * what the server said while failing. They matter because "stub is up, server pointed somewhere
+ * else" and "stub is up, connect refused" are identical from the counter alone and have different
+ * remedies. Observed for real in a full `check:offline` run: all four stub-waits timed out with
+ * `stubRequests=0` while the same file passed 10/10 on its own, and nothing in the output could
+ * distinguish a misconfiguration from a resource problem, which cost an investigation.
+ */
+function dumpNoStubDiagnostics() {
+  const addr = stub.address();
+  console.log(`        --- 桩地址 --- stub 实际监听 ${addr.address}:${addr.port}；服务端被告知 ${modelBase || '(未设置)'}`);
+  const tail = onOutput().split('\n').map((l) => l.trim()).filter(Boolean).slice(-25);
+  if (tail.length) {
+    console.log('        --- 服务器输出（末尾）---');
+    for (const l of tail) console.log(`        ${l}`);
+  } else {
+    console.log('        --- 服务器没有任何输出（可能是启动期就断了）---');
+  }
+}
+
+/**
  * Poll until `predicate` is true, or give up.
  *
  * Used instead of fixed sleeps for anything that has to be synchronised with another
@@ -207,6 +230,7 @@ try {
    */
   if (!await waitFor(() => stubRequests >= 1, 8000)) {
     check('第一个请求确实进入了模型调用', false, `stubRequests=${stubRequests}`);
+    dumpNoStubDiagnostics();
   }
   const second = await sendChat(sid, '第二轮（不该被受理）');
 
@@ -253,6 +277,7 @@ try {
   // Wait for the turn to be in flight, rather than assuming 250ms is enough.
   if (!await waitFor(() => stubRequests > slowBaseline)) {
     check('并发测试的前一轮进入了模型调用', false, `stubRequests=${stubRequests}`);
+    dumpNoStubDiagnostics();
   }
   const parallel = await sendChat(other.id, '另一个会话，应当立刻受理');
   check('不同会话之间互不影响（锁是会话级的）', parallel.status === 200, `status=${parallel.status}`);
@@ -263,6 +288,7 @@ try {
   const streaming = sendChat(sid, '流式的一轮（慢）');
   if (!await waitFor(() => stubRequests > streamBaseline)) {
     check('流式测试的前一轮进入了模型调用', false, `stubRequests=${stubRequests}`);
+    dumpNoStubDiagnostics();
   }
   const streamSecond = await fetch(`http://127.0.0.1:${PORT}/api/chat`, {
     method: 'POST',
