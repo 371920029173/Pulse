@@ -9,6 +9,7 @@ import {
   IconChevronDown, IconChevronRight, IconMerge,
 } from './Icons';
 import { t } from '../lib/i18n';
+import { pathTail } from '../lib/path-label';
 
 export interface SessionMeta {
   id: string;
@@ -30,6 +31,20 @@ export interface SessionMeta {
 
 interface SidebarProps {
   tree: GroupTreeNode[];
+  /**
+   * The project this window is mounted on, so it can be named on screen.
+   *
+   * Absent until the first `/api/workspaces` answer lands; the label is then omitted rather than
+   * showing a placeholder, because a wrong workspace name is worse than no name at all.
+   */
+  workspaceRoot?: string | null;
+  /**
+   * The rail is waiting for a workspace's conversations, so it must not show an empty list.
+   *
+   * Distinct from "no sessions": both render zero rows, and confusing the two is exactly the bug
+   * this flag exists to prevent — an empty rail during a switch looks like the chats were lost.
+   */
+  workspaceLoading?: boolean;
   sessions: SessionMeta[];
   activeSessionId: string | null;
   onOpenSettings?: () => void;
@@ -105,6 +120,8 @@ function TreeNode({ node, depth, onGroupClick }: TreeNodeProps) {
 
 export function Sidebar({
   tree,
+  workspaceRoot,
+  workspaceLoading,
   sessions,
   activeSessionId,
   onGroupClick,
@@ -190,6 +207,30 @@ export function Sidebar({
         </button>
       </div>
 
+      {/*
+        * 当前工作区。常驻显示，因为"我在哪个项目里"是这一屏所有内容的前提 —— 会话栈、文件树、
+        * 知识库都只属于当前工作区。以前这个信息只在主页的选择器里出现过一次，进了工作区就再也
+        * 看不到：2026-10-01 真机上应用被切到一个测试目录（`_she-live-test_2`，两条临时对话），
+        * 界面和正常状态长得一模一样，用户看到的只是"我的对话不见了"。
+        *
+        * 整块是一个按钮，点了就回主页 —— 也就是切换工作区的地方。不做成只读标签，是因为看见它
+        * 的第一反应就是"我怎么不在这儿"。
+        *
+        * 每行以 `*` 开头不只是排版：i18n 检查逐行扫描，只跳过以 `*` 或 `//` 开头的行，否则这段
+        * 散文里的引号内容会被算成四处未翻译文案（这里踩过一次）。
+      */}
+      {workspaceRoot ? (
+        <button
+          type="button"
+          className={styles.workspace}
+          onClick={onGoHome}
+          title={`${workspaceRoot}\n${t('点击回到主页可切换工作区')}`}
+        >
+          <span className={styles.workspaceLabel}>{t('工作区')}</span>
+          <span className={styles.workspaceName}>{pathTail(workspaceRoot, 1)}</span>
+        </button>
+      ) : null}
+
       <div className={styles.sectionHeader}>
         <span>会话</span>
         <div className={styles.sectionActions}>
@@ -206,7 +247,7 @@ export function Sidebar({
           </button>
         </div>
       </div>
-      {sessions.length > 0 ? (
+      {!workspaceLoading && sessions.length > 0 ? (
         <div className={styles.sessionFilterWrap}>
           <input
             className={styles.sessionFilter}
@@ -218,7 +259,17 @@ export function Sidebar({
         </div>
       ) : null}
       <div className={styles.sessionList}>
-        {sessions.length === 0 ? (
+        {/*
+          * 加载骨架优先于"暂无会话"。
+          *
+          * 两者都是零行，所以这个分支必须排在最前：否则切换工作区时那零点几秒会显示"暂无会话"，
+          * 而用户刚刚才看见上个项目的对话 —— 那是同一句谎话，只是短一些。
+          */}
+        {workspaceLoading ? (
+          <div className={styles.skeleton} aria-busy="true" aria-label={t('正在读取会话')}>
+            {[0, 1, 2].map((i) => <span key={i} className={styles.skeletonRow} />)}
+          </div>
+        ) : sessions.length === 0 ? (
           <div className={styles.emptyState}>暂无会话</div>
         ) : visibleSessions.length === 0 ? (
           <div className={styles.emptyState}>无匹配会话</div>

@@ -110,7 +110,6 @@ registerDictionary('en', {
   '时间线': 'Timeline',
   '发送': 'Send',
   '停止': 'Stop',
-  '暂停': 'Pause',
   '继续': 'Resume',
   '输入消息…': 'Type a message…',
   '推理深度': 'Reasoning depth',

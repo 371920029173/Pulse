@@ -38,7 +38,7 @@ export function ConnectionBanner() {
       if (!cancelled) apply(ok);
     };
     void tick();
-    const id = window.setInterval(tick, online ? 15_000 : 4_000);
+    const id = window.setInterval(tick, online ? 5000 : 2000);
     const onFocus = () => { void tick(); };
     const onStreamFailed = () => { void tick(); };
     window.addEventListener('focus', onFocus);

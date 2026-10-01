@@ -91,6 +91,25 @@ export function Home({ onEnter, appearance, dock }: Props) {
       setBusy(target);
       setError(null);
       try {
+        /*
+         * Desktop: let the shell decide which backend serves this workspace.
+         *
+         * Posting `/api/workspaces/switch` here moved the *server's* workspace root, and there is
+         * only one server — so picking a project in this window moved every other window with it.
+         * The shell keeps one server per workspace and points this window at the right one, which
+         * scopes the change to the window that asked. The page is replaced while we await, so the
+         * `busy` state deliberately stays set.
+         *
+         * `null` means the shell has no per-workspace backends (browser, or an older shell) and the
+         * in-page switch is the correct fallback. A **rejection** means the shell has them but could
+         * not deliver, and must not fall back: the shared switch is exactly the cross-window
+         * pollution this avoids. That case propagates to the catch below and is shown as an error.
+         */
+        if (window.sheDesktop?.openWorkspace) {
+          const origin = await window.sheDesktop.openWorkspace(target);
+          // Non-null means the window is navigating to that backend; nothing else to do.
+          if (origin) return;
+        }
         const r = await fetchJSON<{ root: string }>('/api/workspaces/switch', {
           method: 'POST',
           body: { root: target },

@@ -72,7 +72,7 @@ export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, fo
 
   useEffect(() => {
     refresh().catch(() => undefined);
-    const t = setInterval(() => { refresh().catch(() => undefined); }, 15000);
+    const t = setInterval(() => { refresh().catch(() => undefined); }, 5000);
     return () => clearInterval(t);
   }, [refresh]);
 
@@ -200,6 +200,13 @@ export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, fo
       {onOpenMemo && (
         <button type="button" className={styles.timeline} onClick={onOpenMemo} title="备忘录（你和智能体都能改）">备忘</button>
       )}
+      {/*
+         * 缓存管理的入口**不在这里**。
+         *
+         * 它原先挨着 tokens / 缓存命中率放在状态栏，理由是"这几个数字是原始材料"。但状态栏是
+         * 只读遥测区（模型名、工作区、检查点），用户在那一行不该期待有东西改配置；而且和它同类的
+         * 动作（计划 / 时间线 / 技能库）都在输入框下面。入口已经移到 `Chat` 的 `chatActions` 行。
+       */}
       {onOpenSources && (
         <button type="button" className={styles.timeline} onClick={onOpenSources} title="扫描并导入 Cursor / Claude Code / Codex 对话记录">导入对话</button>
       )}

@@ -111,8 +111,17 @@ describe('Chat 消息渲染', () => {
 
 describe('Chat 忙碌状态', () => {
   it('加载中显示停止入口（否则无法中断）', () => {
-    const { container } = render(<Chat {...chatProps({ isLoading: true })} />);
-    expect(container.textContent ?? '').toMatch(/停止|暂停|stop/i);
+    render(<Chat {...chatProps({ isLoading: true })} />);
+    /*
+     * 断言**可达名称**，不是 `textContent`。
+     *
+     * 停止按钮是纯图标，名字在 `aria-label` 上，而 `textContent` 读不到属性 —— 这条用例以前能过，
+     * 是因为旁边那个「暂停显示」按钮恰好有可见文字（`/停止|暂停|stop/` 里的"暂停"命中了它）。
+     * 也就是说它一直在为另一个控件的文本发绿灯，"停止还能点吗"从来没被真正验过。
+     * 删掉暂停按钮后它立刻变红，红得对：换成按名称查，才是在查用户真正要找的那个按钮。
+     */
+    expect(screen.getByRole('button', { name: '停止' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /暂停|继续显示/ })).toBeNull();
   });
 });
 

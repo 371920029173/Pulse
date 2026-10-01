@@ -69,6 +69,24 @@
 }
 .search:focus { border-color: var(--border-focus); }
 
+/*
+  范围开关。用 label 包住 checkbox 而不是做两个按钮：这是一个"要不要多看一点"的布尔选择，
+  不是二选一的模式切换，checkbox 是浏览器原生支持键盘和屏幕阅读器的那一个。
+*/
+.scopeToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.scopeToggle input { margin: 0; cursor: pointer; }
+.scopeToggle:hover { color: var(--text-primary); }
+
 .tabs {
   display: inline-flex;
   gap: 2px;
@@ -151,6 +169,20 @@
   align-items: center;
 }
 .id { font-family: var(--font-mono); opacity: 0.7; }
+
+/* 跨工作区时才出现：说明这一行属于哪个项目。省略号是必要的——路径长度不受控。 */
+.folder {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  background: var(--bg-hover);
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .reopen {
   flex-shrink: 0;

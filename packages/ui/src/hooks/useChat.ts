@@ -258,12 +258,6 @@ export function useChat(sessionId?: string | null) {
   const abortRef = useRef<AbortController | null>(null);
   const followRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const armFollowRef = useRef<(sid: string) => void>(() => {});
-  /** Pausing only holds back rendering — the stream keeps running underneath. */
-  const [isPaused, setIsPaused] = useState(false);
-  const pausedRef = useRef(false);
-  pausedRef.current = isPaused;
-  /** Latest in-flight accumulators, used to flush the view on resume. */
-  const activeAccRef = useRef<{ text: string; reasoning: string } | null>(null);
 
   /**
    * The session this window is bound to. Held in a ref so every callback reads
@@ -337,9 +331,8 @@ export function useChat(sessionId?: string | null) {
      * text received so far stays on screen and the rest keeps streaming into the same place.
      */
     const patchLive = (fields: Partial<ChatMessage>) => {
-      // The round opens even while paused, so `sealBubble` still lands its text.
+      // Lazily opened here rather than at stream start; `sealBubble` below relies on it being set.
       if (!roundKey) roundKey = newKey();
-      if (pausedRef.current) return;
       const key = roundKey;
       const text = acc.text;
       const reasoning = acc.reasoning;
@@ -650,7 +643,6 @@ export function useChat(sessionId?: string | null) {
         return next.map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m));
       });
       setIsLoading(false);
-      setIsPaused(false);
       window.dispatchEvent(new CustomEvent('she:stream-failed', { detail: { message: err.message } }));
       // The view dropped. The turn belongs to that conversation and keeps
       // running; coming back shows the result. Stopping here is what made
@@ -680,9 +672,8 @@ export function useChat(sessionId?: string | null) {
     const controller = new AbortController();
     abortRef.current = controller;
 
-    const acc = { text: '', reasoning: '' };
-    activeAccRef.current = acc;
-    const toolCalls: ToolCallData[] = [];
+      const acc = { text: '', reasoning: '' };
+      const toolCalls: ToolCallData[] = [];
     const currentToolCallRef = { value: null as Partial<ToolCallData> | null };
 
     const handlers = attachStreamHandlers(acc, toolCalls, currentToolCallRef);
@@ -721,9 +712,8 @@ export function useChat(sessionId?: string | null) {
 
     const controller = new AbortController();
     abortRef.current = controller;
-    const acc = { text: '', reasoning: '' };
-    activeAccRef.current = acc;
-    const toolCalls: ToolCallData[] = [];
+      const acc = { text: '', reasoning: '' };
+      const toolCalls: ToolCallData[] = [];
     const currentToolCallRef = { value: null as Partial<ToolCallData> | null };
 
     streamSSE(
@@ -753,9 +743,8 @@ export function useChat(sessionId?: string | null) {
 
     const controller = new AbortController();
     abortRef.current = controller;
-    const acc = { text: '', reasoning: '' };
-    activeAccRef.current = acc;
-    const toolCalls: ToolCallData[] = [];
+      const acc = { text: '', reasoning: '' };
+      const toolCalls: ToolCallData[] = [];
     const currentToolCallRef = { value: null as Partial<ToolCallData> | null };
 
     streamSSE(
@@ -854,9 +843,8 @@ export function useChat(sessionId?: string | null) {
     setMessages((prev) => [...prev, { role: 'system', content: `applying ${patchId}` }]);
     const controller = new AbortController();
     abortRef.current = controller;
-    const acc = { text: '', reasoning: '' };
-    activeAccRef.current = acc;
-    const toolCalls: ToolCallData[] = [];
+      const acc = { text: '', reasoning: '' };
+      const toolCalls: ToolCallData[] = [];
     const currentToolCallRef = { value: null as Partial<ToolCallData> | null };
     streamSSE(
       withSid('/api/fs/apply'),
@@ -881,9 +869,8 @@ export function useChat(sessionId?: string | null) {
     setMessages((prev) => [...prev, { role: 'system', content: 'applying all patches' }]);
     const controller = new AbortController();
     abortRef.current = controller;
-    const acc = { text: '', reasoning: '' };
-    activeAccRef.current = acc;
-    const toolCalls: ToolCallData[] = [];
+      const acc = { text: '', reasoning: '' };
+      const toolCalls: ToolCallData[] = [];
     const currentToolCallRef = { value: null as Partial<ToolCallData> | null };
     streamSSE(
       withSid('/api/fs/apply-all'),
@@ -906,7 +893,6 @@ export function useChat(sessionId?: string | null) {
     abortRef.current?.abort();
     abortRef.current = null;
     setIsLoading(false);
-    setIsPaused(false);
     // Tell the server to abort the turn too — otherwise the agent kept running
     // (and billing tokens) after the browser disconnected.
     void fetchJSON(withSid('/api/chat/stop'), {
@@ -931,29 +917,6 @@ export function useChat(sessionId?: string | null) {
           }
           break;
         }
-      }
-      return updated;
-    });
-  }, []);
-
-  /** Hold the view still; the stream keeps arriving in the background. */
-  const pauseStreaming = useCallback(() => setIsPaused(true), []);
-
-  /** Resume and catch the view up to everything received while paused. */
-  const resumeStreaming = useCallback(() => {
-    setIsPaused(false);
-    const acc = activeAccRef.current;
-    if (!acc) return;
-    setMessages((prev) => {
-      const updated = [...prev];
-      const last = updated[updated.length - 1];
-      if (last?.role === 'assistant') {
-        updated[updated.length - 1] = {
-          ...last,
-          content: acc.text,
-          reasoning: acc.reasoning || last.reasoning,
-          isThinking: !acc.text,
-        };
       }
       return updated;
     });
@@ -989,7 +952,6 @@ export function useChat(sessionId?: string | null) {
     abortRef.current?.abort();
     abortRef.current = null;
     setIsLoading(false);
-    setIsPaused(false);
 
     let next: ChatMessage[] = [];
     setMessages((prev) => {
@@ -1022,7 +984,6 @@ export function useChat(sessionId?: string | null) {
     abortRef.current?.abort();
     abortRef.current = null;
     setIsLoading(false);
-    setIsPaused(false);
     setMessages([]);
     setLatestKBResult(null);
     setToolProgress(new Map());
@@ -1049,7 +1010,6 @@ export function useChat(sessionId?: string | null) {
     abortRef.current?.abort();
     abortRef.current = null;
     setIsLoading(false);
-    setIsPaused(false);
     setPendingConfirm(null);
     setPendingPatch(null);
     setPendingPatches([]);
@@ -1121,7 +1081,6 @@ export function useChat(sessionId?: string | null) {
         const controller = new AbortController();
         abortRef.current = controller;
         const acc = { text: '', reasoning: '' };
-        activeAccRef.current = acc;
         const handlers = attachStreamHandlers(acc, [], { value: null });
         const finish = async () => {
           if (abortRef.current !== controller) return;
@@ -1155,7 +1114,6 @@ export function useChat(sessionId?: string | null) {
   return {
     messages,
     isLoading,
-    isPaused,
     latestKBResult,
     toolProgress,
     pendingConfirm,
@@ -1175,8 +1133,6 @@ export function useChat(sessionId?: string | null) {
     resetLocal,
     loadHistory,
     stopStreaming,
-    pauseStreaming,
-    resumeStreaming,
     interject,
     rewindTo,
   };

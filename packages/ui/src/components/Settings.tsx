@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { fetchJSON } from '../lib/api';
+import { fetchJSON, putSettings } from '../lib/api';
 import { SKILL_PROFILES, isSkillProfile, type SkillProfileId } from '../lib/skills';
 import { LOCALES, t } from '../lib/i18n';
 import type { Locale } from '../lib/i18n';
@@ -27,6 +27,8 @@ interface SettingsData {
     denyDestructiveByDefault?: boolean;
     shell?: string;
     timeout?: number;
+    /** 「允许工作区外命令」+ 档位。老服务端没有这个字段。 */
+    outsideWorkspace?: { allow?: boolean; policy?: 'all' | 'readonly' | 'deny' };
   };
 }
 
@@ -51,11 +53,45 @@ interface Props {
   /**
    * Which block to bring into view when the panel opens.
    *
-   * The panel is a single ~3000px form, and the shared-knowledge-base controls sit about a thousand
-   * pixels down it — far enough that a user looking for them concluded the feature did not exist.
-   * Callers that open Settings *for* a specific purpose pass a section id so the panel lands on it.
+   * The panel used to be a single ~3000px form, and the shared-knowledge-base controls sat about a
+   * thousand pixels down it — far enough that a user looking for them concluded the feature did
+   * not exist. It now has a sidebar, so a caller that opens Settings *for* a specific purpose
+   * selects the section instead of scrolling to a pixel offset.
    */
   focusSection?: string | null;
+}
+
+/**
+ * 侧边栏分区。
+ *
+ * 分成这几块而不是别的分法，依据是"改完之后要做什么"：换模型要重启会话，改工作区要重启服务端，
+ * 权限改完立即生效。同一块里的设置共享这个后果，跨块的不共享 —— 这一点直接决定哪些设置可以放在
+ * 一起保存。
+ */
+const SECTIONS: { id: SectionId; label: string; hint: string }[] = [
+  { id: 'llm', label: '模型与接入', hint: '提供商、模型、密钥、备用线路' },
+  { id: 'workspace', label: '工作区与知识库', hint: '目录、技能档、共享知识库' },
+  { id: 'sandbox', label: '沙箱与权限', hint: '命令审批、工作区边界' },
+  { id: 'appearance', label: '外观与快捷键', hint: '主题、语言、按键' },
+  { id: 'background', label: '背景', hint: '图片 / 视频背景' },
+];
+
+type SectionId = 'llm' | 'workspace' | 'sandbox' | 'appearance' | 'background';
+
+/**
+ * 老调用方传进来的锚点 → 新分区。
+ *
+ * `focusSection` 是上一版"滚到某个像素位置"的接口，外面还有调用方在传它。保留映射而不是删掉参数，
+ * 是为了让这次改动不牵连调用方 —— 但它们指向的已经是分区，不再是滚动位置。
+ */
+function sectionFor(focus: string | null | undefined): SectionId | null {
+  if (!focus) return null;
+  if (focus === 'kb-share' || focus === 'kb' || focus === 'workspace') return 'workspace';
+  if (focus === 'sandbox' || focus === 'perm' || focus === 'permissions') return 'sandbox';
+  if (focus === 'llm' || focus === 'model') return 'llm';
+  if (focus === 'theme' || focus === 'appearance' || focus === 'shortcuts') return 'appearance';
+  if (focus === 'background') return 'background';
+  return null;
 }
 
 const PRESETS: { id: string; label: string; provider: 'openai' | 'anthropic'; baseUrl: string; model: string; keyHint: string }[] = [
@@ -108,19 +144,23 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
   /** The shared-knowledge-base block, so a caller can ask for it to be brought into view. */
   const kbShareRef = useRef<HTMLDivElement | null>(null);
 
+  const [section, setSection] = useState<SectionId>(() => sectionFor(focusSection) ?? 'llm');
+
   /**
-   * Scroll a requested block into view.
+   * 调用方指定了分区时切过去，并把它滚进视野。
    *
-   * Runs after the panel has laid out. The block itself renders immediately (it is not behind a
-   * loading state), but `center` rather than `start` matters here: the section is a group of inputs
-   * and buttons, and aligning its top edge to the viewport would push the buttons off the bottom of
-   * a panel only ~900px tall.
+   * 两件事都要做：切换分区只是让它**存在**，而分区本身可能比面板高（工作区那一块就是），需要的人
+   * 想找的东西仍可能在折线以下。`center` 而不是 `start`：这一块是一组输入加按钮，顶边对齐会把按钮
+   * 推到面板底部之外。
    */
   useEffect(() => {
-    if (focusSection !== 'kb-share') return;
+    const target = sectionFor(focusSection);
+    if (!target) return;
+    setSection(target);
+    if (target !== 'workspace') return;
     const el = kbShareRef.current;
     if (!el) return;
-    // One frame, so the panel's entry animation has a laid-out position to scroll to.
+    // One frame, so the section has a laid-out position to scroll to.
     const id = window.requestAnimationFrame(() => {
       el.scrollIntoView({ block: 'center', behavior: 'smooth' });
     });
@@ -143,6 +183,14 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
    */
   const [allowAllCommands, setAllowAllCommands] = useState<boolean | null>(null);
   const [automationMode, setAutomationMode] = useState<boolean | null>(null);
+  /**
+   * 工作区边界。同样用 `null` 表示"还没读到"，不是 `false`。
+   *
+   * 这两个值决定沙箱放行还是拦，默认成 false 会让"打开设置就保存"把用户的全放行改回逐条审批 ——
+   * 上一版 `allowAllCommands` 踩过的坑，这里不能再踩一次。
+   */
+  const [outsideAllow, setOutsideAllow] = useState<boolean | null>(null);
+  const [outsidePolicy, setOutsidePolicy] = useState<'all' | 'readonly' | 'deny'>('readonly');
   const [kbDbPath, setKbDbPath] = useState('');
   const [kbMode, setKbMode] = useState<'env' | 'shared' | 'local' | ''>('');
   const [sharePath, setSharePath] = useState('');
@@ -155,8 +203,6 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
   const [fallbackModel, setFallbackModel] = useState('');
   const [fallbackProvider, setFallbackProvider] = useState<'openai' | 'anthropic'>('openai');
   const [fallbackApiKey, setFallbackApiKey] = useState('');
-  const [customSkillName, setCustomSkillName] = useState('');
-  const [customSkillBody, setCustomSkillBody] = useState('');
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
 
@@ -178,6 +224,17 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
         setFallbackBaseUrl(d.llm.fallback?.baseUrl || '');
         setFallbackModel(d.llm.fallback?.model || '');
         if (d.llm.fallback?.provider === 'openai' || d.llm.fallback?.provider === 'anthropic') setFallbackProvider(d.llm.fallback.provider as 'openai' | 'anthropic');
+        /*
+         * 老服务端不返回 `outsideWorkspace`。这时候从 `allowAllCommands` 反推一个能对得上的档位，
+         * 而不是留一个空白控件 —— 界面显示的必须是沙箱此刻真正在用的那套规则。
+         */
+        const ow = d.sandbox?.outsideWorkspace;
+        setOutsideAllow(typeof ow?.allow === 'boolean' ? ow.allow : true);
+        setOutsidePolicy(
+          ow?.policy === 'all' || ow?.policy === 'readonly' || ow?.policy === 'deny'
+            ? ow.policy
+            : (d.sandbox?.allowAllCommands ? 'all' : 'readonly'),
+        );
         void refreshKbLink();
       })
       .catch((e) => setMsg(String(e.message || e)));
@@ -192,9 +249,8 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
     if (id === 'ollama' || id === 'lmstudio') {
       setApiKey((k) => k || 'local');
     }
-    setMsg(`已套用预设：${p.label}`);
+    setMsg(t('已套用预设：{label}', { label: p.label }));
   }
-
 
   async function refreshKbLink() {
     try {
@@ -258,7 +314,7 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
   async function publishSharedKb() {
     const path = sharePath.trim();
     if (!path) {
-      setMsg('请填写要发布到的共享路径（例如 ./shared/kb.sqlite，或局域网共享盘的绝对路径）');
+      setMsg(t('请填写要发布到的共享路径（例如 ./shared/kb.sqlite，或局域网共享盘的绝对路径）'));
       return;
     }
     setKbBusy(true);
@@ -327,21 +383,20 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
       // loaded form cannot silently turn auto-run off.
       if (allowAllCommands !== null) body.allowAllCommands = allowAllCommands;
       if (automationMode !== null) body.automationMode = automationMode;
+      if (outsideAllow !== null) body.allowOutsideWorkspace = outsideAllow;
+      if (outsideAllow !== null) body.outsideWorkspacePolicy = outsidePolicy;
       if (apiKey.trim()) body.apiKey = apiKey.trim();
       if (fallbackApiKey.trim()) body.fallbackApiKey = fallbackApiKey.trim();
-      const res = await fetchJSON<{ ok: boolean; llm: { hasKey: boolean }; restartRequired?: boolean }>('/api/settings', {
-        method: 'PUT',
-        body,
-      });
+      const res = await putSettings<{ ok: boolean; llm: { hasKey: boolean }; restartRequired?: boolean }>(body);
       const saved = res.llm.hasKey ? t('已保存（含 API key）') : t('已保存');
       setMsg(res.restartRequired ? t('{saved}；工作区 / 知识库路径已变更，需重启服务端后生效', { saved }) : saved);
       setApiKey('');
       const d = await fetchJSON<SettingsData>('/api/settings');
       setData(d);
       setAllowAllCommands(Boolean(d.sandbox?.allowAllCommands));
-        setAutomationMode(d.automationMode !== false);
-    setKbDbPath(d.kb?.dbPath || '');
-    setWorkspaceRoot(d.workspace.root);
+      setAutomationMode(d.automationMode !== false);
+      setKbDbPath(d.kb?.dbPath || '');
+      setWorkspaceRoot(d.workspace.root);
     } catch (e: any) {
       setMsg(e.message || String(e));
     } finally {
@@ -349,305 +404,418 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
     }
   }
 
+  /** 当前四档落在哪一档，用来画"此刻的实际规则"。 */
+  const effectiveRule = outsideAllow === false
+    ? t('除阅读类命令外，一律需要你点确认')
+    : outsidePolicy === 'all'
+      ? t('一切命令直接放行，不再询问')
+      : outsidePolicy === 'deny'
+        ? t('工作区内自由执行；工作区外的写操作直接拒绝')
+        : t('工作区内自由执行；工作区外的写操作需要你点确认');
+
+  function renderSection() {
+    if (!data) return null;
+    if (section === 'llm') {
+      return (
+        <>
+          <div className={styles.presets}>
+            <span className={styles.presetsLabel}>{t('快速预设')}</span>
+            <div className={styles.presetRow}>
+              {PRESETS.map((p) => (
+                <button key={p.id} type="button" className={styles.presetBtn} onClick={() => applyPreset(p.id)}>
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <label>
+            <span>{t('提供商')}</span>
+            <select value={provider} onChange={(e) => setProvider(e.target.value as any)}>
+              <option value="openai">{t('OpenAI 兼容')}</option>
+              <option value="anthropic">Anthropic</option>
+            </select>
+          </label>
+          <label>
+            <span>{t('模型')}</span>
+            <input value={model} onChange={(e) => setModel(e.target.value)} />
+          </label>
+          <label>
+            <span>{t('接口地址')}</span>
+            <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" />
+          </label>
+          <label>
+            <span>{t('API 密钥')} {data.llm.hasKey ? t('（已配置）') : t('（未配置）')}</span>
+            <input
+              type="password"
+              placeholder={data.llm.hasKey ? t('留空则不改') : 'sk-...'}
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              autoComplete="off"
+            />
+          </label>
+          <p className={styles.hint}>
+            {t('思考强度已移到对话框发送键旁边，可随时拖动调节。主流模型特点见 skill 档。')}
+          </p>
+          <label>
+            <span>{t('备用接口地址（选填）')}</span>
+            <input value={fallbackBaseUrl} onChange={(e) => setFallbackBaseUrl(e.target.value)} placeholder={t('主接口失败时回退')} />
+          </label>
+          <label>
+            <span>{t('备用模型')}</span>
+            <input value={fallbackModel} onChange={(e) => setFallbackModel(e.target.value)} />
+          </label>
+          <label>
+            <span>{t('备用提供商')}</span>
+            <select value={fallbackProvider} onChange={(e) => setFallbackProvider(e.target.value as any)}>
+              <option value="openai">{t('OpenAI 兼容')}</option>
+              <option value="anthropic">Anthropic</option>
+            </select>
+          </label>
+          <label>
+            <span>{t('备用 API 密钥')} {data.llm.fallback?.hasKey ? t('（已配置）') : t('（未配置）')}</span>
+            <input
+              type="password"
+              placeholder={data.llm.fallback?.hasKey ? t('留空则不改') : t('选填')}
+              value={fallbackApiKey}
+              onChange={(e) => setFallbackApiKey(e.target.value)}
+              autoComplete="off"
+            />
+          </label>
+        </>
+      );
+    }
+
+    if (section === 'workspace') {
+      return (
+        <>
+          <label>
+            <span>{t('工作区 root')}</span>
+            <input value={workspaceRoot} onChange={(e) => setWorkspaceRoot(e.target.value)} />
+          </label>
+          <p className={styles.hint}>
+            {t('改动工作区目录需要重启服务端才生效。')}
+          </p>
+          <label className={styles.field}>
+            <span>{t('技能档位')}</span>
+            <select
+              value={skillProfile}
+              onChange={(e) => { if (isSkillProfile(e.target.value)) setSkillProfile(e.target.value); }}
+            >
+              {/* Generated from the single source so this list cannot go stale
+                  again — a hand-written copy here was missing 「通用」. */}
+              {SKILL_PROFILES.map((p) => (
+                <option key={p.id} value={p.id}>{p.label}{p.id === 'dev' ? t('（默认）') : ''}</option>
+              ))}
+            </select>
+          </label>
+          <p className={styles.hint}>
+            {t('加载 .she/skills/_common + 对应档目录。自定义 skill 放到 .she/skills/custom/*.md。侧栏状态栏也可快速切换。')}
+          </p>
+          <label className={styles.field}>
+            <span>{t('知识库路径（本工作区或共享）')}</span>
+            <input
+              value={kbDbPath}
+              onChange={(e) => setKbDbPath(e.target.value)}
+              placeholder={t('留空则用 <工作区>/.she/kb.sqlite')}
+              spellCheck={false}
+            />
+          </label>
+          <p className={styles.hint}>
+            {t('当前模式：')}<strong>{kbMode || '…'}</strong>
+            {kbMode === 'shared' ? t('（多工作区可挂同一 sqlite，改完即重挂，一般不用整服重启）') : ''}
+            {kbMode === 'local' ? t('（仅本工作区 .she/kb.sqlite）') : ''}
+            {kbMode === 'env' ? t('（由 SHE_KB_PATH 指定，优先于 kb-link）') : ''}
+            {t('。保存设置仍会写入路径；要用「贯穿」请用下面的共享操作。')}
+          </p>
+          <div id="settings-kb-share" ref={kbShareRef} className={styles.card}>
+            <span className={styles.cardTitle}>{t('多工作区共享知识库')}</span>
+            <input
+              value={sharePath}
+              onChange={(e) => setSharePath(e.target.value)}
+              placeholder={t('共享 sqlite 路径，例如 ./shared/kb.sqlite（也可填局域网共享盘）')}
+              spellCheck={false}
+            />
+            <div className={styles.btnRow}>
+              <button type="button" className="she-btn she-btn--sm" disabled={kbBusy} onClick={() => void bindSharedKb()}>
+                {t('挂到此共享库')}
+              </button>
+              <button type="button" className="she-btn she-btn--sm" disabled={kbBusy} onClick={() => void publishSharedKb()}>
+                {t('把当前库发布到该路径')}
+              </button>
+              <button type="button" className="she-btn she-btn--sm" disabled={kbBusy} onClick={() => void restoreLocalKb()}>
+                {t('恢复本工作区库')}
+              </button>
+            </div>
+            <input
+              value={mergeSourcePath}
+              onChange={(e) => setMergeSourcePath(e.target.value)}
+              placeholder={t('要合并进来的另一份 sqlite（另一工作区的库）')}
+              spellCheck={false}
+            />
+            <input
+              value={mergeTargetPath}
+              onChange={(e) => setMergeTargetPath(e.target.value)}
+              placeholder={t('可选：合并结果写到新共享路径（留空则并入当前库）')}
+              spellCheck={false}
+            />
+            <div className={styles.btnRow}>
+              <button type="button" className="she-btn she-btn--sm" disabled={kbBusy} onClick={() => void mergeOtherKb()}>
+                {t('合并另一库')}
+              </button>
+            </div>
+            <p className={styles.hint}>
+              {t('推荐流程：工作区 A「发布到共享路径」→ 工作区 B「挂到此共享库」→ 两边贯穿同一套知识。')}
+              {t('若两套库都有内容，用「合并另一库」拼成一份再挂载。')}
+            </p>
+          </div>
+          <p className={styles.hint}>
+            {t('项目规则：编辑工作区 .she/rules.md，新建/重开 Agent 会写入系统提示。')}
+          </p>
+        </>
+      );
+    }
+
+    if (section === 'sandbox') {
+      return (
+        <>
+          <p className={styles.hint}>
+            {t('这里决定 Agent 执行命令时会不会先来问你。改完点保存，立即生效，不用重启。')}
+          </p>
+          <label className={styles.checkRow}>
+            <input
+              type="checkbox"
+              checked={automationMode === true}
+              onChange={(e) => {
+                const on = e.target.checked;
+                setAutomationMode(on);
+                // 关掉自动化时把「所有」降回「只读」，否则破坏性命令会留在静默放行状态。
+                if (!on && outsidePolicy === 'all') setOutsidePolicy('readonly');
+              }}
+            />
+            <span>
+              {t('自动化模式')}
+              <em className={styles.warn}>{t('（少请示：做完再汇报，不等你逐步确认）')}</em>
+            </span>
+          </label>
+
+          <label className={styles.checkRow}>
+            <input
+              type="checkbox"
+              checked={outsideAllow === true}
+              onChange={(e) => setOutsideAllow(e.target.checked)}
+            />
+            <span>
+              {t('允许工作区外命令')}
+              <em className={styles.warn}>
+                {t('（不勾选：除了阅读类命令，工作区内外所有操作都要你确认）')}
+              </em>
+            </span>
+          </label>
+
+          {/*
+            档位只在勾选后才有意义 —— 不勾选时规则是"除阅读类外一律确认"，没有"外面怎么处理"这回事。
+            置灰而不是隐藏，是为了让"勾上之后还有更细的选择"这件事在没勾的时候也看得见。
+          */}
+          <div className={`${styles.policyList} ${outsideAllow === true ? '' : styles.policyDisabled}`}>
+            {([
+              {
+                id: 'readonly' as const,
+                title: t('只读（推荐）'),
+                desc: t('工作区内随便跑；要动工作区外的文件时先问你一声。读文件不受限制。'),
+              },
+              {
+                id: 'all' as const,
+                title: t('所有'),
+                desc: t('什么都不问，包括工作区外。仅限你完全信任的本地环境。'),
+              },
+              {
+                id: 'deny' as const,
+                title: t('拒绝'),
+                desc: t('工作区外一律不许，也不允许你临时批准。最严的一档。'),
+              },
+            ]).map((opt) => (
+              <label
+                key={opt.id}
+                className={`${styles.policyItem} ${outsidePolicy === opt.id ? styles.policyItemActive : ''}`}
+              >
+                <input
+                  type="radio"
+                  name="outside-policy"
+                  checked={outsidePolicy === opt.id}
+                  disabled={outsideAllow !== true}
+                  onChange={() => setOutsidePolicy(opt.id)}
+                />
+                <span>
+                  <span className={styles.policyTitle}>{opt.title}</span>
+                  <span className={styles.policyDesc}>{opt.desc}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+
+          <div className={styles.callout}>
+            <strong>{t('现在的实际规则')}</strong>
+            <span>{effectiveRule}</span>
+            <span className={styles.calloutFoot}>
+              {t('「阅读类」指 cat / type / dir / grep 这类只看不写的命令，它们在哪个目录下执行都不需要确认。')}
+            </span>
+          </div>
+        </>
+      );
+    }
+
+    if (section === 'appearance') {
+      return (
+        <>
+          <div className={styles.row}>
+            <div>
+              <div className={styles.rowTitle}>{t('外观主题')}</div>
+              <div className={styles.rowSub}>{t('对话区可用拖拽把手调节侧栏 / 轨迹宽度')}</div>
+            </div>
+            <button type="button" className={styles.toggleBtn} onClick={onToggleTheme}>
+              {theme === 'light' ? t('切换到深色') : t('切换到浅色')}
+            </button>
+            {onOpenTheme ? (
+              <button type="button" className="she-btn she-btn--sm" onClick={onOpenTheme}>
+                {t('自定义样式…')}
+              </button>
+            ) : null}
+          </div>
+
+          {/*
+            Language switch.
+
+            Placed next to the theme control because they are the same kind of
+            setting — a personal display preference with no effect on the agent.
+            Switching re-renders the whole tree, so it takes effect immediately
+            everywhere rather than needing a reload.
+          */}
+          <div className={styles.row}>
+            <div>
+              <div className={styles.rowTitle}>{t('界面语言')}</div>
+              <div className={styles.rowSub}>{t('界面文案语言，立刻生效')}</div>
+            </div>
+            <div className={styles.btnRow}>
+              {LOCALES.map((l) => (
+                <button
+                  key={l.id}
+                  type="button"
+                  className={`${styles.localeBtn} ${locale === l.id ? styles.localeBtnActive : ''}`}
+                  onClick={() => onLocale(l.id)}
+                >
+                  {l.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className={styles.card}>
+            <ShortcutEditor />
+          </div>
+        </>
+      );
+    }
+
+    return (
+      <>
+        {background ? (
+          <div
+            className={styles.dropZone}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              e.preventDefault();
+              const f = e.dataTransfer.files?.[0];
+              if (f) void background.setFromFile(f);
+            }}
+          >
+            <div className={styles.row}>
+              <div>
+                <div className={styles.rowTitle}>{t('背景')}</div>
+                <div className={styles.rowSub}>
+                  {background.meta.filename
+                    ? t('当前：{name}（{kind}）', {
+                      name: background.meta.filename,
+                      kind: background.meta.kind === 'video' ? t('视频') : t('图片'),
+                    })
+                    : t('把 jpg / png / mp4 拖到这里，各分区将变为毛玻璃')}
+                </div>
+              </div>
+              <div className={styles.btnRow}>
+                <label className={styles.filePick}>
+                  {t('选择文件')}
+                  <input
+                    type="file"
+                    accept="image/*,video/*"
+                    className={styles.fileInput}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) void background.setFromFile(f);
+                      e.currentTarget.value = '';
+                    }}
+                  />
+                </label>
+                {background.meta.filename ? (
+                  <>
+                    <button type="button" className={styles.toggleBtn} onClick={() => background.setEnabled(!background.enabled)}>
+                      {background.enabled ? t('临时关闭') : t('启用')}
+                    </button>
+                    <button type="button" className={styles.toggleBtn} onClick={() => void background.clear()}>
+                      {t('移除')}
+                    </button>
+                  </>
+                ) : null}
+              </div>
+            </div>
+            {background.busy ? <p className={styles.hint}>{t('处理中…')}</p> : null}
+            {background.error ? <p className={styles.error}>{background.error}</p> : null}
+          </div>
+        ) : (
+          <p className={styles.hint}>{t('背景功能在当前界面不可用。')}</p>
+        )}
+      </>
+    );
+  }
+
   return (
     <div className={styles.backdrop} data-surface="backdrop" onClick={onClose}>
       <div className={styles.panel} data-surface="panel" onClick={(e) => e.stopPropagation()}>
         <header className={styles.header}>
-          <h2>设置</h2>
+          <h2>{t('设置')}</h2>
           <button type="button" className={styles.close} onClick={onClose}>Esc</button>
         </header>
         {!data ? (
-          <p className={styles.hint}>{msg || '加载中…'}</p>
+          <p className={styles.loading}>{msg || t('加载中…')}</p>
         ) : (
-          <div className={styles.form}>
-            <div className={styles.presets}>
-              <span className={styles.presetsLabel}>快速预设</span>
-              <div className={styles.presetRow}>
-                {PRESETS.map((p) => (
-                  <button key={p.id} type="button" className={styles.presetBtn} onClick={() => applyPreset(p.id)}>
-                    {p.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <label>
-              <span>提供商</span>
-              <select value={provider} onChange={(e) => setProvider(e.target.value as any)}>
-                <option value="openai">OpenAI 兼容</option>
-                <option value="anthropic">Anthropic</option>
-              </select>
-            </label>
-            <label>
-              <span>模型</span>
-              <input value={model} onChange={(e) => setModel(e.target.value)} />
-            </label>
-            <label>
-              <span>接口地址</span>
-              <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" />
-            </label>
-            <label>
-              <span>API 密钥 {data.llm.hasKey ? '(已配置)' : '(未配置)'}</span>
-              <input
-                type="password"
-                placeholder={data.llm.hasKey ? '留空则不改' : 'sk-...'}
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                autoComplete="off"
-              />
-            </label>
-            <label>
-              <span>工作区 root</span>
-              <input value={workspaceRoot} onChange={(e) => setWorkspaceRoot(e.target.value)} />
-            </label>
-            <label className={styles.field}>
-              <span>技能档位</span>
-              <select
-                value={skillProfile}
-                onChange={(e) => { if (isSkillProfile(e.target.value)) setSkillProfile(e.target.value); }}
-              >
-                {/* Generated from the single source so this list cannot go stale
-                    again — a hand-written copy here was missing 「通用」. */}
-                {SKILL_PROFILES.map((p) => (
-                  <option key={p.id} value={p.id}>{p.label}{p.id === 'dev' ? '（默认）' : ''}</option>
-                ))}
-              </select>
-            </label>
-            <p className={styles.hint}>
-              加载 <code>.she/skills/_common</code> + 对应档目录。自定义 skill 放到 <code>.she/skills/custom/*.md</code>。侧栏状态栏也可快速切换。
-            </p>
-            <label className={styles.field}>
-              <span>{t('知识库路径（本工作区或共享）')}</span>
-              <input
-                value={kbDbPath}
-                onChange={(e) => setKbDbPath(e.target.value)}
-                placeholder="留空则用 <工作区>/.she/kb.sqlite"
-                spellCheck={false}
-              />
-            </label>
-            <p className={styles.hint}>
-              当前模式：<strong>{kbMode || '…'}</strong>
-              {kbMode === 'shared' ? '（多工作区可挂同一 sqlite，改完即重挂，一般不用整服重启）' : ''}
-              {kbMode === 'local' ? '（仅本工作区 .she/kb.sqlite）' : ''}
-              {kbMode === 'env' ? '（由 SHE_KB_PATH 指定，优先于 kb-link）' : ''}
-              。保存设置仍会写入路径；要用「贯穿」请用下面的共享操作。
-            </p>
-            <div id="settings-kb-share" ref={kbShareRef} className={styles.field} style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
-              <span style={{ fontSize: 13, fontWeight: 600 }}>{t('多工作区共享知识库')}</span>
-              <input
-                value={sharePath}
-                onChange={(e) => setSharePath(e.target.value)}
-                placeholder={t('共享 sqlite 路径，例如 ./shared/kb.sqlite（也可填局域网共享盘）')}
-                spellCheck={false}
-              />
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                <button type="button" className="she-btn she-btn--sm" disabled={kbBusy} onClick={() => void bindSharedKb()}>
-                  {t('挂到此共享库')}
-                </button>
-                <button type="button" className="she-btn she-btn--sm" disabled={kbBusy} onClick={() => void publishSharedKb()}>
-                  {t('把当前库发布到该路径')}
-                </button>
-                <button type="button" className="she-btn she-btn--sm" disabled={kbBusy} onClick={() => void restoreLocalKb()}>
-                  {t('恢复本工作区库')}
-                </button>
-              </div>
-              <input
-                value={mergeSourcePath}
-                onChange={(e) => setMergeSourcePath(e.target.value)}
-                placeholder={t('要合并进来的另一份 sqlite（另一工作区的库）')}
-                spellCheck={false}
-              />
-              <input
-                value={mergeTargetPath}
-                onChange={(e) => setMergeTargetPath(e.target.value)}
-                placeholder={t('可选：合并结果写到新共享路径（留空则并入当前库）')}
-                spellCheck={false}
-              />
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                <button type="button" className="she-btn she-btn--sm" disabled={kbBusy} onClick={() => void mergeOtherKb()}>
-                  {t('合并另一库')}
-                </button>
-              </div>
-              <p className={styles.hint} style={{ margin: 0 }}>
-                {t('推荐流程：工作区 A「发布到共享路径」→ 工作区 B「挂到此共享库」→ 两边贯穿同一套知识。')}
-                {t('若两套库都有内容，用「合并另一库」拼成一份再挂载。')}
-              </p>
-            </div>
-              
-            <p className={styles.hint}>
-              思考强度已移到对话框发送键旁边，可随时拖动调节。主流模型特点见 skill 档。
-            </p>
-            <label>
-              <span>备用接口地址（选填）</span>
-              <input value={fallbackBaseUrl} onChange={(e) => setFallbackBaseUrl(e.target.value)} placeholder="主接口失败时回退" />
-            </label>
-            <label>
-              <span>备用模型</span>
-              <input value={fallbackModel} onChange={(e) => setFallbackModel(e.target.value)} />
-            </label>
-            <label>
-              <span>备用提供商</span>
-              <select value={fallbackProvider} onChange={(e) => setFallbackProvider(e.target.value as any)}>
-                <option value="openai">OpenAI 兼容</option>
-                <option value="anthropic">Anthropic</option>
-              </select>
-            </label>
-            <label>
-              <span>备用 API 密钥 {data.llm.fallback?.hasKey ? '(已配置)' : '(未配置)'}</span>
-              <input
-                type="password"
-                placeholder={data.llm.fallback?.hasKey ? '留空则不改' : '选填'}
-                value={fallbackApiKey}
-                onChange={(e) => setFallbackApiKey(e.target.value)}
-                autoComplete="off"
-              />
-            </label>
-            <div className={styles.row} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
-              <div>
-                <div style={{ fontWeight: 600 }}>{t('外观主题')}</div>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>{t('对话区可用拖拽把手调节侧栏 / 轨迹宽度')}</div>
-              </div>
-              <button type="button" onClick={onToggleTheme} style={{ padding: '6px 12px', borderRadius: 8, cursor: 'pointer' }}>
-                {theme === 'light' ? t('切换到深色') : t('切换到浅色')}
-              </button>
-              {onOpenTheme ? (
-                <button type="button" className="she-btn she-btn--sm" onClick={onOpenTheme}>
-                  {t('自定义样式…')}
-                </button>
-              ) : null}
-            </div>
-
-            {/*
-              Language switch.
-
-              Placed next to the theme control because they are the same kind of
-              setting — a personal display preference with no effect on the agent.
-              Switching re-renders the whole tree, so it takes effect immediately
-              everywhere rather than needing a reload.
-            */}
-            <div className={styles.row} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
-              <div>
-                <div style={{ fontWeight: 600 }}>{t('界面语言')}</div>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>
-                  {locale === 'zh' ? t('界面文案语言，立刻生效') : 'UI language, applied immediately'}
-                </div>
-              </div>
-              <div style={{ display: 'flex', gap: 6 }}>
-                {LOCALES.map((l) => (
+          <>
+            <div className={styles.shell}>
+              {/*
+                分区导航。原来是一整条平铺表单，用户要在一千多像素之后才能找到权限开关，找到之前
+                只能认为它不存在 —— 侧栏把"这里有五件事"先说出来，再让他挑。
+              */}
+              <nav className={styles.nav}>
+                {SECTIONS.map((s) => (
                   <button
-                    key={l.id}
+                    key={s.id}
                     type="button"
-                    onClick={() => onLocale(l.id)}
-                    style={{
-                      padding: '6px 12px',
-                      borderRadius: 8,
-                      cursor: 'pointer',
-                      fontWeight: locale === l.id ? 600 : 400,
-                      border: locale === l.id ? '1px solid var(--accent, #0a84ff)' : '1px solid var(--border)',
-                      background: locale === l.id ? 'rgba(10,132,255,0.12)' : 'transparent',
-                      color: 'inherit',
-                    }}
+                    className={`${styles.navItem} ${section === s.id ? styles.navItemActive : ''}`}
+                    onClick={() => setSection(s.id)}
+                    title={t(s.hint)}
                   >
-                    {l.label}
+                    {t(s.label)}
                   </button>
                 ))}
+              </nav>
+              <div className={styles.content}>
+                <div className={styles.form}>{renderSection()}</div>
               </div>
             </div>
-
-            {background ? (
-              <div
-                className={styles.row}
-                style={{ marginBottom: 12, padding: 12, border: '1px dashed var(--border)', borderRadius: 10 }}
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  const f = e.dataTransfer.files?.[0];
-                  if (f) void background.setFromFile(f);
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-                  <div>
-                    <div style={{ fontWeight: 600 }}>背景</div>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>
-                      {background.meta.filename
-                        ? `当前：${background.meta.filename}（${background.meta.kind === 'video' ? '视频' : '图片'}）`
-                        : '把 jpg / png / mp4 拖到这里，各分区将变为毛玻璃'}
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                    <label style={{ padding: '6px 12px', borderRadius: 8, cursor: 'pointer', border: '1px solid var(--border)' }}>
-                      选择文件
-                      <input
-                        type="file"
-                        accept="image/*,video/*"
-                        style={{ display: 'none' }}
-                        onChange={(e) => {
-                          const f = e.target.files?.[0];
-                          if (f) void background.setFromFile(f);
-                          e.currentTarget.value = '';
-                        }}
-                      />
-                    </label>
-                    {background.meta.filename ? (
-                      <>
-                        <button type="button" onClick={() => background.setEnabled(!background.enabled)} style={{ padding: '6px 12px', borderRadius: 8, cursor: 'pointer' }}>
-                          {background.enabled ? '临时关闭' : '启用'}
-                        </button>
-                        <button type="button" onClick={() => void background.clear()} style={{ padding: '6px 12px', borderRadius: 8, cursor: 'pointer' }}>
-                          移除
-                        </button>
-                      </>
-                    ) : null}
-                  </div>
-                </div>
-                {background.busy ? <p className={styles.hint}>处理中…</p> : null}
-                {background.error ? <p className={styles.hint} style={{ color: 'var(--danger, #f85149)' }}>{background.error}</p> : null}
-              </div>
-            ) : null}
-            <label className={styles.checkRow}>
-              <input
-                type="checkbox"
-                checked={automationMode === true}
-                onChange={(e) => {
-                  const on = e.target.checked;
-                  setAutomationMode(on);
-                  // Turning automation off must also drop "allow all commands",
-                  // otherwise destructive shell stays silently enabled.
-                  setAllowAllCommands(on);
-                }}
-              />
-              <span>
-                自动化模式
-                <em className={styles.warn}>（少请示：做完再汇报，不等你逐步确认）</em>
-              </span>
-            </label>
-            <label className={styles.checkRow}>
-              <input
-                type="checkbox"
-                checked={allowAllCommands === true}
-                onChange={(e) => setAllowAllCommands(e.target.checked)}
-              />
-              <span>
-                允许所有命令
-                <em className={styles.warn}>
-                  （这是真正止住「危险操作确认」和「写文件待批准」的开关 — 仅本地可信环境）
-                </em>
-              </span>
-            </label>
-            <p className={styles.hint}>
-              项目规则：编辑工作区 <code>.she/rules.md</code>，新建/重开 Agent 会写入系统提示。
-            </p>
-
-            <div style={{ marginTop: 18, paddingTop: 14, borderTop: '1px solid var(--border)' }}>
-              <ShortcutEditor />
-            </div>
-
-            <div className={styles.actions}>
-              <button type="button" onClick={save} disabled={saving}>
-                {saving ? '保存中…' : '保存'}
+            <footer className={styles.footer}>
+              <button type="button" className={styles.saveBtn} onClick={save} disabled={saving}>
+                {saving ? t('保存中…') : t('保存')}
               </button>
               {msg ? <span className={styles.hint}>{msg}</span> : null}
-            </div>
-          </div>
+            </footer>
+          </>
         )}
       </div>
     </div>

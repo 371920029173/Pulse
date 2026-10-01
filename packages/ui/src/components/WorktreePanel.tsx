@@ -63,9 +63,10 @@ export function WorktreePanel({ onClose, repo, onOpenSession }: {
      *
      * There is no worktree event stream, and the thing that changes without this window doing
      * anything is not the list — it is the uncommitted state of a tree a session is working in.
-     * A slow interval is right for that: the alternative is a "refresh" the user has to remember.
+     * The alternative is a "refresh" the user has to remember, so it polls on the same 5s
+     * cadence as the rest of the live panels.
      */
-    const timer = window.setInterval(() => void refresh(), 10_000);
+    const timer = window.setInterval(() => void refresh(), 5000);
     return () => window.clearInterval(timer);
   }, [refresh]);
 

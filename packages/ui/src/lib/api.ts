@@ -305,3 +305,32 @@ export async function uploadAttachment(file: File | Blob, filename?: string): Pr
 export function attachmentUrl(url: string): string {
   return url.startsWith('/') ? `${BASE}${url}` : url;
 }
+
+/**
+ * Write settings, then let the other windows' backends catch up.
+ *
+ * Settings live in one `.env`, but every backend keeps its own `config` in memory and reads that file
+ * only at startup. Saving in one window therefore used to leave every other window on its old values
+ * until it was restarted — measured: window A set the input price to 7 and read back 7 while window B
+ * went on reading 1.
+ *
+ * Every settings write goes through here rather than calling `fetchJSON('/api/settings', {PUT})`
+ * directly, because the broadcast is the part that is easy to forget: a new call site would silently
+ * reintroduce the inconsistency for whichever field it wrote. The shell replies it to the other
+ * backends through this same endpoint, so the server needs no second "reload" path.
+ *
+ * The notification is fire-and-forget on purpose — the write already succeeded, and failing to reach
+ * a backend is not a reason to tell the user their save failed.
+ */
+export async function putSettings<T = { ok: boolean }>(body: Record<string, unknown>): Promise<T> {
+  const res = await fetchJSON<T>('/api/settings', { method: 'PUT', body });
+  const bridge = (globalThis as {
+    sheDesktop?: { settingsChanged?: (b: unknown) => unknown };
+  }).sheDesktop;
+  try {
+    void bridge?.settingsChanged?.(body);
+  } catch {
+    // A shell without the bridge (older build, plain browser) simply has nothing to notify.
+  }
+  return res;
+}

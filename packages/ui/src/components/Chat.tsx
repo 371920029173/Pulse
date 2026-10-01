@@ -4,7 +4,7 @@ import { continuePrompt } from '../hooks/useChat';
 import { DiffPanel } from './DiffPanel';
 import { ComposerPanel } from './ComposerPanel';
 import { Markdown } from './Markdown';
-import { IconSend, IconStop } from './Icons';
+import { IconSend, IconStop, IconPaperclip } from './Icons';
 import { t } from '../lib/i18n';
 import { fetchJSON, uploadAttachment, attachmentUrl, type UploadedAttachment } from '../lib/api';
 import styles from '../styles/Chat.module.css';
@@ -60,9 +60,6 @@ interface ChatProps {
   onSend: (text: string, images?: Array<{ path: string; mime: string; name?: string; url?: string }>) => void;
   onInterject?: (text: string) => void;
   onStop: () => void;
-  onPause?: () => void;
-  onResume?: () => void;
-  isPaused?: boolean;
   onConfirm: () => void;
   onDismissConfirm: () => void;
   onApplyPatch: () => void;
@@ -87,6 +84,14 @@ interface ChatProps {
   onOpenSkills?: () => void;
   /** Open the scheduled-tasks panel. */
   onOpenSchedule?: () => void;
+  /**
+   * Open the cache-management panel (token pricing → compression strategy).
+   *
+   * Lives here rather than on the status bar: it CHANGES configuration, and the status
+   * bar is the read-only telemetry row. It also belongs with 计划 / 时间线 / 技能库,
+   * which are all "act on this conversation" and all sit under the composer.
+   */
+  onOpenCache?: () => void;
   focusChat?: boolean;
   onToggleFocus?: () => void;
 }
@@ -830,19 +835,48 @@ function mentionQuery(value: string, caret: number): { kind: 'file' | 'folder' |
   return { kind, start: caret - m[0].length, end: caret, q: m[2] || '' };
 }
 
+const ATTACHMENT_BADGE: Record<string, string> = {
+  '.pdf': 'PDF', '.md': 'MD', '.markdown': 'MD', '.txt': 'TXT', '.json': 'JSON',
+  '.csv': 'CSV', '.tsv': 'TSV', '.log': 'LOG', '.yaml': 'YAML', '.yml': 'YAML',
+  '.xml': 'XML', '.html': 'HTML', '.css': 'CSS', '.js': 'JS', '.ts': 'TS',
+  '.tsx': 'TSX', '.jsx': 'JSX', '.py': 'PY', '.go': 'GO', '.rs': 'RS',
+  '.java': 'JAVA', '.sql': 'SQL', '.sh': 'SH', '.ps1': 'PS1', '.zip': 'ZIP',
+  '.docx': 'DOC', '.doc': 'DOC', '.xlsx': 'XLS', '.ppt': 'PPT', '.pptx': 'PPT',
+};
+
+/**
+ * The label a chip shows for a non-image file: `PDF`, `CSV`, `BIN`.
+ *
+ * Three or four characters, because the badge is a fixed square — anything longer moves the
+ * filename, which is the part the user is actually reading.
+ */
+function attachmentBadge(name: string): string {
+  const dot = name.lastIndexOf('.');
+  const ext = dot > 0 ? name.slice(dot).toLowerCase() : '';
+  return ATTACHMENT_BADGE[ext] ?? (ext ? ext.slice(1, 5).toUpperCase() : 'FILE');
+}
+
+/**
+ * The stored name without the generated prefix: `m3k1a2b3-9f0d1e2a-报告.pdf` → `报告.pdf`.
+ *
+ * The prefix is what keeps two pastes of `image.png` apart on disk, and it is noise in a chip.
+ * If the shape ever changes the whole name is shown, which is merely ugly rather than wrong.
+ */
+function attachmentDisplayName(name: string): string {
+  const m = /^[0-9a-z]+-[0-9a-f]{8}-(.+)$/.exec(name);
+  return m ? m[1] : name;
+}
+
 export function Chat({
   messages,
   isLoading,
   toolProgress,
-  isPaused = false,
   pendingConfirm,
   pendingPatch,
   pendingPatches = [],
   onSend,
   onInterject,
   onStop,
-  onPause,
-  onResume,
   skillProfile = 'dev',
   onSkillProfile,
   thinkingLevel = 'medium',
@@ -866,6 +900,7 @@ export function Chat({
   onOpenTimeline,
   onOpenSkills,
   onOpenSchedule,
+  onOpenCache,
   focusChat = false,
   onToggleFocus,
 }: ChatProps) {
@@ -1212,6 +1247,35 @@ export function Chat({
   );
 
   /**
+   * Upload files and hang them on the message.
+   *
+   * One path for all three ways in — the picker, a paste, and a drop that carried no real path —
+   * because they were three separate implementations before and only the paste one was ever
+   * exercised. Each file is uploaded on its own so one rejection (too large, wrong type) does not
+   * discard the rest; the failures are collected and shown together.
+   */
+  const addFiles = useCallback(async (files: File[]) => {
+    if (!files.length) return;
+    setAttachError(null);
+    setAttachBusy(true);
+    const failed: string[] = [];
+    try {
+      for (const file of files) {
+        try {
+          // A pasted image arrives as `image.png` from the clipboard; keep a real name if there is one.
+          const uploaded = await uploadAttachment(file, file.name || 'pasted');
+          setAttachments((prev) => [...prev, uploaded]);
+        } catch (err) {
+          failed.push(`${file.name || '未命名'}：${(err as Error).message}`);
+        }
+      }
+    } finally {
+      setAttachBusy(false);
+      if (failed.length) setAttachError(t('上传失败：{list}', { list: failed.join('；') }));
+    }
+  }, []);
+
+  /**
    * Paste: an image becomes an attachment, anything else pastes as usual.
    *
    * Only `preventDefault` when we actually took an image, so pasting text, a path, or a code block
@@ -1227,25 +1291,19 @@ export function Chat({
     }
     if (!files.length) return;
     e.preventDefault();
-    setAttachError(null);
-    setAttachBusy(true);
-    void (async () => {
-      try {
-        for (const file of files) {
-          // A pasted image arrives as `image.png` from the clipboard; keep a real name if there is one.
-          const uploaded = await uploadAttachment(file, file.name || 'pasted');
-          setAttachments((prev) => [...prev, uploaded]);
-        }
-      } catch (err) {
-        setAttachError((err as Error).message);
-      } finally {
-        setAttachBusy(false);
-      }
-    })();
-  }, []);
+    void addFiles(files);
+  }, [addFiles]);
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const removeAttachment = useCallback((name: string) => {
     setAttachments((prev) => prev.filter((a) => a.name !== name));
+  }, []);
+
+  /** `12.3KB` / `1.4MB`. Chips show this instead of raw bytes. */
+  const humanSize = useCallback((bytes: number) => {
+    if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+    return `${Math.max(1, Math.round(bytes / 1024))}KB`;
   }, []);
 
   return (
@@ -1260,14 +1318,24 @@ export function Chat({
         e.preventDefault();
         setDragging(false);
         const paths: string[] = [];
+        const uploadable: File[] = [];
         const files = e.dataTransfer.files;
         for (let i = 0; i < files.length; i++) {
           const f = files[i] as File & { path?: string };
-          const p = f.path || f.name;
-          if (p) paths.push(p);
+          /*
+           * A real filesystem path means the shell gave us one, and a `@file:` reference is
+           * strictly better than an upload: the agent reads the live file, and edits land in
+           * place. In a plain browser `f.path` is absent and `f.name` is only a basename, which
+           * resolves to nothing — so those files are uploaded instead of referenced. This is the
+           * case that made "拖动文件" look broken: the drop silently produced a reference to a
+           * file that was never there.
+           */
+          if (f.path) paths.push(f.path);
+          else uploadable.push(f);
         }
         const uri = e.dataTransfer.getData('text/plain');
-        if (uri && !paths.includes(uri)) paths.push(uri);
+        if (uri && !paths.includes(uri) && !uploadable.length) paths.push(uri);
+        if (uploadable.length) void addFiles(uploadable);
         if (paths.length) onDropPaths?.(paths);
       }}
     >
@@ -1275,9 +1343,6 @@ export function Chat({
       <div className={styles.header}>
         <span className={styles.headerTitle}>{sessionTitle || '对话'}</span>
         <div className={styles.headerActions}>
-          {isLoading && isPaused ? (
-            <span className={styles.headerHint}>已暂停显示</span>
-          ) : null}
         </div>
       </div>
 
@@ -1425,19 +1490,31 @@ export function Chat({
         <div className={styles.inputWrapper}>
           {/*
             Attachment chips sit above the box, inside the same rounded frame.
-            Thumbnails rather than filenames: the whole point of pasting a screenshot is not having
-            to describe it, so the user has to be able to check they pasted the right one — a
-            filename from the clipboard is always `image.png`.
+            A picture shows its thumbnail — the whole point of pasting a screenshot is not having
+            to describe it, and the clipboard name is always `image.png`, so the strip is how the
+            user checks they pasted the right one. Everything else shows a type badge plus the
+            filename and size, because for a document those are the only identifying things there
+            are, and a chip that showed neither is what made upload look unfinished.
           */}
           {attachments.length || attachError || attachBusy ? (
             <div className={styles.attachRow}>
               {attachments.map((a) => (
-                <div key={a.name} className={styles.attachChip} title={`${a.name} · ${Math.max(1, Math.round(a.bytes / 1024))}KB`}>
+                <div key={a.name} className={styles.attachChip} title={`${a.path} · ${a.mime || '未知类型'} · ${humanSize(a.bytes)}`}>
+                  {/*
+                    A picture shows itself; anything else shows what it is.
+                    The old chip printed the first four characters of the extension and nothing
+                    else, so a dropped `报告.pdf` and a dropped `数据.csv` looked identical — the
+                    user could not tell what they had attached, which is most of "上传过于简陋".
+                  */}
                   {a.mime.startsWith('image/') ? (
                     <img className={styles.attachThumb} src={attachmentUrl(a.url)} alt={a.name} />
                   ) : (
-                    <span className={styles.attachExt}>{a.name.split('.').pop()?.toUpperCase().slice(0, 4)}</span>
+                    <span className={styles.attachExt}>{attachmentBadge(a.name)}</span>
                   )}
+                  <span className={styles.attachMeta}>
+                    <span className={styles.attachName}>{attachmentDisplayName(a.name)}</span>
+                    <span className={styles.attachSize}>{humanSize(a.bytes)}</span>
+                  </span>
                   <button
                     type="button"
                     className={styles.attachRemove}
@@ -1452,13 +1529,43 @@ export function Chat({
             </div>
           ) : null}
 
+          <div className={styles.inputRow}>
+            {/*
+              The only visible way to add a file.
+              Paste and drag existed and worked, but nothing said so: a user who wanted to attach a
+              PDF looked for a paperclip, did not find one, and concluded attachments were
+              image-only. `accept` is deliberately wide and names no types — the server decides
+              what it will store, and a narrow `accept` is how a browser silently greys out the
+              file the user came to pick.
+            */}
+            <button
+              type="button"
+              className={styles.attachBtn}
+              onClick={() => fileInputRef.current?.click()}
+              disabled={attachBusy}
+              title={t('添加文件（也可以直接拖进来或粘贴）')}
+              aria-label={t('添加文件')}
+            ><IconPaperclip size={16} /></button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className={styles.attachInput}
+              onChange={(e) => {
+                const picked = Array.from(e.target.files ?? []);
+                // Cleared so picking the same file twice in a row still fires a change event.
+                e.currentTarget.value = '';
+                if (picked.length) void addFiles(picked);
+              }}
+            />
+
           <textarea
             ref={textareaRef}
             className={styles.textarea}
             placeholder={
               isLoading
                 ? '补充信息…（Enter 追加 · 连按两次 Enter 打断 · Shift+Enter 换行）'
-                : '@file: / @folder: / @symbol: · 可粘贴图片（Enter 发送 · Shift+Enter 换行）'
+                : '@file: / @folder: / @symbol: · 用 📎 添加文件、拖进来或粘贴（Enter 发送 · Shift+Enter 换行）'
             }
             value={input}
             onChange={handleTextareaChange}
@@ -1469,7 +1576,6 @@ export function Chat({
           {/*
             Cursor-style send control: one button.
             空闲 → ↑ 发送；运行中 → ■ 点击打断。输入非空时按钮高亮。
-            暂停/继续移到输入提示行，避免一次挤四个按钮。
           */}
           {isLoading ? (
             <button
@@ -1487,6 +1593,7 @@ export function Chat({
               aria-label={t('发送')}
             ><IconSend size={17} /></button>
           )}
+          </div>
         </div>
 
         <div className={styles.modeSwitchRow}>
@@ -1601,16 +1708,16 @@ export function Chat({
                 定时任务
               </button>
             ) : null}
-            {/* Pause is a view-only concern; keep it out of the primary send row. */}          {isLoading ? (
-            <button
-              type="button"
-              className="she-btn she-btn--chip"
-              onClick={isPaused ? onResume : onPause}
-              title={isPaused ? '继续显示' : '暂停显示（后台继续执行）'}
-            >
-              {isPaused ? '继续显示' : '暂停显示'}
-            </button>
-          ) : null}
+            {onOpenCache ? (
+              <button
+                type="button"
+                className="she-btn she-btn--chip"
+                onClick={onOpenCache}
+                title={t('缓存管理：填写 token 单价，按成本分配压缩策略（含提示缓存命中情况）')}
+              >
+                {t('缓存管理')}
+              </button>
+            ) : null}
           <span className={styles.inputHintInline}>Enter 发送 · Shift+Enter 换行 · Tab 选中 @ 联想</span>
         </div>
       </div>

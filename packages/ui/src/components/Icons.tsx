@@ -60,6 +60,18 @@ export const IconPlus = (p: IconProps) => (
   <Svg {...p}><path d="M12 5v14M5 12h14" /></Svg>
 );
 
+/**
+ * Paperclip, for "add a file".
+ *
+ * Drawn as the familiar angled clip rather than a rectangle with a fold: at 16px the fold
+ * collapses into a smudge, and the clip shape is what makes "attach" readable at that size.
+ */
+export const IconPaperclip = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M20.4 11.6l-7.5 7.5a4.6 4.6 0 0 1-6.5-6.5l7.2-7.2a3 3 0 0 1 4.3 4.3l-7.2 7.2a1.5 1.5 0 0 1-2.1-2.1l6.6-6.6" />
+  </Svg>
+);
+
 export const IconClose = (p: IconProps) => (
   <Svg {...p}><path d="M6 6l12 12M18 6L6 18" /></Svg>
 );

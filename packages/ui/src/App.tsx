@@ -3,13 +3,14 @@ import { useChat } from './hooks/useChat';
 import { useKB } from './hooks/useKB';
 import { useBackground } from './hooks/useBackground';
 import { useClusterChat } from './hooks/useClusterChat';
-import { fetchJSON, apiFetch } from './lib/api';
+import { fetchJSON, apiFetch, putSettings } from './lib/api';
 import { isSkillProfile } from './lib/skills';
 import { Chat, type SkillProfileId, type ThinkingLevel } from './components/Chat';
 import { Sidebar, type SessionMeta } from './components/Sidebar';
 import { PulseTracePanel } from './components/PulseTracePanel';
 import { GroupBrowser } from './components/GroupBrowser';
 import { Settings } from './components/Settings';
+import { ContextCostPanel } from './components/ContextCostPanel';
 import { KbImport } from './components/KbImport';
 import { ImportKnowledge } from './components/ImportKnowledge';
 import { StatusBar } from './components/StatusBar';
@@ -90,8 +91,51 @@ export function App() {
   /**
    * Home screen gate. Shown on first load so the user picks a workspace;
    * "直接进入" skips it for subsequent visits in the same session.
+   *
+   * `?ws=` also counts as "already entered". Switching to another workspace moves the window to a
+   * different origin (one backend per workspace), and `sessionStorage` is per origin — so the flag
+   * above cannot survive that navigation. The shell passes the workspace in the URL precisely so the
+   * window does not fall back to the landing page and ask the user to pick the folder they just
+   * picked.
    */
-  const [entered, setEntered] = useState<boolean>(() => sessionStorage.getItem('she.entered') === '1');
+  const handoffWs = (() => {
+    try {
+      const raw = new URLSearchParams(window.location.search).get('ws');
+      return raw && raw.trim() ? raw.trim() : null;
+    } catch {
+      return null;
+    }
+  })();
+  const [entered, setEntered] = useState<boolean>(
+    () => handoffWs !== null || sessionStorage.getItem('she.entered') === '1',
+  );
+  /**
+   * Which project this window is actually mounted on, for the sidebar label.
+   *
+   * Read from the server rather than remembered locally: the mount point is server state, and the
+   * whole failure this label exists to prevent is the two disagreeing — the app can be pointed at a
+   * directory by something other than this window, and a label that echoed a local guess would say
+   * "you are in your project" while the server was elsewhere.
+   */
+  const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
+  /**
+   * True from the moment a workspace is chosen until its own data has arrived.
+   *
+   * Without this, entering `B` rendered the rail from the state still held for `A` — the previous
+   * project's conversations stayed on screen for up to one poll interval and then "disappeared",
+   * which reads as data loss rather than as a switch. Clearing the list is what makes the race
+   * impossible; this flag is what stops the empty list from *also* being a lie (an empty rail and a
+   * not-yet-loaded rail look identical), so the rail can say which one it is.
+   */
+  const [workspaceLoading, setWorkspaceLoading] = useState(false);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const d = await fetchJSON<{ current?: string }>('/api/workspaces');
+        if (d.current) setWorkspaceRoot(d.current);
+      } catch { /* non-fatal: the label is an affordance, not a gate */ }
+    })();
+  }, [entered]);
   // Session identity must exist before useChat so every request is bound to
   // this window's own conversation.
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
@@ -135,6 +179,8 @@ export function App() {
   const [showRuns, setShowRuns] = useState(false);
   const [showWorktrees, setShowWorktrees] = useState(false);
   const [showTheme, setShowTheme] = useState(false);
+  /** 动态上下文 / 成本面板：定价 → 压缩策略 → 免责声明。 */
+  const [showCost, setShowCost] = useState(false);
 
   /*
    * The user stylesheet lives here, at the root, not inside the editor panel.
@@ -354,6 +400,17 @@ export function App() {
    * The server creates a session on the first message if none exists. Without
    * refetching on BOTH edges of `isLoading`, sending into an empty app left the
    * rail showing "暂无会话" even though a conversation was running.
+   *
+   * The turn edges are not enough on their own: a session started by a scheduled task, by
+   * another window, or by a cluster room changes the list while this one is idle. The rail
+   * would then be stale until something happened locally. So it is also polled.
+   *
+   * 5 秒是刻意的折中：轮询本身很便宜（一次 GET `/api/conversations`，服务端只读），而"列表比现实
+   * 晚几秒"正是用户能立刻看见的那类问题 —— 用户反馈"页面状态刷新勤快点"就是指这个。
+   *
+   * Polling is safe for the local selection: `pickActiveSession` keeps this window's own choice
+   * (`local !== null` wins), so a poll can refresh the list without yanking the user onto a
+   * different conversation.
    */
   const wasLoadingRef = useRef(false);
   useEffect(() => {
@@ -365,6 +422,16 @@ export function App() {
       refreshSessions().catch(() => undefined);
     }
   }, [chat.isLoading, refreshSessions]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      // Not while the tab is hidden: a backgrounded window would keep asking forever for a
+      // list nobody is reading. It refetches on the next visible tick after focus returns.
+      if (document.visibilityState === 'hidden') return;
+      refreshSessions().catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [refreshSessions]);
 
   /**
    * Adopt the server's active session when we do not have one locally.
@@ -388,7 +455,7 @@ export function App() {
       } catch { /* ignore */ }
     };
     void adopt();
-    const t = window.setInterval(adopt, 4000);
+    const t = window.setInterval(adopt, 2500);
     return () => { cancelled = true; window.clearInterval(t); };
   }, [activeSessionId, clusterRoomId]);
 
@@ -592,6 +659,7 @@ export function App() {
 
   const handleEnterWorkspace = useCallback(async (root: string) => {
     sessionStorage.setItem('she.entered', '1');
+    setWorkspaceRoot(root);
     /*
      * Drop this window's saved conversation BEFORE adopting one.
      *
@@ -602,9 +670,23 @@ export function App() {
      */
     try { sessionStorage.removeItem('she.session'); } catch { /* ignore */ }
     setActiveSessionId(null);
+    /*
+     * Drop the outgoing workspace's rail entries and say we are loading.
+     *
+     * Both halves are needed. Clearing alone leaves an empty list that is indistinguishable from
+     * "this project has no conversations" — the user would read that as the same disappearance,
+     * just faster. Loading alone leaves the old list on screen and the flag unobservable. The
+     * pointer is deliberately nulled too, so no row can render as "current" for a workspace it no
+     * longer belongs to.
+     */
+    setSessions([]);
+    setWorkspaceLoading(true);
     setEntered(true);
     // Re-bind everything to the newly selected workspace.
     try {
+      // The rail is refreshed as part of the switch, not left to the next poll: it is the list the
+      // user is looking at while the rest of the window re-binds.
+      await refreshSessions();
       const data = await fetchJSON<{ active_id: string | null }>('/api/sessions');
       setActiveSessionId(data.active_id);
       await chat.resetLocal();
@@ -614,9 +696,26 @@ export function App() {
       await kb.fetchTree();
     } catch {
       /* non-fatal */
+    } finally {
+      setWorkspaceLoading(false);
     }
     void root;
-  }, [chat, kb]);
+  }, [chat, kb, refreshSessions]);
+
+  /**
+   * Land straight in the workspace the shell handed over in `?ws=`.
+   *
+   * Switching workspaces moves this window to another backend (a different origin), and starting
+   * `entered` at true from the URL is only half of it — the window would still be showing an empty
+   * state until the 5s poll caught up, which is the same "where did my conversations go" moment this
+   * change exists to remove. So the handoff runs the same entry sequence a manual pick would, once.
+   */
+  const handoffHandled = useRef(false);
+  useEffect(() => {
+    if (!handoffWs || handoffHandled.current) return;
+    handoffHandled.current = true;
+    void handleEnterWorkspace(handoffWs);
+  }, [handoffWs, handleEnterWorkspace]);
 
   const handleSkillProfile = useCallback(async (profile: SkillProfileId) => {
     setSkillProfile(profile);
@@ -626,7 +725,7 @@ export function App() {
   const handleThinkingLevel = useCallback(async (level: ThinkingLevel) => {
     setThinkingLevel(level);
     try {
-      await fetchJSON('/api/settings', { method: 'PUT', body: { thinkingLevel: level } });
+      await putSettings({ thinkingLevel: level });
     } catch {
       /* non-fatal: local state still applies for this session */
     }
@@ -849,13 +948,14 @@ export function App() {
         else if (showRuns) setShowRuns(false);
         else if (showWorktrees) setShowWorktrees(false);
         else if (showMemo) setShowMemo(false);
+        else if (showCost) setShowCost(false);
         else if (selectedGroupId) setSelectedGroupId(null);
         else setShowTrace(false);
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [selectedGroupId, showSettings, showImport, showKnowledge, filePreview, showCheckpoints, showPalette, showTerminal, showTrace, showCluster, showPlans, showAudit, showRuns, showWorktrees, chat, handleNewSession, focusChat, theme]);
+  }, [selectedGroupId, showSettings, showImport, showKnowledge, filePreview, showCheckpoints, showPalette, showTerminal, showTrace, showCluster, showPlans, showAudit, showRuns, showWorktrees, showCost, chat, handleNewSession, focusChat, theme]);
 
   /**
    * The wallpaper layer.
@@ -918,6 +1018,7 @@ export function App() {
         />
       )}
       {showTheme && <ThemeStudio onClose={() => setShowTheme(false)} userTheme={userTheme} />}
+      {showCost && <ContextCostPanel onClose={() => setShowCost(false)} />}
     </>
   );
 
@@ -992,6 +1093,8 @@ export function App() {
             <aside className={styles.sidebar}>
               <Sidebar
                 tree={kb.tree}
+                workspaceRoot={workspaceRoot}
+                workspaceLoading={workspaceLoading}
                 sessions={sessions}
                 activeSessionId={activeSessionId}
                 onGroupClick={handleGroupClick}
@@ -1028,7 +1131,6 @@ export function App() {
               messages={inGroupMode ? clusterChat.messages : chat.messages}
               isLoading={inGroupMode ? clusterChat.isLoading : chat.isLoading}
               toolProgress={inGroupMode ? undefined : chat.toolProgress}
-              isPaused={chat.isPaused}
               pendingConfirm={inGroupMode ? null : chat.pendingConfirm}
               pendingPatch={inGroupMode ? null : chat.pendingPatch}
               pendingPatches={inGroupMode ? [] : chat.pendingPatches}
@@ -1061,8 +1163,6 @@ export function App() {
               onSend={inGroupMode ? clusterChat.send : chat.sendMessage}
               onInterject={inGroupMode ? clusterChat.send : chat.interject}
               onStop={inGroupMode ? clusterChat.stop : chat.stopStreaming}
-              onPause={chat.pauseStreaming}
-              onResume={chat.resumeStreaming}
               onConfirm={chat.confirmPending}
               onDismissConfirm={chat.dismissConfirm}
               onApplyPatch={chat.applyPendingPatch}
@@ -1074,6 +1174,7 @@ export function App() {
               onRewindTo={inGroupMode ? undefined : (i) => { void handleRewindTo(i); }}
               onOpenSkills={() => setShowSkills(true)}
             onOpenSchedule={() => setShowSchedule(true)}
+              onOpenCache={() => setShowCost(true)}
               onImportContext={() => setShowSources(true)}
               onOpenPlans={() => setShowPlans(true)}
               onOpenTimeline={() => setShowCheckpoints(true)}

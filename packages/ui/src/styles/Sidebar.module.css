@@ -45,6 +45,44 @@
   font-family: var(--font-mono);
 }
 
+/*
+  当前工作区标签。放在 logo 下面单独一行，而不是挤进那一行按钮里：它回答的是"这一屏属于哪个
+  项目"，是整块内容的标题，和其他图标按钮不是一类东西。
+
+  用按钮而不是纯文本，是因为它同时是"回到主页切换工作区"的入口 —— 看见「工作区：_she-live-test_2」
+  的人下一步一定是想把工作区换掉。
+*/
+.workspace {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 12px 8px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.workspace:hover { background: var(--bg-hover); color: var(--text-primary); }
+.workspace:focus-visible { outline: 2px solid var(--border-focus); outline-offset: -2px; }
+
+.workspaceLabel { color: var(--text-tertiary); flex-shrink: 0; }
+
+/* 目录名可能很长：省略号是必需的，完整路径在 title 里。 */
+.workspaceName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
 .sectionHeader {
   display: flex;
   align-items: center;
@@ -382,6 +420,46 @@
   font-size: 12px;
   line-height: 1.6;
   color: var(--text-tertiary);
+}
+
+/*
+  切换工作区时的骨架。
+
+  刻意画成"几行占位"而不是「读取中…」四个字：这一屏的高度和密度会保持住，面板不会因为换了一句话
+  而跳一下；而且它明确表示"内容还没来"，与「暂无会话」那种"内容就是空的"在视觉上分得开 ——
+  这正是这次要修的混淆。
+*/
+.skeleton {
+  padding: 6px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.skeletonRow {
+  height: 26px;
+  border-radius: 8px;
+  background: linear-gradient(
+    90deg,
+    var(--bg-tertiary) 0%,
+    color-mix(in srgb, var(--bg-tertiary) 60%, var(--text-tertiary)) 50%,
+    var(--bg-tertiary) 100%
+  );
+  background-size: 200% 100%;
+  animation: sheSkeleton 1.2s ease-in-out infinite;
+}
+
+/* 缓动要慢、幅度要小：这一行的作用是"说明还没好"，不是吸引注意。 */
+@keyframes sheSkeleton {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeletonRow {
+    animation: none;
+    opacity: 0.6;
+  }
 }
 
 .divider {
