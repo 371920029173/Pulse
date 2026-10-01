@@ -111,7 +111,7 @@
 .gateOpen, .gateClosed {
   font-size: 11px;
   padding: 1px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   white-space: nowrap;
 }
 .gateOpen { color: #0a7d38; background: rgba(52, 199, 89, 0.16); }
@@ -204,7 +204,7 @@
 .badge {
   font-size: 11px;
   padding: 1px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   white-space: nowrap;
 }
 .tone_running { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }

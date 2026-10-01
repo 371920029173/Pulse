@@ -138,14 +138,15 @@
 .segmented {
   display: inline-flex;
   padding: 2px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   border: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg-tertiary) 70%, transparent);
 }
 .seg {
   border: none;
-  border-radius: 999px;
-  padding: 5px 15px;
+  height: var(--control-h-chip);
+  border-radius: var(--radius-full);
+  padding: 0 15px;
   font-size: 12px;
   cursor: pointer;
   background: transparent;
@@ -163,8 +164,9 @@
 .bgControls { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 
 .smallBtn {
-  padding: 5px 12px;
-  border-radius: 9px;
+  height: var(--control-h-sm);
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
   border: none;
   background: var(--fill-control);
   color: var(--text-secondary);
@@ -175,7 +177,15 @@
 .smallBtn:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
 .smallBtn:disabled { opacity: 0.5; cursor: not-allowed; }
 .smallBtnOn {
-  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  /*
+   * An inset shadow, not `border-color`.
+   *
+   * The base class declares `border: none`, so the border width is 0 and a later
+   * `border-color` has nothing to paint — this outline was declared but never rendered
+   * (the computed border stayed `0px none`). A spread inset shadow draws the same 1px
+   * ring without participating in layout, so the button does not shift when selected.
+   */
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
@@ -194,9 +204,10 @@
 /* Fold control for the workspace list. */
 .wsMore {
   margin-top: 2px;
-  padding: 6px 10px;
+  height: var(--control-h-chip);
+  padding: 0 10px;
   border: 1px dashed color-mix(in srgb, var(--border) 90%, transparent);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-tertiary);
   font-size: 11.5px;
@@ -216,7 +227,7 @@
   gap: 11px;
   width: 100%;
   padding: 11px 13px;
-  border-radius: 13px;
+  border-radius: var(--radius-lg);
   border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
   background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent);
   cursor: pointer;
@@ -247,7 +258,7 @@
   flex-shrink: 0;
   font-size: 10.5px;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
 }
 .wsBadge { background: var(--bg-hover); color: var(--text-secondary); }
 .wsBadgeMuted { border: 1px solid var(--border); color: var(--text-tertiary); }
@@ -256,8 +267,9 @@
 .pickerActions { display: flex; gap: 8px; padding-top: 2px; }
 
 .primaryBtn {
-  padding: 8px 18px;
-  border-radius: 11px;
+  height: var(--control-h-lg);
+  padding: 0 18px;
+  border-radius: var(--radius-md);
   border: none;
   background: var(--accent);
   color: var(--on-accent);
@@ -270,8 +282,9 @@
 .primaryBtn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .ghostBtn {
-  padding: 8px 15px;
-  border-radius: 11px;
+  height: var(--control-h-lg);
+  padding: 0 15px;
+  border-radius: var(--radius-md);
   border: none;
   background: var(--fill-control);
   color: var(--text-secondary);
@@ -317,12 +330,20 @@
 }
 
 .linkBtn {
+  /*
+   * Footer links were 19px of bare text with no horizontal padding, which made them the
+   * smallest targets in the app — on the same row as the settings entry. A real control
+   * height plus side padding gives them a target worth aiming at, while staying visually
+   * transparent at rest so they still read as links rather than buttons.
+   */
+  height: var(--control-h-xs);
   border: none;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-tertiary);
   font-size: 12px;
   cursor: pointer;
-  padding: 2px 0;
+  padding: 0 6px;
 }
 .linkBtn:hover { color: var(--accent); }
 
@@ -357,7 +378,7 @@
 .markPulse {
   width: 14px;
   height: 14px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: radial-gradient(circle at 30% 30%, #9fd0ff, #3d7dff 55%, #2554d6);
   box-shadow:
     0 0 0 3px color-mix(in srgb, #3d7dff 28%, transparent),

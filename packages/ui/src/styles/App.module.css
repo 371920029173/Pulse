@@ -221,7 +221,7 @@
   left: 50%;
   width: 3px;
   height: 28px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   transform: translate(-50%, -50%) scaleY(0.55);
   background: color-mix(in srgb, var(--text-tertiary) 55%, transparent);
   opacity: 0;
@@ -273,7 +273,7 @@
   top: 50%;
   height: 3px;
   width: 28px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   transform: translate(-50%, -50%) scaleX(0.55);
   background: color-mix(in srgb, var(--text-tertiary) 55%, transparent);
   opacity: 0;
@@ -314,7 +314,7 @@
   background: color-mix(in srgb, var(--bg-secondary) 90%, transparent);
   backdrop-filter: blur(10px);
   color: var(--text-secondary);
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   padding: 6px 12px;
   font-size: 12px;
   cursor: pointer;
@@ -374,9 +374,9 @@
 }
 
 .railBtn {
-  width: 24px;
-  height: 24px;
-  border-radius: 8px;
+  width: var(--control-h-sm);
+  height: var(--control-h-sm);
+  border-radius: var(--radius-sm);
   border: none;
   background: var(--fill-control);
   color: var(--text-secondary);
@@ -398,9 +398,9 @@
 /* Collapse button inside the sidebar header area. */
 .sidebarCollapseBtn {
   margin-left: auto;
-  width: 22px;
-  height: 22px;
-  border-radius: 7px;
+  width: var(--control-h-xs);
+  height: var(--control-h-xs);
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-tertiary);
@@ -422,7 +422,7 @@
   align-items: center;
   gap: 6px;
   padding: 8px 12px 8px 14px;
-  border-radius: 999px 0 0 999px;
+  border-radius: var(--radius-full) 0 0 var(--radius-full);
   border: 1px solid var(--border);
   border-right: none;
   background: color-mix(in srgb, var(--bg-secondary) 88%, transparent);

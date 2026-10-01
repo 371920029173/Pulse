@@ -51,11 +51,12 @@
 .close:hover { background: var(--bg-hover); color: var(--text-primary); }
 
 .btn {
+  height: var(--control-h-sm);
   background: var(--fill-control);
   border: none;
   color: var(--text-secondary);
-  border-radius: 9px;
-  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  padding: 0 12px;
   cursor: pointer;
   font-size: 11.5px;
   transition: color 170ms var(--ease-out), background 170ms var(--ease-out);

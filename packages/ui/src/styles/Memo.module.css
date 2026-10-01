@@ -12,12 +12,13 @@
 .headMeta { font-size: 11px; color: var(--text-tertiary); margin-left: auto; }
 
 .headBtn {
+  height: var(--control-h-xs);
   border: none;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   background: var(--fill-control);
   color: var(--text-tertiary);
   font-size: 10.5px;
-  padding: 2px 7px;
+  padding: 0 7px;
   cursor: pointer;
 }
 .headBtn:hover { color: var(--text-primary); background: var(--bg-hover); }
@@ -41,8 +42,9 @@
 
 .addBtn {
   flex-shrink: 0;
-  width: 28px;
-  border-radius: 8px;
+  width: var(--control-h-md);
+  height: var(--control-h-md);
+  border-radius: var(--radius-md);
   border: none;
   background: var(--accent);
   color: var(--on-accent);

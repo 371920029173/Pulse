@@ -38,8 +38,9 @@
 /* 跨会话读的入口。填色 + 圆角，和这个面板里别的控件一致 —— 它是个动作，不是一个说明。 */
 .scopeBtn {
   border: none;
+  height: var(--control-h-chip);
   border-radius: var(--radius-full);
-  padding: 3px 10px;
+  padding: 0 10px;
   font-size: 12px;
   cursor: pointer;
   background: var(--fill-control);
@@ -158,8 +159,9 @@
 .planTab {
   /* Filled rather than outlined, matching every other control. */
   border: none;
+  height: var(--control-h-chip);
   border-radius: var(--radius-full);
-  padding: 4px 12px;
+  padding: 0 12px;
   font-size: 12px;
   white-space: nowrap;
   cursor: pointer;

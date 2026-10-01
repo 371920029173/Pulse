@@ -109,11 +109,34 @@
 
   /* Apple's corner language scales with element size; 6/10/14/20 reads softer
      than the previous 4/8/12 which looked sharp at these sizes. */
+  --radius-xs: 4px;
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
   --radius-xl: 20px;
   --radius-full: 9999px;
+
+  /*
+   * Control metrics.
+   *
+   * Controls used to be sized by hand-set vertical padding, and that is what let the
+   * same button drift: `.smallBtn` existed in three files at 20px, 25px and 25px, and
+   * two chips in one composer row differed by 1px. Nothing named the sizes, so nothing
+   * kept them equal — measured across the UI this had reached 105 control rules in 51
+   * distinct geometries. The ladder below is the whole set now: a control picks a step,
+   * and `scripts/control-style-check.mjs` fails on anything outside it, including
+   * controls that size themselves by padding instead of naming a height.
+   *
+   * Horizontal padding is still per-control, because it tracks the label length rather
+   * than the control's size.
+   */
+  --control-h-2xs: 18px; /* tags inside a line of text (tool-call, permission chips) */
+  --control-h-xs: 22px; /* compact strips: status bar, list-row actions */
+  --control-h-sm: 24px; /* small controls and icon buttons */
+  --control-h-chip: 26px; /* pills and chips */
+  --control-h-md: 28px; /* the default control */
+  --control-h-lg: 32px; /* page-level actions, pickable rows */
+  --control-h-send: 34px; /* the composer's send button: deliberately larger and round */
 
   /* Layered, low-opacity shadows — a single hard shadow is what made surfaces
      read as flat cutouts. */

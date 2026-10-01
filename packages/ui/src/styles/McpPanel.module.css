@@ -13,9 +13,9 @@
 .headMeta { font-size: 11px; color: var(--text-tertiary); margin-left: auto; }
 
 .iconBtn {
-  width: 22px;
-  height: 22px;
-  border-radius: 7px;
+  width: var(--control-h-xs);
+  height: var(--control-h-xs);
+  border-radius: var(--radius-sm);
   border: none;
   background: var(--fill-control);
   color: var(--text-secondary);
@@ -50,8 +50,9 @@
 .input:focus { border-color: var(--border-focus); }
 
 .primaryBtn {
-  padding: 6px 12px;
-  border-radius: 8px;
+  height: var(--control-h-sm);
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
   border: none;
   background: var(--accent);
   color: var(--on-accent);
@@ -121,8 +122,9 @@
 .itemActions { display: flex; gap: 5px; margin-top: 7px; }
 
 .smallBtn {
-  padding: 3px 9px;
-  border-radius: 7px;
+  height: var(--control-h-xs);
+  padding: 0 9px;
+  border-radius: var(--radius-sm);
   border: none;
   background: var(--fill-control);
   color: var(--text-secondary);
@@ -134,8 +136,9 @@
 .smallBtn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .smallBtnDanger {
-  padding: 3px 9px;
-  border-radius: 7px;
+  height: var(--control-h-xs);
+  padding: 0 9px;
+  border-radius: var(--radius-sm);
   border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
   background: transparent;
   color: var(--danger);

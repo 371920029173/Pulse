@@ -45,7 +45,7 @@
 
 .option {
   padding: 6px 13px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
   background: color-mix(in srgb, var(--bg-secondary) 70%, transparent);
   color: var(--text-primary);

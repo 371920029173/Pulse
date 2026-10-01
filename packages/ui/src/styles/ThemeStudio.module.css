@@ -276,7 +276,8 @@
 
 .sampleChip {
   align-self: flex-start;
-  padding: 2px 8px;
+  height: var(--control-h-sm);
+  padding: 0 8px;
   border-radius: var(--radius-full);
   background: var(--accent-muted);
   color: var(--text-primary);

@@ -73,15 +73,16 @@
   display: inline-flex;
   gap: 2px;
   padding: 2px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   border: none;
   flex-shrink: 0;
   background: var(--fill-control);
 }
 .tab {
   border: none;
-  border-radius: 999px;
-  padding: 5px 12px;
+  height: var(--control-h-chip);
+  border-radius: var(--radius-full);
+  padding: 0 12px;
   font-size: 11.5px;
   cursor: pointer;
   background: transparent;
@@ -169,7 +170,7 @@
   flex-shrink: 0;
   font-size: 10.5px;
   padding: 3px 9px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--accent) 20%, transparent);
   color: var(--accent);
   font-weight: 600;
@@ -182,7 +183,7 @@
 .tagClosed {
   font-size: 10px;
   padding: 1px 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: var(--bg-hover);
   color: var(--text-tertiary);
 }

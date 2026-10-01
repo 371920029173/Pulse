@@ -16,7 +16,7 @@
 .logoIcon {
   width: 26px;
   height: 26px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: linear-gradient(145deg,
     color-mix(in srgb, var(--accent) 78%, transparent),
     color-mix(in srgb, var(--accent) 38%, transparent));
@@ -280,9 +280,10 @@
 /* Fold control for a long session list. */
 .foldToggle {
   margin: 4px 4px 2px;
-  padding: 5px 8px;
+  height: var(--control-h-chip);
+  padding: 0 8px;
   border: 1px dashed color-mix(in srgb, var(--border) 90%, transparent);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-tertiary);
   font-size: 11px;
@@ -507,7 +508,7 @@
   display: block;
   width: 10px;
   height: 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: radial-gradient(circle at 30% 30%, #9fd0ff, #3d7dff 60%, #2554d6);
   box-shadow: 0 0 0 2px color-mix(in srgb, #3d7dff 30%, transparent);
 }

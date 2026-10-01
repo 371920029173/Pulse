@@ -190,8 +190,9 @@
 .roleAddRow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
 .roleAddLabel { font-size: 11.5px; color: var(--text-tertiary); margin-right: 2px; }
 .presetChip {
-  padding: 4px 10px;
-  border-radius: 999px;
+  height: var(--control-h-chip);
+  padding: 0 10px;
+  border-radius: var(--radius-full);
   border: 1px dashed var(--border);
   background: transparent;
   color: var(--text-secondary);
@@ -226,8 +227,9 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 9px 4px 5px;
-  border-radius: 999px;
+  height: var(--control-h-chip);
+  padding: 0 9px 0 5px;
+  border-radius: var(--radius-full);
   border: none;
   background: var(--bg-secondary);
   font-size: 11.5px;
@@ -291,8 +293,9 @@
 .err { font-size: 11.5px; color: var(--danger); }
 
 .primaryBtn {
-  padding: 8px 16px;
-  border-radius: 10px;
+  height: var(--control-h-lg);
+  padding: 0 16px;
+  border-radius: var(--radius-md);
   border: none;
   background: var(--accent);
   color: var(--on-accent);
@@ -305,8 +308,9 @@
 .primaryBtn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .ghostBtn {
-  padding: 7px 13px;
-  border-radius: 10px;
+  height: var(--control-h-lg);
+  padding: 0 13px;
+  border-radius: var(--radius-md);
   border: none;
   background: var(--fill-control);
   color: var(--text-secondary);

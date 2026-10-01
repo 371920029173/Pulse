@@ -34,12 +34,15 @@
 .title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
 .cwd { font-size: 11px; color: var(--text-tertiary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .headerBtn {
+  display: inline-flex;
+  align-items: center;
+  height: var(--control-h-2xs);
   font-size: 11px;
   color: var(--text-secondary);
   background: var(--fill-control);
   border: none;
-  border-radius: 6px;
-  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  padding: 0 8px;
   cursor: pointer;
 }
 .headerBtn:hover { color: var(--text-primary); background: var(--bg-hover); }
