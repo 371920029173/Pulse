@@ -134,6 +134,8 @@ export type {
 } from './reflection.js';
 export { reviewClaims, renderCriticReview, extractClaims, actionableFindings } from './critic.js';
 export type { CriticClaim, CriticFinding, CriticReview, CriticStatus, CriticVerdict } from './critic.js';
+export { describeWaiting } from './pending-wait.js';
+export type { PendingWait } from './pending-wait.js';
 export {
   guardrailEnabled,
   guardrailPolicy,

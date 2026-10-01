@@ -556,6 +556,36 @@ console.log('\n8. 接线与只读界面');
   check('状态说明（换备用接口、卡死提示）也进轨迹',
     /type === 'status'[\s\S]{0,200}?runRecorder\?\.step/.test(agentSrc), null);
 
+  /* ── 「在等谁」：暂停的出口 ──
+   *
+   * 有 `runPaused` 而没有出口时，界面能拿到的只有一张工单；工单的 TTL 一过就点不动了，而这一轮**还停
+   * 在那里**。所以这里要证明的不只是"能说出在等人"，而是"过期之后它仍然说自己停着、且不会自行继续"。
+   * 判定是纯函数，所以过期这一支是确定地走一遍，不是靠等 120 秒。
+   */
+  const { describeWaiting } = await import(pathToFileURL(join(AGENT_DIR, 'dist', 'pending-wait.js')).href);
+  const liveTicket = {
+    tool: 'shell', summary: 'rm -rf build',
+    created_at: '2026-10-01T10:00:00.000Z', expires_at: '2026-10-01T10:02:00.000Z',
+  };
+  const waitingNow = describeWaiting('confirm', liveTicket, Date.parse('2026-10-01T10:01:00.000Z'));
+  const waitingExpired = describeWaiting('confirm', liveTicket, Date.parse('2026-10-01T10:05:00.000Z'));
+  check('【关键】停着等确认时说得清在等谁、从什么时候起',
+    waitingNow?.waitingOn === 'user' && waitingNow?.since === liveTicket.created_at && waitingNow?.expired === false,
+    JSON.stringify(waitingNow));
+  check('【关键】工单过期之后仍然报"停着等你"，而不是变成"结束了"',
+    waitingExpired?.expired === true && waitingExpired?.waitingOn === 'user'
+      && /仍然停着/.test(waitingExpired?.note ?? '') && /不会自行批准/.test(waitingExpired?.note ?? ''),
+    JSON.stringify(waitingExpired));
+  check('没停着时没有可报的等待（光有工单不算在等）',
+    describeWaiting(null, liveTicket) === null, null);
+
+  check('agent 把这个状态暴露出来（否则界面只能去猜工单过期意味着什么）',
+    /getWaitingOn\(\)\s*:\s*PendingWait \| null[\s\S]{0,220}?describeWaiting\(this\.runPaused/.test(agentSrc), null);
+  check('【关键】接口把 waiting 和 ticket 一起回（工单是凭据，waiting 才是"在等谁"）',
+    /\/api\/chat\/pending-confirm'[\s\S]{0,900}?getPendingConfirm\(\)[\s\S]{0,200}?getWaitingOn\(\)/.test(serverSrc), null);
+  check('【关键】提问那边也用同一套词说"在等谁"（两种等待不该有两套判断）',
+    /\/api\/ask\/pending'[\s\S]{0,1200}?waitingOn: 'user'/.test(serverSrc), null);
+
   check('server 提供 /api/runs 列表', /router\.get\('\/api\/runs'/.test(serverSrc), null);
   check('server 提供单轮详情', /router\.get\('\/api\/runs\/:id'/.test(serverSrc), null);
   check('corroborate 注册在 :id 之前（否则会被当成一个 id）',

@@ -27,7 +27,7 @@
  *
  *   node scripts/session-isolation-check.mjs
  */
-import { mkdtempSync, readFileSync, existsSync, readdirSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -840,6 +840,190 @@ console.log('\n9. 临时工作区不写进 .env 默认（切走就忘），普�
   removeTempDir(envScratch);
   removeTempDir(join(ROOT, '.she', 'check-ws'));
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 10. 搬会话：留下来的东西必须在回执里点名，而且不许"顺手"带走
+ *
+ * 这一节钉的是跨项目搬会话时的**状态归属**。`extract` / `adopt` 只搬 `sessions.json` 里那一条，
+ * 磁盘上别的一个都不动，于是：
+ *
+ *   - 计划 / 备忘是**工作区级**的（第 1～5 节刚钉过），它们属于原项目，**不该**跟着走；
+ *   - 这条会话自己的 `.she/sessions/<id>/`（预检 / 轨迹 / 置信度）是**会话级**的，跟着走才合理；
+ *   - 知识库按目录走，属于原项目。
+ *
+ * 以前这些全部静默留下：用户搬完只看到"计划没了、轨迹没了"，界面上没有任何一处说明过。所以这里要
+ * 证明两件相反的事：**报告必须说全**，而且**默认一个字节都不许动**（"说"不能变成"顺手搬了"）。
+ *
+ * 反向的钉子同样重要：目标项目已经有一份自己的计划时，带过去必须被**拒绝**，而不是覆盖 —— 那份
+ * 计划是那个项目里所有对话共用的，盖掉它不是搬运，是破坏。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+console.log('\n10. 搬会话：留下的计划/备忘/会话状态要在回执里点名，且默认不动、冲突不覆盖');
+
+const moveSrc = tempDir('she-move-src-');
+const moveDst = tempDir('she-move-dst-');
+const moveDstTaken = tempDir('she-move-taken-');
+const MOVE_PORT = String(await pickSafePort(Number(process.env.SHE_MOVE_TEST_PORT || 18211), [18212, 18213]));
+
+// 原项目的状态先写好：一份计划（3 个未完成步骤）+ 一条备忘。
+const srcPlan = new PlanStore(moveSrc, WORKSPACE_SCOPE, 'sess-m').create('把结算服务拆出来', ['拉依赖', '写灰度', '切流量']);
+new MemoStore(moveSrc).add('切换前先冻结结算批次', 'user');
+
+const moveChild = spawn('node', [SERVER_ENTRY], {
+  cwd: SERVER_DIR,
+  env: {
+    ...process.env,
+    SHE_WORKSPACE: moveSrc,
+    SHE_PORT: MOVE_PORT,
+    SHE_ENV_FILE: join(moveSrc, '.env'),
+    SHE_APP_DIR: join(moveSrc, 'appdir'),
+    // 不设 SHE_STATE_DIR：状态目录跟着工作区走，`.she/sessions/<id>/` 才落在原项目下面。
+    SHE_STATE_DIR: '',
+  },
+  stdio: ['ignore', 'pipe', 'pipe'],
+  windowsHide: true,
+});
+let moveOut = '';
+moveChild.stdout.on('data', (c) => { moveOut += c; });
+moveChild.stderr.on('data', (c) => { moveOut += c; });
+
+const moveReq = (method, path, body) => fetch(`http://127.0.0.1:${MOVE_PORT}${path}`, {
+  method,
+  headers: { 'Content-Type': 'application/json' },
+  body: body === undefined ? undefined : JSON.stringify(body),
+  signal: AbortSignal.timeout(8000),
+});
+const moveGet = async (path) => {
+  const r = await moveReq('GET', path);
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+const movePost = async (path, body) => {
+  const r = await moveReq('POST', path, body ?? {});
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+
+const moveReady = await (async () => {
+  const t0 = Date.now();
+  for (;;) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${MOVE_PORT}/api/health`, { signal: AbortSignal.timeout(1500) });
+      if (r.ok) return true;
+    } catch { /* not up yet */ }
+    if (Date.now() - t0 > 30_000) return false;
+    await new Promise((r) => setTimeout(r, 400));
+  }
+})();
+
+if (!moveReady) {
+  check('第 10 节的服务在 30 秒内就绪', false, moveOut.slice(-800));
+} else {
+  try {
+    const srcPlanFile = join(moveSrc, '.she', 'plans.json');
+    const dstPlanFile = join(moveDst, '.she', 'plans.json');
+    const planBytesBefore = readFileSync(srcPlanFile, 'utf8');
+
+    const mkSession = async (title) => {
+      const r = await movePost('/api/sessions', { title });
+      if (r.status !== 201 || !r.body?.id) throw new Error(`建会话失败：${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
+      return r.body.id;
+    };
+
+    /* ── 10.1 不带任何"带走"开关：报告说全，磁盘一个字节不动 ── */
+    const m1 = await mkSession('搬一次的活');
+    const m1StateDir = join(moveSrc, '.she', 'sessions', m1);
+    mkdirSync(m1StateDir, { recursive: true });
+    writeFileSync(join(m1StateDir, 'confidence.json'), JSON.stringify({ samples: [] }), 'utf8');
+
+    const bare = await movePost(`/api/sessions/${m1}/move`, { directory: moveDst });
+    check('不带开关的搬运成功', bare.status === 200, `${bare.status} ${JSON.stringify(bare.body).slice(0, 240)}`);
+
+    const stayed = bare.body?.stayed ?? [];
+    const kinds = (k) => stayed.filter((s) => s.kind === k);
+    check('【关键】回执点名了计划，并说清它留在哪',
+      kinds('plan').length === 1 && samePath(kinds('plan')[0].path, srcPlanFile),
+      JSON.stringify(stayed).slice(0, 400));
+    check('【关键】计划那一条还写出了有几个未完成步骤',
+      kinds('plan')[0]?.detail?.includes('3') && kinds('plan')[0]?.detail?.includes('未完成'),
+      kinds('plan')[0]?.detail);
+    check('回执点名了备忘', kinds('memo').length === 1 && samePath(kinds('memo')[0].path, join(moveSrc, '.she', 'memo.json')),
+      JSON.stringify(kinds('memo')));
+    check('【关键】回执点名了这条会话自己的状态目录',
+      kinds('session_state').length === 1 && samePath(kinds('session_state')[0].path, m1StateDir),
+      JSON.stringify(kinds('session_state')));
+    check('没要求带的东西一样都没带（carried 是空的）',
+      (bare.body?.carried ?? []).length === 0, JSON.stringify(bare.body?.carried));
+
+    check('【关键】默认不动：目标项目里没有被凭空写出一份计划',
+      !existsSync(dstPlanFile), dstPlanFile);
+    check('【关键】默认不动：会话状态目录还留在原项目，没跟着走',
+      existsSync(m1StateDir) && !existsSync(join(moveDst, '.she', 'sessions', m1)), m1StateDir);
+    check('【关键】默认不动：原来那份计划一个字节没变',
+      readFileSync(srcPlanFile, 'utf8') === planBytesBefore, null);
+
+    // 上面那些"没动"得有个前提：会话记录本身真的搬过去了。否则这几条会永远为真。
+    const m1After = await moveGet(`/api/sessions/${m1}`);
+    check('【关键】会话记录本身到了目标项目（上面那些"没动"才不是"什么都没发生"）',
+      m1After.status === 200 && samePath(m1After.body?.directory ?? '', moveDst),
+      `${m1After.status} ${JSON.stringify(m1After.body?.directory)}`);
+
+    /* ── 10.2 明确要求带走：状态目录是移动，计划是复制（原项目那份必须还在）── */
+    const m2 = await mkSession('带着走的活');
+    const m2StateDir = join(moveSrc, '.she', 'sessions', m2);
+    mkdirSync(m2StateDir, { recursive: true });
+    writeFileSync(join(m2StateDir, 'confidence.json'), JSON.stringify({ samples: [{ topic: 'm2' }] }), 'utf8');
+
+    const carried = await movePost(`/api/sessions/${m2}/move`, {
+      directory: moveDst, carry_session_state: true, carry_plan: true,
+    });
+    check('要求带走的搬运成功', carried.status === 200, `${carried.status} ${JSON.stringify(carried.body).slice(0, 240)}`);
+    check('【关键】明确要求后，会话状态目录跟着走了',
+      !existsSync(m2StateDir) && existsSync(join(moveDst, '.she', 'sessions', m2)),
+      `src=${existsSync(m2StateDir)} dst=${existsSync(join(moveDst, '.she', 'sessions', m2))}`);
+    check('【关键】计划是**复制**过去的（目标项目现在有它）',
+      existsSync(dstPlanFile), dstPlanFile);
+    check('【关键】而原项目那份计划还在，且一个字节没变（复制不是搬走）',
+      existsSync(srcPlanFile) && readFileSync(srcPlanFile, 'utf8') === planBytesBefore, null);
+    check('带走的都记在 carried 里（回执不吞掉自己做过的事）',
+      (carried.body?.carried ?? []).length === 2, JSON.stringify(carried.body?.carried));
+    check('状态目录搬走后它不再出现在"留下"里',
+      !(carried.body?.stayed ?? []).some((s) => s.kind === 'session_state'),
+      JSON.stringify(carried.body?.stayed).slice(0, 300));
+
+    /* ── 10.3 目标项目已经有自己的计划：拒绝，而且不许覆盖 ── */
+    const takenPlan = new PlanStore(moveDstTaken, WORKSPACE_SCOPE, 'sess-t').create('这边自己的活', ['别动我']);
+    const takenFile = join(moveDstTaken, '.she', 'plans.json');
+    const takenBytes = readFileSync(takenFile, 'utf8');
+
+    const m3 = await mkSession('要撞车的活');
+    const clash = await movePost(`/api/sessions/${m3}/move`, { directory: moveDstTaken, carry_plan: true });
+    check('【关键】目标项目已有自己的计划时，带计划过去被拒绝（409）',
+      clash.status === 409, `${clash.status} ${JSON.stringify(clash.body).slice(0, 240)}`);
+    check('【关键】被拒绝时目标项目那份计划一个字节没变（不是"先覆盖再报错"）',
+      readFileSync(takenFile, 'utf8') === takenBytes, null);
+    check('【关键】被拒绝时也不许留下半截搬运：会话还老老实实待在原项目',
+      (await moveGet(`/api/sessions/${m3}`)).body?.directory !== moveDstTaken
+        && new PlanStore(moveDstTaken, WORKSPACE_SCOPE).list()[0]?.id === takenPlan.id,
+      JSON.stringify((await moveGet(`/api/sessions/${m3}`)).body?.directory));
+
+    /* ── 10.4 目标已经有同 id 的状态目录：同样拒绝，且不动它 ── */
+    const m4 = await mkSession('状态撞车的活');
+    const m4DstState = join(moveDst, '.she', 'sessions', m4);
+    mkdirSync(m4DstState, { recursive: true });
+    writeFileSync(join(m4DstState, 'keep.txt'), 'dest-original', 'utf8');
+    const stateClash = await movePost(`/api/sessions/${m4}/move`, { directory: moveDst, carry_session_state: true });
+    check('【关键】目标已有同 id 的状态目录时，带状态过去被拒绝（409）',
+      stateClash.status === 409, `${stateClash.status} ${JSON.stringify(stateClash.body).slice(0, 240)}`);
+    check('【关键】目标那份状态目录没被动过（里面的文件还是原来的）',
+      readFileSync(join(m4DstState, 'keep.txt'), 'utf8') === 'dest-original', null);
+  } catch (err) {
+    check('搬会话的接口检查没有抛异常', false, err?.stack ?? String(err));
+  }
+}
+
+killTree(moveChild.pid);
+removeTempDir(moveSrc);
+removeTempDir(moveDst);
+removeTempDir(moveDstTaken);
 
 console.log(`\n${failures === 0 ? 'PASS' : `FAIL (${failures})`}  session-isolation-check`);
 process.exit(failures === 0 ? 0 : 1);

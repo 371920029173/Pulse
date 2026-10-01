@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import os from 'node:os';
-import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, rmSync, copyFileSync, renameSync, openSync, readSync, closeSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, rmSync, copyFileSync, cpSync, renameSync, openSync, readSync, closeSync } from 'node:fs';
 import { join, extname, resolve, dirname, basename, relative, isAbsolute, sep } from 'node:path';
 import { realpathSync, createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -2845,7 +2845,18 @@ function registerRoutes(router: Router): void {
   });
 
   router.get('/api/chat/pending-confirm', (req, res) => {
-    sendJSON(res, { ticket: agentFor(req, undefined, { createIfMissing: false }).getPendingConfirm() });
+    const agent = agentFor(req, undefined, { createIfMissing: false });
+    /*
+     * `waiting` 和 `ticket` 是两件事，一起回：
+     *
+     *   - `ticket` 是确认卡片拿去换批准的凭据（工单本身），
+     *   - `waiting` 是**这一轮停着等谁、从什么时候起、工单过没过期**。
+     *
+     * 分开是因为工单过期之后这一轮**还停在那里**，而一张过期的工单看起来很像"事情结束了"。只有 `waiting`
+     * 里那句 `expired` 能把这两件事分开，界面也才有东西可显示 —— 否则用户看到的是一张点不动的卡片，
+     * 没有任何一处说明它还在等他。
+     */
+    sendJSON(res, { ticket: agent.getPendingConfirm(), waiting: agent.getWaitingOn() });
   });
 
   router.post('/api/chat/confirm', async (req, res) => {
@@ -4987,26 +4998,154 @@ router.get('/api/fs/tree', (req, res) => {
     sendJSON(res, { ok: true, children: children.map((c) => c.id) });
   });
 
-  router.post('/api/sessions/:id/move', async (req, res, params) => {
-    const body = await parseBody<{ directory?: string; move_changes?: boolean }>(req);
-    const dest = resolve(String(body.directory ?? '').trim());
-    if (!dest || !existsSync(dest)) throw new HttpError(404, '目标目录不存在');
-    const found = findSession(params.id);
-    if (!found) throw new HttpError(404, `Session not found: ${params.id}`);
-    if (agents.get(params.id)?.isRunning()) {
-      throw new HttpError(409, '这一轮还在进行。先停下，再把会话搬到别的项目。');
+/**
+ * 搬会话时**留在原项目**的东西。
+ *
+ * `extract` / `adopt` 搬的是**会话记录本身**（`sessions.json` 里那一条），磁盘上别的文件一个都不动。
+ * 而这些东西按设计都属于「原项目」：
+ *
+ *   - 计划 / 备忘：**工作区级**（一个项目一份，项目里每条会话读写同一份）。所以它们不只是"没跟着走"，
+ *     而是**不该**跟着走 —— 它们记的是那个项目里的活，原项目里其他对话还在读它们。
+ *   - 这条会话自己的 `.she/sessions/<id>/`：预检、轨迹、置信度样本。这个是**会话级**的，跟着走才合理，
+ *     但路径是按工作区根拼的，所以搬到新项目后它就成了新项目里读不到的一堆孤儿文件。
+ *   - 知识库：按目录组织，属于原项目。
+ *
+ * 以前这些**全部静默留下**：用户搬完会话，看到的是"计划没了、轨迹没了"，而界面上没有任何一处说过
+ * 这件事。这里把它们如实报出来，让"计划留在哪"变成回执里的一行，而不是一个猜测。
+ */
+function strandedState(root: string, sessionId: string): Array<{ kind: string; path: string; detail: string }> {
+  const items: Array<{ kind: string; path: string; detail: string }> = [];
+
+  const plans = new PlanStore(root, WORKSPACE_SCOPE).list();
+  if (plans.length) {
+    const open = plans
+      .filter((p) => p.status === 'open')
+      .flatMap((p) => p.steps)
+      .filter((s) => s.status !== 'done' && s.status !== 'dropped').length;
+    items.push({
+      kind: 'plan',
+      path: join(root, '.she', 'plans.json'),
+      detail: `${plans.length} 份计划，共 ${open} 个未完成步骤（工作区级：属于原项目，项目里每条会话都在读它）`,
+    });
+  }
+
+  const memo = new MemoStore(root).list();
+  if (memo.length) {
+    items.push({
+      kind: 'memo',
+      path: join(root, '.she', 'memo.json'),
+      detail: `${memo.length} 条备忘（同样是工作区级）`,
+    });
+  }
+
+  const own = sessionStateDir(root, sessionId);
+  if (existsSync(own)) {
+    items.push({ kind: 'session_state', path: own, detail: '这条会话的预检 / 轨迹 / 置信度样本（会话级，可以一起带走）' });
+  }
+
+  return items;
+}
+
+/**
+ * 把一个目录挪过去。同盘用 `rename`（原子、瞬间），跨盘（`EXDEV`）退化成"复制 + 删除"。
+ *
+ * 直接 `renameSync` 在跨盘时抛错，而"工作区换了盘符"是最普通的情况之一 —— 那时候报出来的会是一句
+ * 看不懂的 EXDEV，而这件活本身完全做得到。
+ */
+function movePath(src: string, dst: string): void {
+  try {
+    renameSync(src, dst);
+    return;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err;
+  }
+  cpSync(src, dst, { recursive: true });
+  rmSync(src, { recursive: true, force: true });
+}
+
+router.post('/api/sessions/:id/move', async (req, res, params) => {
+  const body = await parseBody<{
+    directory?: string;
+    move_changes?: boolean;
+    carry_session_state?: boolean;
+    carry_plan?: boolean;
+  }>(req);
+  const dest = resolve(String(body.directory ?? '').trim());
+  if (!dest || !existsSync(dest)) throw new HttpError(404, '目标目录不存在');
+  const found = findSession(params.id);
+  if (!found) throw new HttpError(404, `Session not found: ${params.id}`);
+  if (agents.get(params.id)?.isRunning()) {
+    throw new HttpError(409, '这一轮还在进行。先停下，再把会话搬到别的项目。');
+  }
+  const from = resolve(found.session.directory || found.store.rootDir);
+  const srcRoot = resolve(found.store.rootDir);
+
+  /*
+   * 先算出"会留下什么"，再动任何东西 —— 搬完之后再算，看到的就已经是新状态了。
+   *
+   * 而且这一步同时是**回执的正文**：`stayed` 会原样回给调用方，所以"计划留在哪"是一句陈述，不是一句
+   * 需要用户自己推断的话。
+   */
+  const stayed = strandedState(srcRoot, params.id);
+
+  const srcStateDir = sessionStateDir(srcRoot, params.id);
+  const dstStateDir = sessionStateDir(dest, params.id);
+  const srcPlanFile = join(srcRoot, '.she', 'plans.json');
+  const dstPlanFile = join(dest, '.she', 'plans.json');
+
+  /*
+   * 冲突在**搬任何东西之前**判，两条都要：
+   *
+   *   - 目标已经有一条同 id 的状态目录：覆盖它等于替别人删状态；
+   *   - 目标项目已经有一份自己的计划：`.she/plans.json` 是那个项目的**共享**文件，拿这边的计划盖上
+   *     去会改掉那边所有对话读到的计划。这不是"搬运"，是破坏，所以直接拒绝并说清原因，而不是静默覆盖。
+   */
+  if (body.carry_session_state && existsSync(dstStateDir)) {
+    throw new HttpError(409, `目标项目里已经有这条会话的状态目录（${dstStateDir}），拒绝覆盖。先处理它，或不带过去。`);
+  }
+  if (body.carry_plan && existsSync(dstPlanFile)) {
+    throw new HttpError(409, `目标项目已经有一份属于它自己的计划（${dstPlanFile}），不会被这次搬运覆盖。要带过去就先在那边把计划处理掉。`);
+  }
+
+  let note = '';
+  if (body.move_changes && from !== dest) note = transferLocalChanges(from, dest);
+  const taken = found.store.extract(params.id);
+  if (!taken) throw new HttpError(404, `Session not found: ${params.id}`);
+  taken.directory = dest;
+
+  const carried: string[] = [];
+  const warnings: string[] = [];
+  if (body.carry_session_state && existsSync(srcStateDir)) {
+    try {
+      mkdirSync(dirname(dstStateDir), { recursive: true });
+      movePath(srcStateDir, dstStateDir);
+      carried.push('这条会话的预检 / 轨迹 / 置信度样本');
+    } catch (err) {
+      warnings.push(`状态目录没搬成：${(err as Error).message}`);
     }
-    const from = resolve(found.session.directory || found.store.rootDir);
-    let note = '';
-    if (body.move_changes && from !== dest) note = transferLocalChanges(from, dest);
-    const taken = found.store.extract(params.id);
-    if (!taken) throw new HttpError(404, `Session not found: ${params.id}`);
-    taken.directory = dest;
-    const saved = storeFor(dest).adopt(taken);
-    dropAgent(params.id);
-    try { rememberProject(projectIndexFile(), dest); } catch { /* non-fatal */ }
-    sendJSON(res, { session: saved, note });
-  });
+  }
+  if (body.carry_plan && existsSync(srcPlanFile)) {
+    try {
+      mkdirSync(dirname(dstPlanFile), { recursive: true });
+      /* 复制而不是移动：原项目里其他对话还在读这份计划，搬走等于替它们删计划。 */
+      copyFileSync(srcPlanFile, dstPlanFile);
+      carried.push('原项目那份计划（**复制**过去的，原项目保留它）');
+    } catch (err) {
+      warnings.push(`计划没搬成：${(err as Error).message}`);
+    }
+  }
+
+  const saved = storeFor(dest).adopt(taken);
+  dropAgent(params.id);
+  try { rememberProject(projectIndexFile(), dest); } catch { /* non-fatal */ }
+
+  /* 状态目录是**移动**，所以它不再"留下"；计划是复制，所以它照样留在原项目。 */
+  const stillThere = carried.includes('这条会话的预检 / 轨迹 / 置信度样本')
+    ? stayed.filter((s) => s.kind !== 'session_state')
+    : stayed;
+
+  sendJSON(res, { session: saved, note, stayed: stillThere, carried, warnings });
+});
 
   router.get('/api/worktrees', (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -5419,13 +5558,26 @@ router.get('/api/fs/tree', (req, res) => {
   router.get('/api/ask/pending', (_req, res) => {
     const p = pendingQuestionPath();
     if (!existsSync(p)) {
-      sendJSON(res, { question: null });
+      sendJSON(res, { question: null, waiting: null });
       return;
     }
     try {
-      sendJSON(res, JSON.parse(readFileSync(p, 'utf8')));
+      const q = JSON.parse(readFileSync(p, 'utf8')) as { question?: string; askedAt?: string; [k: string]: unknown };
+      /*
+       * 提问这边**没有**挂起的一轮：`ask_user` 让模型结束本轮并等一条新消息，所以这里没有"暂停的
+       * 运行"可报。但"在等谁"这句话照样成立，而且和确认那边用同一套词（`waitingOn` / `since`），
+       * 界面因此不必为两种等待写两套判断。`askedAt` 是 `ask_user` 落盘时就写好的，不是这里补记的。
+       */
+      sendJSON(res, {
+        ...q,
+        waiting: {
+          waitingOn: 'user',
+          since: q.askedAt ?? null,
+          note: '这一轮已经交回给你，等你的回答（任何一条消息都会接手这个问题）。',
+        },
+      });
     } catch {
-      sendJSON(res, { question: null });
+      sendJSON(res, { question: null, waiting: null });
     }
   });
 

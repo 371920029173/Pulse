@@ -167,9 +167,17 @@ describe('后台任务：启动 / 等待 / 增量读取', () => {
       background: true,
     });
     const id = jobIdOf(started);
-    const first = await tools.execute('shell_wait', { id, wait_ms: 1500 });
+    /*
+     * 第一次的等待给足时间，因为这里问的不是"多快能读到"，而是"两次读有没有重叠"。
+     *
+     * 以前是 1500ms + 断言手里必须有 `tick 1`：那等于要求子进程在 1.5 秒内完成 node 冷启动并打印
+     * 第一次。满负载的门禁里这条会假红（实测：整个文件里就它一条红，`duration_ms 3299`，单独跑
+     * 两次全绿）。前置条件只需要证明"第一次读不是空的"，所以断言放宽到"拿到过至少一个 tick"，
+     * 而**不变量一个字没动**：两次读里的 tick 不许重复。
+     */
+    const first = await tools.execute('shell_wait', { id, wait_ms: 3000 });
     const second = await tools.execute('shell_wait', { id, wait_ms: 1500 });
-    assert.match(first, /tick 1/, first);
+    assert.match(first, /tick \d+/, `第一次读必须是空的才让下面那条变成空跑: ${first}`);
     const firstTicks = new Set((first.match(/tick \d+/g) ?? []));
     const secondTicks = (second.match(/tick \d+/g) ?? []);
     for (const t of secondTicks) {

@@ -26,6 +26,7 @@ import {
 } from './errorbook.js';
 import type { ErrorbookEngineLike, ErrorbookStoreLike, ErrorbookKind } from './errorbook.js';
 import { classifyToolResult, annotateToolResult, isToolFailure, type ToolResultVerdict } from './tool-result.js';
+import { describeWaiting, type PendingWait } from './pending-wait.js';
 import {
   DEFAULT_BUDGET,
   budgetStop,
@@ -2624,6 +2625,16 @@ export class Agent {
   }
   getPendingConfirm(): ConfirmTicketInfo | null {
     return this.lastPending?.ticket ?? null;
+  }
+
+  /**
+   * 这一轮现在停着等什么 —— 在等谁、从什么时候开始等、工单是不是已经过期。
+   *
+   * 和 `getPendingConfirm()` 分开：那个回的是**工单**（确认卡片要拿它去换批准），这里回的是**状态**。
+   * 一张过期的工单和"这一轮在等你"是两件事，而后者才是用户在界面上真正需要知道的那件。
+   */
+  getWaitingOn(): PendingWait | null {
+    return describeWaiting(this.runPaused, this.lastPending?.ticket ?? null);
   }
 
   getPendingPatch(): PendingPatchInfo | null {
