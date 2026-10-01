@@ -27,9 +27,40 @@ export function attachmentsDir(workspaceRoot: string): string {
   return join(workspaceRoot, '.she', 'attachments');
 }
 
-const EXT_ALLOWLIST = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.pdf', '.txt', '.md', '.json', '.csv', '.log'];
+/*
+ * Extensions stored as-is.
+ *
+ * Widened from the image-only list to cover the documents and source files people actually
+ * attach. It matters because the stored extension is what the model side reads to decide how
+ * to hand the file over: a `.py` reduced to `.bin` stops being "inline this as text" and
+ * becomes "this is a binary blob, go read it yourself" — a silent downgrade of a file the
+ * user could see was plain text.
+ */
+const EXT_ALLOWLIST = [
+  // Images.
+  '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp',
+  // Documents.
+  '.pdf', '.txt', '.md', '.markdown', '.rst', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods',
+  // Data.
+  '.json', '.jsonc', '.csv', '.tsv', '.log', '.yaml', '.yml', '.toml', '.ini', '.xml',
+  // Source.
+  '.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx', '.py', '.rb', '.go', '.rs', '.java', '.kt',
+  '.c', '.h', '.cc', '.cpp', '.hpp', '.cs', '.php', '.swift', '.sh', '.bash', '.ps1', '.bat',
+  '.cmd', '.sql', '.vue', '.svelte', '.lua', '.r',
+  // Web / styles.
+  '.html', '.htm', '.css', '.scss', '.less', '.svg',
+  // Archives.
+  '.zip', '.tar', '.gz',
+];
 
-/** The extension to store under: the original when it is one we accept, else by MIME, else `.bin`. */
+/**
+ * The extension to store under: the original when we keep it, else by MIME, else the original
+ * again when it is a plain extension, else `.bin`.
+ *
+ * The last fallback before `.bin` is the load-bearing one. An allowlist can never be complete,
+ * and the alternative to "keep whatever `.xyz` it had" is renaming a `.parquet` or a `.ipynb`
+ * to `.bin` — which loses the one piece of information that tells the reader what the file is.
+ */
 export function attachmentExt(rawName: string, mime: string): string {
   const lower = String(rawName ?? '').toLowerCase();
   const dot = lower.lastIndexOf('.');
@@ -40,7 +71,12 @@ export function attachmentExt(rawName: string, mime: string): string {
   const map: Record<string, string> = {
     'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif',
   };
-  return map[byMime] ?? '.bin';
+  const byImageMime = map[byMime];
+  if (byImageMime) return byImageMime;
+  // A plain extension is still better than none. The shape is constrained so nothing derived
+  // from the upload can put a separator or a `..` into the generated file name.
+  if (/^\.[a-z0-9]{1,8}$/.test(ext)) return ext;
+  return '.bin';
 }
 
 /** Strip directories and anything that is not safe in a filename, keeping a readable tail. */
@@ -130,9 +166,26 @@ export function attachmentMime(name: string): string {
   const ext = String(name ?? '').toLowerCase().split('.').pop() ?? '';
   switch (ext) {
     case 'pdf': return 'application/pdf';
-    case 'json': return 'application/json';
+    case 'json': case 'jsonc': return 'application/json';
     case 'csv': return 'text/csv';
-    case 'md': case 'txt': case 'log': return 'text/plain; charset=utf-8';
+    case 'tsv': return 'text/tab-separated-values';
+    case 'xml': case 'svg': return 'application/xml';
+    case 'yaml': case 'yml': return 'application/yaml';
+    /*
+     * Source and prose. Declaring these as text is not cosmetic: the model side reads the
+     * declared type to decide whether to inline a document or hand over a path, and
+     * `application/octet-stream` for a `.py` would be technically compatible but would make
+     * every reader of that field deal with an extension table it does not need.
+     */
+    case 'md': case 'markdown': case 'rst':
+    case 'txt': case 'log': case 'ini': case 'conf': case 'env':
+    case 'js': case 'mjs': case 'cjs': case 'jsx': case 'ts': case 'tsx':
+    case 'py': case 'rb': case 'go': case 'rs': case 'java': case 'kt':
+    case 'c': case 'h': case 'cc': case 'cpp': case 'hpp': case 'cs': case 'php': case 'swift':
+    case 'sh': case 'bash': case 'zsh': case 'ps1': case 'bat': case 'cmd': case 'sql':
+    case 'html': case 'htm': case 'css': case 'scss': case 'less': case 'vue': case 'svelte':
+    case 'lua': case 'r': case 'toml':
+      return 'text/plain; charset=utf-8';
     default: return 'application/octet-stream';
   }
 }

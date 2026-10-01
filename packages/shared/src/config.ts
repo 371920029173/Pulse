@@ -157,6 +157,39 @@ export interface SheConfig {
     /** When true: skip confirm tickets + allow destructive shell. */
     allowAllCommands: boolean;
     /**
+     * 工作区边界策略 —— 「允许工作区外命令」那一组控件背后的东西。
+     *
+     * ─────────────────────────────────────────────────────────────────────────
+     * 为什么是一个对象而不是继续用一个布尔
+     *
+     * `allowAllCommands` 把两件不同的事焊在一起：**要不要逐条审批**，和**边界管多宽**。第二轮
+     * 实测（`_she-live-test_2` 的 V12–V17）量到的结果就是这两个方向都错：
+     *
+     *   开 allowAllCommands → 字面越界路径仍然 DENIED（该放的没放）
+     *   关 allowAllCommands → `type %TEMP%\x` 这类间接越界一路放行（该问的没问）
+     *
+     * 根因是越界判定只读命令文本里的**字面路径**，而环境变量、数据文件、`cd /d`、内联程序都能
+     * 绕过那一层。`classifyCommand` 把这件事讲清楚：一条命令只能被判成
+     * "已证明只读 / 已证明在工作区内 / 无法判定"，第三类必须按危险那侧处理。
+     *
+     * 于是策略拆成两问，和用户看到的两个控件一一对应：
+     *
+     *   allow=false                     —— 「允许工作区外命令」没勾：除阅读类外一律要人同意。
+     *   allow=true, policy='all'        —— 勾了 + 「所有」：什么都不问。
+     *   allow=true, policy='readonly'   —— 勾了 + 「只读」（默认）：工作区内免问，工作区外的写要问。
+     *   allow=true, policy='deny'       —— 勾了 + 「拒绝」：工作区内免问，工作区外一律直接拒绝。
+     *
+     * 「无法判定」在那三档里一律按**工作区外**处理（阅读类除外）。这不是保守过头：判不出来的原因
+     * 就是路径被藏起来了，而藏起来这件事本身没有无害的解释。
+     * ─────────────────────────────────────────────────────────────────────────
+     */
+    outsideWorkspace: {
+      /** 勾选了「允许工作区外命令」才为 true。false 时连工作区内的非只读命令也要批准。 */
+      allow: boolean;
+      /** 只在 `allow` 为 true 时有意义。 */
+      policy: 'all' | 'readonly' | 'deny';
+    };
+    /**
      * Command allowlist. Empty means "not enforced".
      *
      * The denylist (`DESTRUCTIVE_PATTERNS`) can only block harmful forms someone
@@ -216,6 +249,30 @@ export interface SheConfig {
     maxTokens: number;
     /** Wall clock for the turn, in seconds. */
     maxSeconds: number;
+  };
+  /**
+   * 动态上下文与成本：用户填的 token 单价决定这一轮往哪一侧省钱。
+   *
+   * 和 `budget` 的分工：`budget` 是**硬上限**（超过就停），这里是**怎么省**（都不停）。两者都默认
+   * 不动任何东西 —— "默认行为不变"是一条能测的断言。
+   *
+   * `compression: 'off'` + `allowHistoryReduction: false` 是刻意的默认值，因为
+   * `agent-runtime/src/__tests__/compaction.test.ts` 钉着一条既有决策：长记录完整发出，什么都不删。
+   * 丢历史那条路（早期版本用 8k 摘要替掉 >120k 的对话）实测会让会话可用长度卡死，而且模型为了
+   * 补上下文会多跑几轮 —— 更贵。所以它存在，但必须由用户在设置页显式打开。
+   */
+  context: {
+    /** `off` | `light` | `balanced` | `aggressive` | `auto`（auto = 按定价自己选）。 */
+    compression: 'off' | 'light' | 'balanced' | 'aggressive' | 'auto';
+    /** 是否允许压缩时删减历史记录。默认 false：一条都不删。 */
+    allowHistoryReduction: boolean;
+    /** 每 100 万 token 的单价。全 0 表示没填，界面只报 token 数、不报钱。 */
+    pricing: {
+      inputPerMillion: number;
+      outputPerMillion: number;
+      /** 缓存命中价。0 表示没有优惠，命中部分按 input 价算（不填不等于免费）。 */
+      cachedInputPerMillion: number;
+    };
   };
   /** When true: skip confirms, auto KB hygiene, less babysitting (Cursor/CC-like). */
   automationMode: boolean;
@@ -296,6 +353,15 @@ const DEFAULTS: SheConfig = {
       maxOutputBytes: 0,
       denyDestructiveByDefault: true,
       allowAllCommands: false,
+      /*
+       * 默认「勾选 + 只读」。
+       *
+       * 勾选是默认，理由是这个开关回答的是"工作区外能不能碰"，而绝大多数正常工作都在工作区内 ——
+       * 默认没勾会让每一条 `ls` 都要点确认，那是把工具变成弹窗机。档位默认「只读」而不是「所有」，
+       * 因为「只读」正好等于上一版 `allowAllCommands=false` 时的**意图**：工作区内免问，出去的写要
+       * 过问。区别只在于现在这条规则真的被执行（间接越界能被判出来），而不是只看字面路径。
+       */
+      outsideWorkspace: { allow: true, policy: 'readonly' },
       // Empty = no allowlist. See `SandboxShell.isCommandAllowed` for why it is opt-in.
       allowedCommands: [],
       // Layer 4.2. Off by default: it changes what every command means (see the type's doc comment),
@@ -316,6 +382,21 @@ const DEFAULTS: SheConfig = {
     maxToolCalls: 0,
     maxTokens: 0,
     maxSeconds: 0,
+  },
+  /*
+   * 默认什么都不做：`off` + 不删历史 + 单价全 0。
+   *
+   * 单价默认 0 而不是"猜一个常见价格"：猜错了面板会给出一个和账单对不上的数字，而用户会以为
+   * 那是真的。0 让界面明说"你还没填"，这比一个像模像样的错数好。
+   */
+  context: {
+    compression: 'off',
+    allowHistoryReduction: false,
+    pricing: {
+      inputPerMillion: 0,
+      outputPerMillion: 0,
+      cachedInputPerMillion: 0,
+    },
   },
   automationMode: true,
   schedule: {
@@ -386,7 +467,7 @@ export function tryLoadYaml(filePath: string): Record<string, unknown> | null {
  * applied but is not is worse than one that fails.
  */
 const KNOWN_TOP_LEVEL_KEYS = new Set([
-  'llm', 'workspace', 'kb', 'sandbox', 'skills', 'automationMode', 'schedule', 'server', 'budget',
+  'llm', 'workspace', 'kb', 'sandbox', 'skills', 'automationMode', 'schedule', 'server', 'budget', 'context',
 ]);
 
 /** Warn about keys we do not read, so a typo is visible. */
@@ -649,6 +730,48 @@ export function loadConfig(workspaceRoot?: string): SheConfig {
     }
   }
 
+  /*
+   * Normalise the context block.
+   *
+   * 同一个理由，而且这里的代价更直接：单价如果被 `Number("3.5/M")` 弄成 `NaN`，面板会把花费算成
+   * `NaN` 或者 0 —— 用户对照账单发现对不上，然后不信这个功能。所以只接受有限非负数，其余回落到
+   * 默认。`compression` 只认那几个字面量：写成 `turbo` 不该悄悄变成 off 之外的东西。
+   *
+   * 注意默认值：`allowHistoryReduction` 回落到 `false`。文件里写坏了一个键，结果变成"允许删历史"，
+   * 是这里最不能出的错。
+   */
+  {
+    const fromFile = config.context as unknown;
+    config.context = {
+      ...DEFAULTS.context,
+      pricing: { ...DEFAULTS.context.pricing },
+    };
+    if (fromFile && typeof fromFile === 'object' && !Array.isArray(fromFile)) {
+      const src = fromFile as Record<string, unknown>;
+      if (typeof src.compression === 'string'
+        && ['off', 'light', 'balanced', 'aggressive', 'auto'].includes(src.compression)) {
+        config.context.compression = src.compression as SheConfig['context']['compression'];
+      }
+      if (typeof src.allowHistoryReduction === 'boolean') {
+        config.context.allowHistoryReduction = src.allowHistoryReduction;
+      } else if (src.allowHistoryReduction === 'true' || src.allowHistoryReduction === '1') {
+        config.context.allowHistoryReduction = true;
+      } else if (src.allowHistoryReduction === 'false' || src.allowHistoryReduction === '0') {
+        config.context.allowHistoryReduction = false;
+      }
+      const pricing = src.pricing;
+      if (pricing && typeof pricing === 'object' && !Array.isArray(pricing)) {
+        const p = pricing as Record<string, unknown>;
+        for (const key of ['inputPerMillion', 'outputPerMillion', 'cachedInputPerMillion'] as const) {
+          const raw = p[key];
+          if (raw === undefined || raw === null || raw === '') continue;
+          const n = Number(raw);
+          if (Number.isFinite(n) && n >= 0) config.context.pricing[key] = n;
+        }
+      }
+    }
+  }
+
   const env = process.env;
   if (env.SHE_LLM_PROVIDER === 'openai' || env.SHE_LLM_PROVIDER === 'anthropic') {
     config.llm.provider = env.SHE_LLM_PROVIDER;
@@ -777,6 +900,29 @@ export function loadConfig(workspaceRoot?: string): SheConfig {
   if (budgetTokens !== undefined) config.budget.maxTokens = Math.trunc(budgetTokens);
   const budgetSeconds = readNonNegative(env.SHE_BUDGET_MAX_SECONDS);
   if (budgetSeconds !== undefined) config.budget.maxSeconds = budgetSeconds;
+  /*
+   * 动态上下文与定价。全部可选，默认不动。
+   *
+   * `SHE_ALLOW_HISTORY_REDUCTION` 只认显式的真值：写坏的值**不**打开它。这是这个文件里唯一一个
+   * "打开就会删用户东西"的开关，所以它的解析必须 fail-closed —— 一个拼错的环境变量不该导致历史
+   * 被压缩。
+   */
+  if (env.SHE_CONTEXT_COMPRESSION !== undefined) {
+    const raw = env.SHE_CONTEXT_COMPRESSION.trim().toLowerCase();
+    if (['off', 'light', 'balanced', 'aggressive', 'auto'].includes(raw)) {
+      config.context.compression = raw as SheConfig['context']['compression'];
+    }
+  }
+  if (env.SHE_ALLOW_HISTORY_REDUCTION !== undefined) {
+    const raw = env.SHE_ALLOW_HISTORY_REDUCTION.trim().toLowerCase();
+    config.context.allowHistoryReduction = ['1', 'true', 'yes', 'on'].includes(raw);
+  }
+  const priceIn = readNonNegative(env.SHE_PRICE_INPUT_PER_MILLION);
+  if (priceIn !== undefined) config.context.pricing.inputPerMillion = priceIn;
+  const priceOut = readNonNegative(env.SHE_PRICE_OUTPUT_PER_MILLION);
+  if (priceOut !== undefined) config.context.pricing.outputPerMillion = priceOut;
+  const priceCached = readNonNegative(env.SHE_PRICE_CACHED_INPUT_PER_MILLION);
+  if (priceCached !== undefined) config.context.pricing.cachedInputPerMillion = priceCached;
   if (env.SHE_ALLOW_ALL_COMMANDS === '1' || env.SHE_ALLOW_ALL_COMMANDS === 'true') {
     config.sandbox.allowAllCommands = true;
     config.sandbox.denyDestructiveByDefault = false;
@@ -800,6 +946,35 @@ export function loadConfig(workspaceRoot?: string): SheConfig {
   }
   if (env.SHE_DENY_DESTRUCTIVE === '0' || env.SHE_DENY_DESTRUCTIVE === 'false') {
     config.sandbox.denyDestructiveByDefault = false;
+  }
+
+  /*
+   * 工作区边界。「允许工作区外命令」+ 三档策略。
+   *
+   * 位置在 `SHE_ALLOW_ALL_COMMANDS` / `SHE_DENY_DESTRUCTIVE` 之后，因为它们要参与缺省推导 —— 缺省
+   * 时从已经解析完的 `allowAllCommands` 推，而不是回到硬编码默认值。
+   *
+   * 这样做的理由是**不改变任何现存安装的行为**：一个已经写着 `SHE_ALLOW_ALL_COMMANDS=true` 的
+   * .env（本机就是）升上来仍然是全放行，只是现在这件事在设置页里看得见、也能改。反过来，如果这里
+   * 让缺省值覆盖掉那个变量，用户升级后会发现自己勾过的开关被悄悄关掉了 —— 那正是第二轮实测里
+   * 「开关两个方向都不可靠」的前半句。
+   */
+  if (env.SHE_ALLOW_OUTSIDE_WORKSPACE !== undefined) {
+    const raw = env.SHE_ALLOW_OUTSIDE_WORKSPACE.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(raw)) config.sandbox.outsideWorkspace.allow = true;
+    else if (['0', 'false', 'no', 'off'].includes(raw)) config.sandbox.outsideWorkspace.allow = false;
+    // 别的写法一律不认：这个开关关掉时连工作区内的命令都要批准，猜错的代价是每步一个弹窗，
+    // 或者反过来完全不管。两种都比"保持原值"糟。
+  } else {
+    config.sandbox.outsideWorkspace.allow = true;
+  }
+  if (env.SHE_OUTSIDE_WORKSPACE_POLICY !== undefined) {
+    const raw = env.SHE_OUTSIDE_WORKSPACE_POLICY.trim().toLowerCase();
+    if (raw === 'all' || raw === 'readonly' || raw === 'deny') {
+      config.sandbox.outsideWorkspace.policy = raw;
+    }
+  } else {
+    config.sandbox.outsideWorkspace.policy = config.sandbox.allowAllCommands ? 'all' : 'readonly';
   }
   /*
    * Real isolation (layer 4.2). `SHE_SANDBOX_ISOLATION=wsl` asks for the boundary; an unrecognised

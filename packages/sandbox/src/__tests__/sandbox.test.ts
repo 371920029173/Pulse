@@ -356,16 +356,31 @@ describe('Tool: unknown', () => {
 
 
 describe('Confirm tickets', () => {
-  it('should require confirm for shell tool', async () => {
+  /*
+   * 权限模型在第二轮重做过，这条用例也跟着改了 —— 它原来断言"shell 工具一律要确认"，而新模型下
+   * **只读命令不限制位置、不需要确认**（用户定的规则：阅读类在工作区内外部都可以）。
+   *
+   * 所以这里拆成两半，比原来那条更有信息量：只读直接跑，非只读才要票。
+   */
+  it('只读命令不需要确认，直接执行', async () => {
     const tools = createTools(shell, tempDir);
-    const first = await tools.execute('shell', { command: 'echo hi' });
+    const out = await tools.execute('shell', { command: 'echo hi' });
+    assert.ok(out.includes('exit code'), `只读命令被判为需要批准: ${out}`);
+    assert.ok(!out.includes('needs_confirm'));
+  });
+
+  it('非只读命令需要确认，带票重跑后才执行', async () => {
+    const tools = createTools(shell, tempDir);
+    const first = await tools.execute('shell', { command: 'mkdir made-by-confirm' });
     const parsed = JSON.parse(first);
-    assert.ok(parsed.needs_confirm);
+    assert.ok(parsed.needs_confirm, first);
+    // 票要能说清"为什么问" —— 四档策略下这句话是用户判断该不该点的唯一依据。
+    assert.ok(parsed.reason, first);
     const second = await tools.execute('shell', {
-      command: 'echo hi',
+      command: 'mkdir made-by-confirm',
       _confirm_ticket: parsed.needs_confirm.ticket_id,
     });
-    assert.ok(second.includes('exit code'));
+    assert.ok(second.includes('exit code'), second);
   });
 });
 

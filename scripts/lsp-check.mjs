@@ -17,7 +17,8 @@
  *
  *   node scripts/lsp-check.mjs
  */
-import { readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync, mkdtempSync, mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LspManager, makeLspTools, executeLspTool } from '../packages/agent-runtime/dist/lsp-tools.js';
 import { availableServers } from '../packages/agent-runtime/dist/lsp-client.js';
@@ -34,6 +35,8 @@ const check = (label, cond, detail) => {
 };
 
 const managers = [];
+/** 本节自建的临时工作区，跑完必须删；语言服务器可能还占着目录，所以带重试。 */
+const roots = [];
 const newManager = () => {
   const m = new LspManager(ROOT);
   managers.push(m);
@@ -72,7 +75,7 @@ if (servers.length === 0) {
    * message says exactly what to install.
    */
   console.error('  未安装任何语言服务器，LSP 检查无法执行。');
-  console.error('  这不是通过：LSP 相关的 18 项断言一条都没跑。');
+  console.error('  这不是通过：LSP 相关的 20 项断言一条都没跑。');
   console.error('  安装后重试：pnpm add -w -D typescript-language-server typescript');
   process.exit(1);
 }
@@ -172,6 +175,51 @@ if (hasTs) {
     check(`拒绝越界路径 ${p}`, r?.ok === false && /超出工作区/.test(String(r.output)), r?.output);
   }
 
+  console.log('\n=== 跨窗口的根隔离（两个根 · 同一相对路径） ===');
+  {
+    /*
+     * 对应评测报告里的 4a。报告作者的原话是"我单工作区测不出两个窗口抢根"，于是这一项一直停在
+     * "已修好、但无法确认"。判据是**行号**：两个工作区放**同相对路径的同名文件**，各自在**不同的行**
+     * 上出错；谁读到了另一个工作区的文件，报出来的就是对方的行号。
+     *
+     * 两个根是**并发**跑的，而且都在**同一个进程**里 —— 比真实的多窗口（两个进程）更苛刻。如果根是
+     * 模块级全局状态，这里必然串。所以这条断言证明的不是"进程碰巧隔开了"，而是"根按实例持有"。
+     */
+    const makeRoot = (tag, errLine) => {
+      const root = mkdtempSync(join(tmpdir(), `she-lsp-root-${tag}-`));
+      roots.push(root);
+      mkdirSync(join(root, 'src'));
+      writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({
+        compilerOptions: { strict: true, noEmit: true }, include: ['src/**/*.ts'],
+      }));
+      const body = [];
+      for (let i = 1; i <= 12; i++) {
+        body.push(i === errLine ? 'export const bad: number = "x";' : `// filler ${i}`);
+      }
+      writeFileSync(join(root, 'src', 'target.ts'), `${body.join('\n')}\n`);
+      return root;
+    };
+    const rootA = makeRoot('a', 2);
+    const rootB = makeRoot('b', 9);
+    const mA = new LspManager(rootA);
+    const mB = new LspManager(rootB);
+    managers.push(mA, mB);
+
+    const [a, b] = await Promise.all([
+      executeLspTool('lsp_diagnostics', { path: 'src/target.ts' }, rootA, mA),
+      executeLspTool('lsp_diagnostics', { path: 'src/target.ts' }, rootB, mB),
+    ]);
+    const ta = String(a?.output ?? '');
+    const tb = String(b?.output ?? '');
+    console.log(`        根 A（错在第 2 行）-> ${ta.split('\n').pop()}`);
+    console.log(`        根 B（错在第 9 行）-> ${tb.split('\n').pop()}`);
+    // 匹配 `target.ts:<行>:` 而不是裸的行号，免得被别的数字误命中。
+    check('根 A 报出的是自己那份文件的行号', /target\.ts:2:\d+/.test(ta), ta);
+    check('根 B 报出的是自己那份文件的行号', /target\.ts:9:\d+/.test(tb), tb);
+    check('两个根没有互换（互换就是抢根）',
+      !/target\.ts:9:\d+/.test(ta) && !/target\.ts:2:\d+/.test(tb), `${ta} | ${tb}`);
+  }
+
   console.log('\n=== 降级行为 ===');
   {
     const r = await call('lsp_diagnostics', { path: 'README.md' });
@@ -216,6 +264,16 @@ console.log('\n=== Agent 集成 ===');
 }
 
 for (const m of managers) await m.dispose();
+
+/*
+ * 删掉本节建的临时工作区。语言服务器的子进程可能还没完全放手（Windows 上会 EBUSY），所以重试 ——
+ * 一次失败就放弃会在磁盘上留一堆目录，而这些目录里每个都曾经挂着一个 tsserver。
+ */
+for (const root of roots) {
+  for (let attempt = 0; attempt < 12; attempt++) {
+    try { rmSync(root, { recursive: true, force: true }); break; } catch { await new Promise((r) => { setTimeout(r, 250); }); }
+  }
+}
 
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`);
 process.exit(failures === 0 ? 0 : 1);

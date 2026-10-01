@@ -373,6 +373,16 @@ export interface SandboxOptions {
   /** When true, bypass denyDestructiveByDefault (after confirm ticket). */
   allowDestructive?: boolean;
   /**
+   * 人已经为**工作区边界**这一件事批准过这条命令。
+   *
+   * 与 `allowDestructive` 分开是必要的，不是重复：那是"破坏性命令要额外一道闸"，这是"越界的写已经
+   * 被问过"。两者来源不同（前者由终端端点在人点过之后传，后者由工具层的确认票传），合并会让
+   * 批准一次越界写顺手把破坏性闸门也打开，或者反过来 —— 而实测里"两个开关互相代表"正是问题本身。
+   *
+   * 只有 `tools.ts` 的 `execute` 在确认票校验通过后才会传 true，模型无法自己伪造。
+   */
+  boundaryApproved?: boolean;
+  /**
    * Keep the process alive past `timeout` and hand back a job instead of killing it.
    *
    * Off by default: `exec()` is used by callers that want a bounded answer (the terminal endpoint,

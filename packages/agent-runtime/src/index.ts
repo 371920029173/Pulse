@@ -54,6 +54,34 @@ export {
 export type { ToolFailureKind, ToolResultVerdict } from './tool-result.js';
 export { DEFAULT_BUDGET, budgetStop, parseBudgetLimits, renderBudgetStop } from './budget.js';
 export type { BudgetKind, BudgetLimits, BudgetStop, BudgetUsage } from './budget.js';
+/*
+ * 动态上下文 / 成本分配。
+ *
+ * `context-budget.ts` 里没有一行读时钟、文件或环境变量 —— 它的输出只取决于（定价, 用量, 档位），
+ * 所以"按定价选策略"这件事能在没有模型、没有网络的情况下被测，也能被 `pnpm check:context` 那样
+ * 的脚本直接调。
+ */
+export {
+  allocateContext,
+  estimateCost,
+  pricingConfigured,
+  pricingNote,
+  parseContextBudget,
+  DEFAULT_PRICING,
+  DEFAULT_CONTEXT_BUDGET,
+  COST_DISCLAIMER,
+} from './context-budget.js';
+export type {
+  Allocation,
+  CompressionChoice,
+  CompressionLevel,
+  ContextBudgetConfig,
+  CostBreakdown,
+  Lever,
+  LeverId,
+  TokenPricing,
+  UsageLike,
+} from './context-budget.js';
 export {
   MAX_PARALLEL_READS,
   READ_ONLY_TOOLS,

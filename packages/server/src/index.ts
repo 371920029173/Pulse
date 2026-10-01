@@ -1,18 +1,19 @@
 import { createServer } from 'node:http';
 import os from 'node:os';
 import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, rmSync, copyFileSync, renameSync, openSync, readSync, closeSync } from 'node:fs';
-import { join, extname, resolve, dirname, basename, relative, isAbsolute } from 'node:path';
+import { join, extname, resolve, dirname, basename, relative, isAbsolute, sep } from 'node:path';
 import { realpathSync, createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { createLogger, loadConfig, resolveEnvFile, mergeMissingEnvFile, updateEnvFile, THINKING_LEVELS, getConfigRecovery, getConfigFileInUse, lastGoodConfigPath, lastGoodConfigMetaPath } from '@she/shared';
-import type { SheConfig, StreamChunk, EdgeKind, SkillProfile } from '@she/shared';
+import { isScratchWorkspace } from './scratch-workspace.js';
+import type { SheConfig, StreamChunk, EdgeKind, SkillProfile, ThinkingLevel } from '@she/shared';
 import { KBStore, GroupKBEngine, mergeKnowledgeBases } from '@she/kb';
 import type { KBMemoryPatch } from '@she/kb';
 import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLink } from './kb-link.js';
 import { SandboxShell, createTools, ConfirmTicketStore } from '@she/sandbox';
-import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, subagentWrapUpScheduleMs, composeWrapUpNudge, selectHarvestNotes } from '@she/agent-runtime';
-import type { SubagentRunner, SubagentResult, SubagentKbHarvest } from '@she/agent-runtime';
+import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, subagentWrapUpScheduleMs, composeWrapUpNudge, selectHarvestNotes, allocateContext, pricingConfigured, pricingNote } from '@she/agent-runtime';
+import type { SubagentRunner, SubagentResult, SubagentKbHarvest, UsageLike } from '@she/agent-runtime';
 import {
   PlanStore,
   MemoStore,
@@ -1474,6 +1475,7 @@ function makeAgent(cfg: SheConfig, sessionId?: string | null): Agent {
   const shell = new SandboxShell(local.workspace.root, local.sandbox);
   const base = createTools(shell, local.workspace.root, {
     allowAllCommands: local.sandbox.allowAllCommands,
+    outsideWorkspace: local.sandbox.outsideWorkspace,
     // The KB is reachable only through `kb_*`; raw access is refused by the shell itself.
     kbDbPath: local.kb.dbPath,
   });
@@ -2085,6 +2087,11 @@ function dropAgent(id: string): void {
 }
 
 /**
+ * The predicate lives in `scratch-workspace.ts` so it can be tested without booting a server;
+ * see there for why it needs both the temp-directory and the naming signal.
+ */
+
+/**
  * Point the process at another project without killing sessions that are
  * already pinned to their own directory or still running.
  *
@@ -2133,7 +2140,15 @@ function mountWorkspace(root: string, sessionId?: string): ChatSession | null {
     try { rememberProject(projectIndexFile(), next); } catch (err) {
       log.warn(`记录项目目录失败: ${(err as Error).message}`);
     }
-    try { updateEnvFile(ENV_PATH, { SHE_WORKSPACE: next }); } catch { /* non-fatal */ }
+    /*
+     * Remember this workspace as the default for the next launch — unless it is a scratch directory,
+     * which is used now and forgotten on restart (see `isScratchWorkspace`).
+     */
+    if (isScratchWorkspace(next)) {
+      log.info(`临时工作区 ${next} 不写入 .env 默认（下次启动不会回到这里）`);
+    } else {
+      try { updateEnvFile(ENV_PATH, { SHE_WORKSPACE: next }); } catch { /* non-fatal */ }
+    }
   }
 
   let chosen: ChatSession | null = null;
@@ -3017,6 +3032,17 @@ function registerRoutes(router: Router): void {
       automationMode: config.automationMode !== false,
       sandbox: config.sandbox,
       server: config.server,
+      /*
+       * 动态上下文/成本面板要读的那几个值。
+       *
+       * 单价原样回传（包括 0）：界面必须能区分"用户填了 0"和"还没填"，所以这里不做任何"补一个
+       * 默认价"的好心 —— 那会让用户以为面板算的钱是有依据的。
+       */
+      context: {
+        compression: config.context.compression,
+        allowHistoryReduction: config.context.allowHistoryReduction,
+        pricing: { ...config.context.pricing },
+      },
     });
   });
 
@@ -3049,6 +3075,10 @@ router.put('/api/settings', async (req, res) => {
       temperature?: number;
       maxTokens?: number;
       allowAllCommands?: boolean;
+      /** 「允许工作区外命令」勾选框。 */
+      allowOutsideWorkspace?: boolean;
+      /** 工作区外策略：所有 / 只读 / 拒绝。 */
+      outsideWorkspacePolicy?: 'all' | 'readonly' | 'deny';
       kbDbPath?: string;
       skillProfile?: 'dev' | 'liberal' | 'general' | 'custom';
       automationMode?: boolean;
@@ -3057,6 +3087,12 @@ router.put('/api/settings', async (req, res) => {
       fallbackApiKey?: string;
       fallbackModel?: string;
       fallbackProvider?: 'openai' | 'anthropic';
+      /** 动态上下文压缩档位。 */
+      compression?: 'off' | 'light' | 'balanced' | 'aggressive' | 'auto';
+      /** 是否允许压缩时删减历史。默认 false，且只有显式传布尔值才改。 */
+      allowHistoryReduction?: boolean;
+      /** 每 100 万 token 的单价。 */
+      pricing?: { inputPerMillion?: number; outputPerMillion?: number; cachedInputPerMillion?: number };
     }>(req);
 
     const prevWorkspaceRoot = config.workspace.root;
@@ -3178,9 +3214,70 @@ router.put('/api/settings', async (req, res) => {
       // Persist the *effective* value, not the incoming one.
       setEnv('SHE_ALLOW_ALL_COMMANDS', config.sandbox.allowAllCommands ? 'true' : 'false');
     }
+
+    /*
+     * 工作区边界：勾选框 + 档位。
+     *
+     * 这两个字段也是各写各的，因为界面允许"只改档位"或"只改勾选"。缺省**不动**当前值 —— 这里
+     * 不能像 `allowAllCommands` 那样从 automationMode 推，否则用户刚选的档位会在下一次保存别处
+     * 设置时被一次没有携带它的请求冲掉。
+     *
+     * 勾选与「所有」档是同一件事的两种写法（见 config.ts 里 `outsideWorkspace` 的注释）：勾了「所有」
+     * 就意味着免审，所以这里同步 `allowAllCommands` 的反向依赖 —— 选了「所有」时把它置真，选别的
+     * 档位时把它置假，让那两处（审批层 / 边界层）读到的永远是同一个结论。
+     */
+    if (typeof body.allowOutsideWorkspace === 'boolean') {
+      config.sandbox.outsideWorkspace.allow = body.allowOutsideWorkspace;
+      setEnv('SHE_ALLOW_OUTSIDE_WORKSPACE', body.allowOutsideWorkspace ? 'true' : 'false');
+    }
+    if (body.outsideWorkspacePolicy === 'all' || body.outsideWorkspacePolicy === 'readonly' || body.outsideWorkspacePolicy === 'deny') {
+      config.sandbox.outsideWorkspace.policy = body.outsideWorkspacePolicy;
+      setEnv('SHE_OUTSIDE_WORKSPACE_POLICY', body.outsideWorkspacePolicy);
+    }
+    if (
+      typeof body.allowOutsideWorkspace === 'boolean' || body.outsideWorkspacePolicy !== undefined
+    ) {
+      // 只有「勾选 + 所有」才是真正的全放行。其余三档都要经过 `classifyCommand`，所以
+      // `allowAllCommands` 必须跟着走 —— 它现在只是这四个状态的派生值，不再是独立开关。
+      const open = config.sandbox.outsideWorkspace.allow && config.sandbox.outsideWorkspace.policy === 'all';
+      config.sandbox.allowAllCommands = open;
+      config.sandbox.denyDestructiveByDefault = !open;
+      setEnv('SHE_ALLOW_ALL_COMMANDS', open ? 'true' : 'false');
+    }
     if (body.thinkingLevel && THINKING_LEVEL_SET.has(body.thinkingLevel)) {
       config.llm.thinkingLevel = body.thinkingLevel;
       setEnv('SHE_THINKING_LEVEL', body.thinkingLevel);
+    }
+    /*
+     * 动态上下文 / 成本面板。
+     *
+     * 每一格都单独判断有没有传，而不是用 `?? 默认`：面板是分次保存的（先填单价，再选档位），
+     * 用默认值覆盖没传的字段会把用户上一次的选择擦掉。
+     *
+     * `allowHistoryReduction` 只在**显式传了布尔值**时才改 —— 这是唯一一个会删用户东西的开关，
+     * "没传"绝不能被理解成 true。
+     */
+    if (body.compression && ['off', 'light', 'balanced', 'aggressive', 'auto'].includes(body.compression)) {
+      config.context.compression = body.compression;
+      setEnv('SHE_CONTEXT_COMPRESSION', body.compression);
+    }
+    if (typeof body.allowHistoryReduction === 'boolean') {
+      config.context.allowHistoryReduction = body.allowHistoryReduction;
+      setEnv('SHE_ALLOW_HISTORY_REDUCTION', body.allowHistoryReduction ? 'true' : 'false');
+    }
+    if (body.pricing && typeof body.pricing === 'object') {
+      for (const key of ['inputPerMillion', 'outputPerMillion', 'cachedInputPerMillion'] as const) {
+        const raw = (body.pricing as Record<string, unknown>)[key];
+        if (raw === undefined || raw === null || raw === '') continue;
+        const n = Number(raw);
+        // 负数/NaN 直接不接受：`NaN` 会让面板把花费显示成 NaN，用户只会觉得这个功能坏了。
+        if (!Number.isFinite(n) || n < 0) continue;
+        config.context.pricing[key] = n;
+        setEnv(
+          { inputPerMillion: 'SHE_PRICE_INPUT_PER_MILLION', outputPerMillion: 'SHE_PRICE_OUTPUT_PER_MILLION', cachedInputPerMillion: 'SHE_PRICE_CACHED_INPUT_PER_MILLION' }[key],
+          String(n),
+        );
+      }
     }
     if (!config.llm.fallback) config.llm.fallback = {};
     if (typeof body.fallbackBaseUrl === 'string') {
@@ -3223,6 +3320,7 @@ router.put('/api/settings', async (req, res) => {
       body.provider || body.model || body.baseUrl || body.apiKey || body.workspaceRoot
       || body.skillProfile || typeof body.automationMode === 'boolean'
       || typeof body.allowAllCommands === 'boolean' || typeof body.kbDbPath === 'string'
+      || typeof body.allowOutsideWorkspace === 'boolean' || body.outsideWorkspacePolicy !== undefined
       || body.fallbackBaseUrl || body.fallbackApiKey || body.fallbackModel || body.fallbackProvider
       || typeof body.temperature === 'number' || typeof body.maxTokens === 'number',
     );
@@ -3258,6 +3356,12 @@ router.put('/api/settings', async (req, res) => {
       sandbox: {
         allowAllCommands: config.sandbox.allowAllCommands,
         denyDestructiveByDefault: config.sandbox.denyDestructiveByDefault,
+        // 设置页画那两个控件要用的真实值。`allowAllCommands` 还在返回，是为了兼容旧界面 ——
+        // 但它现在是下面这两个字段的派生值，不再是一个可以独立改变的开关。
+        outsideWorkspace: {
+          allow: config.sandbox.outsideWorkspace.allow,
+          policy: config.sandbox.outsideWorkspace.policy,
+        },
       },
     });
   });
@@ -4703,12 +4807,33 @@ router.get('/api/fs/tree', (req, res) => {
   router.post('/api/sessions', async (req, res) => {
     const body = await parseBody<{ title?: string; directory?: string; parent_id?: string }>(req);
     persistHistory();
-    const directory = resolve(body.directory?.trim() || config.workspace.root);
+    /*
+     * "Which store" and "which working directory" are two different questions.
+     *
+     * `directory` is the folder the session works in; it used to select the store as well. But the
+     * store the rail READS is the mounted one (`stateDir`), and those are the same path only while
+     * `SHE_STATE_DIR` is unset — it is an explicit storage override, so `stateDir` may name a
+     * directory that is not `config.workspace.root`.
+     *
+     * With the override set, `POST` wrote `<workspace>/.she/sessions.json` while
+     * `GET /api/conversations` read `<stateDir>/.she/sessions.json`. Reproduced live: four
+     * `POST /api/sessions` all answered 201, the rows landed in the workspace file, and the rail
+     * stayed on 暂无会话 while `GET /api/sessions/:id` answered 200 for each id — creates that
+     * succeed and then never appear, which is what "the chat I just made is gone" looks like from
+     * the outside. A reload did not help, because the list and the create disagreed on disk, not in
+     * memory.
+     *
+     * So the default is the mounted store, and only an explicit `directory` picks another
+     * project's. In the common case (`stateDir === workspace.root`) this is exactly the old
+     * behaviour.
+     */
+    const requested = body.directory?.trim();
+    const directory = resolve(requested || config.workspace.root);
     if (!existsSync(directory)) throw new HttpError(404, `路径不存在: ${directory}`);
-    const owner = storeFor(directory);
+    const owner = requested ? storeFor(directory) : sessions;
     const s = createSession(owner, body.title, { directory, parentId: body.parent_id });
     try { rememberProject(projectIndexFile(), directory); } catch { /* non-fatal */ }
-    if (sameDb(directory, config.workspace.root)) {
+    if (sameDb(owner.rootDir, stateDir)) {
       activeAgentId = s.id;
       agents.set(s.id, makeAgent(config, s.id));
     }
@@ -5477,6 +5602,65 @@ router.get('/api/fs/tree', (req, res) => {
 
   router.get('/api/usage', (req, res) => {
     sendJSON(res, agentFor(req, undefined, { createIfMissing: false }).getTokenUsage());
+  });
+
+  /**
+   * 成本面板的数据：这一段会话花了多少、按你的定价该往哪一侧省、以及那句免责声明。
+   *
+   * 这里**只算和解释，不改任何东西**。把"建议"和"生效"分开是有意的：面板要能回答"如果我改成这个
+   * 档位会怎样"，而一个预览动作不该顺手把配置改了 —— 那会让用户在不知情的情况下丢掉历史（如果是
+   * aggressive+允许删历史的话）。
+   *
+   * 没有任何会话时也返回一份（`createIfMissing: false`）：面板在空工作区也要能填单价。
+   */
+  router.get('/api/context/plan', (req, res) => {
+    const agent = agentFor(req, undefined, { createIfMissing: false });
+    const usage = agent.getTokenUsage();
+    const allocation = allocateContext({
+      requested: config.context.compression,
+      pricing: config.context.pricing,
+      usage: usage as unknown as UsageLike,
+      allowHistoryReduction: config.context.allowHistoryReduction,
+      currentThinkingLevel: (config.llm.thinkingLevel || 'medium') as ThinkingLevel,
+    });
+    sendJSON(res, {
+      pricing: { ...config.context.pricing },
+      pricingConfigured: pricingConfigured(config.context.pricing),
+      pricingNote: pricingNote(config.context.pricing),
+      compression: config.context.compression,
+      allowHistoryReduction: config.context.allowHistoryReduction,
+      usage,
+      allocation,
+    });
+  });
+
+  /**
+   * 把面板的建议应用下去（用户按了按钮才算）。
+   *
+   * `historyReduction` 不在这里设置 —— 它由设置页那个显式开关决定。让一个"应用建议"的按钮顺手
+   * 打开"允许删历史"是这里最不该有的行为。
+   */
+  router.post('/api/context/apply', async (req, res) => {
+    const body = await parseBody<{ thinkingLevel?: ThinkingLevel }>(req).catch(() => ({} as { thinkingLevel?: ThinkingLevel }));
+    const agent = agentFor(req, undefined, { createIfMissing: false });
+    const allocation = allocateContext({
+      requested: config.context.compression,
+      pricing: config.context.pricing,
+      usage: agent.getTokenUsage() as unknown as UsageLike,
+      allowHistoryReduction: config.context.allowHistoryReduction,
+      currentThinkingLevel: (config.llm.thinkingLevel || 'medium') as ThinkingLevel,
+    });
+    const wanted = body.thinkingLevel ?? allocation.recommendedThinkingLevel;
+    let applied: ThinkingLevel | null = null;
+    if (wanted && THINKING_LEVEL_SET.has(wanted)) {
+      config.llm.thinkingLevel = wanted;
+      // 事件里的 `setEnv` 是 PUT /api/settings 里的局部闭包（它攒到 envPatch 再一起写），这里
+      // 直接落盘，和 `mountWorkspace` 记工作区的做法一致。
+      try { updateEnvFile(ENV_PATH, { SHE_THINKING_LEVEL: wanted }); } catch { /* non-fatal */ }
+      for (const a of agents.values()) a.setThinkingLevel(wanted);
+      applied = wanted;
+    }
+    sendJSON(res, { ok: true, applied, allocation });
   });
 
   router.post('/api/usage/reset', (req, res) => {

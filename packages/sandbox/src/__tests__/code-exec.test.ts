@@ -266,11 +266,40 @@ describe('后台任务：这一事实在每一次读回都在', () => {
 });
 
 describe('既有的路径拦截没有被这条新检查影响', () => {
-  it('文本里看得见的越界路径还是照旧被拒', async () => {
-    const r = await shell.exec('cd C:\\');
+  /*
+   * 这一段原来断言"`cd C:\` 一律被拒"，并注明"既有的路径拦截没被影响"。第二轮返工后，这个断言
+   * 本身成了要改的东西 —— 它把两件事绑在了一起：
+   *
+   *   路径拦截（这条命令有没有出去）      ← 仍然成立，下面第一条继续测
+   *   出去之后怎么办（拒 / 问人 / 放行）  ← 现在由四档策略决定，不再是无条件拒
+   *
+   * 旧行为在实测里两个方向都出过错（V17）：开「允许所有命令」时字面越界照拒（该放没放），
+   * 关的时候间接越界照跑（该问没问）。所以这里按档位分开测，而不是继续测"一律拒"。
+   */
+  it('默认（未勾选工作区外）档：越界命令仍被拒', async () => {
+    const strict = new SandboxShell(tempDir);
+    const r = await strict.exec('cd C:\\');
     assert.equal(r.denied, true);
     assert.match(r.stderr, /DENIED/);
     assert.equal(r.codeExecution, undefined, '被拒的命令没有子进程');
+  });
+
+  it('「所有」档：越界命令不再被拒（用户明确选过不在乎边界）', async () => {
+    const r = await shell.exec('cd C:\\');
+    assert.notEqual(r.denied, true, `「所有」档下不该再拒: ${r.stderr}`);
+  });
+
+  it('只读档：越界**写**仍然进不来，越界只读可以（阅读类不看位置）', async () => {
+    const ro = new SandboxShell(tempDir, {
+      outsideWorkspace: { allow: true, policy: 'readonly' },
+    });
+    // 指向一个不存在的目录：万一守卫没拦住，这条命令自己也会失败，不会真在 C: 根上留下文件。
+    const write = await ro.exec('echo x > C:\\__she_probe_no_such_dir__\\x.txt');
+    assert.equal(write.denied, true, '越界写在只读档下没被拦住');
+
+    // 读越界则放行：规则是阅读类不限制位置，`type` 在不写东西的动词表里。
+    const read = await ro.exec('type C:\\Windows\\win.ini');
+    assert.notEqual(read.denied, true, `越界只读被误拦: ${read.stderr}`);
   });
 
   it('写进工作区里的普通命令不受影响', async () => {

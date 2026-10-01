@@ -139,6 +139,16 @@ function scanShellSyntax(command: string): ShellScan {
 
     if (ch === '<' || ch === '>') { redirection = true; current += ch; continue; }
 
+    /*
+     * `&` immediately after `>` is file-descriptor duplication (`2>&1`, `>&2`), not a separator:
+     * cmd.exe and POSIX both run that as ONE command. Splitting it produced a phantom segment
+     * named `1`, which two callers then misread in the same direction — the allowlist refused it
+     * as an unknown command, and `classifyCommand` read `cat a.txt 2>&1` as a non-read. A real
+     * `&` separator is always preceded by a word or a space (`echo a & b`, `echo a&b`), never by
+     * the redirection operator it belongs to.
+     */
+    if (ch === '&' && current.endsWith('>')) { current += ch; continue; }
+
     if (SEPARATORS.has(ch)) {
       const trimmed = current.trim();
       if (trimmed) segments.push(trimmed);
@@ -390,6 +400,29 @@ function staysInWorkspace(workspaceRoot: string, target: string): boolean {
  * `fs_*` already jails paths. The shell did not: `echo x > ..\file` and `cd C:\`
  * both ran. Quoted `>` (as in `=>` inside a node -e string) is not a redirect.
  */
+/**
+ * 一条命令是否会把 shell 的工作目录搬到工作区外。
+ *
+ * 单独成一个函数，因为它虽然和"路径字面量越界"同属越界，处置却不同：`cd` 到外面不是"读了一个外面
+ * 的文件"，而是**把后续每一步都搬出去** —— 之后再写任何相对路径都已经不在工作区内。所以它不能
+ * 享受"阅读类不限制位置"的豁免，分类器必须把它当成改变位置的动作（第二轮实测 V14）。
+ */
+function cdEscapeInSegment(segment: string, workspaceRoot: string): string | null {
+  const cd = /^(?:cd|chdir|pushd)\s+(?:\/d\s+)?(\S+)/i.exec(segment.trim());
+  if (!cd) return null;
+  const target = unquoteToken(cd[1]);
+  if (staysInWorkspace(workspaceRoot, target)) return null;
+  return `cd 目标在工作区外: ${target}`;
+}
+
+export function cdEscapeReason(command: string, workspaceRoot: string): string | null {
+  for (const seg of splitCmdSegments(command)) {
+    const hit = cdEscapeInSegment(seg, workspaceRoot);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 export function workspaceEscapeReason(command: string, workspaceRoot: string): string | null {
   // `../` inside quotes is invisible to the redirect scanner, and it is how
   // `node -e "...writeFileSync('../x')"` leaves the workspace. `a..b` (a git
@@ -398,13 +431,8 @@ export function workspaceEscapeReason(command: string, workspaceRoot: string): s
     return '路径在工作区外: 命令包含 ../';
   }
   for (const seg of splitCmdSegments(command)) {
-    const cd = /^(?:cd|chdir|pushd)\s+(?:\/d\s+)?(\S+)/i.exec(seg.trim());
-    if (cd) {
-      const target = unquoteToken(cd[1]);
-      if (!staysInWorkspace(workspaceRoot, target)) {
-        return `cd 目标在工作区外: ${target}`;
-      }
-    }
+    const cdEscape = cdEscapeInSegment(seg, workspaceRoot);
+    if (cdEscape) return cdEscape;
     for (const target of redirectTargets(seg)) {
       if (!staysInWorkspace(workspaceRoot, target)) {
         return `重定向目标在工作区外: ${target}`;
@@ -547,6 +575,292 @@ export function codeExecutionDisclosure(finding: CodeExecutionOnCommandLine): st
     + '沙箱的路径检查只能看命令文本、看不到代码字符串内部的路径，'
     + '所以这个子进程的读写**不受工作区边界约束**（它能碰到的东西 = 你账号能碰到的东西）。'
     + '要真的限制它得用层 4.2 的真隔离（WSL2 / Docker）；在那之前，请把这段代码本身当作要审的东西。';
+}
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHAT A COMMAND IS PROVEN TO DO, AS OPPOSED TO WHAT IT MIGHT DO
+ *
+ * `workspaceEscapeReason` answers "does the text name a path outside the workspace?". That is a
+ * narrower question than the permission model needs, which has two:
+ *
+ *   1. Does it WRITE?   `cat x` and `rm x` both parse cleanly as "a command with a path". Only one
+ *                       of them is safe to run without asking.
+ *   2. WHERE does it act?  A write inside the workspace is the agent's own business; the same
+ *                       write one directory up is not.
+ *
+ * Both answers are only ever PROVEN, never guessed. A command that hides its program in a string
+ * (`node -e …`), in a substitution (`$(…)`), or in a variable (`%CD%\x`, `$HOME/x`) makes the
+ * question unanswerable, and the honest verdict is `unknown` rather than `inside`. Every caller
+ * treats `unknown` as the more dangerous of the two, which is what closes the hole the second-round
+ * audit measured: `node -e` building a path with `String.fromCharCode(68,58,92,…)` read
+ * `D:\AGI\README.txt` while every check in this file said yes.
+ *
+ * The read-only table is an ALLOWLIST — a verb absent from it is "not proven harmless", which costs
+ * a confirmation and never a wrong write. Three verbs that read or write depending on an argument
+ * (`find -delete`, `sed -i`, `sort -o`) are listed and then checked for those flags, because
+ * `find . -name x` is an ordinary read and refusing it would teach the agent to route around the
+ * check rather than use it.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+/**
+ * Verbs that cannot modify the filesystem, whatever their arguments.
+ *
+ * Deliberately excludes anything with a write form reachable from an argument — `git branch`,
+ * `git tag`, `git stash`, `git config`, `git remote` are all absent and go through
+ * `READ_ONLY_SUBCOMMANDS` or are simply not proven. So are `tee`, `xargs`, `awk`, `env` and
+ * `less`/`more`: the first three run or write whatever they are handed, `env` launches a command,
+ * and the pagers take shell escapes.
+ *
+ * `cd`/`pushd`/`popd` are here because they only move the shell's own working directory — a
+ * `cd` that leaves the workspace is refused separately by `workspaceEscapeReason`, which is the
+ * check that actually knows about paths.
+ */
+const READ_ONLY_VERBS = new Set([
+  // POSIX reads: no argument turns these into writes.
+  'cat', 'head', 'tail', 'wc', 'file', 'stat', 'ls', 'pwd', 'tree', 'echo',
+  'whoami', 'hostname', 'date', 'diff', 'cmp', 'uniq', 'cut', 'column', 'basename',
+  'dirname', 'readlink', 'realpath', 'jq', 'ps', 'uptime', 'nproc', 'printenv', 'id',
+  // Search: they print matches, they do not edit.
+  'grep', 'egrep', 'fgrep', 'rg', 'fd', 'ack', 'ag',
+  // Shell state that is not a file.
+  'cd', 'pushd', 'popd', 'sleep', 'true', 'false',
+  // cmd.exe.
+  'type', 'dir', 'findstr', 'where', 'ver',
+  // PowerShell.
+  'get-content', 'gc', 'get-childitem', 'gci', 'get-item', 'get-location', 'gl',
+  'select-string', 'sls', 'test-path', 'resolve-path', 'get-command',
+  'select-object', 'measure-object', 'out-string', 'format-list', 'format-table',
+  'convertto-json', 'compare-object', 'get-member', 'get-help',
+  // Read or write depending on a flag — the flag is checked below before this table is trusted.
+  'find', 'sed', 'sort',
+]);
+
+/**
+ * The flags that turn one of the three flag-dependent readers into a writer.
+ *
+ * Checked BEFORE the read-only table, so `find . -delete` never reaches the line that would call
+ * it a read. `-exec`/`-ok` are here for the same reason as `-delete`: they run an arbitrary
+ * program per match, which is a write whenever that program is one.
+ */
+const WRITING_FLAGS: Record<string, readonly string[]> = {
+  find: ['-delete', '-exec', '-execdir', '-ok', '-okdir', '-fprint', '-fprint0', '-fprintf', '-fls'],
+  sed: ['-i', '--in-place'],
+  sort: ['-o', '--output'],
+};
+
+/**
+ * Verbs that are read-only only for some subcommands.
+ *
+ * Names the READS and treats everything else about that verb as a write, because the opposite
+ * list — every way `git` can lose work — is the one that ages badly. Hence no `branch`, `tag`,
+ * `stash`, `config`, `remote` or `worktree` here: each has a destructive form one flag away.
+ */
+const READ_ONLY_SUBCOMMANDS: Record<string, readonly string[]> = {
+  git: [
+    'status', 'log', 'diff', 'show', 'ls-files', 'rev-parse', 'rev-list', 'describe', 'blame',
+    'shortlog', 'whatchanged', 'reflog', 'show-ref', 'cat-file', 'ls-remote', 'diff-tree',
+    'diff-files', 'diff-index', 'name-rev', 'merge-base', 'count-objects', 'var',
+  ],
+  npm: ['ls', 'list', 'view', 'info', 'outdated', 'why', 'explain', 'ping', 'doctor'],
+  pnpm: ['ls', 'list', 'view', 'info', 'outdated', 'why', 'licenses'],
+  yarn: ['list', 'info', 'why', 'licenses', 'versions'],
+  cargo: ['tree', 'metadata', 'search', 'verify-project'],
+  go: ['version', 'env', 'list', 'doc', 'vet'],
+  docker: ['ps', 'images', 'version', 'info', 'logs', 'inspect'],
+  kubectl: ['get', 'describe', 'logs', 'version', 'explain', 'api-resources'],
+};
+
+/** Verbs whose only harmless call is the one that prints version/build information. */
+const VERSION_FLAGS: Record<string, readonly string[]> = {
+  node: ['-v', '--version'],
+  python: ['-v', '--version'],
+  python3: ['-v', '--version'],
+  py: ['-v', '--version'],
+  java: ['-version', '--version'],
+  dotnet: ['--version', '--info', '--list-sdks', '--list-runtimes'],
+  tsc: ['--version', '-v'],
+  git: ['--version'],
+  npm: ['-v', '--version'],
+  pnpm: ['-v', '--version'],
+};
+
+/** The verdict for one command line: what it is proven to do, and what made that unprovable. */
+export interface CommandBoundary {
+  /** Every segment is a verb that cannot write, nothing is redirected, nothing is opaque. */
+  readOnly: boolean;
+  /**
+   * `outside` when the text names a path the jail can resolve and refuse; `unknown` when it hid
+   * the answer (inline program, substitution, variable); `inside` otherwise.
+   */
+  where: 'inside' | 'outside' | 'unknown';
+  /** The specific finding behind `outside`/`unknown`/`readOnly:false`, for the confirm card. */
+  reason: string;
+  /** The inline program that made the command opaque, when that is what did it. */
+  inline: CodeExecutionOnCommandLine | null;
+}
+
+export function classifyCommand(command: string, workspaceRoot: string): CommandBoundary {
+  const opaqueReason = opacityReason(command);
+  const escape = workspaceEscapeReason(command, workspaceRoot);
+  const cdEscape = cdEscapeReason(command, workspaceRoot);
+
+  /*
+   * An unterminated quote means this scanner and the shell disagree about where the command ends,
+   * so no verdict below it can be believed. `scanShellSyntax` reports it for the allowlist for the
+   * same reason; here it collapses both answers to the unprovable one.
+   */
+  if (scanShellSyntax(command).unterminated) {
+    return { readOnly: false, where: 'unknown', reason: '引号未闭合，命令结构无法确定', inline: null };
+  }
+
+  let readReason = '';
+  for (const segment of scanShellSyntax(command).segments) {
+    const verdict = segmentIsReadOnly(segment);
+    if (!verdict.ok) { readReason = verdict.reason; break; }
+  }
+  if (!readReason && hasOutputRedirect(command)) readReason = '命令会写文件（输出重定向）';
+  if (!readReason && opaqueReason) readReason = opaqueReason;
+  /*
+   * `cd` 到工作区外不算"读"。
+   *
+   * 它的动词在只读表里（它确实不写文件），但它**改变位置**：执行完之后，后续每一条相对路径都已经
+   * 不在工作区内了。所以它必须被排除在"阅读类不限制位置"的豁免之外，否则 `cd /d %USERPROFILE% &
+   * echo x > y` 会变成一条免审的越界写（第二轮实测 V14 就是这个形状）。
+   */
+  if (!readReason && cdEscape) readReason = cdEscape;
+
+  return {
+    readOnly: readReason === '',
+    where: escape ? 'outside' : opaqueReason ? 'unknown' : 'inside',
+    // A resolvable escape is the more specific answer, so it outranks "something hid it".
+    reason: escape ?? readReason,
+    inline: detectInlineCodeExecution(command),
+  };
+}
+
+/**
+ * Why this command's scope cannot be read off its text, or '' when it can.
+ *
+ * Ordered most-specific first: an inline program is the interesting case even when the string it
+ * contains also has a `$` in it, and the disclosure the caller shows should name the interpreter
+ * rather than the variable.
+ */
+function opacityReason(command: string): string {
+  const inline = detectInlineCodeExecution(command);
+  if (inline) {
+    return `程序写在命令行里（${inline.interpreter} ${inline.flag}），`
+      + '它读写了什么无法从命令文本判定';
+  }
+  if (hasCommandSubstitution(command)) {
+    return '命令包含 $() 或反引号，里面执行了什么无法从命令文本判定';
+  }
+  if (/%[A-Za-z_][A-Za-z0-9_]*%/.test(command)) {
+    return '命令包含 %VAR% 变量展开，实际路径要等 cmd 展开才知道';
+  }
+  if (/![A-Za-z_][A-Za-z0-9_]*!/.test(command)) {
+    return '命令包含 !VAR! 延迟展开，实际路径要等 cmd 展开才知道';
+  }
+  if (/\$env:/i.test(command)) {
+    return '命令包含 $env: 变量，实际路径要等 PowerShell 展开才知道';
+  }
+  if (/\$\{/.test(command)) {
+    return '命令包含 ${...} 变量展开，实际路径要等 shell 展开才知道';
+  }
+  if (/\$[A-Za-z_][A-Za-z0-9_]*/.test(command)) {
+    return '命令包含 $VAR 变量，实际路径要等 shell 展开才知道';
+  }
+  /*
+   * `for /f "..." %i in (文件) do @type "%i"` —— 路径来自**数据**，不在命令文本里。
+   *
+   * 这条此前既不是"只读动词"（动词是 `for`），也没有任何一处检查认识它，所以它带着一个完全无法
+   * 预判的目标一路跑完了（第二轮实测 V13）。它比 `%VAR%` 更隐蔽：变量至少还写着名字，这里连名字
+   * 都没有 —— `p.txt` 今天的内容决定它明天读哪个文件，命令文本本身不构成任何约束。
+   *
+   * 判不出来的命令按危险那侧走，所以这里只需要认出"存在这种结构"。
+   */
+  if (/^\s*for\b[^&|]*\bin\s*\(/i.test(command) || /%{1,2}[A-Za-z_~]/i.test(command)) {
+    return '命令用 for/变量从数据里取路径，实际目标无法从命令文本判定';
+  }
+  return '';
+}
+
+/**
+ * Whether one segment is a proven non-writer.
+ *
+ * Quoted and stripped before matching so a path-qualified verb (`/usr/bin/git`) reads the same as a
+ * bare one, which is the same normalisation `firstCommandToken` applies for the allowlist.
+ */
+function segmentIsReadOnly(segment: string): { ok: true } | { ok: false; reason: string } {
+  const verb = firstCommandToken(segment);
+  if (!verb) return { ok: false, reason: '命令为空或程序名无法识别' };
+
+  const args = argTokensAfterVerb(segment, verb);
+
+  // Before the read-only table, because the same verb is a read with one argument and a write
+  // with another.
+  const writing = WRITING_FLAGS[verb];
+  if (writing?.some((f) => args.some((a) => a.toLowerCase() === f || a.toLowerCase().startsWith(`${f}=`)))) {
+    return { ok: false, reason: `${verb} 带了会写文件的参数` };
+  }
+
+  if (READ_ONLY_VERBS.has(verb)) return { ok: true };
+
+  const subs = READ_ONLY_SUBCOMMANDS[verb];
+  if (subs) {
+    const sub = args.find((a) => !a.startsWith('-'));
+    if (sub && subs.includes(sub.toLowerCase())) return { ok: true };
+    return { ok: false, reason: `${verb} ${sub ?? ''}`.trim() + ' 不是只读子命令' };
+  }
+
+  const versions = VERSION_FLAGS[verb];
+  if (versions) {
+    if (args.length > 0 && args.every((a) => versions.includes(a.toLowerCase()))) return { ok: true };
+    return { ok: false, reason: `${verb} 不是只读调用` };
+  }
+
+  return { ok: false, reason: `${verb} 不在只读命令表内` };
+}
+
+/** The arguments of one segment, positioned after the verb (leading `VAR=value` skipped). */
+function argTokensAfterVerb(segment: string, verb: string): string[] {
+  const tokens = cmdTokens(segment).map(unquoteToken);
+  const at = tokens.findIndex((t) => {
+    const base = lastPathComponent(t.replace(/[\\/]+$/, ''))
+      .toLowerCase()
+      .replace(/\.(exe|cmd|bat|com)$/, '');
+    return base === verb;
+  });
+  return at === -1 ? [] : tokens.slice(at + 1);
+}
+
+/**
+ * Whether any unquoted `>` writes a file.
+ *
+ * Separate from `scanShellSyntax().redirection`, which is true for `<` as well: reading a file into
+ * a program's stdin is a read, and treating it as a write would refuse `sort < list.txt`. `>&` and
+ * `2>&1` duplicate a file descriptor rather than naming a file, so they are not writes either.
+ */
+function hasOutputRedirect(command: string): boolean {
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote) {
+      if (ch === '\\' && quote === '"') { i++; continue; }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '\\') { i++; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (ch !== '>') continue;
+    let j = i + 1;
+    while (j < command.length && command[j] === '>') j++;
+    while (j < command.length && /\s/.test(command[j])) j++;
+    if (command[j] === '&') { i = j; continue; }
+    return true;
+  }
+  return false;
 }
 
 export function resolveInsideWorkspace(workspaceRoot: string, requestedPath: string): string {
@@ -863,6 +1177,14 @@ export class SandboxShell {
       maxOutputBytes: config?.maxOutputBytes ?? 0,
       denyDestructiveByDefault: config?.denyDestructiveByDefault ?? true,
       allowAllCommands: config?.allowAllCommands ?? false,
+      /*
+       * 缺省与 `allowAllCommands` 的缺省保持一致，理由和 `createTools` 那边一样：只构造了沙箱的
+       * 调用方（测试、脚本）仍然得到旧语义 —— `allowAllCommands: true` 就是「勾选 + 所有」。
+       */
+      outsideWorkspace: config?.outsideWorkspace ?? {
+        allow: config?.allowAllCommands ?? false,
+        policy: (config?.allowAllCommands ?? false) ? 'all' : 'readonly',
+      },
       // Empty means "no allowlist": the denylist is then the only command control, which
       // is the previous behaviour and stays the default.
       allowedCommands: config?.allowedCommands ?? [],
@@ -1094,7 +1416,32 @@ export class SandboxShell {
     }
 
     const escape = workspaceEscapeReason(command, this.workspaceRoot);
-    if (escape) return deny(escape);
+    if (escape) {
+      /*
+       * 越界**不等于**拒绝。
+       *
+       * 这段原来是一句无条件的 `return deny(escape)`，它正是第二轮实测 V17 两个方向的来源：
+       * 开「允许所有命令」时字面越界仍然被拒（该放没放），关的时候间接越界一路放行（该问没问）——
+       * 因为这是唯一在看的检查，而它只认命令文本里的字面路径。
+       *
+       * 现在规则只留三条，每条都能自证：
+       *
+       *   1. 已证明是**只读**命令 → 不拒。用户定的规则是阅读类不限制位置，所以 `cat` 到工作区外
+       *      是允许的；硬拦会把"读参考材料"这件正常工作也堵掉。
+       *   2. 策略是「所有」→ 不拒。用户明确说了不在乎边界。
+       *   3. 其余（只读档 / 拒绝档 / 未勾选）→ 拒。
+       *
+       * 第 3 条里，"问人"这一步在**上层**（`tools.ts` 的 `boundaryDecision`），因为只有那一层能问；
+       * 这里拒的理由是"本层无法取得批准"。人已经批准过的调用带着 `allowDestructive` 回来，于是放行 ——
+       * 拒绝档例外：它是真的不许，不提供"批准后放行"这条路。
+       */
+      const policy = this.config.outsideWorkspace;
+      const readOnlyProven = classifyCommand(command, this.workspaceRoot).readOnly;
+      const hardDeny = policy.policy === 'deny';
+      if (!readOnlyProven && policy.policy !== 'all' && (hardDeny || !options?.boundaryApproved)) {
+        return deny(escape);
+      }
+    }
 
     /*
      * Nothing refused it, so it runs — and if the program itself was on the command line, the paths

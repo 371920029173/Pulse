@@ -219,11 +219,26 @@ console.log('\n=== 任意代码执行：识别出来并如实说明（不假装�
   const plain = await tools.execute('shell', { command: 'node -v' });
   check('普通命令不添加这句（否则等于没说明）', !plain.includes('任意代码执行'));
 
-  const denied = await shell.exec('cd C:\\');
-  check('看得见的越界路径照旧被拒（新检查没有放松旧边界）', denied.denied === true);
-  check('被拒的命令不带披露（它没有子进程）', denied.codeExecution === undefined);
+  /*
+   * 看得见的越界路径：V17 之后这条断言一分为二。
+   *
+   * 原来它只写一句「一律被拒」，把两件事绑在了一起：**路径拦截**（这条命令有没有出去）和
+   * **出去之后怎么办**（拒 / 问人 / 放行）。前者没变，后者由四档策略决定。而"一律拒"正是 V17：
+   * 开「允许所有命令」时字面越界照拒（该放没放）。所以按档位分开断言 —— 与
+   * `packages/sandbox/src/__tests__/code-exec.test.ts` 里那三条同源。
+   */
+  const strict = new SandboxShell(workspace, { denyDestructiveByDefault: false });
+  const refused = await strict.exec('cd C:\\');
+  check('默认（未勾选）档：看得见的越界路径照旧被拒（新检查没有放松旧边界）',
+    refused.denied === true, JSON.stringify(refused).slice(0, 160));
+  check('被拒的命令不带披露（它没有子进程）', refused.codeExecution === undefined);
+
+  const wildcard = await shell.exec('cd C:\\');
+  check('「所有」档：同一条命令放行（V17：该放没放）', wildcard.denied !== true,
+    JSON.stringify(wildcard).slice(0, 160));
 
   await shell.stopAll();
+  await strict.stopAll();
 }
 
 removeTempDir(workspace);

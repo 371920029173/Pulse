@@ -7,7 +7,7 @@ import type {
   ToolDefinition, SandboxResult, SandboxJobView, SandboxJobKillReason,
 } from '@she/shared';
 import type { SandboxShell } from './shell.js';
-import { codeExecutionDisclosure } from './shell.js';
+import { classifyCommand, codeExecutionDisclosure } from './shell.js';
 import type { IsolationInEffect } from '@she/shared';
 
 /**
@@ -281,9 +281,22 @@ const KB_DIRECT_ACCESS_REASON =
 export function createTools(
   shell: SandboxShell,
   workspaceRoot: string,
-  opts?: { allowAllCommands?: boolean; kbDbPath?: string },
+  opts?: {
+    allowAllCommands?: boolean;
+    kbDbPath?: string;
+    /** 「允许工作区外命令」+ 档位。见 `config.sandbox.outsideWorkspace`。 */
+    outsideWorkspace?: { allow: boolean; policy: 'all' | 'readonly' | 'deny' };
+  },
 ): ToolSet {
   const allowAll = Boolean(opts?.allowAllCommands);
+  /*
+   * 只传了 `allowAllCommands` 的调用方（测试、脚本）仍然得到旧语义：
+   *   true  → 「勾选 + 所有」，全放行；
+   *   false → 「未勾选」，除阅读类外都要批准。
+   * 服务端两个都传，所以它走的是真实的四档。
+   */
+  const outsideWorkspace = opts?.outsideWorkspace
+    ?? { allow: allowAll, policy: allowAll ? 'all' as const : 'readonly' as const };
   const root = resolve(workspaceRoot);
 
   /** Where a blocked call says "still waiting"; set per call by the agent. */
@@ -361,8 +374,15 @@ export function createTools(
       const command = args.command as string;
       const cwd = (args.cwd as string) ?? '.';
       const timeout = timeoutOf(args.timeout_ms);
+      /*
+       * 人批准过这次调用时才为 true（见 `execute` 里对 `_approved` 的说明）。它让 `admit()` 放行
+       * "越界的写"这一类本来要拒的命令 —— 但**不**动破坏性那道闸：那是另一件事，只有用户把档位开到
+       * 「所有」才会松开。这不是一个可以靠模型自己打开的开关 —— 上面那一层已经把模型传的 `_approved`
+       * 剥掉了。
+       */
+      const approved = args._approved === true;
       if (args.background === true) {
-        const started = await shell.startJob(command, { cwd, timeout });
+        const started = await shell.startJob(command, { cwd, timeout, boundaryApproved: approved });
         return started.ok ? renderJobStarted(started.job) : renderJobRefused(started);
       }
       /*
@@ -370,7 +390,7 @@ export function createTools(
        * the wait is not a mistake to undo: the work is real, it is still happening, and killing it
        * to satisfy a stopwatch is how a turn loses an hour of computation and reports a timeout.
        */
-      const result = await shell.exec(command, { cwd, timeout, backgroundOnTimeout: true });
+      const result = await shell.exec(command, { cwd, timeout, backgroundOnTimeout: true, boundaryApproved: approved });
       return renderShellResult(result);
     },
   );
@@ -924,6 +944,81 @@ export function createTools(
     },
   );
 
+/**
+ * 这次工具调用该放行、该问人、还是该直接拒绝。
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 四档策略，和设置页上那两个控件一一对应（`config.sandbox.outsideWorkspace` 有完整说明）：
+ *
+ *   未勾选「允许工作区外命令」  只读放行；其余一律问人
+ *   勾选 + 所有               全部放行
+ *   勾选 + 只读（默认）        工作区内放行；工作区外/判不出 且非只读 → 问人
+ *   勾选 + 拒绝               工作区内放行；工作区外/判不出 且非只读 → 直接拒
+ *
+ * 「判不出」（`where: 'unknown'`）在那三档里一律按**危险那侧**处理。判不出来的原因就是路径被藏
+ * 起来了 —— 环境变量、`for /f` 从文件里读路径、`cd /d`、内联程序 —— 而藏起来这件事本身没有无害
+ * 的解释。第二轮实测的 V12–V15 全部落在这一格：它们此前一路放行，不是因为被判定为安全，而是因为
+ * 没有任何一道检查在看它们。
+ *
+ * 只读命令**不看位置**：用户定的规则是阅读类不限制位置（读工作区外的参考资料是正常工作），所以
+ * `cat D:\参考\说明.md` 是允许的，而 `echo x > D:\参考\说明.md` 不是。
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+type BoundaryDecision =
+  | { kind: 'allow' }
+  | { kind: 'confirm'; reason: string }
+  | { kind: 'refuse'; reason: string };
+
+function boundaryDecision(name: string, args: Record<string, unknown>): BoundaryDecision {
+  const policy = outsideWorkspace;
+
+  // 「勾选 + 所有」= 用户明确说了不在乎边界。这一档连问都不问，也是唯一一档会跳过分类的。
+  if (policy.allow && policy.policy === 'all') return { kind: 'allow' };
+
+  if (name === 'shell') {
+    const command = String(args.command ?? '');
+    const cls = classifyCommand(command, root);
+
+    if (cls.readOnly) return { kind: 'allow' };
+
+    const beyond = cls.where !== 'inside';
+    const where = cls.where === 'outside' ? '工作区外' : '位置无法判定';
+
+    if (!policy.allow) {
+      return {
+        kind: 'confirm',
+        reason: `未允许工作区外命令：除阅读类外都要人工批准。本条${cls.where === 'inside' ? '会写工作区内的文件' : where}`
+          + `（${cls.reason}）。`,
+      };
+    }
+    // 「只读」与「拒绝」这一层只关心出去没出去：往里写的命令在上面 `readOnly` 那里已经放行了。
+    if (!beyond) return { kind: 'allow' };
+
+    if (policy.policy === 'deny') {
+      return {
+        kind: 'refuse',
+        reason: `${where}，且策略为「拒绝工作区外操作」（${cls.reason}）。`
+          + '要放行请到设置页把「允许工作区外命令」改成「只读」，或改为「所有」。',
+      };
+    }
+    return {
+      kind: 'confirm',
+      reason: `${where}且不是只读命令（${cls.reason}）。`
+        + '在工作区外写东西、或者路径被藏起来导致判不出位置，都要人工确认。',
+    };
+  }
+
+  /*
+   * 其余工具。`fs_write` 自己就是被 jail 的（`validatePath`），越界在它内部直接抛错，所以这里问的
+   * 只是"要不要逐条批准"；`computer_*` 另有 `SHE_ALLOW_COMPUTER_USE` 这道独立的闸（见文件里那一段
+   * 注释），两件事不能互相代表。
+   */
+  if (toolMap.get(name)?.def.isDangerous && !policy.allow) {
+    return { kind: 'confirm', reason: '未允许工作区外命令：此操作需要人工批准。' };
+  }
+  return { kind: 'allow' };
+}
+
 async function execute(name: string, args: Record<string, unknown>): Promise<string> {
     const entry = toolMap.get(name);
     if (!entry) {
@@ -941,8 +1036,25 @@ async function execute(name: string, args: Record<string, unknown>): Promise<str
     const refused = protectedRefusal(name, args);
     if (refused) return refused;
 
+    /*
+     * 权限判定：先分类，再决定放行 / 问人 / 拒绝。
+     *
+     * 这是第二轮返工的核心。旧的判定只有一句 `entry.def.isDangerous && !allowAll`，它把两个问题
+     * 焊在一起："这条命令危险吗"和"它在哪一侧动"。结果两个方向都错（实测 V12–V17）：
+     *
+     *   开了「允许所有命令」→ `type "D:\AGI\README.txt"` 仍然 DENIED（该放没放）
+     *   关了 → `type %TEMP%\x` 一路放行（该问没问）
+     *
+     * 因为唯一在看的 `workspaceEscapeReason` 只认命令文本里的字面路径，而环境变量、`for /f`
+     * 读文件取路径、`cd /d`、内联程序都能把真实路径藏起来。
+     *
+     * 现在判定交给 `classifyCommand`，它对每条命令给两个**证明过**的答案：写不写、在哪一侧；判不出
+     * 来就说判不出来，而"判不出来"按危险那侧走。四档策略见 config.ts 的 `outsideWorkspace`。
+     */
     try {
-      if (entry.def.isDangerous && !allowAll) {
+      const decision = boundaryDecision(name, args);
+      if (decision.kind === 'refuse') return `DENIED: ${decision.reason}`;
+      if (decision.kind === 'confirm') {
         const ticketId = typeof args._confirm_ticket === 'string' ? args._confirm_ticket : undefined;
         // Pass the arguments so the ticket is valid only for what was approved.
         const err = tickets.consume(name, ticketId, args);
@@ -956,17 +1068,33 @@ async function execute(name: string, args: Record<string, unknown>): Promise<str
           return JSON.stringify({
             needs_confirm: ticket,
             error: err,
+            // 把"为什么要问"一起带回去。上一版这里只有一句"批准后带 ticket 重跑"，用户和模型都不知道
+            // 这次批准的是哪一件事 —— 而四档策略下"为什么"正是用户判断该不该点的唯一依据。
+            reason: decision.reason,
             hint: 'Re-run with args._confirm_ticket set to ticket_id after user approval',
           });
         }
       }
-      const { _confirm_ticket, ...rest } = args as Record<string, unknown> & { _confirm_ticket?: string };
+      const { _confirm_ticket, _approved, ...rest } = args as Record<string, unknown> & {
+        _confirm_ticket?: string;
+        _approved?: boolean;
+      };
+      /*
+       * 把人已经批准过这件事传给沙箱。
+       *
+       * `_approved` 被显式解构掉再重新赋值，而不是直接透传：模型可以自己往参数里塞一个
+       * `_approved: true`，如果不先剥掉，它就等于自带了一张批准票。这里只在 ticket 校验**通过之后**
+       * 才设成 true —— 也就是说这个字段的唯一来源是上面那次 `tickets.consume`。
+       */
+      if (decision.kind === 'confirm' && _confirm_ticket) {
+        (rest as Record<string, unknown>)._approved = true;
+      }
       return await entry.fn(rest);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return `Error: ${msg}`;
     }
-  }
+}
 
   return {
     definitions,

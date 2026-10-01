@@ -9,7 +9,7 @@ import {
   interruptedNoticeChunk,
   hasCompleteArguments,
 } from './stream-failure.js';
-import { resolveImages, skippedNotice } from './images.js';
+import { resolveAttachments } from './documents.js';
 
 const log = createLogger('openai');
 
@@ -924,28 +924,31 @@ export class OpenAIProvider implements LLMProvider {
     }
 
     /*
-     * Attached images turn the message into content parts.
+     * Attachments turn the message into content parts.
      *
      * Only user turns can carry them (see `MessageImage`), and only when there is at least one
      * readable file: when every attachment failed to resolve, the message stays a plain string
      * with a note in it, so a text-only request is never reshaped into a parts array it did not
      * need — that reshaping is what would invalidate an otherwise cacheable prefix.
+     *
+     * `resolveAttachments` (not `resolveImages`) because a turn can carry documents too: a `.md`
+     * is inlined as text and a `.pdf` is pointed at by path. Those blocks are plain text, so they
+     * join the text part rather than becoming a part of their own — and when there are no
+     * pictures at all, `ok.length` is 0 and the message keeps its string shape.
      */
     if (msg.role === 'user' && msg.images?.length) {
-      const { ok, skipped } = resolveImages(msg.images);
+      const { images: ok, documentText } = resolveAttachments(msg.images);
+      const withDocs = [text.trim(), documentText].filter(Boolean).join('\n\n');
       if (ok.length) {
         const parts: OpenAIContentPart[] = [];
-        const body = text.trim() ? text : '';
-        if (body) parts.push({ type: 'text', text: body });
+        if (withDocs) parts.push({ type: 'text', text: withDocs });
         for (const image of ok) parts.push({ type: 'image_url', image_url: { url: image.dataUrl } });
         result.content = parts;
         return result;
       }
-      const notice = skippedNotice(skipped);
-      if (notice) {
-        const combined = text.trim() ? `${text}\n\n${notice}` : notice;
-        result.content = combined;
-        text = combined;
+      if (withDocs) {
+        result.content = withDocs;
+        text = withDocs;
       }
     }
 
