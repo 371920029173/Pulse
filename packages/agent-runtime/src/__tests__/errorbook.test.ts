@@ -270,7 +270,7 @@ describe('ErrorBook 读取', () => {
 
 describe('isWorthRemembering', () => {
   it('记的是「做错了」，不是「碰上了」', () => {
-    for (const kind of ['invalid_args', 'permission', 'unavailable', 'not_found', 'nonzero_exit', 'unknown', 'stuck_loop', 'reflection'] as const) {
+    for (const kind of ['invalid_args', 'permission', 'unavailable', 'not_found', 'nonzero_exit', 'vacuous', 'unknown', 'stuck_loop', 'reflection'] as const) {
       assert.equal(isWorthRemembering(kind), true, `${kind} 该记`);
     }
     for (const kind of ['none', 'empty', 'precondition', 'service', 'timeout', 'rate_limited'] as const) {

@@ -20,6 +20,8 @@
 import { readFileSync, writeFileSync, rmSync, mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { spawn } from 'node:child_process';
 import { LspManager, makeLspTools, executeLspTool } from '../packages/agent-runtime/dist/lsp-tools.js';
 import { availableServers } from '../packages/agent-runtime/dist/lsp-client.js';
 
@@ -218,6 +220,81 @@ if (hasTs) {
     check('根 B 报出的是自己那份文件的行号', /target\.ts:9:\d+/.test(tb), tb);
     check('两个根没有互换（互换就是抢根）',
       !/target\.ts:9:\d+/.test(ta) && !/target\.ts:2:\d+/.test(tb), `${ta} | ${tb}`);
+  }
+
+  /*
+   * ─────────────────────────────────────────────────────────────────────────────
+   * 两个**进程**，不是两个实例。
+   *
+   * 上一节在同一进程里跑两个根，证明的是"根按实例持有"。但报告作者原话是「我单工作区测不出两个窗口
+   * 抢根」—— 他要的是**两个窗口**，而在逐工作区后端之后，一个窗口就是一个后端进程（见
+   * `check:window-isolation` 第 3 节）。同一进程内的隔离性**推不出**跨进程的隔离性：如果哪天有人
+   * 把根挪到一个跨进程共享的位置（环境变量、共享缓存目录、按语言而不是按根命名的 socket），上面那
+   * 一节照样全绿，而真实的两个窗口会互相串。
+   *
+   * 所以这一节起两个真进程，各自挂自己的工作区，**同时**诊断同一个相对路径。判据还是行号：谁读到了
+   * 对方的文件，报出来的就是对方的行号。
+   */
+  console.log('\n=== 跨窗口的根隔离（两个进程 · 真实并发） ===');
+  {
+    const makeRoot = (tag, errLine) => {
+      const root = mkdtempSync(join(tmpdir(), `she-lsp-proc-${tag}-`));
+      roots.push(root);
+      mkdirSync(join(root, 'src'));
+      writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({
+        compilerOptions: { strict: true, noEmit: true }, include: ['src/**/*.ts'],
+      }));
+      const body = [];
+      for (let i = 1; i <= 12; i++) {
+        body.push(i === errLine ? 'export const bad: number = "x";' : `// filler ${i}`);
+      }
+      writeFileSync(join(root, 'src', 'target.ts'), `${body.join('\n')}\n`);
+      return root;
+    };
+
+    const rootA = makeRoot('a', 3);
+    const rootB = makeRoot('b', 11);
+
+    /*
+     * 子进程脚本写到临时文件，而不是用 `node -e`：命令行长脚本在这台机器上会被引号规则吃掉，
+     * 而且 `-e` 的字符串本身会进沙箱的"不可知"分类，排查时反而更难读。
+     */
+    const distUrl = pathToFileURL(join(ROOT, 'packages/agent-runtime/dist/lsp-tools.js')).href;
+    const childPath = join(tmpdir(), `she-lsp-child-${process.pid}-${Date.now()}.mjs`);
+    writeFileSync(childPath, `
+import { LspManager, executeLspTool } from ${JSON.stringify(distUrl)};
+const root = process.argv[2];
+const manager = new LspManager(root);
+try {
+  const r = await executeLspTool('lsp_diagnostics', { path: 'src/target.ts' }, root, manager);
+  process.stdout.write(String(r?.output ?? ''));
+} finally {
+  await manager.dispose();
+}
+`, 'utf8');
+
+    /** 起一个子进程并收集 stdout；失败时把 stderr 一起带回来，否则红得没法查。 */
+    const runChild = (root) => new Promise((resolve) => {
+      const child = spawn(process.execPath, [childPath, root], { windowsHide: true });
+      let out = '';
+      let err = '';
+      child.stdout.on('data', (d) => { out += d.toString(); });
+      child.stderr.on('data', (d) => { err += d.toString(); });
+      const timer = setTimeout(() => { child.kill(); }, 90_000);
+      child.on('close', () => { clearTimeout(timer); resolve({ out, err }); });
+      child.on('error', (e) => { clearTimeout(timer); resolve({ out, err: `${err}${e.message}` }); });
+    });
+
+    const [pa, pb] = await Promise.all([runChild(rootA), runChild(rootB)]);
+    console.log(`        进程 A（错在第 3 行）-> ${pa.out.split('\n').filter(Boolean).pop() ?? pa.err.slice(0, 120)}`);
+    console.log(`        进程 B（错在第 11 行）-> ${pb.out.split('\n').filter(Boolean).pop() ?? pb.err.slice(0, 120)}`);
+
+    check('进程 A 报出的是自己那份文件的行号', /target\.ts:3:\d+/.test(pa.out), pa.out || pa.err);
+    check('进程 B 报出的是自己那份文件的行号', /target\.ts:11:\d+/.test(pb.out), pb.out || pb.err);
+    check('两个进程没有互换（互换就是跨进程抢根）',
+      !/target\.ts:11:\d+/.test(pa.out) && !/target\.ts:3:\d+/.test(pb.out), `${pa.out} | ${pb.out}`);
+
+    rmSync(childPath, { force: true });
   }
 
   console.log('\n=== 降级行为 ===');

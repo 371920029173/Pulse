@@ -1127,7 +1127,7 @@ export class Agent {
         if (!isReadOnlyTool(name)) readCache.clear();
         if (!executor) {
           result = `Error: unknown tool "${name}"`;
-          verdict = classifyToolResult(name, result);
+          verdict = classifyToolResult(name, result, { workspaceRoot: this.config.workspace.root });
           toolFailed = isToolFailure(verdict);
         } else {
           try {
@@ -1229,12 +1229,12 @@ export class Agent {
                * redacted `needs_confirm` payload is a state, not a failure, and rewriting it
                * would corrupt the JSON the gate depends on.
                */
-              verdict = classifyToolResult(name, result);
+              verdict = classifyToolResult(name, result, { workspaceRoot: this.config.workspace.root });
               toolFailed = isToolFailure(verdict);
             } catch (err) {
               toolFailed = true;
               result = `Error: ${err instanceof Error ? err.message : String(err)}`;
-              verdict = classifyToolResult(name, result);
+              verdict = classifyToolResult(name, result, { workspaceRoot: this.config.workspace.root });
             } finally {
               // In a `finally` so a throwing tool is still counted.
               const ms = toolMs ?? (Date.now() - toolStart);
@@ -1353,7 +1353,7 @@ export class Agent {
             }
           } catch (err: unknown) {
             result = `Error: ${err instanceof Error ? err.message : String(err)}`;
-            verdict = classifyToolResult(name, result);
+            verdict = classifyToolResult(name, result, { workspaceRoot: this.config.workspace.root });
           }
         }
 
@@ -2319,7 +2319,7 @@ export class Agent {
      * command that was approved and then failed is exactly when the model most needs to be
      * told why, and a non-zero exit code here was previously indistinguishable from success.
      */
-    verdict = classifyToolResult(pending.name, result);
+    verdict = classifyToolResult(pending.name, result, { workspaceRoot: this.config.workspace.root });
     /*
      * The approved call recorded as its own tool event.
      *

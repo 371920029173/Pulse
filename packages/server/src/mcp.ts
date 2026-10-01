@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, isAbsolute, resolve, sep } from 'node:path';
 import { productVersion } from './version.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 
@@ -13,6 +13,13 @@ export interface McpServerConfig {
   source: 'cursor' | 'she';
   /** Whether it was enabled from the SHE-managed file (only for source 'she'). */
   enabled?: boolean;
+  /**
+   * 被收敛掉的原始允许根（空/缺省 = 没动过）。
+   *
+   * 存在的理由见 `confineMcpRoots`：文件系统型 MCP 的允许根曾经是用户桌面，于是 SHE 的边界只
+   * 盖住 `fs_*`/`shell`，MCP 是一条旁路。收敛必须**可见** —— 悄悄改掉用户的配置，比不收敛更糟。
+   */
+  confinedRoots?: string[];
 }
 
 export interface McpServerStatus extends McpServerConfig {
@@ -55,6 +62,73 @@ interface RawMcpFile {
   mcpServers?: Record<string, { command?: string; args?: string[]; env?: Record<string, string>; disabled?: boolean }>;
 }
 
+/*
+ * ─────────────────────────────────────────────────────────────────────────────
+ * MCP 的允许根必须从工作区派生（评测报告 2c / 漏洞汇总 V3 / D3）
+ *
+ * 实测：`mcp_filesystem` 的允许目录是 `C:\Users\Administrator\Desktop` 与 `…\Desktop\chuli`，
+ * 成功列出桌面 60+ 项；而 `D:\AGI\she-agent-cloud` 回 `not in allowed directories`。反差就是
+ * 问题本身：**能读你的桌面，读不到你自己的代码树**。SHE 的边界只覆盖 `fs_*` 与 `shell`，MCP
+ * 是一条完整的旁路 —— 它跑在自己的进程里，用自己的一套路径检查。
+ *
+ * 修法取"按工作区派生"，而不是在界面上写一句"MCP 不受沙箱约束"：后者只是把风险说清楚，前者
+ * 把它去掉。代价是用户在 Cursor 里配的多根会被收成一个，所以收敛**必须回显** —— 原始根留在
+ * `confinedRoots` 里，面板照实显示。悄悄改掉用户的配置比不收敛更糟。
+ *
+ * 只在**文件系统型**服务器上动手。别的服务器（比如某个指向另一个仓库的 git MCP）传绝对路径是
+ * 配置意图本身，收敛它会毁掉功能；而文件系统型服务器的 positional 参数按契约就是"允许哪些目录"，
+ * 收敛它不改变"这个服务器能做什么"，只改变"能看到哪里"。
+ */
+const FILESYSTEM_SERVER = /(?:@modelcontextprotocol\/server-filesystem|mcp-server-filesystem|server-filesystem)/i;
+
+/** 这个参数看起来是不是一个"目录"（而不是包名或开关）。 */
+function looksLikeDirectory(arg: string): boolean {
+  if (!arg || arg.startsWith('-')) return false;
+  if (arg.startsWith('~')) return true;
+  return isAbsolute(arg);
+}
+
+/**
+ * 把文件系统型 MCP 的允许根收敛到工作区。
+ *
+ * 返回新的 `args`（不改调用方传进来的数组），并把被替换掉的原始根放进 `confinedRoots`。
+ * 工作区内的根原样保留 —— 用户本来就写对的情况不该被"修正"成别的东西。
+ */
+function confineMcpRoots(cfg: McpServerConfig, workspaceRoot: string): { args: string[]; confinedRoots: string[]; changed: boolean } {
+  if (!FILESYSTEM_SERVER.test([cfg.command, ...cfg.args].join(' '))) {
+    return { args: cfg.args, confinedRoots: [], changed: false };
+  }
+
+  const home = homedir();
+  const ws = resolve(workspaceRoot);
+  const confined: string[] = [];
+  let changed = false;
+  const seen = new Set<string>();
+
+  const next: string[] = [];
+  for (const arg of cfg.args) {
+    if (!looksLikeDirectory(arg)) { next.push(arg); continue; }
+    const abs = resolve(arg.startsWith('~') ? join(home, arg.slice(1)) : arg);
+    const inside = abs === ws || abs.startsWith(ws + sep);
+    if (inside) {
+      // 已经在工作区里：保留，但仍然去重（用户可能既写了工作区又写了子目录）。
+      if (seen.has(abs)) { changed = true; continue; }
+      seen.add(abs);
+      next.push(arg);
+      continue;
+    }
+    confined.push(arg);
+    changed = true;
+    if (!seen.has(ws)) { seen.add(ws); next.push(ws); }
+  }
+
+  // 一个根都没有（配置里只写了工作区外的目录，且全被收敛）时为 0 个根的服务器拿到空参数列表，
+  // 它会把自己的 cwd 当根 —— 那又成了不可控。明确补上工作区。
+  if (!next.some((a) => looksLikeDirectory(a))) next.push(ws);
+
+  return { args: next, confinedRoots: confined, changed };
+}
+
 /** Discover MCP servers from Cursor configs and SHE's own override file. */
 export function discoverMcpServers(workspaceRoot: string): McpServerConfig[] {
   const out: McpServerConfig[] = [];
@@ -66,13 +140,15 @@ export function discoverMcpServers(workspaceRoot: string): McpServerConfig[] {
   const sheServers = she?.mcpServers ?? {};
   for (const [name, cfg] of Object.entries(sheServers)) {
     if (!cfg?.command) continue;
+    const confined = confineMcpRoots({ name, command: cfg.command, args: cfg.args ?? [], source: 'she' }, workspaceRoot);
     out.push({
       name,
       command: cfg.command,
-      args: cfg.args ?? [],
+      args: confined.args,
       env: cfg.env,
       source: 'she',
       enabled: cfg.disabled !== true,
+      ...(confined.changed ? { confinedRoots: confined.confinedRoots } : {}),
     });
     seen.add(name);
   }
@@ -82,13 +158,15 @@ export function discoverMcpServers(workspaceRoot: string): McpServerConfig[] {
     const parsed = readJson(p) as RawMcpFile | null;
     for (const [name, cfg] of Object.entries(parsed?.mcpServers ?? {})) {
       if (!cfg?.command || seen.has(name)) continue;
+      const confined = confineMcpRoots({ name, command: cfg.command, args: cfg.args ?? [], source: 'cursor' }, workspaceRoot);
       out.push({
         name,
         command: cfg.command,
-        args: cfg.args ?? [],
+        args: confined.args,
         env: cfg.env,
         source: 'cursor',
         enabled: cfg.disabled !== true,
+        ...(confined.changed ? { confinedRoots: confined.confinedRoots } : {}),
       });
       seen.add(name);
     }

@@ -185,6 +185,7 @@ export {
   subagentWrapUpDelayMs,
   subagentWrapUpScheduleMs,
   composeWrapUpNudge,
+  armSubagentWrapUp,
   SUBAGENT_WRAP_UP_RATIO,
   SUBAGENT_WRAP_UP_RATIOS,
   selectHarvestNotes,

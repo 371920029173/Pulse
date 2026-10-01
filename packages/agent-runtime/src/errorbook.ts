@@ -176,6 +176,12 @@ export function isWorthRemembering(kind: ErrorbookKind | string): boolean {
     case 'unavailable':
     case 'not_found':
     case 'nonzero_exit':
+    /*
+     * `vacuous` 是"调用成功了，但结论没有依据"（工作区里没有依赖清单，安全扫描却回"无漏洞"）。
+     * 它进 yes-list 是因为它不是环境的错：把一个空扫描当成"已检查"写进报告，正是"本来可以做得
+     * 不一样"的那类事 —— 而这一整张表就是为了让这类事在下次开工前能被读到。
+     */
+    case 'vacuous':
     case 'unknown':
       return true;
     case 'none':

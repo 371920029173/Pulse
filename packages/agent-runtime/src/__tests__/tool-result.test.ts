@@ -12,8 +12,11 @@
  *   - `No matches found`, which read as data when the honest answer is "nothing"
  *   - a refusal, an argument error and a dead endpoint, which all looked alike
  */
-import { describe, it } from 'node:test';
+import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { classifyToolResult, annotateToolResult, isToolFailure } from '../tool-result.js';
 
 describe('成功与空结果', () => {
@@ -232,6 +235,67 @@ describe('等人在确认是一个状态，不是失败', () => {
 
   it('needs_apply 不算失败', () => {
     const v = classifyToolResult('fs_write', JSON.stringify({ needs_apply: { path: 'a.ts', diff: '+x' } }));
+    assert.equal(v.kind, 'none');
+  });
+});
+
+describe('空扫描：说了"干净"，但没有东西可扫', () => {
+  /*
+   * 这段的原话来自 `_she-live-test_2` 的真实 run 记录（`mcp_guardian_check_vulnerabilities`，
+   * `scan_mode=summary`）：工作区里没有 `package.json`，它照样回"没有已知漏洞"，而这条结论被当成
+   * "安全检查已通过"。
+   *
+   * 判据是**文件系统**，不是文案。这条用例两边都钉住：没有清单时判定为空扫描；有清单时同样的
+   * 文本必须是普通成功 —— 否则一个真的扫过的项目会被无端指控。
+   */
+  const CLEAN = '# Security Scan Results (package.json)\n\n'
+    + '✅ **No known security vulnerabilities found!**\n\n'
+    + '⚠️ composer.json file not found in this directory.';
+
+  let dirs: string[] = [];
+  const tempWorkspace = (files: string[] = []): string => {
+    const d = mkdtempSync(join(tmpdir(), 'she-vacuous-'));
+    dirs.push(d);
+    for (const f of files) writeFileSync(join(d, f), '{}', 'utf8');
+    return d;
+  };
+  after(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  it('没有依赖清单时，"没有漏洞"是空扫描而不是结论', () => {
+    const v = classifyToolResult('mcp_guardian_check_vulnerabilities', CLEAN, {
+      workspaceRoot: tempWorkspace(),
+    });
+    assert.equal(v.kind, 'vacuous');
+    assert.equal(v.ok, false, '没有依据的结论不能算 ok');
+    assert.equal(v.retryable, false, '反复重试不会让清单出现');
+    assert.match(String(v.remedy), /没有检查/);
+    assert.match(String(v.remedy), /未扫描/);
+  });
+
+  it('有依赖清单时，同样的文本是普通成功（不能反过来说谎）', () => {
+    const v = classifyToolResult('mcp_guardian_check_vulnerabilities', CLEAN, {
+      workspaceRoot: tempWorkspace(['package.json']),
+    });
+    assert.equal(v.kind, 'none');
+    assert.equal(v.ok, true);
+  });
+
+  it('清单在一级子目录里也算数（monorepo 布局）', () => {
+    const root = tempWorkspace();
+    mkdirSync(join(root, 'packages', 'app'), { recursive: true });
+    writeFileSync(join(root, 'packages', 'app', 'package.json'), '{}', 'utf8');
+    assert.equal(classifyToolResult('scan', CLEAN, { workspaceRoot: root }).kind, 'none');
+  });
+
+  it('不传 workspaceRoot 时保持纯字符串判定（脚本与测试的旧调用方式不变）', () => {
+    // 没有工作区就没法核对依据，这时只能按文案走 —— 判成成功，而不是凭空指控。
+    assert.equal(classifyToolResult('scan', CLEAN).kind, 'none');
+  });
+
+  it('没有"干净"结论的普通扫描输出不受影响', () => {
+    const v = classifyToolResult('scan', '# Security Scan Results\n\nFound 3 issues in package.json', {
+      workspaceRoot: tempWorkspace(),
+    });
     assert.equal(v.kind, 'none');
   });
 });

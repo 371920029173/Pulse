@@ -122,7 +122,36 @@ export interface KBQueryResult {
   totalNodesScanned: number;
   queryTimeMs: number;
   pulseSeeds: PulseSeed[];
+  /** Which scoring channels produced this ranking, and what each one contributed. */
+  diagnostics?: KBQueryDiagnostics;
 }
+
+/**
+ * 一次检索的质量读数。
+ *
+ * 存在理由是评测报告 5b：`kb_query` 原来只给 score 和耗时，没有任何东西能回答"这次检索好不好"。
+ * 在一个 8 节点的库里，排名靠前是理所当然的；在 1000 个节点里，同一套机制可能把答案挤到第 30 位
+ * 而分数看起来一样漂亮。分数**分布**（最高、中位、是否贴着地板）才是那种退化唯一看得见的信号。
+ */
+export interface KBQueryDiagnostics {
+  /** 参与融合的打分通道。默认两条都在，见 `GroupKBEngine.query` 的 `channels`。 */
+  channels: RetrievalChannel[];
+  /** 各通道进入候选集的节点数（去重前的规模）。 */
+  candidates: { lexical: number; structural: number; fused: number };
+  /** 融合分数的分布。`aboveFloor` 是真正越过相关度地板、被返回的条数。 */
+  scores: { max: number; median: number; min: number; aboveFloor: number; floor: number };
+  /** 返回条数上限，用来判断"是不是被截断了"。 */
+  limit: number;
+}
+
+/**
+ * 打分通道。
+ *
+ * 注意：这只控制**谁参与打分**，不控制**从哪进入图**。结构共振需要入口节点才能开始传播，而入口
+ * 来自 BM25 与显式锚点 —— 把入口也关掉的话，"结构通道"在非锚点查询上会永远返回空，那不是一条
+ * 通道，是一个坏掉的开关。所以两个通道共享入口，分开的只有分数。对照实验的口径由这一点决定。
+ */
+export type RetrievalChannel = 'lexical' | 'structural';
 
 // ─── LLM Types ───
 

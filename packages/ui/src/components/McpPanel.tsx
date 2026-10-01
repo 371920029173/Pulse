@@ -18,6 +18,14 @@ interface McpServer {
   /** Tools actually registered to the agent by the server-side MCP bridge. */
   injected?: number;
   injectError?: string;
+  /**
+   * 被收敛掉的原始允许根（缺省 = 没动过）。
+   *
+   * 文件系统型 MCP 的允许根从工作区派生，工作区外的目录会被替换掉 —— 实测里那个服务器原本
+   * 指向桌面，于是它成了 SHE 边界的一条完整旁路（能读桌面、读不到代码树）。收敛必须说出来：
+   * 悄悄改掉用户的配置比不收敛更糟。
+   */
+  confinedRoots?: string[];
 }
 
 /**
@@ -163,6 +171,12 @@ export function McpPanel() {
 
               {s.reachable === false && s.error ? (
                 <div className={styles.errline}>{s.error}</div>
+              ) : null}
+
+              {s.confinedRoots?.length ? (
+                <div className={styles.errline}>
+                  {t('允许根已收敛到当前工作区，原本指向：{roots}', { roots: s.confinedRoots.join('、') })}
+                </div>
               ) : null}
 
               {s.enabled !== false && s.reachable && s.toolCount !== null && s.toolCount !== (s.injected ?? 0) ? (

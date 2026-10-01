@@ -14,7 +14,7 @@ import { loadConfig } from '../packages/shared/dist/index.js';
 import { KBStore, GroupKBEngine } from '../packages/kb/dist/index.js';
 import { SandboxShell, createTools } from '../packages/sandbox/dist/index.js';
 import { Agent } from '../packages/agent-runtime/dist/index.js';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -80,6 +80,26 @@ record('子智能体没有 kb_ingest_*', !childTools.some((n) => n.startsWith('k
 const useful = ['fs_read', 'fs_write', 'fs_list', 'shell', 'kb_query', 'grep'];
 const missing = useful.filter((t) => !childTools.includes(t));
 record('子智能体保留干活的工具', missing.length === 0, missing.length ? `缺少: ${missing.join(', ')}` : '');
+
+// ── 软截止接线（2026-10-01：从"已修好但未复现"变成可验证） ─────────────────
+/*
+ * 时刻表与措辞有单元测试，端到端链路由 `subagent-wrap-up-e2e.test.ts` 驱动真 Agent 验证。
+ * 这里钉的是**接线本身**：服务器必须调那一个函数，而不是内联一份等价的 setTimeout ——
+ * 内联一份的话，被测的就是另一个实现，覆盖会退化成"看起来有测试"。
+ */
+const serverSrc = readFileSync(join(PROJECT_ROOT, 'packages/server/src/index.ts'), 'utf8');
+record('服务器用 armSubagentWrapUp 武装软截止（不是内联一份 setTimeout）',
+  serverSrc.includes('armSubagentWrapUp(child, budgetMs)'),
+  '没有这个调用，端到端用例测的就不是线上跑的那份代码');
+record('子任务提前结束时撤销掉提醒',
+  serverSrc.includes('disarmWrapUp()'),
+  '少了它，短任务会留下一直在跑的定时器');
+record('超时恢复的是进度而不是一句"子任务超时"',
+  serverSrc.includes('formatTimeoutReport(readChildProgress('),
+  '父级拿不到"这 180 秒换来了什么"');
+record('不再有内联的 wrap-up 定时器残留',
+  !/wrapUpTimers/.test(serverSrc),
+  'armSubagentWrapUp 之外还有一份定时器，两处迟早会漂移');
 
 console.log('\n  父智能体工具:', parentTools.join(', '));
 console.log('  子智能体工具:', childTools.join(', '));

@@ -12,7 +12,7 @@ import { KBStore, GroupKBEngine, mergeKnowledgeBases } from '@she/kb';
 import type { KBMemoryPatch } from '@she/kb';
 import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLink } from './kb-link.js';
 import { SandboxShell, createTools, ConfirmTicketStore } from '@she/sandbox';
-import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, subagentWrapUpScheduleMs, composeWrapUpNudge, selectHarvestNotes, allocateContext, pricingConfigured, pricingNote } from '@she/agent-runtime';
+import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, armSubagentWrapUp, selectHarvestNotes, allocateContext, pricingConfigured, pricingNote } from '@she/agent-runtime';
 import type { SubagentRunner, SubagentResult, SubagentKbHarvest, UsageLike } from '@she/agent-runtime';
 import {
   PlanStore,
@@ -1199,19 +1199,15 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
       const job = (async (): Promise<SubagentResult> => {
         let timedOut = false;
         /*
-         * 软截止：硬杀之前先让子任务收尾。interject 会排队，等当前工具组结束后再并入对话，
-         * 所以不会插在工具调用和它的结果之间。子任务提前结束时清掉计时器。
+         * 软截止：硬杀之前先让子任务收尾。
          *
-         * 排的是三次而不是一次：提醒只能落在回合边界上，而单个回合可能长达一分钟（实测 63.4s），
-         * 所以第一次可能落地得很晚——2026-09-25 那次只剩 26.4s。落晚了若没有下一次就无从补救。
+         * 排的是三次而不是一次：提醒只能落在回合边界上（`interject` 会排队，等当前工具组结束后再
+         * 并入对话），而单个回合可能长达一分钟（实测 63.4s），所以第一次可能落地得很晚——
+         * 2026-09-25 那次只剩 26.4s。落晚了若没有下一次就无从补救。
+         *
+         * 排序与措辞在 `armSubagentWrapUp` 里，因为那段要能被测试驱动（那里有整条链路的验证）。
          */
-        const wrapUpTimers = subagentWrapUpScheduleMs(budgetMs).map((at, i) => {
-          const timer = setTimeout(() => {
-            try { child.interject(composeWrapUpNudge((budgetMs - at) / 1000, i + 1)); } catch { /* ignore */ }
-          }, at);
-          timer.unref?.();
-          return timer;
-        });
+        const disarmWrapUp = armSubagentWrapUp(child, budgetMs);
         try {
           const out = await Promise.race([
             child.chat(brief),
@@ -1222,7 +1218,7 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
              */
             new Promise<null>((r) => setTimeout(() => { timedOut = true; r(null); }, budgetMs).unref?.()),
           ]);
-          for (const timer of wrapUpTimers) clearTimeout(timer);
+          disarmWrapUp();
           if (timedOut) {
             try { child.stop(); } catch { /* ignore */ }
           }

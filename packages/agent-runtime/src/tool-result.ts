@@ -1,4 +1,6 @@
 import { createLogger } from '@she/shared';
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 const log = createLogger('tool-result');
 
@@ -61,6 +63,18 @@ export type ToolFailureKind =
   | 'rate_limited'
   /** A command ran and failed. Distinct from never having run. */
   | 'nonzero_exit'
+  /**
+   * 调用成功了，但它的结论**没有可核对的依据**。
+   *
+   * 与 `empty` 的区别：`empty` 是"确实查了，结果是没有"；这是"看起来查了，其实没东西可查"。
+   * 实测来源是一条第三方安全扫描 MCP：工作区里连 `package.json` 都没有，它照样回
+   * 「✅ No known security vulnerabilities found!」，而那条结论被当成了"已通过安全检查"。
+   *
+   * 判据不是**文案**，是**文件系统**：要断言"没有漏洞"，前提是先有一份依赖清单可扫。清单不在，
+   * 这条"干净"就不是结论，是空转 —— 报告里管它叫 guardian 假阴性，根因归在"无法判定默认落到
+   * 允许"。所以它必须是一条独立的判定，不能借 `none` 混过去。
+   */
+  | 'vacuous'
   /** A tool reported failure in a way no rule recognises. */
   | 'unknown';
 
@@ -181,6 +195,14 @@ const KINDS: Record<ToolFailureKind, { ok: boolean; retryable: boolean; remedy: 
     retryable: false,
     remedy: '工具报告了失败，但原因不属于已知类别。读一遍原始输出再决定，不要原样重试。',
   },
+
+  vacuous: {
+    ok: false,
+    retryable: false,
+    remedy: '这次调用返回了"没有发现问题"的结论，但工作区里并没有它能扫的依赖清单，'
+      + '所以这不是"检查通过"，是"没有检查"。不要把这条结论写进交付或报告；'
+      + '要么先确认真实依赖清单的位置并指向它，要么如实说明"未扫描"及其原因。',
+  },
 };
 
 const verdict = (kind: ToolFailureKind): ToolResultVerdict => ({ kind, ...KINDS[kind] });
@@ -286,6 +308,74 @@ const EMPTY_SENTINELS = [
   /^No results found in Group KB\.?$/i, // agent-runtime kb-tools.ts, kb_query
 ];
 
+/*
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 空扫描：说了"没有漏洞"，但没有东西可扫
+ *
+ * 实测原话：`mcp_guardian(scan_mode=summary)` 在工作区**没有 package.json** 的情况下返回
+ * 「✅ No known security vulnerabilities found!」，而这条结论被当成"安全检查已通过"写进了报告。
+ *
+ * 判据刻意**不看文案**。第一次实现想从输出里找"package.json file not found"这类句子，但那条
+ * 输出本身就同时印着一句「composer.json file not found」—— 一个真的扫过 package.json 的项目，
+ * 只要它没有 composer.json，也会印这句，于是真扫描会被误判成空扫描。第三方输出措辞会变，靠它做
+ * 判据就是把自己挂到别人的字符串上。
+ *
+ * 所以判据是**文件系统**：要断言"没有已知漏洞"，前提是先有一份能被扫的依赖清单。工作区里一份都
+ * 没有的时候，"干净"不是结论，是空转。这是根因 B（"无法判定"落到"允许"）的一个具体形态：
+ * 找不到清单不该报"无漏洞"，该报"未扫描"。
+ */
+const CLEAN_VERDICT = /no known (?:security )?vulnerabilit|0 vulnerabilit|未(?:发现|检出)[^\n]{0,8}漏洞|无已知漏洞|没有(?:已知)?漏洞/i;
+
+/** 任一存在就说明"有东西可扫"，这时扫描结果是真结论。 */
+const DEPENDENCY_MANIFESTS = [
+  'package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock',
+  'requirements.txt', 'pyproject.toml', 'poetry.lock', 'Pipfile',
+  'Cargo.toml', 'go.mod', 'pom.xml', 'build.gradle', 'build.gradle.kts',
+  'composer.json', 'Gemfile', 'packages.config',
+];
+
+/** `.NET` 的清单是一个扩展名而不是一个固定文件名。 */
+const MANIFEST_EXTENSIONS = ['.csproj', '.fsproj', '.vbproj', '.sln'];
+
+/**
+ * 工作区里有没有"可扫的依赖清单"。
+ *
+ * 扫三层目录，跳过 `node_modules`/`.git`/`dist`：再深就不是"这个工作区有没有清单"，而是"依赖树里
+ * 有没有某个传递依赖的清单"，那是另一件事。三层是因为常见布局把清单放在二级目录里
+ * （`packages/&lt;名字&gt;/package.json`），而扫描器自身的 cwd 通常就在根上 —— 两层只够看到
+ * `packages/` 本身，会漏掉里面每一个清单。
+ *
+ * 只在**已经**匹配到"没有漏洞"结论时才被调用（见 `classifyToolResult` 的调用点），所以这次
+ * `readdirSync` 不会出现在每一条工具结果的路径上。
+ */
+function hasDependencyManifest(root: string, depth = 3): boolean {
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    /*
+     * 读不到目录：**当作"有清单"**。
+     *
+     * 这条检查会让模型不去相信一条结论，误报的代价是它多做一次核对。反之，把"读不到"当成
+     * "没有清单"就会凭空产出"这是空扫描"的指控。两种错里，宁可少说。
+     */
+    return true;
+  }
+  for (const e of entries) {
+    if (e.isFile()) {
+      if (DEPENDENCY_MANIFESTS.includes(e.name)) return true;
+      if (MANIFEST_EXTENSIONS.some((ext) => e.name.endsWith(ext))) return true;
+    }
+  }
+  if (depth <= 1) return false;
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    if (e.name === 'node_modules' || e.name === '.git' || e.name === 'dist') continue;
+    if (hasDependencyManifest(join(root, e.name), depth - 1)) return true;
+  }
+  return false;
+}
+
 /**
  * `shell`'s own trailing marker for a command it gave up waiting on (tools.ts).
  *
@@ -362,8 +452,15 @@ const AWAITING_HUMAN = /"needs_confirm"|"needs_apply"/;
  *
  * @param name tool name, used only for the log line when nothing matches
  * @param raw the value the executor returned, after the confirm-gate redaction
+ * @param opts `workspaceRoot` enables the empty-scan check. Omitted by callers that have no
+ *   workspace in hand (tests, the check scripts) — the rest of the classification is a pure
+ *   function of the text, and stays that way.
  */
-export function classifyToolResult(name: string, raw: unknown): ToolResultVerdict {
+export function classifyToolResult(
+  name: string,
+  raw: unknown,
+  opts: { workspaceRoot?: string } = {},
+): ToolResultVerdict {
   const text = typeof raw === 'string' ? raw : JSON.stringify(raw ?? '');
   const trimmed = text.trim();
 
@@ -402,6 +499,17 @@ export function classifyToolResult(name: string, raw: unknown): ToolResultVerdic
     if (exit !== 0) return verdict('nonzero_exit');
     // Exit 0 with output: an ordinary success, even if the output mentions errors.
     return verdict('none');
+  }
+
+  /*
+   * 空扫描，判在 `^Error:` 之前。
+   *
+   * 一个安全扫描器的"没有漏洞"是**成功**返回（guardian 那条 `ok: true, failure: none`），所以
+   * 它永远走不到下面那段错误分类里 —— 想让它被看见，只能在这里截住。两条都要满足才判定：
+   * 文本给出了"干净"结论，且工作区里一份依赖清单都没有。缺任何一条都退回原路径，绝不猜。
+   */
+  if (opts.workspaceRoot && CLEAN_VERDICT.test(trimmed) && !hasDependencyManifest(opts.workspaceRoot)) {
+    return verdict('vacuous');
   }
 
   if (!/^Error:/i.test(trimmed)) return verdict('none');

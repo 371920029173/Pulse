@@ -604,9 +604,34 @@ export function composeWrapUpNudge(remainingSeconds: number, attempt = 1): strin
     `现在就用你已经拿到的信息，按交接单的交付物格式给出最终答复；没查完的部分直接写明"未核实"。`;
 }
 
+/**
+ * 武装软截止提醒，返回一个撤销函数。
+ *
+ * 抽出来是为了让这段**接线**也能被验证，而不是只验证时刻表。不抽出来的时候，服务器里那五行
+ * `setTimeout`/`clearTimeout` 谁都没跑过：`subagentWrapUp.test.ts` 证明"提醒该排在这些时刻"，
+ * 却没有任何东西证明"提醒真的会被排上、真的会落到子任务的对话里、真的在硬杀之前"。评测报告里
+ * 这一项停在"已修好，但从未复现第二次"，根子就在这里 —— 时刻表是对的，接线没被测过。
+ *
+ * `interject` 而不是直接改历史：它会把文本排队到下一个回合边界，所以提醒不会插在一次工具调用和
+ * 它的结果之间（那会让下一次请求非法）。
+ */
+export function armSubagentWrapUp(
+  child: { interject: (text: string) => void },
+  budgetMs: number,
+): () => void {
+  const timers = subagentWrapUpScheduleMs(budgetMs).map((at, i) => {
+    const timer = setTimeout(() => {
+      try { child.interject(composeWrapUpNudge((budgetMs - at) / 1000, i + 1)); } catch { /* ignore */ }
+    }, at);
+    // 子任务十秒就跑完时，这个定时器会活到预算结束；`unref` 让它不替调用方把进程钉住。
+    timer.unref?.();
+    return timer;
+  });
+  return () => { for (const t of timers) clearTimeout(t); };
+}
+
 /** Clamp a requested budget, or fall back to the default. Exported so the rule is testable. */
-export function resolveSubagentTimeoutMs(requested: unknown, fallbackSeconds = DEFAULT_SUBAGENT_TIMEOUT_SECONDS): number {
-  const fallback = fallbackSeconds * 1000;
+export function resolveSubagentTimeoutMs(requested: unknown, fallbackSeconds = DEFAULT_SUBAGENT_TIMEOUT_SECONDS): number {  const fallback = fallbackSeconds * 1000;
   const n = Number(requested);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return Math.min(Math.max(n, MIN_SUBAGENT_TIMEOUT_SECONDS * 1000), MAX_SUBAGENT_TIMEOUT_SECONDS * 1000);

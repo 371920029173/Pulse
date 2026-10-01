@@ -6,6 +6,8 @@ import type {
   Edge,
   EdgeKind,
   KBQueryResult,
+  KBQueryDiagnostics,
+  RetrievalChannel,
   ActivationTrace,
   PulseSeed,
   PulseHop,
@@ -1079,6 +1081,14 @@ export class GroupKBEngine {
   private static readonly ANCHOR_BONUS = 3.5;
 
   /**
+   * 融合分的并列判定尺度，见 `query` 里排序处的注释。
+   *
+   * 1e-6 是"比任何有意义的分数差都小、比浮点噪声大"的那一档：时效项造成的差异在 1e-12 量级，
+   * 真实的词法/结构差异在 1e-2 量级。
+   */
+  private static readonly SCORE_EPSILON = 1e-6;
+
+  /**
    * Structural signals that should move a node up or down regardless of
    * whether it surfaced via resonance or via BM25.
    */
@@ -1129,9 +1139,34 @@ export class GroupKBEngine {
    */
   query(
     queryText: string,
-    options?: { budget?: number; includeRetired?: boolean },
+    options?: { budget?: number; includeRetired?: boolean; channels?: RetrievalChannel[] },
   ): KBQueryResult {
     const startTime = performance.now();
+    /*
+     * Which channels get to score.
+     *
+     * Default: both, unchanged from before — the renormalisation below divides by the sum of the
+     * active weights, which is 1 when neither is switched off, so the production ranking is
+     * bit-for-bit what it was.
+     *
+     * The switch exists so the two channels can be MEASURED against each other (评测报告 5a:
+     * "规模下的检索质量未验"). A fused score can look good while one channel is carrying the other;
+     * the only way to know is to rank with each alone on a corpus big enough for ranking to matter.
+     */
+    const channels: RetrievalChannel[] = options?.channels ?? ['lexical', 'structural'];
+    const chanSet = new Set(channels);
+    /*
+     * Entry points are shared, deliberately.
+     *
+     * Structural resonance needs a seed to start from, and seeds come from BM25 hits and explicit
+     * anchors. Switching off the lexical CHANNEL must not switch off the lexical ENTRY, or
+     * "structural only" would return nothing for any query that is not a literal anchor — that
+     * would measure a broken switch, not a channel.
+     */
+    const structWeight = chanSet.has('structural') ? GroupKBEngine.W_STRUCTURAL : 0;
+    const lexWeight = chanSet.has('lexical') ? GroupKBEngine.W_LEXICAL : 0;
+    const weightSum = structWeight + lexWeight;
+
     // Retired memories are out of retrieval unless asked for (see `retireMemory`). They are
     // dropped as entry points and as results; nothing else about the scoring changes.
     const includeRetired = options?.includeRetired === true;
@@ -1194,9 +1229,22 @@ export class GroupKBEngine {
           }
           const qTokens = q.split(/[\s,/]+/).flatMap((t) => t.split(/[-_.]+/)).filter((t) => t.length >= 3);
           const tokenHit = qTokens.some((t) => segments.has(t));
+          /*
+           * 查询里"提到"这个组，必须是**按词**提到，不是**包含子串**。
+           *
+           * 这里原来写的是 `q.includes(path)`，于是 `grp22` 里的 `grp22`.includes('grp2') 成立，
+           * 组 `grp2` 也被当成锚点 —— 实测（`scripts/kb-retrieval-check.mjs`，250 个主题）里
+           * 查询 `grp22` 的前四名全是主题 2 的内容，真正想要的组排到第 8 位。锚点带 ANCHOR_BONUS
+           * 3.5，一次误判就足以把答案挤出视野，而 `grp2` / `grp1` 这种前缀冲突在真实命名里遍地都是
+           * （`agent` / `agent-usability`、`ops` / `ops-kb`）。
+           *
+           * 判据因此改成"整体相等"或"按词命中"：`q === path` 覆盖整条路径，`qTokens` 覆盖它出现在
+           * 句子里（`看看 grp22 的内容`）。`tokenHit` 保留原有的分词命中（`agent-usability` →
+           * 查询 `agent` 仍能找到它），因为那是**词**级别的，不受子串问题影响。
+           */
           const isAnchor = q === name || q === path
+            || qTokens.includes(name) || qTokens.includes(path)
             || q.endsWith('/' + name) || path.endsWith('/' + q)
-            || q.includes(path)
             || tokenHit;
           if (!isAnchor) continue;
           for (const mem of this.store.getMemoriesByGroup(g.id)) groupAnchors.push(mem);
@@ -1205,6 +1253,23 @@ export class GroupKBEngine {
     }
 
     const anchorIds = new Set([...anchorNodes, ...groupAnchors].map((n) => n.id));
+    /*
+     * 锚点在自己组里的次序，用来决定同分锚点的先后。
+     *
+     * 需求不是"中心节点永远第一"，是**可复现**：同一份数据、同一条查询，每次该返回同样的顺序。
+     * 实测中四个同组成员 `final` 只差 1e-12（时效项的噪声），`createdAt` 又常常是同一毫秒，
+     * 于是顺序落到 `id` 上 —— UUID，随机但稳定。稳定够用，却不可解释。
+     *
+     * 组内次序是可解释的那一个："这个组里最早归档的那条排前面"。取第一次出现的锚定组，
+     * 因为一条记忆可以同时属于多个组。
+     */
+    const anchorRank = new Map<string, number>();
+    for (const g of this.store.getAllGroups()) {
+      if (!groupAnchors.some((n) => n.groupIds.includes(g.id))) continue;
+      g.memoryIds.forEach((memId, i) => {
+        if (!anchorRank.has(memId)) anchorRank.set(memId, i);
+      });
+    }
     const seeds: MemoryNode[] = [];
     const seenSeed = new Set<string>();
     for (const node of [...anchorNodes, ...groupAnchors, ...lexicalHits.map((h) => h.mem)]) {
@@ -1299,9 +1364,14 @@ export class GroupKBEngine {
 
       const structPart = maxAct > 0 ? activation / maxAct : 0;
       const lexPart = maxLex > 0 ? lexical / maxLex : 0;
-      const base =
-        GroupKBEngine.W_STRUCTURAL * structPart +
-        GroupKBEngine.W_LEXICAL * lexPart;
+      /*
+       * Renormalised by the active weights, so switching a channel off does not just shrink every
+       * score (which would make "lexical only" lose to "both" on every absolute threshold). With
+       * both channels on, `weightSum` is 1 and this is the original expression exactly.
+       */
+      const base = weightSum > 0
+        ? (structWeight * structPart + lexWeight * lexPart) / weightSum
+        : 0;
       // An anchor with no fused signal at all is still worth surfacing (a group
       // name can legitimately share no tokens with its contents).
       if (base <= 0 && !anchorIds.has(nodeId)) continue;
@@ -1321,7 +1391,24 @@ export class GroupKBEngine {
       });
     }
 
-    scored.sort((a, b) => b.final - a.final || a.mem.createdAt - b.mem.createdAt);
+    /*
+     * 并列的判定要先量化，再谈次序。
+     *
+     * 两个**真正并列**的节点（同一次组名锚点命中的四个成员）`final` 会相差 1e-12 量级：那个差来自
+     * `computeSignalBoost` 里的时效项 `0.85 + 0.15*exp(-ageDays/120)` —— 同一毫秒写入的节点也会算出
+     * 不同 `ageDays`。让这个噪声决定排序，等于让"组名查询先返回哪一条"不可复现。
+     *
+     * 量化到 1e-6 之后噪声折进同一档，次序依次交给：写入时间（升序）→ 组内次序（见 `anchorRank`）
+     * → id（UUID，只作为最后的兜底）。真实的分数差异远大于 1e-6，所以这一步不会改变任何"确实
+     * 不一样"的排序。
+     */
+    const scoreBucket = (x: number): number => Math.round(x / GroupKBEngine.SCORE_EPSILON);
+    const rankOf = (id: string): number => anchorRank.get(id) ?? Number.MAX_SAFE_INTEGER;
+    scored.sort((a, b) =>
+      scoreBucket(b.final) - scoreBucket(a.final)
+      || a.mem.createdAt - b.mem.createdAt
+      || rankOf(a.mem.id) - rankOf(b.mem.id)
+      || (a.mem.id < b.mem.id ? -1 : a.mem.id > b.mem.id ? 1 : 0));
 
     // Absolute relevance floor (independent of the top hit, so a larger budget
     // can only ever ADD results — never remove them).
@@ -1375,6 +1462,57 @@ export class GroupKBEngine {
       totalNodesScanned: counter.n,
       queryTimeMs: performance.now() - startTime,
       pulseSeeds: allPulseSeeds,
+      diagnostics: this.buildQueryDiagnostics({
+        channels,
+        lexicalCandidates: lexicalById.size,
+        structuralCandidates: activationMap.size,
+        fusedCandidates: scored.length,
+        scores: scored.map((s) => s.final),
+        aboveFloor: nodes.length,
+        floor: relevanceFloor,
+        limit: MAX_RESULTS,
+      }),
+    };
+  }
+
+  /**
+   * 把一次检索的规模与分数分布整理成读数。
+   *
+   * 分数分布的**中位数**是关键那一项：在一个小库里，答案排第一和排第十看起来一样；在大库里，
+   * 一旦中位数贴着地板抬起来，"分数不低"就不再等于"找对了" —— 那时唯一能看出退化的是
+   * `scores.max / scores.median` 这个比值，以及 `aboveFloor` 是不是已经贴到 `limit`。
+   */
+  private buildQueryDiagnostics(input: {
+    channels: RetrievalChannel[];
+    lexicalCandidates: number;
+    structuralCandidates: number;
+    fusedCandidates: number;
+    scores: number[];
+    aboveFloor: number;
+    floor: number;
+    limit: number;
+  }): KBQueryDiagnostics {
+    const sorted = [...input.scores].sort((a, b) => a - b);
+    const median = sorted.length === 0
+      ? 0
+      : (sorted.length % 2 === 1
+        ? sorted[(sorted.length - 1) / 2]
+        : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2);
+    return {
+      channels: input.channels,
+      candidates: {
+        lexical: input.lexicalCandidates,
+        structural: input.structuralCandidates,
+        fused: input.fusedCandidates,
+      },
+      scores: {
+        max: sorted.length ? sorted[sorted.length - 1] : 0,
+        median,
+        min: sorted.length ? sorted[0] : 0,
+        aboveFloor: input.aboveFloor,
+        floor: input.floor,
+      },
+      limit: input.limit,
     };
   }
 

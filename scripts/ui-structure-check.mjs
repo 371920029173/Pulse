@@ -81,22 +81,73 @@ const studio = code(studioRaw);
   const refs = (app.match(/\{overlays\}/g) ?? []).length;
   check('浮层片段被两个分支共同引用', refs === 2, `出现 ${refs} 次（应为 2）`);
 
-  const frag = /const overlays = \(([\s\S]*?)\n  \);/.exec(app);
+  /*
+   * Extract the fragment by matching parentheses, not by regex.
+   *
+   * The previous pattern stopped at the first newline-indented `);`, so any nested call or
+   * reformat ended the slice early — and the set of panels below would then be computed from a
+   * truncated fragment, silently narrowing the check to whatever happened to come first.
+   */
+  const extractFragment = (text) => {
+    const start = text.indexOf('const overlays = (');
+    if (start < 0) return null;
+    const open = text.indexOf('(', start);
+    let depth = 0;
+    for (let i = open; i < text.length; i++) {
+      if (text[i] === '(') depth++;
+      else if (text[i] === ')') { depth--; if (depth === 0) return text.slice(open, i + 1); }
+    }
+    return null;
+  };
+  const frag = extractFragment(app);
+
   if (!frag) {
     check('浮层片段存在', false, '没找到 `const overlays = (`');
   } else {
-    const inFragment = new Set([...frag[1].matchAll(/\{show(\w+) &&/g)].map((m) => m[1]));
+    const inFragment = new Set([...frag.matchAll(/\{show(\w+) &&/g)].map((m) => m[1]));
 
     /*
-     * The precise rule: a panel the HOME SCREEN can open must be in the shared fragment,
-     * because Home returns before the chat branch is ever reached.
+     * The precise rule: a panel reachable from a GLOBAL entry point must be in the shared
+     * fragment, because Home returns before the chat branch is ever reached.
      *
-     * Panels that only the chat surface opens (checkpoints, import, knowledge base) are
-     * correctly chat-only, so demanding that every panel be shared would be wrong — it would
-     * force meaningless churn. Deriving the set from Home's own props keeps the rule honest
-     * and self-maintaining: adding a button to Home that opens a new panel fails this check
-     * until the panel is shared.
+     * The trigger set is derived mechanically, and that is the whole fix here. The previous
+     * version read Home's props and listed `Theme` / `Schedule` by name — so the command
+     * palette was invisible to it. `Ctrl+K` on the landing page flipped `showPalette` and
+     * rendered nothing, and because the palette is the ONLY global route to 导入知识库 /
+     * 导入对话 / 检查点 / 讨论群, five further panels were dead there too. Nothing threw and no
+     * component was broken — only the *placement* was wrong — so the only way to see it was to
+     * press the key in a real browser (which is how it was found).
+     *
+     * Three kinds of trigger, all of which reach the app from either screen:
+     *   · a branch of the Escape-close chain  (`else if (showX) setShowX(false)`)
+     *   · any `setShowX(true)` call           (palette command, status-bar button, Home prop)
+     *   · `Ctrl+K`                            (the palette; it toggles, so `(v) => !v`)
+     *
+     * Names are collected WITHOUT the `show` prefix, matching how the fragment above is
+     * scanned for `{showX &&`. Mixing the two conventions compares `showCheckpoints` against
+     * `Checkpoints` and reports every panel as missing.
      */
+    const triggers = new Set();
+    for (const m of app.matchAll(/else if \(show(\w+)\) set/g)) triggers.add(m[1]);
+    for (const m of app.matchAll(/setShow(\w+)\(true\)/g)) triggers.add(m[1]);
+    if (/setShowPalette\(\(v\) => !v\)/.test(app)) triggers.add('Palette');
+
+    /*
+     * Panels that belong to the chat layout rather than to the overlay layer. Excluded by name,
+     * because whether they may live outside the fragment depends on the layout — which a static
+     * read of the JSX cannot decide, and guessing wrong would force meaningless churn.
+     */
+    const LAYOUT_LOCAL = new Set(['Trace', 'Terminal', 'FocusChat']);
+    const missing = [...triggers].filter((n) => !LAYOUT_LOCAL.has(n) && !inFragment.has(n));
+
+    check(
+      `全局入口的浮层都在共享片段里（${triggers.size} 个入口）`,
+      missing.length === 0,
+      `不在 overlays 里，首页上打不开：${missing.map((n) => `show${n}`).join(', ')}`,
+    );
+
+    // The Home case specifically — the one that started this — kept separate so the failure
+    // names the screen the user is actually looking at.
     const homeProps = /<Home([\s\S]*?)\/>/.exec(app);
     const fromHome = new Set(
       homeProps ? [...homeProps[1].matchAll(/setShow(\w+)\(true\)/g)].map((m) => m[1]) : [],
@@ -106,22 +157,11 @@ const studio = code(studioRaw);
       fromHome.size >= 2,
       `只解析出 ${fromHome.size} 个：${[...fromHome].join(', ') || '(无)'}`,
     );
-    const missing = [...fromHome].filter((n) => !inFragment.has(n));
     check(
       '首页能打开的面板都在共享片段里（Home 会提前 return）',
-      missing.length === 0,
-      `只挂在对话分支：${missing.join(', ')}`,
+      [...fromHome].every((n) => inFragment.has(n)),
+      `只挂在对话分支：${[...fromHome].filter((n) => !inFragment.has(n)).join(', ')}`,
     );
-
-    // The theme editor and the scheduler are opened from Settings, which is itself reachable
-    // from both screens — so they inherit that reachability and must be shared too.
-    for (const name of ['Theme', 'Schedule']) {
-      check(
-        `${name} 面板在共享片段里（设置里能打开它）`,
-        inFragment.has(name),
-        `${name} 不在 overlays 里，Home 上会打不开`,
-      );
-    }
   }
 }
 

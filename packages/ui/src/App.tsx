@@ -1019,6 +1019,74 @@ export function App() {
       )}
       {showTheme && <ThemeStudio onClose={() => setShowTheme(false)} userTheme={userTheme} />}
       {showCost && <ContextCostPanel onClose={() => setShowCost(false)} />}
+
+      {/*
+        * The panels below are reachable from a GLOBAL entry point — Ctrl+K, a palette
+        * command, or the Escape chain — so they must exist on both screens.
+        *
+        * They used to be mounted after the `if (!entered)` block, which meant that on the
+        * landing page every one of them was silently dead: the palette set `showPalette`
+        * and nothing rendered, so Ctrl+K did nothing at all, and the same applied to the
+        * five panels the palette can open (导入知识库 / 导入对话 / 检查点 / 讨论群 …).
+        * A shortcut that does nothing is worse than no shortcut, because there is no way
+        * to tell it apart from a broken app. This is the third time this exact mistake
+        * happened, which is why the rule is stated here and enforced mechanically by
+        * `check:uistruct` (section 2), which derives every global entry point from the code
+        * rather than trusting a list.
+        */}
+      {showPalette && (
+        <CommandPalette
+          open={showPalette}
+          commands={paletteCommands}
+          onClose={() => setShowPalette(false)}
+        />
+      )}
+      {showCluster && <ClusterPanel onClose={() => { setShowCluster(false); setClusterFocusId(null); }} focusRoomId={clusterFocusId} onRoomsChanged={() => { void refreshSessions(); }} />}
+      {showHistory && (
+        <SessionHistory
+          onClose={() => setShowHistory(false)}
+          onReopened={(id) => { void handleReopened(id); }}
+        />
+      )}
+      {showMemo && (
+        <div className={styles.overlay} onClick={() => setShowMemo(false)}>
+          <div
+            style={{
+              width: 'min(560px, 92vw)',
+              maxHeight: '78vh',
+              display: 'flex',
+              flexDirection: 'column',
+              background: 'var(--bg-secondary)',
+              border: '1px solid var(--border)',
+              borderRadius: 16,
+              boxShadow: 'var(--shadow-lg)',
+              overflow: 'hidden',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <Memo />
+          </div>
+        </div>
+      )}
+      {showSources && (
+        <ImportSources
+          onClose={() => setShowSources(false)}
+          destination={activeSessionId ? 'sessions' : 'kb'}
+          onImported={() => {
+          // An import changes BOTH the conversation list and the knowledge base (or just the KB,
+          // depending on the destination). Only the chat history was reloaded, so the sidebar's
+          // knowledge tree stayed on its pre-import empty state — the KB looked empty while
+          // holding thousands of groups, until the user re-entered the workspace or reloaded.
+          void chat.loadHistory();
+          void refreshSessions();
+          void kb.fetchTree();
+          void kb.fetchStats();
+        }}
+        />
+      )}
+      {showImport && <KbImport onClose={() => setShowImport(false)} />}
+      {showKnowledge && <ImportKnowledge onClose={() => setShowKnowledge(false)} activeSessionId={activeSessionId} />}
+      {showCheckpoints && <CheckpointTimeline onClose={() => setShowCheckpoints(false)} />}
     </>
   );
 
@@ -1262,62 +1330,9 @@ export function App() {
         onOpenWorktrees={() => setShowWorktrees(true)}
       />
 
-      {showPalette && (
-        <CommandPalette
-          open={showPalette}
-          commands={paletteCommands}
-          onClose={() => setShowPalette(false)}
-        />
-      )}
       <TaskCards />
       <Toast />
       {overlays}
-      {showCluster && <ClusterPanel onClose={() => { setShowCluster(false); setClusterFocusId(null); }} focusRoomId={clusterFocusId} onRoomsChanged={() => { void refreshSessions(); }} />}
-      {showHistory && (
-        <SessionHistory
-          onClose={() => setShowHistory(false)}
-          onReopened={(id) => { void handleReopened(id); }}
-        />
-      )}
-      {showMemo && (
-        <div className={styles.overlay} onClick={() => setShowMemo(false)}>
-          <div
-            style={{
-              width: 'min(560px, 92vw)',
-              maxHeight: '78vh',
-              display: 'flex',
-              flexDirection: 'column',
-              background: 'var(--bg-secondary)',
-              border: '1px solid var(--border)',
-              borderRadius: 16,
-              boxShadow: 'var(--shadow-lg)',
-              overflow: 'hidden',
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <Memo />
-          </div>
-        </div>
-      )}
-      {showSources && (
-        <ImportSources
-          onClose={() => setShowSources(false)}
-          destination={activeSessionId ? 'sessions' : 'kb'}
-          onImported={() => {
-          // An import changes BOTH the conversation list and the knowledge base (or just the KB,
-          // depending on the destination). Only the chat history was reloaded, so the sidebar's
-          // knowledge tree stayed on its pre-import empty state — the KB looked empty while
-          // holding thousands of groups, until the user re-entered the workspace or reloaded.
-          void chat.loadHistory();
-          void refreshSessions();
-          void kb.fetchTree();
-          void kb.fetchStats();
-        }}
-        />
-      )}
-      {showImport && <KbImport onClose={() => setShowImport(false)} />}
-      {showKnowledge && <ImportKnowledge onClose={() => setShowKnowledge(false)} activeSessionId={activeSessionId} />}
-      {showCheckpoints && <CheckpointTimeline onClose={() => setShowCheckpoints(false)} />}
 
       {filePreview && (
         <div className={styles.overlay} onClick={() => setFilePreview(null)}>
