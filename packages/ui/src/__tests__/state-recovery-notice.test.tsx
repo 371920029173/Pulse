@@ -15,11 +15,17 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { StateRecoveryNotice } from '../components/StateRecoveryNotice';
 import type { StateRecovery } from '../components/StateRecoveryNotice';
 
-const BACKUP = 'D:/AGI/demo/.she/sessions.json.unusable-2026-09-29T13-47-33-123Z';
+/*
+ * A POSIX root on purpose. The component prints `backup` verbatim and does no path handling, so a
+ * drive letter would exercise nothing extra — while `check:portability` forbids hardcoded drive
+ * paths, and an author-local one (`D:/AGI/demo`, which this used to be) is the worst kind: it names
+ * the machine it was written on and means nothing anywhere else.
+ */
+const BACKUP = '/srv/projects/demo/.she/sessions.json.unusable-2026-09-29T13-47-33-123Z';
 
 const recovery = (over: Partial<StateRecovery> = {}): StateRecovery => ({
   kind: 'sessions',
-  root: 'D:/AGI/demo',
+  root: '/srv/projects/demo',
   backup: BACKUP,
   reason: '文件不是合法 JSON: Unexpected end of JSON input',
   ...over,
@@ -47,7 +53,7 @@ describe('StateRecoveryNotice', () => {
       <StateRecoveryNotice
         recoveries={[
           recovery(),
-          recovery({ kind: 'cluster', backup: 'D:/AGI/demo/.she/cluster/rooms.json.unusable-1', reason: '内容不是一个对象' }),
+          recovery({ kind: 'cluster', backup: '/srv/projects/demo/.she/cluster/rooms.json.unusable-1', reason: '内容不是一个对象' }),
         ]}
         onDismiss={vi.fn()}
       />,
@@ -62,7 +68,7 @@ describe('StateRecoveryNotice', () => {
       <StateRecoveryNotice
         recoveries={[
           recovery(),
-          recovery({ backup: 'D:/AGI/demo/.she/sessions.json.unusable-2' }),
+          recovery({ backup: '/srv/projects/demo/.she/sessions.json.unusable-2' }),
         ]}
         onDismiss={vi.fn()}
       />,

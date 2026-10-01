@@ -81,6 +81,9 @@ describe('识别：代码写在命令行里的每一种形式', () => {
     ['python3 -c "print(1)"', 'python3', '-c'],
     ['py -c "print(1)"', 'py', '-c'],
     ['powershell -Command "Get-ChildItem"', 'powershell', '-Command'],
+    // portability-check:allow — 下面这行是**被测数据**，不是调用。这个文件测的就是「能不能从命令行
+    // 文本里认出有人写了代码」，所以 powershell -EncodedCommand 必须原样出现；整张表只喂给
+    // detectInlineCodeExecution()，不 spawn 任何进程，也就无所谓平台分支。
     ['powershell.exe -EncodedCommand ZQBjAGgAbwA=', 'powershell', '-EncodedCommand'],
     ['pwsh -c "Get-Date"', 'pwsh', '-c'],
     ['cmd /c dir', 'cmd', '/c'],
@@ -97,6 +100,8 @@ describe('识别：代码写在命令行里的每一种形式', () => {
     ['bun -e "console.log(1)"', 'bun', '-e'],
     ['deno eval "console.log(1)"', 'deno', 'eval'],
     // A full path resolves to the same interpreter as the bare name.
+    // portability-check:allow — 同样是数据：带盘符的完整路径正是要认出来的形状之一（而且它一旦被
+    // 当成真调用执行，写的也是 "C:/Program Files" 这种只该出现在 Windows 上的位置）。
     ['"C:/Program Files/nodejs/node.exe" -e "console.log(1)"', 'node', '-e'],
     // An environment assignment in front does not hide the command.
     ['NODE_ENV=test node -e "console.log(1)"', 'node', '-e'],
@@ -168,6 +173,9 @@ describe('披露：这是一条只能说明、不能靠文本拦住的边界', (
    * ─────────────────────────────────────────────────────────────────────────────
    */
   it('【关键】路径检查看不见代码字符串里的越界路径', () => {
+    // portability-check:allow — 这条命令是断言里的**标本**，只交给 workspaceEscapeReason 和
+    // detectInlineCodeExecution 做纯字符串判断，永远不执行；`C:/definitely-outside` 存在的意义
+    // 恰恰是「一个明显在工作区外的路径」，写成相对路径就测不出这条限制了。
     const command = 'node -e "require(\'fs\').writeFileSync(\'C:/definitely-outside/x\',\'1\')"';
     assert.equal(
       workspaceEscapeReason(command, tempDir),
