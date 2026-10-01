@@ -5,8 +5,12 @@ import { spawn, execFile } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import type {
   SheConfig, SandboxResult, SandboxOptions, SandboxJobView, SandboxJobStatus, SandboxJobKillReason,
-  CodeExecutionOnCommandLine,
+  CodeExecutionOnCommandLine, IsolationInEffect,
 } from '@she/shared';
+import {
+  buildConfinedScript, buildWslArgv, planIsolation, isolationInEffect, isolationSpawnEnv,
+} from './isolation.js';
+import type { IsolationPlan, IsolationMode } from './isolation.js';
 
 export const DESTRUCTIVE_PATTERNS: RegExp[] = [
   /rm\s+.*-[a-z]*r[a-z]*f|rm\s+.*-[a-z]*f[a-z]*r|rm\s+-rf/i,
@@ -609,7 +613,35 @@ function spawnCommand(
   cwd: string,
   env: NodeJS.ProcessEnv,
   _workspaceRoot: string,
+  isolation?: { plan: IsolationPlan; cwdRel: string } | null,
 ): ChildProcess {
+  /*
+   * Layer 4.2: hand the command to a real boundary instead of the host shell.
+   *
+   * Placed here, at the single spawn both the foreground and background paths go through, so a
+   * background job cannot be started unconfined while the foreground is confined — the same
+   * single-choke-point argument as `admit()`.
+   *
+   * The command text reaches the distro base64-encoded and is decoded inside the namespace (see
+   * `buildConfinedScript`): it is arbitrary user text, and handing it to a second shell to re-parse
+   * is exactly the quoting problem `spawnCommand`'s own doc comment describes for cmd.exe.
+   */
+  if (isolation) {
+    const script = buildConfinedScript({
+      workspaceLinux: isolation.plan.workspaceLinux,
+      cwdRel: isolation.cwdRel,
+      command,
+    });
+    return spawn('wsl.exe', buildWslArgv(isolation.plan.distro, script), {
+      // The HOST cwd, so WSL starts from a directory that exists on both sides; the command itself
+      // starts in `cwdRel` inside the namespace, which is what the user asked for.
+      cwd: _workspaceRoot,
+      env: isolationSpawnEnv(env),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+  }
+
   if (!IS_WINDOWS) {
     return spawn(command, {
       shell: true,
@@ -793,6 +825,14 @@ interface Proc {
    * view a reader can reach.
    */
   codeExecution?: CodeExecutionOnCommandLine;
+  /**
+   * The boundary this process runs behind, if any.
+   *
+   * On the process rather than recomputed per result for the same reason as `codeExecution`: a job
+   * outlives the config lookup, and a later `shell_wait` must describe the boundary the process is
+   * actually in, not the one the current config would have asked for.
+   */
+  isolation?: IsolationPlan;
 }
 
 export class SandboxShell {
@@ -826,6 +866,9 @@ export class SandboxShell {
       // Empty means "no allowlist": the denylist is then the only command control, which
       // is the previous behaviour and stays the default.
       allowedCommands: config?.allowedCommands ?? [],
+      // Layer 4.2. `off` keeps the host path byte-for-byte as it was.
+      isolation: config?.isolation ?? 'off',
+      wslDistro: config?.wslDistro ?? '',
     };
   }
 
@@ -1061,11 +1104,25 @@ export class SandboxShell {
      */
     const codeExecution = detectInlineCodeExecution(command);
 
+    const cwd = options?.cwd ? this.validatePath(options.cwd) : this.workspaceRoot;
+    /*
+     * Layer 4.2, resolved at the same choke point and for the same reason as the disclosure above:
+     * this is the one place foreground, background and post-ticket commands all pass through, so no
+     * path can run isolated while another runs unconfined without the difference being recorded.
+     *
+     * A failure here is a REFUSAL when isolation was explicitly requested — `planIsolation` returns
+     * an error only for the `wsl` mode, where silently running on the host would contradict what the
+     * result is about to claim.
+     */
+    const iso = planIsolation(this.config.isolation, this.workspaceRoot, cwd, this.config.wslDistro);
+    if (iso && 'error' in iso) return deny(iso.error);
+
     return {
-      cwd: options?.cwd ? this.validatePath(options.cwd) : this.workspaceRoot,
+      cwd,
       timeout: options?.timeout ?? this.config.timeout,
       maxOutput: options?.maxOutputBytes ?? this.config.maxOutputBytes,
       ...(codeExecution ? { codeExecution } : {}),
+      ...(iso ? { isolation: iso } : {}),
     };
   }
 
@@ -1128,6 +1185,7 @@ export class SandboxShell {
             // Carried on the process, so the foreground answer, the job view and a later `shell_wait`
             // all say the same thing about whether this process was path-contained.
             ...(proc.codeExecution ? { codeExecution: proc.codeExecution } : {}),
+            ...(isolationInEffect(proc.isolation ?? null) ? { isolation: isolationInEffect(proc.isolation ?? null) } : {}),
           });
           return;
         }
@@ -1324,7 +1382,11 @@ export class SandboxShell {
   private spawnProc(
     command: string,
     cwd: string,
-    admitted: { maxOutput: number; codeExecution?: CodeExecutionOnCommandLine },
+    admitted: {
+      maxOutput: number;
+      codeExecution?: CodeExecutionOnCommandLine;
+      isolation?: { plan: IsolationPlan; cwdRel: string };
+    },
     options?: SandboxOptions,
   ): Proc {
     /*
@@ -1371,14 +1433,14 @@ export class SandboxShell {
       PYTHONIOENCODING: process.env.PYTHONIOENCODING || 'utf-8',
       PYTHONUTF8: process.env.PYTHONUTF8 || '1',
     };
-    const child = this.config.shell === 'powershell'
+    const child = this.config.shell === 'powershell' && !admitted.isolation
       ? spawn(powershellBin, ['-NoProfile', '-NonInteractive', '-Command', command], {
           cwd,
           env: childEnv,
           stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true,
         })
-      : spawnCommand(command, cwd, childEnv, this.workspaceRoot);
+      : spawnCommand(command, cwd, childEnv, this.workspaceRoot, admitted.isolation);
 
     const proc: Proc = {
       id: '',
@@ -1401,6 +1463,7 @@ export class SandboxShell {
       lifeTimer: null,
       closed: false,
       ...(admitted.codeExecution ? { codeExecution: admitted.codeExecution } : {}),
+      ...(admitted.isolation ? { isolation: admitted.isolation.plan } : {}),
     };
 
     const capOutput = admitted.maxOutput > 0;
@@ -1463,6 +1526,7 @@ export class SandboxShell {
       timedOut,
       durationMs: Date.now() - proc.startedAt,
       ...(proc.codeExecution ? { codeExecution: proc.codeExecution } : {}),
+      ...(isolationInEffect(proc.isolation ?? null) ? { isolation: isolationInEffect(proc.isolation ?? null) } : {}),
     };
   }
 
@@ -1856,6 +1920,13 @@ export class SandboxShell {
     };
     if (proc.killedBy) view.killedBy = proc.killedBy;
     if (proc.codeExecution) view.codeExecution = proc.codeExecution;
+    /*
+     * The boundary is reported on every view, including the status-only one: a `shell_jobs` listing
+     * that omitted it would let a reader assume the wrong thing about a running job, and the note
+     * costs one line.
+     */
+    const iso = isolationInEffect(proc.isolation ?? null);
+    if (iso) view.isolation = iso;
     if (!opts.consuming) return view;
 
     /*

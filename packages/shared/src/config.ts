@@ -167,6 +167,25 @@ export interface SheConfig {
      * `ls && rm -rf /` would pass.
      */
     allowedCommands: string[];
+    /**
+     * Real isolation for shell commands — layer 4.2 of the isolation-hardening plan.
+     *
+     * `off` (default): commands run on the host, under the path jail. Unchanged behaviour.
+     *
+     * `wsl`: require the boundary. If WSL (or the node inside it) is unavailable the command is
+     * REFUSED rather than run unconfined, because an explicit request that silently degrades is
+     * worse than no request — the transcript would say "isolated" about a command that was not.
+     *
+     * `auto`: use the boundary when it is available, otherwise run on the host. The absence of an
+     * `isolation` field on the result is then the signal that it did not apply.
+     *
+     * Opt-in, for the same reason the allowlist is: it changes what every command means. Inside the
+     * boundary the command is a LINUX process, so `powershell`, `cmd`, `taskkill` and Windows drive
+     * paths stop working, and the only Windows path visible is the workspace itself.
+     */
+    isolation: 'off' | 'auto' | 'wsl';
+    /** WSL distro to run in. Empty uses WSL's own default. */
+    wslDistro: string;
   };
   skills: {
     /** Active skill profile — see SKILL_PROFILES for the full set. */
@@ -279,6 +298,10 @@ const DEFAULTS: SheConfig = {
       allowAllCommands: false,
       // Empty = no allowlist. See `SandboxShell.isCommandAllowed` for why it is opt-in.
       allowedCommands: [],
+      // Layer 4.2. Off by default: it changes what every command means (see the type's doc comment),
+      // so it is a choice rather than an imposition.
+      isolation: 'off',
+      wslDistro: '',
     },
   skills: {
     profile: 'general',
@@ -778,6 +801,16 @@ export function loadConfig(workspaceRoot?: string): SheConfig {
   if (env.SHE_DENY_DESTRUCTIVE === '0' || env.SHE_DENY_DESTRUCTIVE === 'false') {
     config.sandbox.denyDestructiveByDefault = false;
   }
+  /*
+   * Real isolation (layer 4.2). `SHE_SANDBOX_ISOLATION=wsl` asks for the boundary; an unrecognised
+   * value is ignored rather than guessed at, so a typo cannot quietly arm the strict mode that
+   * refuses every command when WSL is missing.
+   */
+  if (env.SHE_SANDBOX_ISOLATION !== undefined) {
+    const raw = env.SHE_SANDBOX_ISOLATION.trim().toLowerCase();
+    if (raw === 'off' || raw === 'auto' || raw === 'wsl') config.sandbox.isolation = raw;
+  }
+  if (env.SHE_WSL_DISTRO !== undefined) config.sandbox.wslDistro = env.SHE_WSL_DISTRO.trim();
 
   config.workspace.root = (/^[a-zA-Z]:[\\/]/.test(config.workspace.root) || config.workspace.root.startsWith('/'))
     ? resolve(config.workspace.root)

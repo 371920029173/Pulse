@@ -136,9 +136,25 @@ if (process.platform !== 'win32') {
      * translate 'F:\_cursor_setup\scoop\shims'"). It is unrelated to the command, so
      * stderr goes to /dev/null and only stdout and the exit code are trusted.
      */
-    wslSh = (script) => wsl(['-d', distro, '--', 'bash', '-lc', `cd ${JSON.stringify(linuxCwd)} && ${script}`]);
+    /*
+     * `-e` (exec), NOT `--`.
+     *
+     * wsl.exe re-parses the command line that follows `--`, and that re-parse swallows command
+     * substitution: measured on this machine, `n=$(command -v node); echo "[$n]"` came back as
+     * `n=[]` through `--` while the identical script through `-e` returned `/usr/bin/node`. It is
+     * silent — no error, no exit code — so every probe built on `$(...)` reported an empty answer.
+     *
+     * The consequence was permanent and invisible: the Node probe below returned "none" even after
+     * Node was installed, so the Linux tests never ran and this gate reported 阻塞 forever. That is
+     * exactly the failure this file's own header warns about ("a silent skip is how 'we support
+     * Linux' becomes a claim nobody has checked in a year"), and it was in the probe itself.
+     *
+     * `--cd` passes the working directory as a Windows path rather than interpolating a `cd` into
+     * the script, so the script also stops having to survive being quoted into a command line.
+     */
+    wslSh = (script) => wsl(['-d', distro, '--cd', ROOT, '-e', 'bash', '-lc', script]);
 
-    const reachable = wslSh(`test -d ${JSON.stringify(linuxCwd)} && echo yes`).includes('yes');
+    const reachable = wslSh('test -d . && echo yes').includes('yes');
     check(`仓库在 WSL 下可达（${linuxCwd}）`, Boolean(reachable));
 
     let uname = '';
@@ -152,12 +168,23 @@ if (process.platform !== 'win32') {
     /*
      * Look for Node through a login shell, because nvm lives in the profile and is
      * invisible to a non-login `bash -c`.
+     *
+     * The result must also be a LINUX node. WSL puts the Windows PATH into the Linux
+     * PATH, and on this machine 36 `/mnt/...` entries arrive that way, so a Windows
+     * `node.exe` shim can satisfy `command -v node` and print a version while being
+     * unusable for a Linux command. Asking only for `-v` would have accepted it, and
+     * the "Linux" gate would then have been a claim about a Windows binary. The same
+     * check lives in the sandbox's isolation probe (`ISOLATION_PROBE`); this one stays
+     * dependency-free on purpose so `check:wsl` can run before anything is built.
      */
     try {
       linuxNode = wslSh(
         'n=$(command -v node 2>/dev/null); '
         + '[ -z "$n" ] && n=$(ls "$HOME"/.nvm/versions/node/*/bin/node 2>/dev/null | tail -1); '
-        + 'if [ -n "$n" ]; then "$n" -v; else echo none; fi',
+        + 'case "$n" in /mnt/*) echo "windows-binary($n)"; exit 0;; esac; '
+        + 'if [ -n "$n" ]; then p=$("$n" -p "process.platform" 2>/dev/null); '
+        + 'if [ "$p" = linux ]; then "$n" -v; else echo "not-linux($p)"; fi; '
+        + 'else echo none; fi',
       ).trim();
     } catch {
       linuxNode = 'none';
@@ -174,12 +201,25 @@ if (process.platform !== 'win32') {
     } else {
       console.log(`  --    Node： ${linuxNode}`);
       /*
-       * Only the dependency-free gates run here. They are chosen because they are the
-       * ones whose failure mode is platform-specific — path separators, path case,
-       * `\r\n`, `os.tmpdir()` — while a test that needs tsx/esbuild would fail inside
-       * WSL for reasons that have nothing to do with Linux correctness.
+       * The list is split by whether a script can actually run with nothing but Node.
+       *
+       * The previous list was documented as "dependency-free gates" but was not: `encoding-check`
+       * and `docs-check` load the workspace's modules, and those modules are NATIVE — they were
+       * installed on Windows, so the Linux side cannot load them at all. Measured here:
+       *
+       *   better-sqlite3/build/Release/better_sqlite3.node: invalid ELF header
+       *
+       * That is a PE binary. The failure is environmental, not a Linux-correctness signal, and it
+       * would have been reported as a red FAIL forever — the exact "silently blocked" outcome this
+       * file's header warns about, and which nobody could clear without a full Linux install.
+       *
+       * So: run what is genuinely dependency-free, and say BLOCKED (with the one command that fixes
+       * it) for what needs native modules. A blocked item is not a pass.
        */
-      for (const script of ['portability-check.mjs', 'encoding-check.mjs', 'i18n-check.mjs', 'docs-check.mjs']) {
+      const dependencyFree = ['portability-check.mjs', 'i18n-check.mjs'];
+      const needsNativeModules = ['encoding-check.mjs', 'docs-check.mjs'];
+
+      for (const script of dependencyFree) {
         let ok = true;
         let detail = '';
         try {
@@ -189,6 +229,34 @@ if (process.platform !== 'win32') {
           detail = String(e.stdout ?? e.message).split('\n').slice(-12).join('\n        ');
         }
         check(`WSL 里 node scripts/${script}`, ok, detail);
+      }
+
+      let nativeUsable = false;
+      try {
+        nativeUsable = wslSh('node -e "require(\'better-sqlite3\')" >/dev/null 2>&1 && echo yes || echo no').includes('yes');
+      } catch {
+        nativeUsable = false;
+      }
+      if (nativeUsable) {
+        for (const script of needsNativeModules) {
+          let ok = true;
+          let detail = '';
+          try {
+            wslSh(`node scripts/${script}`);
+          } catch (e) {
+            ok = false;
+            detail = String(e.stdout ?? e.message).split('\n').slice(-12).join('\n        ');
+          }
+          check(`WSL 里 node scripts/${script}`, ok, detail);
+        }
+      } else {
+        for (const script of needsNativeModules) {
+          note(
+            `WSL 里 node scripts/${script}`,
+            '需要原生模块，而 node_modules 是 Windows 侧装的（better-sqlite3 是 PE 二进制，Linux 侧报 invalid ELF header）。'
+            + `\n        Linux 侧装一份之后这条会自己开始跑： wsl -d ${distro} --cd ${linuxCwd} -e bash -lc "pnpm install"`,
+          );
+        }
       }
     }
   }

@@ -317,6 +317,18 @@ export interface SandboxResult {
    */
   codeExecution?: CodeExecutionOnCommandLine;
   /**
+   * Set when the command ran inside a real isolation boundary instead of on the host.
+   *
+   * This is the OTHER answer to the same question `codeExecution` raises. 4.1 made the sandbox stop
+   * claiming that a child process was path-contained; 4.2 makes that claim true for the commands it
+   * covers. When present, the paths this child could reach were decided by the operating system, not
+   * by a scan of the command text — which is the only way to contain code the text does not reveal.
+   *
+   * Absent means "ran on the host, under the jail" — not "ran somewhere unknown". A command that
+   * never ran (denied, or a host-only shell) carries neither field.
+   */
+  isolation?: IsolationInEffect;
+  /**
    * Set when the command did not finish and is now running as a background job.
    *
    * `timedOut` is true in that case too (the wait really did end without an exit code), but the
@@ -336,6 +348,21 @@ export interface CodeExecutionOnCommandLine {
   flag: string;
   /** The command segment that matched, for the reader and for the audit trail. */
   segment: string;
+}
+
+/**
+ * A real isolation boundary the command actually ran behind.
+ *
+ * `detail` is carried rather than composed at render time on purpose: the boundary's shape is a
+ * property of the mechanism and the machine (which paths are mountable, what the sandbox user can
+ * reach), and a caller that re-derives it from the mode name would eventually describe a boundary
+ * that is not the one that ran.
+ */
+export interface IsolationInEffect {
+  /** The mechanism: `wsl` today, `docker` if it is ever added. */
+  mode: string;
+  /** One line, shown to the reader, stating what this boundary does NOT confine. */
+  detail: string;
 }
 
 export interface SandboxOptions {
@@ -386,6 +413,13 @@ export interface SandboxJobView {
   matched?: boolean;
   /** The same disclosure as on `SandboxResult`: this job's program was inline, so the jail did not see it. */
   codeExecution?: CodeExecutionOnCommandLine;
+  /**
+   * The same boundary note as on `SandboxResult`, for a job.
+   *
+   * Present on the status-only listing too: a reader deciding whether to kill a job needs to know
+   * what it can reach, and that is not a detail to omit from the cheap view.
+   */
+  isolation?: IsolationInEffect;
   found: boolean;
 }
 

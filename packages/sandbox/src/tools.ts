@@ -8,6 +8,19 @@ import type {
 } from '@she/shared';
 import type { SandboxShell } from './shell.js';
 import { codeExecutionDisclosure } from './shell.js';
+import type { IsolationInEffect } from '@she/shared';
+
+/**
+ * The boundary note, formatted once.
+ *
+ * Separate from `codeExecutionDisclosure` because the two answer opposite questions and must not
+ * read alike: that one says "this child was NOT path-contained", this one says "the operating system
+ * contained it, and here is the part it does not cover". A reader who confuses them draws the exact
+ * wrong conclusion from each.
+ */
+function isolationNote(iso: IsolationInEffect | undefined): string[] {
+  return iso ? [`[真隔离] ${iso.detail}`] : [];
+}
 import { ConfirmTicketStore } from './tickets.js';
 import { computerClick, computerKey, computerScroll, computerType, computerUseEnabled } from './computer.js';
 import { PendingPatchStore } from './patches.js';
@@ -128,7 +141,10 @@ function renderShellResult(result: SandboxResult): string {
    * `INLINE_CODE_INTERPRETERS` in the sandbox), so the statement of what the jail did NOT cover is
    * the only thing standing between "it ran" and "therefore it was contained".
    */
-  const disclosure = result.codeExecution ? [codeExecutionDisclosure(result.codeExecution)] : [];
+  const disclosure = [
+    ...isolationNote(result.isolation),
+    ...(result.codeExecution ? [codeExecutionDisclosure(result.codeExecution)] : []),
+  ];
   if (result.jobId) {
     return [
       `命令还在跑，已经转到后台（job_id=${result.jobId}，已运行 ${seconds(result.durationMs)} 秒）。`,
@@ -152,6 +168,7 @@ function renderJobStarted(job: SandboxJobView): string {
     ...outputBlocks(job.stdout, job.stderr),
   ];
   if (job.codeExecution) parts.push(codeExecutionDisclosure(job.codeExecution));
+  parts.push(...isolationNote(job.isolation));
   return parts.join('\n');
 }
 
@@ -212,6 +229,7 @@ function renderJobView(view: SandboxJobView): string {
    * question "was this process path-contained?" has the same answer every time.
    */
   if (view.codeExecution) parts.push(codeExecutionDisclosure(view.codeExecution));
+  parts.push(...isolationNote(view.isolation));
   return parts.join('\n');
 }
 
