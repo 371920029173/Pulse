@@ -465,7 +465,19 @@ await boot('第三次启动（状态文件已损坏）');
 {
   const list = json(await raw('/api/sessions'));
   const ids = (list?.sessions ?? []).map((x) => x.id);
-  check('损坏的状态文件不会让服务起不来', Array.isArray(ids) && ids.length > 0,
+  /*
+   * 断言的是"服务起来了并且照常应答"，不是"它替我建了一条会话"。
+   *
+   * 这里原来是 `ids.length > 0`，而它之所以一直是通过的，恰恰是因为**启动会替用户建一个空会话**
+   * 那个 bug：损坏的文件被隔离成一个空 store，然后 `pickStartupSession` 顺手补一条 `New chat`，
+   * 于是"有会话"成立。那个补会话的行为在 2026-10-01 被去掉了（用户点一次 `+` 会得到两条），
+   * 这条断言就露出了它真正在测的东西 —— 一个和"损坏文件能不能起来"无关的副作用。
+   *
+   * 隔离后的状态**本来就该是空的**，这正是下一段注释说的"recovered state is empty, not broken"。
+   * 所以这里要求：应答是一个合法的列表，且里面没有凭空出现的东西。
+   */
+  check('损坏的状态文件不会让服务起不来（隔离损坏文件后照常应答）',
+    Array.isArray(list?.sessions) && ids.length === 0,
     `${ids.length} 个会话`);
 
   /*

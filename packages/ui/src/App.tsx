@@ -368,7 +368,10 @@ export function App() {
 
   /**
    * Adopt the server's active session when we do not have one locally.
-   * This is what makes a fresh app show the auto-created conversation selected.
+   *
+   * `active_id` 可以是 null —— 一个还没有任何会话的工作区就是 null，界面显示空状态。
+   * 这里**不**建会话：新建是用户按 `+` 的动作，不是窗口打开时的副作用。（以前启动时服务端会
+   * 替用户建一条 `New chat`，于是用户点一次 `+` 看到两条。）
    */
   useEffect(() => {
     if (activeSessionId || clusterRoomId) return;

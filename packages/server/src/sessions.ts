@@ -221,6 +221,41 @@ export class SessionStore {
   private recovery: { backup: string; reason: string } | null = null;
   /** Set when the previous file was upgraded in place. */
   private migratedFrom: string | null = null;
+  /**
+   * 本 store 发出去的最后一个时间戳（毫秒）。见 `stamp()`。
+   *
+   * 懒加载：第一次用到时才去已加载的数据里取最大值，所以不用去动 `load()`。
+   */
+  private lastStamp = 0;
+
+  /**
+   * 单调递增的"现在时刻"，用于 `created_at` / `updated_at`。
+   *
+   * 为什么不能直接用 `new Date().toISOString()`：它的粒度是毫秒，而"两条会话在同一毫秒里各自被碰到
+   * 一次"在真实使用里是常态 —— 一次激活会先 `persistHistory()`（碰到正在看的那条）再 `setActive()`
+   * （碰到被点开的那条），两次调用通常落在同一毫秒。于是两边的 `updated_at` 完全相等，"谁更近"这个
+   * 问题就没有答案了。
+   *
+   * 后果不是理论上的：会话栈拿 `created_at` 当平手时的次序，而 store 是靠位置（`hoist`）表达的。
+   * 平手时两者会给出**不同**的顺序 —— 实测 4 次跑出 3 次红：`store: 甲,丙,乙` 而 `rail: 丙,甲,乙`。
+   * 界面上就是"我点了那条，它没跳到最上面"。
+   *
+   * 所以时间戳必须是严格递增的：撞上同一毫秒（或时钟被往回调）就往后借 1 毫秒。差额小于一毫秒，
+   * 对任何展示都没有影响，但它让"最后一次被碰到"永远有唯一答案。
+   */
+  private stamp(): string {
+    if (this.lastStamp === 0) {
+      // 接着磁盘上的最大值走，免得重启后新会话排到老会话前面去（时间戳被往回调时）。
+      for (const s of this.data.sessions) {
+        const t = Date.parse(s.updated_at || '') || 0;
+        if (t > this.lastStamp) this.lastStamp = t;
+      }
+    }
+    const t = Date.now();
+    const next = t > this.lastStamp ? t : this.lastStamp + 1;
+    this.lastStamp = next;
+    return new Date(next).toISOString();
+  }
 
   constructor(baseDir: string) {
     const dir = join(baseDir, '.she');
@@ -318,6 +353,18 @@ export class SessionStore {
    * List sessions.
    * `includeClosed` returns everything still on disk (i.e. not deleted), which
    * is what the history view needs.
+   */
+  /**
+   * 会话列表，**最近用过的在最前面**。
+   *
+   * 这个顺序不是在这里排出来的，而是被维护出来的：`create` 把新会话放到最前面，`update` 和
+   * `setActive`（也就是"被用到"的两条路径）把它移回最前面。
+   *
+   * 为什么不在读的时候按 `updated_at` 排：`importMany` 有一条刻意的规则 —— 导入的对话**没有来源
+   * 时间戳时保持调用方给出来的顺序**（那是用户选择它们的顺序），因为每个条目的"现在"是逐条算的，
+   * 按它排等于按亚毫秒的偶然差别重排这一批。读时排序会让那条规则失效（实测：`importMany` 的
+   * 顺序测试转红），而且同一份数据在 `/api/sessions` 和会话栈上会出现两种顺序。维护顺序没有
+   * 这个问题：它只改变"哪一条被碰到了"，不改变没被碰到的那一批的相对位置。
    */
   list(includeClosed = false): {
     active_id: string | null;
@@ -418,11 +465,16 @@ export class SessionStore {
   }
 
   create(title?: string, opts?: { directory?: string; parentId?: string; background?: boolean }): ChatSession {
+    /*
+     * 一次取一个时间戳给两个字段用：分开取会让 `created_at` 和 `updated_at` 差 1 毫秒，而
+     * "没被碰过"的会话两者本该相等 —— 有代码和测试依赖这个等式。
+     */
+    const ts = this.stamp();
     const s: ChatSession = {
       id: `sess_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
       title: title?.trim() || UNTITLED,
-      created_at: nowIso(),
-      updated_at: nowIso(),
+      created_at: ts,
+      updated_at: ts,
       messages: [],
       directory: opts?.directory || this.rootDir,
     };
@@ -494,10 +546,18 @@ export class SessionStore {
    * imported conversations at the top in date order so the list reads naturally.
    */
   importMany(items: ImportedConversation[]): ChatSession[] {
+    /*
+     * 没有来源时间戳的条目共用**同一个**"现在"，而不是各算各的。
+     *
+     * 逐条 `nowIso()` 会让同一批里的条目相差 0–2 毫秒，于是"这批该是什么顺序"变成了对亚毫秒差
+     * 别的赌博：`list()` 维护顺序时它们算平手（保持调用方顺序），而按 `updated_at` 排的地方
+     * （会话栈）会按那个偶然差别重排 —— 同一批数据两种顺序。给它们同一个时间戳，两边就同解。
+     */
+    const batchStamp = this.stamp();
     const created: ChatSession[] = [];
     for (const item of items) {
       const messages = Array.isArray(item.messages) ? item.messages : [];
-      const created_at = item.createdAt || nowIso();
+      const created_at = item.createdAt || batchStamp;
       const s: ChatSession = {
         id: `sess_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
         title: item.title?.trim() || defaultTitle(messages),
@@ -524,8 +584,7 @@ export class SessionStore {
     if (anyDated) {
       created.sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
     }
-    this.data.sessions.unshift(...created);
-    this.save();
+    this.data.sessions.unshift(...created);    this.save();
     return created;
   }
 
@@ -557,9 +616,28 @@ export class SessionStore {
        */
       if (!patch.title && s.title === UNTITLED) s.title = defaultTitle(s.messages);
     }
-    s.updated_at = nowIso();
+    s.updated_at = this.stamp();
+    /*
+     * 被碰到就移到最前面 —— "最近用过的在最上面"是这个 store 维护出来的，不是读的时候排出来的。
+     *
+     * 之前这里只改 `updated_at` 而不动位置：一分钟前刚说过话的会话还待在它当初被创建的地方，
+     * 列表看起来是乱的（用户的原话是"chat 的排序不该按活跃排序吗"）。而会话栈是按 `updated_at`
+     * 排的，同一批数据两种顺序。
+     *
+     * 放在 `update` 里是因为它是"这条会话被用到了"的唯一入口：`persistHistory` 每轮都在调它。
+     * 逐条重排而不是读时排序，是为了不打断 `importMany` 刻意保留的导入顺序（见 `list`）。
+     */
+    this.hoist(s.id);
     this.save();
     return s;
+  }
+
+  /** 把一条会话移到数组最前面（已经是第一条时什么都不做）。 */
+  private hoist(id: string): void {
+    const i = this.data.sessions.findIndex((s) => s.id === id);
+    if (i <= 0) return;
+    const [s] = this.data.sessions.splice(i, 1);
+    this.data.sessions.unshift(s);
   }
 
   remove(id: string): void {
@@ -579,6 +657,17 @@ export class SessionStore {
     const s = this.get(id);
     if (!s) throw new Error(`session not found: ${id}`);
     this.data.active_id = id;
+    /*
+     * 选中也算"用到过"：用户点开一条会话却不说话，它也该排到最上面去 —— Cursor 就是这样，而
+     * 列表的顺序应该反映用户看到的东西的顺序，不是"只有发过消息才算数"。
+     *
+     * `updated_at` 必须一起抬：顺序有两处读它 —— 这个 store 自己靠 `hoist` 维护位置，会话栈
+     * （`/api/conversations`）靠 `updated_at` 排序。只 hoist 不抬时间戳，会话栈就仍把这条留在
+     * 原位，同一批数据两种顺序（实测 2026-10-01：激活最早那条后 `/api/sessions` 把它排到第一，
+     * 会话栈排第三）。要一致就得两条路都走。
+     */
+    s.updated_at = this.stamp();
+    this.hoist(id);
     this.save();
     return s;
   }

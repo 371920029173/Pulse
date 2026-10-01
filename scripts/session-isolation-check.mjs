@@ -429,6 +429,182 @@ try {
 }
 
 cleanup();
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 7. 会话栈：只能看到本工作区的 chat
+ *
+ * 这一节是 2026-10-01 补的，因为上面所有断言都是绿的、而用户看到的仍然是"隔离完全无效"。
+ * 漏掉的那半边不在 store 里，在**接口层**：`/api/conversations` 遍历 `projectRoots()`（所有被记住
+ * 过的项目）把会话合并成一条列表，于是任何工作区打开都看得见别的项目的对话。分账在磁盘上是对的，
+ * 而用户看的是界面。
+ *
+ * 另一个同源的漏洞在启动路径：`recoverLegacyState` 会从**安装根目录**搬 `sessions.json` 进任何还
+ * 没有这个文件的工作区。于是新建一个空工作区，里面凭空出现安装根的对话 —— 单靠这条就能复现"隔离
+ * 无效"。所以这一节起一个**全新**的空工作区，第一条断言就是"它里面什么都没有"。
+ *
+ * 这次起的服务**不设 `SHE_STATE_DIR`**：那个变量是显式的"所有状态都放这里"覆盖，设了它工作区切换
+ * 就不换会话（这是设计如此）。要测"工作区边界"就得让它跟着工作区走。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+console.log('\n7. 会话栈：只列本工作区的 chat（不是所有项目的）');
+
+const liveRoot = tempDir('she-rail-live-');
+const liveOther = tempDir('she-rail-other-');
+const OTHER_PORT = String(await pickSafePort(Number(process.env.SHE_RAIL_TEST_PORT || 18191), [18192, 18193]));
+
+const liveChild = spawn('node', [SERVER_ENTRY], {
+  cwd: SERVER_DIR,
+  env: {
+    ...process.env,
+    SHE_WORKSPACE: liveRoot,
+    SHE_PORT: OTHER_PORT,
+    SHE_ENV_FILE: join(liveRoot, '.env'),
+    SHE_APP_DIR: join(liveRoot, 'appdir'),
+    // 刻意不设 SHE_STATE_DIR：状态目录要跟着工作区走。
+    SHE_STATE_DIR: '',
+  },
+  stdio: ['ignore', 'pipe', 'pipe'],
+  windowsHide: true,
+});
+let liveOut = '';
+liveChild.stdout.on('data', (c) => { liveOut += c; });
+liveChild.stderr.on('data', (c) => { liveOut += c; });
+
+const live = (path, init) => fetch(`http://127.0.0.1:${OTHER_PORT}${path}`, { signal: AbortSignal.timeout(8000), ...init });
+const liveGet = async (path) => {
+  const r = await live(path);
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+const livePost = (path, body) => live(path, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body ?? {}),
+});
+
+async function liveReady() {
+  const t0 = Date.now();
+  for (;;) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${OTHER_PORT}/api/health`, { signal: AbortSignal.timeout(1500) });
+      if (r.ok) return true;
+    } catch { /* not up yet */ }
+    if (Date.now() - t0 > 30_000) return false;
+    await new Promise((r) => setTimeout(r, 400));
+  }
+}
+
+const liveCleanup = () => {
+  killTree(liveChild.pid);
+  removeTempDir(liveRoot);
+  removeTempDir(liveOther);
+};
+
+if (!(await liveReady())) {
+  check('第二个服务在 30 秒内就绪', false, liveOut.slice(-800));
+  liveCleanup();
+} else {
+  try {
+    /*
+     * 空工作区的第一条断言：**真的是空的**。
+     *
+     * 这一条同时钉住 `recoverLegacyState`：仓库自己的 `.she/sessions.json` 里是有会话的，如果那条
+     * 恢复逻辑又跑去安装根目录搬，这里立刻不是 0。
+     */
+    const fresh = await liveGet('/api/sessions');
+    const freshRail = await liveGet('/api/conversations');
+    check('【关键】全新的空工作区里一条会话都没有（安装根的对话没被搬进来）',
+      fresh.body.sessions.length === 0 && freshRail.body.items.length === 0,
+      JSON.stringify({ sessions: fresh.body.sessions?.map((s) => s.title), rail: freshRail.body.items?.map((s) => s.title) }).slice(0, 300));
+    check('空工作区的 active_id 是 null（没有替用户建会话）', fresh.body.active_id === null, String(fresh.body.active_id));
+
+    // 建两条，间隔一秒让 updated_at 分得开。
+    const first = await (await livePost('/api/sessions', { title: '甲的活' })).json();
+    await new Promise((r) => setTimeout(r, 1100));
+    await livePost('/api/sessions', { title: '乙的活' });
+    await new Promise((r) => setTimeout(r, 1100));
+    await livePost('/api/sessions', { title: '丙的活' });
+
+    const afterCreate = await liveGet('/api/conversations');
+    const titles = (r) => (r.body.items ?? []).map((i) => i.title);
+    check('新建的会话排在最前面（按创建时间倒序）',
+      titles(afterCreate).join(',') === '丙的活,乙的活,甲的活',
+      titles(afterCreate).join(','));
+
+    /*
+     * 排序的核心断言：**被激活的那条跳到最前面**，而且两条接口给同一个顺序。
+     *
+     * 只 hoist 不抬 `updated_at` 时，`/api/sessions` 把它排第一、会话栈按时间戳把它排第三 —— 实测
+     * 2026-10-01 亲眼看到这个分叉。所以这里两个都要比。
+     */
+    await livePost(`/api/sessions/${first.id}/activate`);
+    const afterActivate = await liveGet('/api/sessions');
+    const railAfter = await liveGet('/api/conversations');
+    check('【关键】激活一条老会话后它排到最上面（按活跃排序，不是按创建排序）',
+      (afterActivate.body.sessions ?? [])[0]?.id === first.id,
+      (afterActivate.body.sessions ?? []).map((s) => s.title).join(','));
+    check('【关键】/api/sessions 和 /api/conversations 给的顺序一致（同一批数据不该有两种排法）',
+      (afterActivate.body.sessions ?? []).map((s) => s.id).join(',') === (railAfter.body.items ?? []).map((s) => s.id).join(','),
+      JSON.stringify({ store: (afterActivate.body.sessions ?? []).map((s) => s.title), rail: titles(railAfter) }).slice(0, 300));
+
+    /*
+     * 点一次 `+` 只加一条 —— 这条钉住"启动时替用户建会话"那个 bug：以前空工作区启动会先有一条
+     * `New chat`（无消息），用户再点 + 就是两条。
+     */
+    const beforeCount = (await liveGet('/api/sessions')).body.sessions.length;
+    await livePost('/api/sessions', { title: '只加一条' });
+    const grown = (await liveGet('/api/sessions')).body.sessions.length;
+    check('【关键】点一次「+」只多一条（启动不再悄悄建会话）',
+      grown === beforeCount + 1, `${beforeCount} -> ${grown}`);
+
+    /*
+     * 换一个工作区：**看不到**上面那批。这一条是"会话隔离"最直白的表述。
+     */
+    const switched = await livePost('/api/workspaces/switch', { root: liveOther });
+    const swBody = await switched.json().catch(() => null);
+    check('切到一个还没用过的工作区，activeSessionId 是 null（不假装打开了一条）',
+      swBody?.activeSessionId === null, JSON.stringify(swBody).slice(0, 240));
+    await new Promise((r) => setTimeout(r, 1200));
+
+    const otherRail = await liveGet('/api/conversations');
+    check('【关键】另一个工作区的会话栈是空的（看不到上一个工作区的 chat）',
+      (otherRail.body.items ?? []).length === 0, titles(otherRail).join(','));
+    const otherSessions = await liveGet('/api/sessions');
+    check('另一个工作区的 /api/sessions 也是空的',
+      (otherSessions.body.sessions ?? []).length === 0,
+      (otherSessions.body.sessions ?? []).map((s) => s.title).join(','));
+
+    // 在第二个工作区里建一条，它不该跑回第一个工作区去。
+    await livePost('/api/sessions', { title: '乙区的活' });
+    const otherOwn = await liveGet('/api/conversations');
+    check('第二个工作区里建的会话只属于它',
+      titles(otherOwn).join(',') === '乙区的活', titles(otherOwn).join(','));
+
+    // 切回去：原来那批原样都在，且看不见第二个工作区那条。
+    await livePost('/api/workspaces/switch', { root: liveRoot });
+    await new Promise((r) => setTimeout(r, 1200));
+    const backRail = await liveGet('/api/conversations');
+    const backTitles = titles(backRail);
+    check('【关键】切回来，原来那批一条不少',
+      backTitles.length === grown, `${backTitles.length} vs ${grown}: ${backTitles.join(',')}`);
+    check('【关键】第一个工作区里看不到第二个工作区建的会话',
+      !backTitles.includes('乙区的活'), backTitles.join(','));
+
+    /*
+     * 边界靠路径，不靠过滤：两个工作区各自有文件，而第二个工作区**没有**从第一个那里继承。
+     */
+    check('两个工作区各自有自己的 sessions.json',
+      existsSync(join(liveRoot, '.she', 'sessions.json')) && existsSync(join(liveOther, '.she', 'sessions.json')),
+      null);
+    const rootFile = JSON.parse(readFileSync(join(liveRoot, '.she', 'sessions.json'), 'utf8'));
+    check('第一个工作区的文件里没有被写进第二个工作区的会话',
+      !(rootFile.sessions ?? []).some((s) => s.title === '乙区的活'),
+      (rootFile.sessions ?? []).map((s) => s.title).join(','));
+  } catch (err) {
+    check('会话栈的接口检查没有抛异常', false, err?.stack ?? String(err));
+  }
+  liveCleanup();
+}
+
 removeTempDir(dir);
 removeTempDir(otherWorkspace);
 

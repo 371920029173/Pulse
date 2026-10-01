@@ -581,8 +581,21 @@ console.log('\n数据安全回归（会启动真实服务，用临时工作区�
     const rail = await call('GET', '/api/conversations');
     const items = Array.isArray(rail.body?.items) ? rail.body.items : [];
     seen = items.map((i) => `${i.kind}:${i.id}`).join(' ') || '(空)';
-    roomListed = items.some((i) => i.kind === 'cluster' && i.id === roomId);
-    chatSurvived = items.some((i) => i.id === 'sess_a');
+    /*
+     * 点开 B 的会话 = 把 B 挂载进来，所以轨道此后就该是 **B 的**。
+     *
+     * 这一段原先断言的是"群和 A 的会话仍留在轨道里"。那是旧契约：轨道把所有已知项目的会话合并
+     * 成一条列表。2026-10-01 按用户的要求改掉了 —— "在一个工作区里只能看到属于这一个工作区的
+     * chat"，"我看到别的项目的对话"就是用户一直在报的那件事。合并列表存在的理由是"切走会掉东西"，
+     * 而"会切走"本身正是合并列表造成的，这个循环被拆掉之后两边都不需要了。
+     *
+     * 所以这里改钉新契约的两头：
+     *   - 轨道现在列的是 B 的会话（sess_b 在，A 的 sess_a 不在）—— 这是隔离本身；
+     *   - 手上那个 A 的群 id **仍然打得开、也写得到**（`roomOpens` / `writeLanded`，下面照旧）——
+     *     这才是这一段真正防的 bug：一个 id 被交到手上就不该变成 404。
+     */
+    roomListed = items.some((i) => i.id === 'sess_b');
+    chatSurvived = !items.some((i) => i.id === 'sess_a');
 
     roomOpens = (await call('GET', `/api/cluster/rooms/${roomId}`)).status === 200;
 
@@ -592,17 +605,12 @@ console.log('\n数据安全回归（会启动真实服务，用临时工作区�
   });
 
   record(
-    '【关键】点了另一个项目的会话之后，工作群仍留在轨道里（曾凭空消失）',
-    healthy && roomListed,
-    roomListed ? switchDetail : `切走之后轨道只剩：${seen}`,
+    '【关键】点了另一个项目的会话之后，轨道变成那个项目的（sess_b 在，A 的 sess_a 不在）',
+    healthy && roomListed && chatSurvived,
+    roomListed && chatSurvived ? switchDetail : `切走之后轨道只剩：${seen}`,
   );
   record(
-    '点了另一个项目的会话之后，原来那个项目的会话也还在轨道里',
-    healthy && chatSurvived,
-    seen,
-  );
-  record(
-    '轨道上列出来的群是真能打开的（不是列出来就 404）',
+    '【关键】切走之后，原来那个项目的东西不是"被丢了"：手上的群 id 仍然打得开',
     healthy && roomOpens,
     roomOpens ? '' : 'GET /api/cluster/rooms/<id> 没有返回 200',
   );
@@ -762,19 +770,44 @@ if (process.platform === 'win32') {
      * （读到的是当时的空文件）。这一行是下面那条断言的前提，不是装饰 —— 少了它，坏代码也能过。
      */
     const poll = await call('GET', '/api/conversations');
-    const bVisible = (poll.body?.items ?? []).some((i) => resolve(i.directory ?? '') === resolve(wsB));
-    if (!bVisible) detail = '前置条件没满足：第一次轮询时 B 还不是已知项目（那测的就不是缓存问题）';
+    /*
+     * 注意这段的前提在新契约下换了个形式：轨道不再列 B 的会话，所以"B 是已知项目"不能再靠
+     * "轨道上看得见 B"来证明（那个断言本身就是旧契约的一部分，现在会一直为假）。改成读
+     * `/api/workspaces` 的清单 —— 那才是"这个项目是已知的"的事实来源。
+     */
+    const known = await call('GET', '/api/workspaces');
+    const knownRoots = (known.body?.workspaces ?? []).map((w) => resolve(w.root ?? w));
+    if (!knownRoots.some((r) => r === resolve(wsB))) {
+      detail = `前置条件没满足：轮询之后 B 还不是已知项目（那测的就不是缓存问题），已知=${knownRoots.join(' | ')}`;
+    }
 
     await call('POST', '/api/workspaces/switch', { root: wsB });
     const made = await call('POST', '/api/cluster/rooms', { title: '在 B 里建的群' });
     const roomId = made.body?.id;
-    await call('POST', '/api/workspaces/switch', { root: wsA });
 
-    const rail = await call('GET', '/api/conversations');
-    const items = Array.isArray(rail.body?.items) ? rail.body.items : [];
-    listed = Boolean(roomId) && items.some((i) => i.kind === 'cluster' && i.id === roomId);
+    /*
+     * 在 B 里就必须看得见 B 的群 —— 这一句取代了原来"切回 A 之后还看得见 B 的群"。
+     *
+     * 原断言防的是真 bug：轮询给 B 的存储建了缓存实例，之后在 B 建群写的是挂载中那份，读却从
+     * 缓存那份拿，于是轨道是空的、点开还 404。那个 bug 的形状是"写进去的东西读不出来"，和
+     * "在哪个工作区"无关 —— 所以正确地钉住它的方式是**在 B 里读**（同一个 rooms.json 上的两份
+     * 实例照样会让这句为假），而不是要求它跑到 A 的轨道上去。
+     */
+    const railInB = await call('GET', '/api/conversations');
+    const itemsInB = Array.isArray(railInB.body?.items) ? railInB.body.items : [];
+    listed = Boolean(roomId) && itemsInB.some((i) => i.kind === 'cluster' && i.id === roomId);
     if (!listed) {
-      detail = `轨道上只有 ${items.map((i) => `${i.kind}:${i.id}`).join(' ') || '(空)'}`;
+      detail = `在 B 里轨道上只有 ${itemsInB.map((i) => `${i.kind}:${i.id}`).join(' ') || '(空)'}`;
+    }
+
+    await call('POST', '/api/workspaces/switch', { root: wsA });
+    const railInA = await call('GET', '/api/conversations');
+    const itemsInA = Array.isArray(railInA.body?.items) ? railInA.body.items : [];
+    /* 切回 A 之后，B 的群不该跟着过来 —— 这是隔离的另一面。 */
+    let leakedToA = itemsInA.some((i) => i.kind === 'cluster' && i.id === roomId);
+    if (listed && leakedToA) {
+      listed = false;
+      detail = '切回 A 之后，B 的群还挂在 A 的轨道上（隔离没生效）';
     }
 
     const opened = await call('GET', `/api/cluster/rooms/${roomId}`);
@@ -794,9 +827,19 @@ if (process.platform === 'win32') {
   });
 
   record(
-    '【关键】轨道被轮询过之后，在别的项目里建的群切走仍留在轨道里（曾整条消失、点开 404）',
-    healthy && listed && opens,
-    listed && opens ? '群在轨道里，也打得开' : detail,
+    '【关键】在某个项目里建的群，在那个项目的轨道上看得见（曾因缓存实例读不到、点开 404）',
+    healthy && listed,
+    listed ? '群在 B 的轨道里' : detail,
+  );
+  record(
+    '切回另一个项目之后，那个群不会跟着过来（隔离）',
+    healthy && listed,
+    listed ? '' : detail || 'B 的群出现在 A 的轨道上',
+  );
+  record(
+    '切回 A 之后，手上那个 B 的群 id 仍然打得开（不是"被丢了"）',
+    healthy && opens,
+    opens ? '' : `GET /api/cluster/rooms/<id> → ${opens}`,
   );
   record(
     '在那个项目里给群发的消息，真的落在那个项目的 rooms.json 里',

@@ -354,16 +354,26 @@ function recoverFile(target: string, src: string, label: string): boolean {
  * previous project's sessions into the new one, which is exactly why chats
  * looked like they were not isolated per workspace.
  *
+ * 2026-10-01：上面那条"不要每次切工作区都跑"是对的，但还不够 —— 它在**启动时**照样把安装根
+ * 目录的会话搬进任何新工作区。实测：把 `SHE_WORKSPACE` 指到一个空的临时目录，启动日志写着
+ * `Recovered chat sessions from D:\AGI\she-agent-cloud\.she\sessions.json`，于是那个全新的工作区
+ * 里凭空出现了安装根目录的对话。用户看到的"会话隔离完全无效"里，这一条是能单独复现的。
+ *
+ * 原因：安装根目录（以及它下面的 `packages/server`）当年是**默认工作区的 cwd**，不是"公共历史"。
+ * 它里面的会话属于"以安装根为工作区"这个工作区，不属于用户后来选的任何一个工作区。所以只有在
+ * 目标**就是安装根自己**时才去那里翻旧账；换了工作区就没有旧账可翻，也就不该翻。
+ *
  * `process.cwd()` is intentionally NOT a candidate. It made the outcome depend
  * on how the server was launched (launcher vs direct), so two different
  * workspaces could overwrite each other's history.
  */
 function recoverLegacyState(targetDir: string, extraSources: string[] = []): void {
   const target = resolve(targetDir);
+  const installRoot = resolve(PROJECT_ROOT);
+  const isInstallRoot = pathKey(target) === pathKey(installRoot);
   const sources = [
     ...extraSources,
-    join(PROJECT_ROOT, 'packages', 'server'),
-    PROJECT_ROOT,
+    ...(isInstallRoot ? [join(installRoot, 'packages', 'server'), installRoot] : []),
   ].map((d) => resolve(d));
   const candidates = [...new Set(sources)].filter((d) => d !== target);
 
@@ -2081,7 +2091,7 @@ function dropAgent(id: string): void {
  * A full dispose made "open the other project's chat" abort every parallel
  * turn. Pinned sessions keep the agent that was built for their directory.
  */
-function mountWorkspace(root: string, sessionId?: string): ChatSession {
+function mountWorkspace(root: string, sessionId?: string): ChatSession | null {
   persistHistory();
   const next = resolve(root);
   const prev = resolve(config.workspace.root);
@@ -2136,15 +2146,25 @@ function mountWorkspace(root: string, sessionId?: string): ChatSession {
     }
   }
   if (!chosen) chosen = pickStartupSession();
-  if (!chosen.directory && sessions.get(chosen.id)) {
-    const dir = resolve(sessions.rootDir);
-    chosen = sessions.update(chosen.id, { directory: dir });
-  }
-  activeAgentId = chosen.id;
-  if (!agents.get(chosen.id)) {
-    const a = makeAgent(config, chosen.id);
-    if (chosen.messages?.length) a.setHistory(chosen.messages);
-    agents.set(chosen.id, a);
+  if (chosen) {
+    if (!chosen.directory && sessions.get(chosen.id)) {
+      const dir = resolve(sessions.rootDir);
+      chosen = sessions.update(chosen.id, { directory: dir });
+    }
+    activeAgentId = chosen.id;
+    if (!agents.get(chosen.id)) {
+      const a = makeAgent(config, chosen.id);
+      if (chosen.messages?.length) a.setHistory(chosen.messages);
+      agents.set(chosen.id, a);
+    }
+  } else {
+    /*
+     * 这个工作区里一条会话都没有。**这是一个正常状态，不该被自动补上。**
+     *
+     * 清掉 `activeAgentId`：它现在指着上一个工作区的会话（切工作区时刚 persist 过），留着会让
+     * "当前会话"在这个工作区里指向一条不存在的记录。
+     */
+    activeAgentId = null;
   }
 
   /*
@@ -4598,13 +4618,17 @@ router.get('/api/fs/tree', (req, res) => {
     const active = mountWorkspace(root, body.sessionId);
     rememberWorkspace(root);
     log.info(`Workspace switched: ${prevWorkspace} -> ${root}`);
+    /*
+     * `activeSessionId` 可以是 null：这个工作区里还没有任何会话。界面据此显示空状态，
+     * 而不是打开一条刚被凭空造出来的 `New chat`。
+     */
     sendJSON(res, {
       ok: true,
       root: config.workspace.root,
       kbDbPath: config.kb.dbPath,
       kbMode: resolveWorkspaceKbPath(config.workspace.root).mode,
       restartRequired: false,
-      activeSessionId: active.id,
+      activeSessionId: active?.id ?? null,
     });
   });
 
@@ -4801,6 +4825,11 @@ router.get('/api/fs/tree', (req, res) => {
     const dir = resolve(found.session.directory || found.store.rootDir);
     if (!sameDb(dir, config.workspace.root)) {
       const active = mountWorkspace(dir, params.id);
+      /*
+       * `params.id` 已经确认存在（上面 404 过了），所以这里拿到 null 是"目标工作区里没有它" ——
+       * 报 404，而不是把一条新建的 `New chat` 冒充成用户点的那个会话。
+       */
+      if (!active || active.id !== params.id) throw new HttpError(404, `Session not found: ${params.id}`);
       sendJSON(res, active);
       return;
     }
@@ -5559,8 +5588,17 @@ router.get('/api/fs/tree', (req, res) => {
    * Rooms were previously only reachable from the cluster panel, so a group the
    * user created looked like it had vanished. Expose them as pseudo-sessions of
    * kind 'cluster' so the sidebar can list them alongside chats.
+   *
+   * 默认只列**本工作区**的会话。这是这条路线之前最要命的错误：它遍历 `projectRoots()` ——
+   * 所有被记住过的项目 —— 把它们的历史合并成一条列表。于是一个新工作区打开就能看到别的项目
+   * 的对话，而"这个工作区里只有这个工作区的 chat"这条最基本的承诺从来没有成立过。
+   *
+   * 合并的初衷是好的：会话栈要能显示群，而群是按项目存的。但那个问题应该用"群跟着工作区走"
+   * 来解决，不是把每个项目的历史都摊在用户面前。跨项目现在要显式要：`?scope=all`。
    */
-  router.get('/api/conversations', (_req, res) => {
+  router.get('/api/conversations', (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const crossProject = url.searchParams.get('scope') === 'all';
     const seen = new Set<string>();
     const chats: Array<{
       id: string;
@@ -5573,7 +5611,12 @@ router.get('/api/fs/tree', (req, res) => {
       background?: boolean;
       running?: boolean;
     }> = [];
-    const roots = projectRoots();
+    /*
+     * 本工作区就是**已挂载的那个 state 目录**（`sessions.rootDir`），不是 `config.workspace.root`：
+     * 两者在 `SHE_STATE_DIR` 被显式指定时会分开，而 chats 跟着 state 目录走。用挂载中的 store 是
+     * 唯一一处能同时保证"列出来的"和"点得开的"是同一批的做法。
+     */
+    const roots = crossProject ? projectRoots() : [sessions.rootDir];
     for (const root of roots) {
       for (const s of visibleToTenant(storeFor(root).list().sessions)) {
         if (seen.has(s.id)) continue;
@@ -5592,16 +5635,20 @@ router.get('/api/fs/tree', (req, res) => {
       }
     }
     /*
-     * Groups come from every known project as well, not just the mounted one.
+     * 群跟着工作区走，跟 chats 同一条规则。
      *
-     * A room lives in its project's state directory, and opening a chat that belongs to another
-     * project mounts that project's directory — so reading only the mounted `cluster` made the rail
-     * drop groups the moment such a chat was clicked. Reproduced live on 2026-09-27: three rail
-     * items became two, with the work group gone. `seenGroups` keeps a room from being listed twice
-     * when two spellings of a path resolve to one state directory.
+     * 2026-09-27 这里改成遍历所有项目，原因是：打开一个属于别的项目的会话会把那个项目挂载进来，
+     * 于是只读挂载中的 `cluster` 会让会话栈"掉"群（实测三个变两个）。那个现象是真的，但根因是
+     * **上一段**（会话栈本来就不该列别的项目的会话）。现在会话栈只剩本工作区，那个挂载切换也就
+     * 不会再发生，于是这里可以回到"只列本工作区的群" —— 也就是和上面同一个 `roots`。
+     *
+     * `clusterStoresForRail()` 仍然保留：`roomHome()` 需要按 id 在**所有**项目里找一个群（用户
+     * 可能从别处带过来一个房间 id），那是"按 id 查"而不是"列出别人的东西"，两件事不一样。
+     * `seenGroups` 防止一个群被列两次（同一个 state 目录的两种写法）。
      */
     const seenGroups = new Set<string>();
-    const groups = clusterStoresForRail().flatMap((c) =>
+    const groupStores = crossProject ? clusterStoresForRail() : [cluster];
+    const groups = groupStores.flatMap((c) =>
       c.list().flatMap((r) => {
         if (seenGroups.has(r.id)) return [];
         seenGroups.add(r.id);
@@ -5616,8 +5663,20 @@ router.get('/api/fs/tree', (req, res) => {
         }];
       }),
     );
+    /*
+     * 按**活跃**排序，最新用过的在最上面。
+     *
+     * 这本来就是这条接口的行为（`updated_at` 倒序），但它是唯一一处这么做的地方 ——
+     * `SessionStore.list()` 返回的是创建顺序（`create` 用 `unshift`），所以 `/api/sessions`
+     * 和会话栈会对同一批数据给出两种顺序。用户看到"排序不对"就是这两个顺序在对不上。
+     *
+     * 平手时用 `created_at` 再比一次，然后才是 id：两个从没说过话的会话 `updated_at` 完全相同
+     * （都是创建那一刻），只按它排的话顺序取决于数组当时的样子，刷新一次就可能换位。
+     */
     const all = [...chats, ...groups].sort((a, b) =>
-      (b.updated_at ?? '').localeCompare(a.updated_at ?? ''),
+      (b.updated_at ?? '').localeCompare(a.updated_at ?? '')
+      || (b.created_at ?? '').localeCompare(a.created_at ?? '')
+      || a.id.localeCompare(b.id),
     );
     /*
      * `active_id` is filtered too. It is an id, not a title, but it is the id of a conversation the
@@ -5639,7 +5698,7 @@ router.get('/api/fs/tree', (req, res) => {
       const notice = storeFor(root).recoveryNotice;
       if (notice) recoveries.push({ kind: 'sessions', root, ...notice });
     }
-    for (const c of clusterStoresForRail()) {
+    for (const c of groupStores) {
       const notice = c.recoveryNotice;
       if (notice) recoveries.push({ kind: 'cluster', root: c.rootDir, ...notice });
     }
@@ -5892,8 +5951,19 @@ router.get('/api/fs/tree', (req, res) => {
  *
  * The rule itself lives in `chooseStartupSession` so it can be unit-tested; this only
  * applies it to the live store (reading the sessions and writing back the pick).
+ *
+ * 没有会话时返回 `null` —— **不再顺手建一个**。
+ *
+ * 之前这里以 `createSession(...)` 收尾，于是"一个空工作区启动"会凭空多出一条没人要的
+ * `New chat`。用户看到的是：打开应用时列表是空的，点一下 `+`，出现**两个** `New chat` ——
+ * 一个是他点的，一个是启动时替他点的。实测复现（2026-10-01，空工作区启动后
+ * `GET /api/sessions` 返回 1 条 title='New chat'）。那条会话连一句话都没有，却占着 `active_id`，
+ * 还让 `chooseStartupSession` 的注释里描述的"重启后历史看起来丢了"更难判断。
+ *
+ * "没有会话"是一个正常状态：界面就该显示空状态，用户点 `+` 才产生第一条。补上一条假的，
+ * 是把"还没有"伪装成"已经有了"。
  */
-function pickStartupSession() {
+function pickStartupSession(): ChatSession | null {
   const stored = sessions.getActive();
   // Hydrated so the rule can see `messages` and `background`; `list()` strips both.
   const all = sessions.list()
@@ -5908,7 +5978,7 @@ function pickStartupSession() {
     const activated = sessions.setActive(chosen.id);
     if (activated) return activated;
   }
-  return stored ?? createSession(sessions, undefined, { directory: resolve(config.workspace.root) });
+  return stored ?? null;
 }
 
 export async function startServer(overrideConfig?: SheConfig): Promise<ReturnType<typeof createServer>> {  // Resolve config against the install root so the server finds the same
@@ -5937,8 +6007,11 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
   // empty "New chat" (e.g. created by a test or an abandoned tab), which makes
   // a perfectly healthy history look like it was lost after a restart. Prefer
   // the most recently touched session that actually has messages.
+  //
+  // 没有会话就什么都不开。空工作区启动时不再造一条 `New chat`（见 `pickStartupSession`）——
+  // 那样会让用户点一次 `+` 得到两条，而且那条假会话会被持久化，下次启动又挑中它。
   const active = pickStartupSession();
-  activeAgentId = active.id;
+  activeAgentId = active?.id ?? null;
 
   /*
    * Load plugin tools BEFORE the first agent is built.
@@ -5974,10 +6047,18 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
     log.warn(`MCP tool registration failed (server still starts): ${(e as Error).message}`);
   }
 
-  const initialAgent = makeAgent(config, active.id);
-  if (active.messages?.length) initialAgent.setHistory(active.messages);
-  agents.set(active.id, initialAgent);
-  log.info(`Opened session ${active.id} (${active.messages?.length ?? 0} messages)`);
+  if (active) {
+    const initialAgent = makeAgent(config, active.id);
+    if (active.messages?.length) initialAgent.setHistory(active.messages);
+    agents.set(active.id, initialAgent);
+    log.info(`Opened session ${active.id} (${active.messages?.length ?? 0} messages)`);
+  } else {
+    /*
+     * 空工作区。不打 "Opened session" —— 那句日志现在会是一句谎话，而且它是排查"会话去哪了"
+     * 时第一眼看的东西。`/api/conversations` 会如实回一个空列表，界面显示空状态。
+     */
+    log.info('这个工作区还没有会话（等用户新建）');
+  }
 
   log.info(`Settings file: ${ENV_PATH}`);
   log.info(`State dir:     ${stateDir}`);
