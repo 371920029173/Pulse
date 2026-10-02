@@ -399,11 +399,25 @@ describe('前台超时：留在后台，而不是被杀掉', () => {
     const own = new SandboxShell(tempDir, { allowAllCommands: true });
     const ownTools = createTools(own, tempDir, { allowAllCommands: true });
     try {
+      /*
+       * 软截止必须留出**进程链自己启动**的时间，否则这条会假红。
+       *
+       * Windows 上一条 `node -e` 不是直接起 node：`spawnCommand` 起的是
+       * `powershell.exe -EncodedCommand` → `cmd.exe /d /c` → `node`，三层。实测这一串到"第一行
+       * 输出可读"的端到端延迟：空载 565–690ms（8 次），而 `pnpm -r test` 满负载下 565–2131ms
+       * （10 次，中位 920ms）。原来的 1500ms 正落在满载区间的中间，于是全量门禁里这条报
+       * `not ok 3`，`first` 里一行输出都没有，而它当时的原话是「已运行 1.5 秒」—— 那不是在说
+       * "输出被印了两遍"，是**子进程还没轮到 CPU**。前置条件不成立，不变量根本没被检验。
+       *
+       * 给到 6000ms（实测最坏值的约 3 倍），LATE-LINE 推到 8000ms 让它仍然晚于截止。
+       * **不变量一个字没动**：已经给出去的那段输出，不许在后台那次读里再出现一次。
+       */
       const first = await ownTools.execute('shell', {
-        command: nodeEval('console.log("EARLY-LINE");setTimeout(()=>console.log("LATE-LINE"),2500)'),
-        timeout_ms: 1500,
+        command: nodeEval('console.log("EARLY-LINE");setTimeout(()=>console.log("LATE-LINE"),8000)'),
+        timeout_ms: 6000,
       });
-      assert.match(first, /EARLY-LINE/, first);
+      assert.match(first, /EARLY-LINE/,
+        `前置条件：命令必须在截止前印出第一行（没印出说明进程链启动比截止还慢，不是重复输出）: ${first}`);
       const id = jobIdOf(first);
       const rest = await ownTools.execute('shell_wait', { id, wait_ms: 15000 });
       assert.ok(!rest.includes('EARLY-LINE'), `转后台前已印过的行不该重复: ${rest}`);

@@ -116,20 +116,57 @@ let linuxCwd = null;
 let linuxNode = null;
 let wslSh = null;
 
-const wsl = (args) => execFileSync('wsl.exe', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+/**
+ * `wsl.exe` has its own way of not answering.
+ *
+ * Every call below used to be unbounded, and `execFileSync` waits for the child's STDOUT PIPE to
+ * close — the same mechanism that hung this gate for 65 minutes in `check:docs`. `wsl.exe` is
+ * unusually good at producing that shape: a wedged WSL service, a distro that is mid-`wsl --shutdown`
+ * or a Linux side swapping hard all leave the command sitting there with no output and no exit. The
+ * gate would then stop inside a check that is *not* the thing being investigated, printing nothing.
+ *
+ * The budget is deliberately loose: a healthy `wsl -l -q` answers in tens of milliseconds and these
+ * probes are `test -d` / `uname` / `node -v`, so two minutes is not a performance judgement — it is
+ * the point past which "slow" has stopped being a plausible explanation.
+ */
+const WSL_TIMEOUT_MS = 2 * 60_000;
+
+const wsl = (args) => execFileSync('wsl.exe', args, {
+  encoding: 'utf8',
+  stdio: ['ignore', 'pipe', 'ignore'],
+  timeout: WSL_TIMEOUT_MS,
+  killSignal: 'SIGKILL',
+});
+
+/**
+ * Was the failure the deadline, or did `wsl.exe` answer?
+ *
+ * This distinction is the whole point of bounding these calls. The catch blocks below all mean
+ * "WSL could not help us" and every one of them had been reading `distro = null` out of it — so a
+ * service that had stopped responding was reported as **"没有已安装的 WSL 发行版。装一个：
+ * wsl --install -d Ubuntu"**, an instruction that cannot fix it and that would send a reader to
+ * reinstall something they already have. Being slow to fail and then naming the wrong cause is worse
+ * than either failure on its own.
+ */
+const timedOut = (e) => e?.code === 'ETIMEDOUT' || e?.signal === 'SIGKILL';
 
 if (process.platform !== 'win32') {
   note('WSL 探测', '当前不是 Windows，跳过（在 Linux 上这些检查应当直接由 CI 执行）');
 } else {
+  let probeError = null;
   try {
     const listed = wsl(['-l', '-q']);
     distro = listed.split(/\r?\n/).map((s) => s.replace(/\0/g, '').trim()).filter(Boolean)[0] ?? null;
-  } catch {
+  } catch (e) {
     distro = null;
+    probeError = e;
   }
 
   if (!distro) {
-    note('WSL 发行版', '没有已安装的 WSL 发行版。装一个：wsl --install -d Ubuntu');
+    note('WSL 发行版', timedOut(probeError)
+      ? `wsl.exe -l -q 超过 ${WSL_TIMEOUT_MS / 1000} 秒没返回（exit=${probeError?.signal ?? ''}）—— 这是 WSL 服务自己卡住了，不是"没装发行版"。`
+        + '\n        先 wsl --shutdown 再重开一个终端跑这条门禁；发行版列不出来和发行版不存在是两件事。'
+      : '没有已安装的 WSL 发行版。装一个：wsl --install -d Ubuntu');
   } else {
     console.log(`  --    发行版： ${distro}`);
 
@@ -190,17 +227,20 @@ if (process.platform !== 'win32') {
         + 'if [ "$p" = linux ]; then "$n" -v; else echo "not-linux($p)"; fi; '
         + 'else echo none; fi',
       ).trim();
-    } catch {
-      linuxNode = 'none';
+    } catch (e) {
+      linuxNode = timedOut(e) ? `timeout(${WSL_TIMEOUT_MS / 1000}s)` : 'none';
     }
 
     const version = /^v(\d+)/.exec(linuxNode)?.[1];
     if (!version || Number(version) < 20) {
       note(
         '在 WSL 里跑真实 Linux 测试',
-        `WSL 里没有可用的 Node（探测结果 "${linuxNode}"，仓库要求 >= 20）。`
-        + `\n        装上之后这条会自己开始跑： wsl -d ${distro} -- bash -lc "curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs"`
-        + '\n        注意 /mnt/d 是 drvfs，Windows 侧的 node_modules 含 win32 版 esbuild，Linux 侧需要各自安装。',
+        linuxNode.startsWith('timeout(')
+          ? `探测 Node 的 wsl 命令超过 ${WSL_TIMEOUT_MS / 1000} 秒没返回 —— WSL 卡住了，不是"没有 Node"。`
+            + '\n        先 wsl --shutdown 再重开终端；这期间 Linux 侧到底有没有 Node 是未知的，不要当成"没有"。'
+          : `WSL 里没有可用的 Node（探测结果 "${linuxNode}"，仓库要求 >= 20）。`
+            + `\n        装上之后这条会自己开始跑： wsl -d ${distro} -- bash -lc "curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs"`
+            + '\n        注意 /mnt/d 是 drvfs，Windows 侧的 node_modules 含 win32 版 esbuild，Linux 侧需要各自安装。',
       );
     } else {
       console.log(`  --    Node： ${linuxNode}`);
@@ -230,7 +270,9 @@ if (process.platform !== 'win32') {
           wslSh(`node scripts/${script}`);
         } catch (e) {
           ok = false;
-          detail = String(e.stdout ?? e.message).split('\n').slice(-12).join('\n        ');
+          detail = timedOut(e)
+            ? `wsl 命令超过 ${WSL_TIMEOUT_MS / 1000} 秒没返回 —— 卡住了，不是这条检查失败`
+            : String(e.stdout ?? e.message).split('\n').slice(-12).join('\n        ');
         }
         check(`WSL 里 node scripts/${script}`, ok, detail);
       }
@@ -249,7 +291,9 @@ if (process.platform !== 'win32') {
             wslSh(`node scripts/${script}`);
           } catch (e) {
             ok = false;
-            detail = String(e.stdout ?? e.message).split('\n').slice(-12).join('\n        ');
+            detail = timedOut(e)
+              ? `wsl 命令超过 ${WSL_TIMEOUT_MS / 1000} 秒没返回 —— 卡住了，不是这条检查失败`
+              : String(e.stdout ?? e.message).split('\n').slice(-12).join('\n        ');
           }
           check(`WSL 里 node scripts/${script}`, ok, detail);
         }

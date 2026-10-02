@@ -53,16 +53,30 @@ console.log('\n逐工作区后端与窗口隔离检查\n');
 /* ─── 1. 池的不变量（真跑单元测试） ─── */
 console.log('=== 1. 池的不变量 ===');
 {
-  const r = spawnSync(process.execPath, ['--test', 'packages/desktop/__tests__/backend-pool.test.cjs'], {
-    cwd: ROOT, encoding: 'utf8', windowsHide: true,
+  /*
+   * 有界：`spawnSync` 等的是子进程的**输出管道关闭**，不是进程退出 —— 与 `check:docs` 里那个
+   * 65 分钟挂死同源。这里跑的是一个纯逻辑单测文件（`spawnChild` 是注入的假实现，不真起进程），
+   * 但没有超时的子进程调用在门禁里就是一个"可以永远不出声"的地方，而它的失败信息只会是
+   * "什么都没发生"。`--test-timeout` 把"卡在某个用例上"变成**带文件名**的失败：
+   * 实测 `--test-timeout=1` 印的是 `not ok 1 - <file>` + `test timed out after 1ms`。
+   * 120 秒对这条纯逻辑用例（实测整个文件 1 秒内跑完）是 100 倍以上的余量。
+   */
+  const POOL_TEST_TIMEOUT_MS = 120_000;
+  const r = spawnSync(process.execPath, [
+    '--test', `--test-timeout=${POOL_TEST_TIMEOUT_MS}`,
+    'packages/desktop/__tests__/backend-pool.test.cjs',
+  ], {
+    cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: POOL_TEST_TIMEOUT_MS,
   });
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
   // 断言的是"全绿"，不只是退出码：--test 在 0 个用例时也返回 0，而"检查跑了个寂寞"正是这类
   // 门禁最容易出现的假通过。
   const pass = /^# pass (\d+)$/m.exec(out);
   const fail = /^# fail (\d+)$/m.exec(out);
-  check('后端池单元测试全部通过', r.status === 0 && Number(pass?.[1]) >= 11 && Number(fail?.[1]) === 0,
-    `status=${r.status} pass=${pass?.[1]} fail=${fail?.[1]}`);
+  const why = r.error?.code === 'ETIMEDOUT'
+    ? `超过 ${POOL_TEST_TIMEOUT_MS / 1000} 秒没跑完（卡住了，不是失败）：${r.signal ?? ''}`
+    : `status=${r.status} pass=${pass?.[1]} fail=${fail?.[1]}`;
+  check('后端池单元测试全部通过', r.status === 0 && Number(pass?.[1]) >= 11 && Number(fail?.[1]) === 0, why);
 }
 
 /* ─── 2. 端口不能靠猜 ─── */

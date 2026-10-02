@@ -19,6 +19,9 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+// "Which packages must report" and "what did each report" live in the lib: `test-suites.mjs` needs
+// the same two answers, and two copies of them would drift.
+import { readJson, packagesWithTests, parseSuiteOutput } from './lib/suites.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -54,33 +57,6 @@ const ROOT = resolve(HERE, '..');
  * Escapes are still stripped before matching: belt and braces, and it costs nothing.
  * ─────────────────────────────────────────────────────────────────────────────
  */
-/**
- * Read JSON, tolerating a leading BOM.
- *
- * PowerShell's `Set-Content`/`Out-File` and Notepad write one on Windows, and `JSON.parse` rejects
- * it — so a file a user saved by hand parses as invalid rather than as JSON. That is not a cosmetic
- * gap here: this is the read that decides how many suites MUST report, and a package quietly dropped
- * from that list turns an incomplete measurement into a certified-correct one. (Found by writing
- * exactly such a file: a probe package created with `Set-Content -Encoding utf8` was not counted, and
- * the check went on claiming "应有 6 套" while seven had a `test` script.)
- */
-function readJson(file) {
-  const text = readFileSync(file, 'utf8');
-  return JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
-}
-
-/** Packages that declare a `test` script — the set that MUST report a count. */
-function packagesWithTests() {
-  return readdirSync(join(ROOT, 'packages'), { withFileTypes: true })
-    .filter((d) => d.isDirectory())
-    .filter((d) => {
-      const pkg = join(ROOT, 'packages', d.name, 'package.json');
-      if (!existsSync(pkg)) return false;
-      try { return Boolean(readJson(pkg).scripts?.test); } catch { return false; }
-    })
-    .map((d) => d.name);
-}
-
 /**
  * How long the whole `pnpm -r test` run may take before it is abandoned.
  *
@@ -131,34 +107,6 @@ function runSuites() {
 }
 
 /**
- * Sum the totals the runners report, and record WHICH package reported each one.
- *
- * The attribution is the point. `pnpm -r` prefixes every line with `packages/<name> <script>: `, so a
- * summary line carries the name of the suite that produced it — and then "which suite is missing?" is
- * answerable instead of a guess.
- */
-function parseSuiteOutput(text) {
-  let total = 0;
-  let nodeTestSuites = 0;
-  let vitestSuites = 0;
-  const counted = new Set();
-
-  for (const line of text.split('\n')) {
-    const prefixed = /^packages\/([\w.-]+) [^:]*: ?(.*)$/.exec(line);
-    const pkg = prefixed ? prefixed[1] : null;
-    const body = (prefixed ? prefixed[2] : line).trim();
-
-    const node = /^# tests (\d+)/.exec(body);
-    if (node) { total += Number(node[1]); nodeTestSuites++; if (pkg) counted.add(pkg); continue; }
-
-    const vitest = /^Tests +(\d+)/.exec(body);
-    if (vitest) { total += Number(vitest[1]); vitestSuites++; if (pkg) counted.add(pkg); }
-  }
-
-  return { total, nodeTestSuites, vitestSuites, counted };
-}
-
-/**
  * How many packages SHOULD have reported. A partial count is the dangerous case: it is larger than
  * zero, so it reads as a real measurement, and the failure surfaces as "the docs quote a stale
  * number" when the docs are right and the measurement is not. Observed twice for real — a run
@@ -197,11 +145,22 @@ function judgeRun({ parsed, expected, status, timedOut }) {
   const allReported = expected.length > 0 && suites === expected.length && missing.length === 0;
   const clean = !timedOut && status === 0;
 
+  /*
+   * Name what did not report — in BOTH non-timeout branches, not only the clean one.
+   *
+   * The non-zero-exit branch used to say "报出的 4/6 套不是完整普查" and stop there. That is the
+   * sentence a real gate run produced (2026-10-02): it tells the reader the measurement is unusable
+   * and leaves out the only part they can act on — WHICH two suites never reported. The retry that
+   * follows usually hides the gap, and when it does not, this message is all anyone has. Same
+   * argument as naming the silent packages when `check:suites` hits its deadline: "it came back
+   * short" is not actionable, "kb and server never reported" is.
+   */
+  const missingNote = missing.length ? `，没报告的是：${missing.join('、')}` : '';
   const why = timedOut
     ? '整轮超时被放弃'
     : status !== 0
-      ? `node --test 以退出码 ${status} 结束（有文件被取消或失败），它报出的 ${suites}/${expected.length} 套不是完整普查`
-      : `${suites}/${expected.length} 套${missing.length ? `，没报告的是：${missing.join('、')}` : ''}`;
+      ? `node --test 以退出码 ${status} 结束（有文件被取消或失败），它报出的 ${suites}/${expected.length} 套不是完整普查${missingNote}`
+      : `${suites}/${expected.length} 套${missingNote}`;
 
   return { suites, missing, attributed, complete: allReported && clean, why };
 }
@@ -501,6 +460,19 @@ console.log('\n=== 文档里引用的数字与实际一致 ===');
     check('自测：少一套报数 → 不可用', !usable({ counted: ['a'], nodeTestSuites: 1, status: 0 }));
     check('自测：整轮超时 → 不可用（哪怕它报了两个套件）',
       !usable({ counted: ['a', 'b'], nodeTestSuites: 2, status: null, timedOut: true }));
+
+    /*
+     * And pin the wording, because "unusable" is only half the message. Both non-timeout branches
+     * must name the suites that went silent — the non-zero-exit one did not, and that is the branch
+     * a real run took.
+     */
+    const whyFor = (o) => judgeRun({
+      parsed: fake(o), expected: two, status: o.status, timedOut: o.timedOut ?? false,
+    }).why;
+    check('【关键】自测：退出码非 0 时也要点名没报数的套件',
+      whyFor({ counted: ['a'], nodeTestSuites: 1, status: 1 }).includes('b'));
+    check('自测：干净退出但少一套时同样点名',
+      whyFor({ counted: ['a'], nodeTestSuites: 1, status: 0 }).includes('b'));
   }
 
   console.log(`        门禁步数 ${gateSteps}，检查脚本 ${checkScripts} 个`);
