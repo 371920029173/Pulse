@@ -1229,6 +1229,34 @@ const JOB_TICK_MS = 5_000;
 const JOB_TAIL_BYTES = 16_384;
 
 /**
+ * How much output ONE `shell_wait` hands back, in characters.
+ *
+ * Separate from `JOB_OUTPUT_CAP_BYTES` below, which bounds what the buffer HOLDS. This bounds what a
+ * single call DELIVERS, and the two are different questions:
+ *
+ *   - the buffer cap protects memory (1MB is fine to hold);
+ *   - this cap protects the model's context, which is re-billed on every later request.
+ *
+ * Measured (2026-10-03, a real session): a `shell_wait wait_ms=120000` on a 600-second build
+ * returned 732,633 characters in one result — 76% of that entire session's transcript, inside a run
+ * that billed 9.3M prompt tokens. `waitJob` loops and accumulates, so a single call collected every
+ * byte the job had printed since the last read. The buffer had done nothing wrong; nothing had ever
+ * bounded the READ.
+ *
+ * When the collected output is over budget the TAIL is kept and the older bytes are dropped, with the
+ * count reported through `view.droppedBytes` — the same field, and the same disclosure line, the
+ * buffer cap already uses. The tail rather than the head for the reason `JOB_OUTPUT_CAP_BYTES`
+ * already gives: for a job whose ending is the news, the oldest bytes are the least interesting. It
+ * is also what makes the common call useful — a model that waited 120 seconds on a build wants the
+ * summary, not the first 12,000 characters of a compiler's chatter.
+ *
+ * Deliberately below the agent's own budget (`TOOL_RESULT_CONTEXT_CHARS`, 16,000): a result that is
+ * already inside the agent's limit passes through untouched, so the model sees this tool's own
+ * disclosure about what it dropped rather than a second elision note wrapping it.
+ */
+const JOB_READ_CHARS = 12_000;
+
+/**
  * The answer for a job id this sandbox does not know.
  *
  * Worded to be findable: an id from a previous process (a restart, another session) is the common
@@ -1252,6 +1280,41 @@ function notFoundJob(id: string): SandboxJobView {
 function capacityMessage(): string {
   return `后台任务已达上限（${MAX_BACKGROUND_JOBS} 个）：先用 shell_jobs 看还在跑的是哪些，`
     + 'shell_wait 等一个结束或 shell_kill 收掉一个，再启动新的。';
+}
+
+/**
+ * Keep the tail of what one `shell_wait` has collected, reporting how many BYTES went.
+ *
+ * `JOB_READ_CHARS` says the budget; this is where it is enforced. Two lists because stdout and
+ * stderr are reported separately and their priority is not equal: stdout is usually the bulk and
+ * stderr is usually the reason the call was made, so stdout is trimmed FIRST and stderr only if
+ * trimming stdout was not enough.
+ *
+ * The budget is in characters (the reader is a model paying per token) but the returned count is in
+ * bytes, because that is the unit every other `droppedBytes` in the view is in and the disclosure
+ * line says 字节. Converting here rather than re-labelling the field keeps the number true without
+ * changing a shape the UI and the checks read.
+ */
+function capAccumulated(out: string[], err: string[]): number {
+  const charsOf = (list: string[]) => list.reduce((n, s) => n + s.length, 0);
+  let over = charsOf(out) + charsOf(err) - JOB_READ_CHARS;
+  if (over <= 0) return 0;
+  let dropped = 0;
+  for (const list of [out, err]) {
+    while (over > 0 && list.length > 0) {
+      const head = list[0];
+      if (head.length <= over) {
+        list.shift();
+        dropped += Buffer.byteLength(head, 'utf8');
+        over -= head.length;
+      } else {
+        list[0] = head.slice(over);
+        dropped += Buffer.byteLength(head.slice(0, over), 'utf8');
+        over = 0;
+      }
+    }
+  }
+  return dropped;
 }
 
 /**
@@ -1826,6 +1889,9 @@ export class SandboxShell {
       if (read.stdout) out.push(read.stdout);
       if (read.stderr) err.push(read.stderr);
       dropped += read.droppedBytes;
+      // Bound what THIS call collects. See `JOB_READ_CHARS`: the loop below keeps reading while the
+      // job runs, so without this a long wait returns the job's whole log in one result.
+      dropped += capAccumulated(out, err);
 
       const matched = opts?.pattern ? this.matchesTail(proc, opts.pattern) : false;
       if (read.status !== 'running' || matched || read.matched || waitMs === 0) {

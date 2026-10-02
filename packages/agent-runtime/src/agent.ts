@@ -26,6 +26,7 @@ import {
 } from './errorbook.js';
 import type { ErrorbookEngineLike, ErrorbookStoreLike, ErrorbookKind } from './errorbook.js';
 import { classifyToolResult, annotateToolResult, isToolFailure, type ToolResultVerdict } from './tool-result.js';
+import { budgetToolResult, fitToolResultsToBudget, TOOL_RESULT_CONTEXT_CHARS } from './tool-output.js';
 import { describeWaiting, type PendingWait } from './pending-wait.js';
 import {
   DEFAULT_BUDGET,
@@ -1462,9 +1463,36 @@ export class Agent {
           });
         }
 
+        /*
+         * The context budget, applied at the ONE place a tool result becomes context.
+         *
+         * Deliberately here rather than in each tool. A tool knows what it produced; it does not
+         * know what the context costs, and a third-party MCP server cannot be asked to care. The
+         * agent is the only layer that knows a result is paid for on EVERY later request, so it is
+         * the layer that bounds it. Measured cost of not doing this: one `shell_wait` result of
+         * 732,633 characters (76% of a whole session) inside a run that billed 9.3M prompt tokens.
+         *
+         * Applied to the text BEFORE it is pushed, so history, the persisted transcript and every
+         * later request carry the same bytes. It is a pure function of the text, which is what
+         * keeps the cache prefix stable — recomputing a boundary per request would re-bill the
+         * conversation (see `docs/context-and-caching.md`).
+         */
+        const asText = typeof result === 'string' ? result : JSON.stringify(result ?? '');
+        const budgeted = budgetToolResult(asText, name);
+        if (budgeted.truncated) {
+          /*
+           * Logged, because a silent bound is indistinguishable from a bug: the reader of the log
+           * has to be able to tell "this tool returned less" from "this result was elided".
+           */
+          log.info(
+            `工具结果超出上下文预算：${name} 返回 ${budgeted.fullChars} 字符，`
+            + `省略 ${budgeted.elidedChars}，进入上下文 ${budgeted.text.length}（上限 ${TOOL_RESULT_CONTEXT_CHARS}）`,
+          );
+        }
+
         const toolMsg: LLMMessage = {
           role: 'tool',
-          content: typeof result === 'string' ? result : JSON.stringify(result ?? ''),
+          content: budgeted.text,
           tool_call_id: tc.id,
         };
         this.history.push(toolMsg);
@@ -1474,7 +1502,11 @@ export class Agent {
         // the turn is still running. Previously results existed only in history,
         // so they appeared only after a reload — the transcript looked empty of
         // tool activity during live streaming.
-        onChunk?.({ type: 'tool_result', toolCallId: tc.id, toolName: name, content: result });
+        //
+        // Streams the BUDGETED text, not the raw result: the UI renders the same transcript that
+        // gets persisted, and a 700k-character payload sent to the browser would be one more copy
+        // of the same waste. A reload must not render a different transcript than streaming did.
+        onChunk?.({ type: 'tool_result', toolCallId: tc.id, toolName: name, content: budgeted.text });
 
         /*
          * Flag a genuinely stuck loop.
@@ -1718,7 +1750,16 @@ export class Agent {
    */
   private messagesForRequest(): { messages: LLMMessage[] } {
     return {
-      messages: [{ role: 'system', content: this.systemMessageContent() }, ...this.history],
+      messages: [
+        { role: 'system', content: this.systemMessageContent() },
+        /*
+         * `fitToolResultsToBudget` is a no-op for anything this build wrote (see `tool-output.ts`)
+         * and the only thing standing between a RESTORED session and its old oversized results: a
+         * 732,633-character tool result from before this rule would otherwise be re-sent on every
+         * request of every later turn.
+         */
+        ...fitToolResultsToBudget(this.history),
+      ],
     };
   }
 
@@ -2534,7 +2575,10 @@ export class Agent {
 
     const toolMsg: LLMMessage = {
       role: 'tool',
-      content: result,
+      // Same context budget as the main loop. Confirmed commands are the ones most likely to be
+      // long (a build, a full check run is exactly what a person approves), so this path needs the
+      // bound at least as much as the unconfirmed one.
+      content: budgetToolResult(result, pending.name).text,
       tool_call_id: pending.toolCallId,
     };
     let replaced = false;
@@ -2550,11 +2594,10 @@ export class Agent {
 
     onChunk?.({ type: 'status', content: `confirmed ${pending.name}` });
 
-    // Continue the tool/LLM loop so multiple files can stage into Composer.
-    const messages: LLMMessage[] = [
-      { role: 'system', content: this.systemMessageContent() },
-      ...this.history,
-    ];
+    // Continue the tool/LLM loop so multiple files can stage into Composer. Built through the same
+    // helper as every other request, so the per-result context budget covers this path too — a
+    // hand-built `[system, ...history]` here used to be the one request the bound did not reach.
+    const { messages } = this.messagesForRequest();
     // Already inside withTurn. runExclusive would see the lock and refuse.
     const reply = await this.runLoop(messages, onChunk);
     const staged = this.getPendingPatches();
@@ -2620,11 +2663,9 @@ export class Agent {
         return msg;
       }
 
-      // Already holding the turn lock — go straight to the loop.
-      const messages: LLMMessage[] = [
-        { role: 'system', content: this.systemMessageContent() },
-        ...this.history,
-      ];
+      // Already holding the turn lock — go straight to the loop. Same builder as the turn itself:
+      // one place composes a request, so one place applies the context budget.
+      const { messages } = this.messagesForRequest();
       this.toolEventSink = onChunk ?? null;
       try {
         return await this.runLoop(messages, onChunk);

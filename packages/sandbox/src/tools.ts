@@ -241,7 +241,7 @@ function renderJobView(view: SandboxJobView): string {
   }
   if (view.matched) head.push('（pattern 匹配到了，所以提前返回；任务本身可能还在跑。）');
   if (view.droppedBytes) {
-    head.push(`（较早的 ${view.droppedBytes} 字节输出因为缓冲上限被丢弃，下面看到的是最近的。）`);
+    head.push(`（较早的 ${view.droppedBytes} 字节输出被丢弃，没有发给你 —— 下面看到的是最近的。）`);
   }
   const parts = [...head, ...outputBlocks(view.stdout, view.stderr)];
   /*
@@ -461,8 +461,11 @@ export function createTools(
       name: 'shell_wait',
       description:
         'Wait for a background job started by `shell`, and return what it printed since the last read. '
-        + 'Returns as soon as the job ends, when new output matches `pattern`, or after wait_ms. '
-        + 'wait_ms: 0 just asks for the current status. Blocking is the point: do not poll in a loop, '
+        + 'Returns as soon as the job ends, when new output matches `pattern`, after wait_ms, or when '
+        + 'this call has collected enough output to read (about one screen): a long-running, chatty '
+        + 'job does not hand back its whole log in one result, and the tail is kept — if the result '
+        + 'says earlier output was dropped, that is why. wait_ms: 0 just asks for the current status. '
+        + 'Blocking is the point: do not poll in a loop, '
         + 'and never re-run the command to "check on it".',
       parameters: {
         type: 'object',

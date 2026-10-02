@@ -494,6 +494,70 @@ console.log('\n=== 会话结束时收掉后台任务（不是丢引用）===');
   check('本次检查自己没留下任何进程', leftover === 0, `剩余 ${leftover}`);
 }
 
+/* ─── 12. A chatty job does not hand its whole log to the model ─── */
+/*
+ * 实测（2026-10-03，真实自评会话）：`shell_wait wait_ms=120000` 在一条跑了 600 秒的构建上返回了
+ * 732,633 字符 —— 占那一整份会话记录的 76%，而那一轮 35 次请求、prompt 9,318,458 tokens。
+ * `waitJob` 是循环读取并累加的，所以"一次调用收完"就等于把任务期间打印的全部内容一次交出去。
+ *
+ * 这一段钉住两件事：话多的任务一次只给一段（并且是**结尾**，因为日志的结尾才是消息），
+ * 以及**不话多的任务一个字都不动** —— 后者是这一段的重点，一个到处裁输出的上限比没有更糟。
+ */
+console.log('\n=== 【关键】话多的任务一次只给一段，不是整份日志 ===');
+{
+  // ~220k characters: 4,000 lines of ~55 bytes. The same order as the build log that caused this.
+  const started = await tools.execute('shell', {
+    command: 'node -e "for(let i=0;i<4000;i++)console.log(\'LINE-\'+i+\'-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\')"',
+    background: true,
+  });
+  const id = jobId(started);
+  const v = await tools.execute('shell_wait', { id, wait_ms: 60000 });
+
+  check('任务跑完了（不是靠超时退出的）', /已结束/.test(v), v.slice(0, 200));
+  check('【关键】一次 wait 给出的输出有上限（否则它会把整份日志交出去）',
+    v.length <= 14000, `实际 ${v.length} 字符；不设上限时这里会是 220,000 上下`);
+  check('【关键】留下的是结尾，不是开头（日志的结尾才是消息）',
+    /LINE-3999-/.test(v) && !/LINE-0-xxxxxxxx/.test(v),
+    v.slice(-200));
+  // The drop is disclosed, not silent: the reader has to be able to tell a small log from a
+  // truncated one, or it will treat a half-read build as a whole one.
+  check('丢掉的量写在结果里（不是静默截断）', /字节输出被丢弃/.test(v) && /\d/.test(v),
+    (/（较早的[^）]*）/.exec(v) ?? ['没有找到丢弃说明'])[0]);
+}
+console.log('\n=== 输出不多的任务一个字都不动（这个上限不是见谁都裁）===');
+{
+  const started = await tools.execute('shell', {
+    command: 'node -e "console.log(\'FIRST\');console.log(\'LAST\')"',
+    background: true,
+  });
+  const v = await tools.execute('shell_wait', { id: jobId(started), wait_ms: 30000 });
+  check('全部输出都在', /FIRST/.test(v) && /LAST/.test(v), v);
+  check('没有丢弃说明，也没有少一行', /被丢弃/.test(v) === false, v);
+}
+
+console.log('\n=== 上限按「字符」算：中文输出不会被按字节砍掉三分之二，而丢掉的量按字节报 ===');
+{
+  /*
+   * 4,000 行 × 60 个汉字 = 244,000 字符 / 724,000 字节 —— 字符数和字节数差出 3 倍，这正是这一段
+   * 能测出"单位"的原因。两件事一起钉：
+   *
+   *   - 预算按**字符**算，所以中文也拿到 ~12,000 字符；若按字节算，同样的预算只给 ~4,000 字符 ——
+   *     对中文用户来说，那是"输出莫名其妙只有别人三分之一"的 bug；
+   *   - `droppedBytes` 的名字和说明都写「字节」，所以报出来的数必须是字节（按字符报会少 3 倍，
+   *     一个说错单位的诊断数字比没有更坏）。
+   */
+  const started = await tools.execute('shell', {
+    command: 'node -e "for(let i=0;i<4000;i++)console.log(\'中\'.repeat(60))"',
+    background: true,
+  });
+  const v = await tools.execute('shell_wait', { id: jobId(started), wait_ms: 60000 });
+  check('中文输出拿到的是 ~12,000 字符，不是 ~4,000（按字节算就会是后者）',
+    v.length > 8_000 && v.length <= 14_000, `实际 ${v.length} 字符`);
+  const disclosed = Number((/较早的 (\d+) 字节/.exec(v) ?? [])[1] ?? 0);
+  check('丢掉的量按字节报（按字符报最多 244,000）', disclosed > 300_000,
+    `报出 ${disclosed} 字节`);
+}
+
 await shell.stopAll();
 removeTempDir(workspace);
 

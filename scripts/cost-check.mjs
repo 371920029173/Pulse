@@ -396,6 +396,164 @@ console.log('\n5. 缓存前缀：换一个工作区还能命中多少，以及�
   second.store.close();
 }
 
+/*
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 6. 一条工具结果不是付一次，是每次请求都付
+ *
+ * 实测（2026-10-03，真实自评会话 `sess_8cd40d35a3cb`）：一次 `shell_wait` 返回了 732,633 字符，
+ * 占那一整份记录 964,280 字符的 76%；那一轮 35 次请求，prompt 9,318,458 tokens。缓存命中率 96%
+ * —— 命中率从来不是问题，是上下文本身就大，而且每一轮都重发一遍。
+ *
+ * 这一节驱动真实 Agent，钉住四件事：进上下文的有界、首尾是原文、省略量报的是真数字、去路具体；
+ * 以及**一条不裁**：预算内的结果逐字节原样通过（否则这个"预算"就是一个到处丢数据的 bug）。
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+console.log('\n6. 工具结果的上下文预算：一条结果每一轮都要重付');
+{
+  const { Agent, TOOL_RESULT_CONTEXT_CHARS } = await import('../packages/agent-runtime/dist/index.js');
+
+  const root = join(dir, 'budget');
+  mkdirSync(join(root, '.she'), { recursive: true });
+
+  /** What the tool really returned, so the section can prove it was over budget rather than assume it. */
+  const returned = new Map();
+  const huge = (chunks) => '> pnpm check:offline\n\n'
+    + 'x'.repeat(chunks)
+    + '\n\n=== ALL CHECKS PASSED (52 steps, 616.7s) ===\n';
+
+  const defs = ['shell', 'fs_read', 'agreeable'].map((name) => ({
+    name,
+    description: 'stub',
+    parameters: { type: 'object', properties: {}, required: [] },
+  }));
+  const execute = async (name) => {
+    // 200,000 characters: the same order as the single result that caused this.
+    if (name === 'fs_read') { const t = huge(200_000); returned.set(name, t); return t; }
+    // Deliberately far under the budget, for the "not a blanket truncator" assertion.
+    if (name === 'agreeable') { const t = 'stdout:\nPASS 15/15\nexit code: 0'; returned.set(name, t); return t; }
+    const t = huge(200_000); returned.set(name, t); return t;
+  };
+
+  const c = loadConfig(PROJECT_ROOT);
+  c.workspace.root = root;
+  c.llm = { ...c.llm, model: 'stub' };
+  c.sandbox = { ...c.sandbox, allowAllCommands: true };
+  const store = new KBStore(join(root, '.she', 'kb.sqlite'));
+  const engine = new GroupKBEngine(store, { ...c.kb, dbPath: join(root, '.she', 'kb.sqlite') });
+  const agent = new Agent(c, engine, { definitions: defs, execute }, 'sess-budget', {
+    subagentRunner: { run: async () => ({}) },
+  });
+
+  const sent = [];
+  let step = 0;
+  const scripts = [
+    [{ name: 'shell' }, { name: 'fs_read' }, { name: 'agreeable' }],
+  ];
+  agent.provider = {
+    name: 'stub',
+    async chat(messages) {
+      sent.push(messages.map((m) => ({ ...m })));
+      const calls = scripts[step];
+      if (!calls) return { role: 'assistant', content: 'done' };
+      step++;
+      return {
+        role: 'assistant',
+        content: '',
+        tool_calls: calls.map((x, i) => ({
+          id: `call_${step}_${i}`,
+          type: 'function',
+          function: { name: x.name, arguments: '{}' },
+        })),
+      };
+    },
+  };
+
+  await agent.chat('跑一个会打印几十万字符的命令', () => {});
+
+  const toolMsgs = agent.getHistory().filter((m) => m.role === 'tool');
+  const byCall = new Map(toolMsgs.map((m) => [String(m.tool_call_id), String(m.content)]));
+  const shellStored = byCall.get('call_1_0') ?? '';
+  const readStored = byCall.get('call_1_1') ?? '';
+  const smallStored = byCall.get('call_1_2') ?? '';
+
+  check('工具真的返回了 20 万字符（否则这一节测的是空的）',
+    (returned.get('shell') ?? '').length > 200_000,
+    `实际返回 ${(returned.get('shell') ?? '').length} 字符`);
+
+  check('【关键】进上下文的那一条不超过预算',
+    shellStored.length > 0 && shellStored.length <= TOOL_RESULT_CONTEXT_CHARS,
+    `history 里 ${shellStored.length} 字符，预算 ${TOOL_RESULT_CONTEXT_CHARS}；`
+    + `不设预算时它是 ${(returned.get('shell') ?? '').length} 字符`);
+
+  check('开头和结尾都是命令自己的原文',
+    shellStored.startsWith('> pnpm check:offline') && /ALL CHECKS PASSED \(52 steps/.test(shellStored),
+    shellStored.slice(0, 60) + ' … ' + shellStored.slice(-60));
+
+  check('省略量是真实的：说明里的数字能和实际长度对上',
+    /省略了 (\d+) 字符/.test(shellStored)
+    && Number(/省略了 (\d+) 字符/.exec(shellStored)[1]) > 0
+    && /返回了 2000\d\d 字符/.test(shellStored),
+    (/省略了 \d+ 字符/.exec(shellStored) ?? ['没有找到省略说明'])[0]);
+
+  check('去路按工具给，不是一句笼统的"结果太长"',
+    /startLine/.test(readStored) && !/startLine/.test(shellStored),
+    `shell: ${(/\[tool-result\] (.+)/.exec(shellStored) ?? [])[1]}\n        fs_read: ${(/\[tool-result\] (.+)/.exec(readStored) ?? [])[1]}`);
+
+  check('【关键】预算内的结果逐字节原样（这个预算不是见谁都裁）',
+    smallStored === 'stdout:\nPASS 15/15\nexit code: 0',
+    JSON.stringify(smallStored.slice(0, 120)));
+
+  check('模型收到的和落盘的是同一份（不是存储裁了、请求没裁）',
+    sent[sent.length - 1].filter((m) => m.role === 'tool').every((m) => m.content.length <= TOOL_RESULT_CONTEXT_CHARS),
+    sent[sent.length - 1].filter((m) => m.role === 'tool').map((m) => m.content.length).join(', '));
+
+  /*
+   * 这一节的数字本身，和上面那段注释里的实测对上：省下的是**每一轮**的重复，不是一次性的大小。
+   *
+   * 35 次请求、其中约 20 次在这条结果之后 —— 一次 732,633 字符（≈21 万 tokens）的结果，
+   * 光它一项就是 400 万 tokens 量级。所以判据是"这一条小了多少量级"，而不是"小了百分之几"。
+   */
+  const rawChars = (returned.get('shell') ?? '').length;
+  console.log(`        shell 结果 ${rawChars} 字符 → 进上下文 ${shellStored.length} 字符`
+    + `（${(100 * shellStored.length / rawChars).toFixed(1)}%）；`
+    + `按 3.47 字符/token，每一个后续请求少付 ≈${Math.round((rawChars - shellStored.length) / 3.47)} tokens`);
+
+  /*
+   * 先有记录、后有规则的那一半。
+   *
+   * 上面断言的是"推进 history 的那一刻"设了预算；但盘上已经存在的会话记录里就存着这种大结果
+   * （实测那条 732,633 字符的 `shell_wait`），只在推入时设预算，对它们**一次都不生效** ——
+   * 用户恢复那条会话，账单照旧。所以这里用 `setHistory`（恢复会话与显式改历史的入口）直接塞一条
+   * 旧写法的大结果进去，看它进**请求**时有没有被压住。
+   */
+  const oversized = 'x'.repeat(732_633);
+  agent.setHistory([
+    { role: 'user', content: '继续' },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'call_old', type: 'function', function: { name: 'shell_wait', arguments: '{}' } }],
+    },
+    { role: 'tool', content: oversized, tool_call_id: 'call_old' },
+  ]);
+  const before = agent.getHistory();
+  await agent.chat('接着看', () => {});
+  const lastSent = sent[sent.length - 1] ?? [];
+  const sentTools = lastSent.filter((m) => m.role === 'tool');
+  check('【关键】恢复出来的旧记录进请求时也被压住（先有记录、后有规则的那一半）',
+    sentTools.length > 0 && sentTools.every((m) => m.content.length <= TOOL_RESULT_CONTEXT_CHARS),
+    `请求里的工具结果 ${sentTools.map((m) => m.content.length).join(', ')} 字符`);
+  check('旧记录的去路也按工具给（工具名从调用它的那条 assistant 消息里认出来）',
+    sentTools.some((m) => /shell_wait/.test(m.content)),
+    (sentTools[0]?.content ?? '').slice(-200));
+  check('【关键】没有为了压住请求而去改盘上的记录（打开一份会话不该改它）',
+    before.some((m) => m.role === 'tool' && m.content.length === oversized.length),
+    '存下来的那条被就地改短了');
+
+  await agent.dispose?.();
+  store.close();
+}
+
 removeTempDir(dir);
 console.log(`\n${failures === 0 ? 'PASS' : `FAIL (${failures})`}  cost-check`);
 process.exit(failures === 0 ? 0 : 1);

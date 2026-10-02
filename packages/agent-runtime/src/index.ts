@@ -52,6 +52,8 @@ export {
   isToolFailure,
 } from './tool-result.js';
 export type { ToolFailureKind, ToolResultVerdict } from './tool-result.js';
+export { budgetToolResult, elisionRemedy, fitToolResultsToBudget, TOOL_RESULT_CONTEXT_CHARS } from './tool-output.js';
+export type { BudgetedToolResult, BudgetableMessage } from './tool-output.js';
 export { DEFAULT_BUDGET, budgetStop, parseBudgetLimits, renderBudgetStop } from './budget.js';
 export type { BudgetKind, BudgetLimits, BudgetStop, BudgetUsage } from './budget.js';
 /*

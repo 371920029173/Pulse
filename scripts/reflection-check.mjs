@@ -719,9 +719,26 @@ console.log('\n9. 接线与提示词');
     /if \(!this\.calibrationFrozen\)[\s\S]{0,400}?this\.buildCalibrationBlock\(\)[\s\S]{0,200}?this\.calibrationFrozen = true;/.test(agentSrc), null);
   check('构造时就建一次（读固定开销的检查在第一条请求之前拿到的就是准数）',
     /this\.calibrationBlock = this\.buildCalibrationBlock\(\);[\s\S]{0,120}?this\.calibrationFrozen = this\.calibrationBlock !== '';/.test(agentSrc), null);
-  check('同一个系统消息给到每一次迭代与每一次续跑（前缀缓存靠这个）',
-    (agentSrc.match(/content: this\.systemMessageContent\(\)/g) ?? []).length >= 3
-      && !/content: this\.systemPrompt\b/.test(agentSrc), null);
+  /*
+   * 系统消息是缓存前缀的头，所以这一组钉的是「谁在拼请求」。
+   *
+   * 这里原来钉的是「至少三处 `content: this.systemMessageContent()`」——那时每条续跑路径各自手拼
+   * `[system, ...history]`，三处就代表三条路。后来发现那两条手拼的路正好漏掉了别的东西（工具结果的
+   * 上下文预算），于是统一走 `messagesForRequest()`。判据跟着改钉更硬的性质：**拼请求的地方只有一个，
+   * 每一次迭代与每一次续跑都必须走它**，系统消息只由 `systemMessageContent()` 产出。手工再拼一条
+   * `[system, ...history]` 会让第一个数从 1 变 2 —— 那正是这条检查要拦的事。
+   *
+   * 数之前先去掉注释：上面这段说明自己就写着那些模式，不去掉的话注释会把自己数进去。
+   */
+  const agentCode = agentSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const systemSites = (agentCode.match(/content: this\.systemMessageContent\(\)/g) ?? []).length;
+  const requestCalls = (agentCode.match(/const \{ messages \} = this\.messagesForRequest\(\);/g) ?? []).length;
+  check('系统消息只有一个产出口（各条路各拼各的，就会在这里露出来）',
+    systemSites === 1, `产出口 ${systemSites} 处`);
+  check('每一次迭代与每一次续跑都走同一个请求构造器（前缀缓存靠这个）',
+    requestCalls >= 3, `调用点 ${requestCalls} 处（应含：轮次开头、确认后、补丁续跑）`);
+  check('没有人把裸 systemPrompt 直接塞进请求（那会绕过自评块）',
+    !/content: this\.systemPrompt\b/.test(agentCode), null);
   check('提示词里带上镜像读数', /renderCalibration/.test(agentSrc), null);
   check('提示词里有自省段，且说明是「关于你自己」的测量',
     /## Self-Review/.test(promptSrc) && /measurement of you, not of the work/.test(promptSrc), null);
