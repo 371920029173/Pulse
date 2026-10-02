@@ -125,6 +125,8 @@ function runSuites() {
       ? `pnpm -r test 超过 ${Math.round(SUITE_RUN_TIMEOUT_MS / 60_000)} 分钟未返回，已放弃`
       : (out.error ? String(out.error.message ?? out.error) : ''),
     timedOut,
+    // The child's own exit code. Null when it never started.
+    status: typeof out.status === 'number' ? out.status : null,
   };
 }
 
@@ -166,7 +168,45 @@ function parseSuiteOutput(text) {
  *
  * Counting the packages that declare a `test` script is the only fact available here that the parsed
  * output cannot fake, so it is what the count is checked against.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+/**
+ * Decide whether one run's output is a usable measurement of "how many unit tests exist".
  *
+ * Two independent conditions, and the second one was missing:
+ *
+ *   1. Every package that declares a `test` script reported a total (the count above).
+ *   2. The run EXITED CLEAN.
+ *
+ * Condition 2 is not a formality. `node --test` prints a summary that counts the tests it RAN, so a
+ * file that is cancelled — its promise still pending when the event loop drained, which this
+ * repository has already hit once via an unref'd timer being the only handle — makes the summary
+ * SHORTER than the file's real test count while still printing `# fail 0`. Measured on
+ * `packages/sandbox` with one file cancelled: `# tests 256` instead of 269, `# pass 255`, `# fail 0`,
+ * exit status 1.
+ *
+ * The suite still reports, so condition 1 alone calls that a complete measurement, and the doc
+ * comparison then fails with "文档写的是 1682，实测 1669" — pointing the reader at the documentation
+ * for a defect in the test run. A short total is not a census; the exit code is the one fact in the
+ * output that says so, and it is why this is decided here rather than by counting suites.
+ */
+function judgeRun({ parsed, expected, status, timedOut }) {
+  const attributed = parsed.counted.size > 0;
+  const missing = attributed ? expected.filter((n) => !parsed.counted.has(n)) : [];
+  const suites = parsed.nodeTestSuites + parsed.vitestSuites;
+  const allReported = expected.length > 0 && suites === expected.length && missing.length === 0;
+  const clean = !timedOut && status === 0;
+
+  const why = timedOut
+    ? '整轮超时被放弃'
+    : status !== 0
+      ? `node --test 以退出码 ${status} 结束（有文件被取消或失败），它报出的 ${suites}/${expected.length} 套不是完整普查`
+      : `${suites}/${expected.length} 套${missing.length ? `，没报告的是：${missing.join('、')}` : ''}`;
+
+  return { suites, missing, attributed, complete: allReported && clean, why };
+}
+
+/**
  * ─────────────────────────────────────────────────────────────────────────────
  * A PARTIAL RUN IS RETRIED, AND IS NOT ALLOWED TO CONDEMN THE DOCS
  *
@@ -183,17 +223,17 @@ function measureUnitTests() {
   let measured = null;
 
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const { text, error } = runSuites();
+    const { text, error, timedOut, status } = runSuites();
     const parsed = parseSuiteOutput(text);
-    const attributed = parsed.counted.size > 0;
-    const missing = attributed ? expected.filter((n) => !parsed.counted.has(n)) : [];
-    const suites = parsed.nodeTestSuites + parsed.vitestSuites;
-    const complete = expected.length > 0 && suites === expected.length && missing.length === 0;
-
-    measured = { ...parsed, suites, missing, attributed, complete, attempts: attempt, error };
-    if (complete) break;
-    console.log(`        第 ${attempt} 次测量不完整（${suites}/${expected.length} 套`
-      + `${missing.length ? `，没报告的是：${missing.join('、')}` : ''}`
+    measured = {
+      ...parsed,
+      ...judgeRun({ parsed, expected, status, timedOut }),
+      attempts: attempt,
+      error,
+      status,
+    };
+    if (measured.complete) break;
+    console.log(`        第 ${attempt} 次测量不完整（${measured.why}`
       + `${error ? `，${error}` : ''}）${attempt < 2 ? '—— 重跑一次' : ''}`);
   }
 
@@ -205,7 +245,7 @@ function measureUnitTests() {
     + `（node:test ${measured.nodeTestSuites} 套 + vitest ${measured.vitestSuites} 套，`
     + `应有 ${expected.length} 套${measured.complete && measured.attempts > 1 ? `，第 ${measured.attempts} 次才完整` : ''}）`);
   if (!measured.complete) {
-    console.log('        !! 计数不完整 —— 是测量本身失败了，不是文档写错了');
+    console.log(`        !! 计数不完整（${measured.why}）—— 是测量本身失败了，不是文档写错了`);
   }
   return { ...measured, expectedSuites: expected.length };
 }
@@ -419,7 +459,7 @@ console.log('\n=== 文档里引用的数字与实际一致 ===');
   check(
     `测试总数是从全部套件测出来的（${measured.suites}/${measured.expectedSuites} 套）`,
     measured.complete,
-    `${realTotal} 这个数字不可信：${measured.missing.length ? `没有报告的是 ${measured.missing.join('、')}` : '有套件没有报数'}，`
+    `${realTotal} 这个数字不可信：${measured.why}。`
     + '这是测量失败，不是文档写错。重跑一次再判断',
   );
   /*
@@ -442,6 +482,25 @@ console.log('\n=== 文档里引用的数字与实际一致 ===');
       quoted.length <= 1,
       [...testCounts].join('\n        '),
     );
+  }
+
+  /*
+   * Pin the usability rule itself, because it is the guard that decides whether the number below is
+   * allowed to judge the docs — and its second half (the exit code) cannot be exercised by whatever
+   * this machine happens to do during this run. Fabricated inputs, asserted directly.
+   */
+  {
+    const two = ['a', 'b'];
+    const fake = ({ counted, nodeTestSuites = 0, vitestSuites = 0, total = 10 }) =>
+      ({ total, nodeTestSuites, vitestSuites, counted: new Set(counted) });
+    const usable = (o) => judgeRun({ parsed: fake(o), expected: two, status: o.status, timedOut: o.timedOut ?? false }).complete;
+
+    check('自测：两套都报数且干净退出 → 可用', usable({ counted: ['a', 'b'], nodeTestSuites: 2, status: 0 }));
+    check('【关键】自测：两套都报数但退出码非 0 → 不可用（短总计不是普查，别去怪文档）',
+      !usable({ counted: ['a', 'b'], nodeTestSuites: 2, status: 1 }));
+    check('自测：少一套报数 → 不可用', !usable({ counted: ['a'], nodeTestSuites: 1, status: 0 }));
+    check('自测：整轮超时 → 不可用（哪怕它报了两个套件）',
+      !usable({ counted: ['a', 'b'], nodeTestSuites: 2, status: null, timedOut: true }));
   }
 
   console.log(`        门禁步数 ${gateSteps}，检查脚本 ${checkScripts} 个`);
