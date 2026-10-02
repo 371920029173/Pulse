@@ -106,7 +106,23 @@ export interface RunEvent {
   path?: string;
   /** `end` */
   durationMs?: number;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  /**
+   * `end`: what THIS run spent, not what the agent has spent since it was created.
+   *
+   * `requests` is the multiplier that makes the bill legible: the same prompt re-sent 120 times is a
+   * different problem from one big prompt, and the two are indistinguishable from tokens alone.
+   * `cache_hit_tokens` / `cache_miss_tokens` are here because a prompt-cache regression is otherwise
+   * invisible until the bill arrives — and it is the miss half that a volatile block in the prompt
+   * prefix moves.
+   */
+  usage?: {
+    requests?: number;
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    cache_hit_tokens?: number;
+    cache_miss_tokens?: number;
+  };
   /** `previous` / `preflight` / `prune`: the runs or records being referred to. */
   runs?: string[];
   /** `error`, or `end` on a run that stopped short: why. */

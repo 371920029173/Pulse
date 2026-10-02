@@ -70,6 +70,16 @@ import { dirname, resolve } from 'node:path';
 /** Tool calls one plan step may take before the reflection check calls the plan over budget. */
 export const TOOL_CALLS_PER_PLAN_STEP = 8;
 
+/**
+ * Characters per token, as measured for this prompt shape (2026-10-03, deepseek-flash:
+ * 48,888 characters of prompt + tool table → 14,087 prompt tokens).
+ *
+ * Used only to turn a character count into a number a person can compare against a bill. The eval
+ * runner carries the same constant for the same reason, and both need re-measuring when the model
+ * or the tokenizer changes — it is a conversion, not a law.
+ */
+const CHARS_PER_TOKEN = 3.47;
+
 const log = createLogger('agent');
 
 /**
@@ -105,6 +115,24 @@ export class Agent {
   // Cache counters are tracked because a prompt-cache regression is otherwise
   // invisible until the bill arrives — see docs/context-and-caching.md.
   private tokenUsage = {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    reasoning_tokens: 0,
+    cache_hit_tokens: 0,
+    cache_miss_tokens: 0,
+  };
+  /**
+   * The spend of the run currently open, reset in `beginRun`.
+   *
+   * `tokenUsage` above is the agent's lifetime total, which is what a cost API wants and what a
+   * single conversation mostly is. It is the WRONG number for a run trace: reading a trace back,
+   * one turn appeared to have cost 3.2M prompt tokens, when 3.2M was everything that session had
+   * ever spent. The number was not merely imprecise, it pointed at the wrong turn — and a report
+   * that points at the wrong turn cannot be acted on.
+   */
+  private runUsage = {
+    requests: 0,
     prompt_tokens: 0,
     completion_tokens: 0,
     total_tokens: 0,
@@ -272,6 +300,17 @@ export class Agent {
    * sends the identical system message — the prefix cache depends on it.
    */
   private calibrationBlock = '';
+  /**
+   * Set once the calibration block has been built with something to say.
+   *
+   * See `beginRun`: a block that changes between turns costs half the request, because it sits at
+   * the head of the cache prefix. Frozen for the lifetime of the agent, so the reading is one
+   * conversation behind — the numbers behind it are accumulated across conversations and move
+   * slowly, and a stable prefix is worth more than a fresher sentence.
+   */
+  private calibrationFrozen = false;
+  /** Set once the fixed overhead has been logged for this agent. See `beginRun`. */
+  private overheadNoticed = false;
   /** `provider/model`, recorded on the `start` event so a trace says which model was answering. */
   private readonly modelLabel: string;
   /** `provider/model` of the spare, for the trace and the status line. Null when none is configured. */
@@ -458,6 +497,19 @@ export class Agent {
      * half readable at all — and what keeps another conversation's task text unreachable from here.
      */
     this.confidenceMirror = new ConfidenceMirror(config.workspace.root, this.sessionId);
+    /*
+     * Built here, not at the first turn, so `getSystemPromptText()` describes what this agent will
+     * actually send before it has sent anything.
+     *
+     * The cost guard (`evals-check`, `check:cost`) measures the fixed overhead through that method
+     * on a fresh agent. Building lazily made the reading depend on whether a turn had already run:
+     * the same agent reported 26,750 characters before its first turn and 27,455 after, and the
+     * smaller number is the one a budget check would have compared against a real request. A cost
+     * reading that under-reports by the size of a block is a check that cannot see that block
+     * growing.
+     */
+    this.calibrationBlock = this.buildCalibrationBlock();
+    this.calibrationFrozen = this.calibrationBlock !== '';
 
     for (const def of this.sandboxTools.definitions) {
       // `shell` is where intentional failures (a test run to watch it fail) happen, so it advertises
@@ -910,6 +962,15 @@ export class Agent {
           this.tokenUsage.reasoning_tokens += chunk.usage.reasoning_tokens || 0;
           this.tokenUsage.cache_hit_tokens += chunk.usage.cache_hit_tokens || 0;
           this.tokenUsage.cache_miss_tokens += chunk.usage.cache_miss_tokens || 0;
+          this.runUsage.prompt_tokens += chunk.usage.prompt_tokens || 0;
+          this.runUsage.completion_tokens += chunk.usage.completion_tokens || 0;
+          this.runUsage.total_tokens += chunk.usage.total_tokens || 0;
+          this.runUsage.reasoning_tokens += chunk.usage.reasoning_tokens || 0;
+          this.runUsage.cache_hit_tokens += chunk.usage.cache_hit_tokens || 0;
+          this.runUsage.cache_miss_tokens += chunk.usage.cache_miss_tokens || 0;
+          // One usage report per request, so this counter IS the number of model requests the run
+          // made — the multiplier that turns "the prompt is big" into "the turn cost millions".
+          this.runUsage.requests += 1;
           turnPromptTokens += chunk.usage.prompt_tokens || 0;
           /*
            * Per-turn total, for the budget ceiling. `total_tokens` is preferred but not trusted
@@ -1657,8 +1718,26 @@ export class Agent {
    */
   private messagesForRequest(): { messages: LLMMessage[] } {
     return {
-      messages: [{ role: 'system', content: this.calibrationBlock ? `${this.systemPrompt}\n\n${this.calibrationBlock}` : this.systemPrompt }, ...this.history],
+      messages: [{ role: 'system', content: this.systemMessageContent() }, ...this.history],
     };
+  }
+
+  /**
+   * The system message as it is actually sent: the prompt, plus the calibration block when there is
+   * one.
+   *
+   * One place composes it because all three request builders (the turn, the confirm continuation and
+   * the patch continuation) must produce the same bytes. They used to differ — two of them sent the
+   * bare prompt — which is a cache miss at every continuation boundary AND a different instruction
+   * set inside what the model is told is one run.
+   *
+   * `getSystemPromptText()` returns the same string; the cost guard measures the overhead from it,
+   * and a measurement that omitted the block would under-report by exactly the block's size.
+   */
+  private systemMessageContent(): string {
+    return this.calibrationBlock
+      ? `${this.systemPrompt}\n\n${this.calibrationBlock}`
+      : this.systemPrompt;
   }
 
   async chat(
@@ -1754,6 +1833,39 @@ export class Agent {
     this.jobsNoticeSent = false;
     this.runFallback = null;
     this.runStartedAt = Date.now();
+    // This run's own spend, as opposed to the agent's lifetime total in `tokenUsage`. Read by
+    // `finishRun`: a trace's closing event describes the run it closes.
+    this.runUsage = {
+      requests: 0,
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+      reasoning_tokens: 0,
+      cache_hit_tokens: 0,
+      cache_miss_tokens: 0,
+    };
+    /*
+     * The fixed overhead, once per agent, in the log next to the model line.
+     *
+     * It is the one cost every request pays whether or not the turn does any work, and it is
+     * invisible from the outside: the prompt is built from the prompt file plus every registered
+     * tool, and MCP servers can add sixty of them to a table nobody sees. Measured 2026-10-03 for
+     * the built-in set: 41 tools ≈ 30.8k characters ≈ 8.9k prompt tokens; the number below is
+     * whatever THIS workspace actually carries, so a server that injects 40k characters says so
+     * instead of quietly doubling the bill.
+     *
+     * Logged at the first turn rather than in the constructor because the tool table is not
+     * finished until every tool family has been registered.
+     */
+    if (!this.overheadNoticed) {
+      this.overheadNoticed = true;
+      const promptChars = this.getSystemPromptText().length;
+      const toolChars = JSON.stringify(this.allToolDefs).length;
+      log.info(
+        `固定开销（每次请求都要付）：系统提示词 ${promptChars} 字符 + ${this.allToolDefs.length} 个工具 ${toolChars} 字符`
+        + ` ≈ ${Math.round((promptChars + toolChars) / CHARS_PER_TOKEN)} prompt tokens`,
+      );
+    }
     // A new run starts with no tool events of its own, and no inherited pre-flight confidence: the
     // mirror's sample must attribute this turn's claim to this turn's outcome.
     this.runEvents = [];
@@ -1799,14 +1911,36 @@ export class Agent {
     } catch { /* a trace must never be the reason a turn fails */ }
 
     /*
-     * The calibration block for this turn, computed ONCE and reused for every iteration.
+     * The calibration block, frozen once it says something.
      *
-     * Rebuilt here rather than per request because the system message is the cache prefix: a block
-     * that changed between iterations of one turn would invalidate the cache on every LLM call, and
-     * the only thing it would be reflecting is the run's own progress, which the model already has
-     * in front of it in the transcript.
+     * It is built at construction (see the constructor: the cost reading has to be accurate before
+     * the first turn). The rebuild below exists for one case only — a long-lived agent that started
+     * with an empty reading and later accumulated enough samples to have a verdict. That is ONE
+     * change per session; the rule these lines exist to keep is that a turn never re-reads it.
+     *
+     * The block is appended to the SYSTEM message, and the system message is the head of the cache
+     * prefix. Measured against the real endpoint (deepseek-flash, 2026-10-03) with a ~19.5k-char
+     * history and the block at that position:
+     *
+     *   block unchanged between two turns → 94% of the request served from cache
+     *   block recomputed between turns   → 37%
+     *
+     * i.e. rebuilding it costs ~57% of the request, every turn it changes — the history AND the
+     * tool table both land after the break, and the tool table is 6.4k tokens for the built-in
+     * tools alone (8.9k with the session-scoped tools). That is precisely the failure
+     * `docs/context-and-caching.md` warns about ("每轮重新生成摘要 = 每轮改前缀"), in a different
+     * place than the one it was written about.
+     *
+     * The reading is accumulated across conversations and moves slowly, so a session's worth of
+     * staleness costs nothing next to the cache it saves.
      */
-    this.calibrationBlock = this.buildCalibrationBlock();
+    if (!this.calibrationFrozen) {
+      const block = this.buildCalibrationBlock();
+      if (block) {
+        this.calibrationBlock = block;
+        this.calibrationFrozen = true;
+      }
+    }
   }
 
   /**
@@ -2011,10 +2145,23 @@ export class Agent {
       text,
       durationMs: Date.now() - this.runStartedAt,
       fallback: this.runFallback ?? undefined,
+      /*
+       * This RUN's usage, not the agent's lifetime total.
+       *
+       * The closing event closes a run, so the numbers on it have to describe that run: how many
+       * requests it made, and of the prompt tokens it sent, how many were served from the
+       * provider's cache. A reader who cannot separate those two cannot tell a big prompt from a
+       * big turn, which is exactly the confusion `usage.requests` and `cache_miss_tokens` exist to
+       * end. `getTokenUsage()` still answers the lifetime question, and that is the number the
+       * cost API reports.
+       */
       usage: {
-        prompt_tokens: this.tokenUsage.prompt_tokens,
-        completion_tokens: this.tokenUsage.completion_tokens,
-        total_tokens: this.tokenUsage.total_tokens,
+        requests: this.runUsage.requests,
+        prompt_tokens: this.runUsage.prompt_tokens,
+        completion_tokens: this.runUsage.completion_tokens,
+        total_tokens: this.runUsage.total_tokens,
+        cache_hit_tokens: this.runUsage.cache_hit_tokens,
+        cache_miss_tokens: this.runUsage.cache_miss_tokens,
       },
     });
     this.runRecorder = null;
@@ -2405,7 +2552,7 @@ export class Agent {
 
     // Continue the tool/LLM loop so multiple files can stage into Composer.
     const messages: LLMMessage[] = [
-      { role: 'system', content: this.systemPrompt },
+      { role: 'system', content: this.systemMessageContent() },
       ...this.history,
     ];
     // Already inside withTurn. runExclusive would see the lock and refuse.
@@ -2475,7 +2622,7 @@ export class Agent {
 
       // Already holding the turn lock — go straight to the loop.
       const messages: LLMMessage[] = [
-        { role: 'system', content: this.systemPrompt },
+        { role: 'system', content: this.systemMessageContent() },
         ...this.history,
       ];
       this.toolEventSink = onChunk ?? null;
@@ -2702,6 +2849,29 @@ export class Agent {
 
   getToolDefinitions(): ToolDefinition[] {
     return [...this.allToolDefs];
+  }
+
+  /**
+   * The system message exactly as it will be sent — the assembled text, not a re-derivation.
+   *
+   * Read by the cost guard. `evals/agent` grades a task called `greeting-cheap`, and what that task
+   * is really about is "this request carried the fixed overhead and nothing else": the only durable
+   * way to say that is to compare the request's prompt tokens against the overhead as it is *right
+   * now*, because the overhead changes whenever anyone edits the prompt or adds a tool. A frozen
+   * number goes stale silently (it did: a 13000 cap measured when the overhead was 10300 sat red
+   * through five rounds of legitimate growth), while a number derived from these two strings moves
+   * with them and still catches what it should — history, a resumed plan, tool output quoted back.
+   *
+   * A second copy of `getSystemPrompt(...)`'s arguments in another file would drift and the budget
+   * would then be measuring text the model never sees, which is why this is a method here.
+   */
+  getSystemPromptText(): string {
+    /*
+     * Composed exactly as the request composes it, calibration block included: a cost reading that
+     * omitted the block would under-report the overhead by exactly the block's size, which is the
+     * direction that makes a regression look fine.
+     */
+    return this.systemMessageContent();
   }
 
   /**

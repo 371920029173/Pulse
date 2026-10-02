@@ -35,6 +35,7 @@ import { spawn } from 'node:child_process';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -56,6 +57,35 @@ const check = (label, cond, detail) => {
     if (detail) console.log(`        ${String(detail).slice(0, 700)}`);
   }
 };
+
+/**
+ * 一段源码里，`needle` 被哪个方法包着。
+ *
+ * 这里原来写的是 `private beginRun\([\s\S]{0,1400}?this\.runTrace\?\.begin\(`：1400 是当
+ * 时刚好能过的距离，不是一条性质。往 `beginRun` 里加二十行解释"为什么轨迹要这么记"的注释，
+ * 它就红了 —— 红的是写对代码的人。距离不该是判据。
+ *
+ * 从调用点往上数花括号：第一个没配对的 `{` 就是包着它的那个块的开口，再看开口前面写的是哪个
+ * 方法。数到方法体之外（文件顶层）就返回 null。
+ */
+function enclosingMethod(src, needle) {
+  const at = src.indexOf(needle);
+  if (at < 0) return null;
+  let depth = 0;
+  for (let i = at; i >= 0; i--) {
+    const ch = src[i];
+    if (ch === '}') depth++;
+    else if (ch === '{') {
+      if (depth === 0) {
+        const before = src.slice(0, i);
+        const m = /([A-Za-z_]\w*)\s*\([^()]*\)\s*(?::[^;{}()]*)?\s*$/.exec(before);
+        return m ? m[1] : null;
+      }
+      depth--;
+    }
+  }
+  return null;
+}
 
 const { RunTraceStore, distinctTokens } = await import(pathToFileURL(RUNTRACE_MODULE).href);
 
@@ -334,13 +364,12 @@ const workspace = tempDir('she-runs-live-');
 
 const child = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
-  env: {
-    ...process.env,
+  env: hermeticEnv({
     SHE_WORKSPACE: workspace,
     SHE_PORT: PORT,
     SHE_APP_DIR: join(workspace, 'appdir'),
     SHE_STATE_DIR: workspace,
-  },
+  }),
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });
@@ -530,8 +559,20 @@ console.log('\n8. 接线与只读界面');
    * wiring is asserted structurally. A missing recorder call is a silent hole in the trace, which
    * is the failure this whole file exists to prevent.
    */
-  check('每轮开始就开一份轨迹（带上提问、会话、模型、工具清单）',
-    /private beginRun\([\s\S]{0,1400}?this\.runTrace\?\.begin\(/.test(agentSrc), null);
+  /*
+   * 「开轨迹」这件事必须是 `beginRun` 干的，而判据是"包着它的方法叫什么"，不是"离某个位置
+   * 多少字符"。下面两条一起看：第一条要它在 beginRun 里，第二条证明这个定位法确实分得清
+   * 方法（把一个调用挪到别的方法里，它会指认出别的方法），否则第一条可能永远是绿的。
+   */
+  check('每轮开始就开一份轨迹，而且开在 beginRun 里（带上提问、会话、模型、工具清单）',
+    enclosingMethod(agentSrc, 'this.runTrace?.begin(') === 'beginRun'
+      && /this\.runTrace\?\.begin\(\{[\s\S]{0,300}?prompt,[\s\S]{0,200}?sessionId[\s\S]{0,200}?model:[\s\S]{0,200}?tools:/.test(agentSrc),
+    String(enclosingMethod(agentSrc, 'this.runTrace?.begin(')));
+  check('（对照）定位法分得清方法：同一个调用换个方法就报出别的方法名',
+    enclosingMethod('class X {\n  private otherRun(): void {\n    this.runTrace?.begin({});\n  }\n}\n', 'this.runTrace?.begin(') === 'otherRun'
+      && enclosingMethod('this.runTrace?.begin({});\n', 'this.runTrace?.begin(') === null
+      && enclosingMethod('const nothing = 1;\n', 'this.runTrace?.begin(') === null,
+    String(enclosingMethod('class X {\n  private otherRun(): void {\n    this.runTrace?.begin({});\n  }\n}\n', 'this.runTrace?.begin(')));
   check('工具调用在同一个作用域里记录（名字/参数/结果/耗时/分类都在）',
     /runRecorder\?\.tool\(\{[\s\S]{0,400}?name,\s*args:[\s\S]{0,200}?ms:[\s\S]{0,120}?ok:/.test(agentSrc), null);
   check('等确认时记录，并且那一轮不会就此收尾',

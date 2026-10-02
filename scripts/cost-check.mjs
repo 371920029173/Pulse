@@ -24,7 +24,7 @@
  * The second half is the one that matters. If a future change makes the reply shorter by
  * deleting something, section 1/3 fail rather than the bill looking better.
  */
-import { mkdtempSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -255,6 +255,145 @@ console.log('\n4. kb_query 实测数字');
     kbLong === 0 || defaultChars < contentChars,
     `默认 ${defaultChars} vs 正文 ${contentChars}`,
   );
+}
+
+console.log('\n5. 缓存前缀：换一个工作区还能命中多少，以及每轮重算的块会不会毁掉它');
+{
+  const { Agent } = await import('../packages/agent-runtime/dist/index.js');
+  const { SandboxShell, createTools } = await import('../packages/sandbox/dist/index.js');
+
+  const build = (root, sessionId) => {
+    const c = loadConfig(PROJECT_ROOT);
+    c.workspace.root = root;
+    c.automationMode = true;
+    c.sandbox.allowAllCommands = true;
+    const s = new KBStore(join(root, '.she', 'kb.sqlite'));
+    const e = new GroupKBEngine(s, { ...c.kb, dbPath: join(root, '.she', 'kb.sqlite') });
+    const t = createTools(new SandboxShell(root, c.sandbox), root, {
+      allowAllCommands: true,
+      kbDbPath: join(root, '.she', 'kb.sqlite'),
+    });
+    return { agent: new Agent(c, e, t, sessionId, { subagentRunner: { run: async () => ({}) } }), store: s };
+  };
+
+  /** The ledger the calibration verdict is computed from: over-claimed, mostly failed. */
+  const writeLedger = (root, count, claimed = 0.9) => {
+    mkdirSync(join(root, '.she', 'reflection'), { recursive: true });
+    writeFileSync(join(root, '.she', 'reflection', 'confidence.json'), JSON.stringify({
+      samples: Array.from({ length: count }, (_, i) => ({
+        at: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
+        claimed, attempted: 4, succeeded: 1,
+      })),
+    }), 'utf8');
+  };
+  const writeSessionSamples = (root, sessionId, topics) => {
+    const d = join(root, '.she', 'sessions', sessionId);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, 'confidence.json'), JSON.stringify({
+      samples: topics.map((topic, i) => ({
+        at: new Date(Date.UTC(2026, 1, 1, 0, i)).toISOString(),
+        claimed: 0.9, attempted: 4, succeeded: 1, topic,
+      })),
+    }), 'utf8');
+  };
+
+  const sameWorkspace = join(dir, 'prefix-same');
+  mkdirSync(sameWorkspace, { recursive: true });
+
+  /*
+   * (a) 同一个工作区、同一个会话，两轮之间把「证据」整个换掉：系统消息必须逐字节不变。
+   *
+   * 这不是"顺便看一眼"：这块排在系统消息末尾，而工具表按接口的序列化顺序排在消息之后，所以
+   * 它一变，**整段历史 + 整张工具表**都落在缓存断点之后。实测（deepseek-flash，~19.5k 字符历史）
+   * 是 94% → 37%，也就是这一句每轮要重付掉大半条请求。
+   */
+  writeLedger(sameWorkspace, 4);
+  writeSessionSamples(sameWorkspace, 'sess-prefix', ['检索', '检索', '检索']);
+  const first = build(sameWorkspace, 'sess-prefix');
+  const seen = [];
+  first.agent.provider = {
+    name: 'stub',
+    async chat(messages) {
+      seen.push(String(messages[0].content));
+      return { role: 'assistant', content: 'ok' };
+    },
+  };
+  await first.agent.chat('one');
+  const systemTurn1 = seen[0] ?? '';
+  const hasBlock = /Self-Review — Your Calibration/.test(systemTurn1);
+  check('有证据时，自评块确实进了系统消息（否则下面的不变量是空的）', hasBlock,
+    `系统消息 ${systemTurn1.length} 字符里没有找到该块`);
+  const blockAt = systemTurn1.indexOf('## Self-Review — Your Calibration');
+  const blockChars = blockAt < 0 ? 0 : systemTurn1.length - blockAt;
+  check('固定开销的读数把它算进去了（少算就等于把回归藏起来）',
+    first.agent.getSystemPromptText() === systemTurn1,
+    `getSystemPromptText() ${first.agent.getSystemPromptText().length} vs 实际发送 ${systemTurn1.length}`);
+
+  // 换掉全部证据，连领域列表一起。重建的话这一轮就会短一截 —— 那正是每轮重算的代价。
+  rmSync(join(sameWorkspace, '.she', 'reflection', 'confidence.json'));
+  writeSessionSamples(sameWorkspace, 'sess-prefix', ['排版', '排版', '排版']);
+  writeLedger(sameWorkspace, 40, 0.99);
+  await first.agent.chat('two');
+  const systemTurn2 = seen[1] ?? '';
+  check('【关键】证据变了、系统消息没变（每轮重算 = 每轮丢掉整张工具表的命中）',
+    systemTurn2 === systemTurn1,
+    `第 1 轮 ${systemTurn1.length} 字符 → 第 2 轮 ${systemTurn2.length} 字符；`
+    + '差异位置就是缓存断点，断点之后的整段历史与工具表都按全价重算');
+  console.log(`        系统消息 ${systemTurn1.length} 字符（自评块 ${blockChars} 字符）在两轮之间逐字节不变`);
+  await first.agent.dispose?.();
+  first.store.close();
+
+  /*
+   * (b) 换工作区：只有工作区路径那一处该变，其余必须能复用。
+   *
+   * 这是"跨会话还能不能共享前缀"的机械判据。往系统提示词开头塞一个日期、主机名、随机顺序，
+   * 都会让这个比例掉下来 —— 而那样做的代价是每次新会话的第一条请求全价。
+   */
+  const otherWorkspace = join(dir, 'prefix-other');
+  mkdirSync(join(otherWorkspace, '.she'), { recursive: true });
+  // The same evidence state as the first agent, so the comparison isolates the WORKSPACE as the
+  // only variable. Two agents with different self-review readings differ for a reason that has
+  // nothing to do with the workspace, and the check would then be measuring the wrong thing.
+  writeLedger(otherWorkspace, 4);
+  writeSessionSamples(otherWorkspace, 'sess-prefix', ['检索', '检索', '检索']);
+  const second = build(otherWorkspace, 'sess-prefix');
+  const a = first.agent.getSystemPromptText();
+  const b = second.agent.getSystemPromptText();
+  const toolsA = JSON.stringify(first.agent.getToolDefinitions());
+  const toolsB = JSON.stringify(second.agent.getToolDefinitions());
+  let same = 0;
+  while (same < a.length && same < b.length && a[same] === b[same]) same++;
+  const reuse = 100 * same / a.length;
+  console.log(`        换工作区：系统提示词 ${a.length} → ${b.length} 字符，共同前缀 ${same} 字符（${reuse.toFixed(1)}%）`);
+  /*
+   * 判据不是"共同前缀够长"，而是**把工作区路径遮掉之后两条必须逐字节相同**。
+   *
+   * 前者会随提示词长度漂移（自评块一进来，同一个断点的百分比就掉了 2 个点），而且它只说明"断点
+   * 靠后"，不说明"断点是工作区路径"。后者说的是准确的那句话：跨工作区唯一会变的就是那一个路径，
+   * 所以新会话的第一条请求仍然能复用前面这一段（实测：33 个工具时 25.6k/26.7k 字符，
+   * 41 个工具时按比例更多）。往提示词里加一个日期、主机名、或者把工具表按 Map 顺序拼，
+   * 都会让这条判断红 —— 而那样做的代价是每次新会话的第一条请求全价。
+   */
+  const masked = (s, root) => s.split(root).join('<WORKSPACE>');
+  const maskedA = masked(a, sameWorkspace);
+  const maskedB = masked(b, otherWorkspace);
+  let mSame = 0;
+  while (mSame < maskedA.length && mSame < maskedB.length && maskedA[mSame] === maskedB[mSame]) mSame++;
+  check('【关键】跨工作区只有工作区路径一处不同（遮掉路径后逐字节相同）',
+    maskedA === maskedB,
+    `遮掉路径后仍不同：A ${maskedA.length} 字符 vs B ${maskedB.length} 字符，`
+    + `首个差异在第 ${mSame} 字符：A ${JSON.stringify(maskedA.slice(Math.max(0, mSame - 50), mSame + 50))} / `
+    + `B ${JSON.stringify(maskedB.slice(Math.max(0, mSame - 50), mSame + 50))}`);
+  check('共同前缀 ≥90%（换工作区时前面的这一段仍然命中）', reuse >= 90,
+    `共同前缀只有 ${reuse.toFixed(1)}%`);
+  check('工具表逐字节一致（顺序不确定 = 整张表重新计费；实测换序丢掉 3456 命中 tokens）',
+    toolsA === toolsB);
+  console.log(`        工具表 ${first.agent.getToolDefinitions().length} 个工具 ${toolsA.length} 字符 ≈ ${Math.round(toolsA.length / 3.47)} tokens`
+    + '（按接口的序列化顺序排在消息之后，所以消息里任何一处变动都会把它一起推到 miss 桶）');
+  await first.agent.dispose?.();
+  await second.agent.dispose?.();
+  first.store.close();
+  second.store.close();
 }
 
 removeTempDir(dir);

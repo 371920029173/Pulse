@@ -49,6 +49,20 @@ const repeatArg = repeatIdx >= 0 ? args[repeatIdx + 1] : process.env.SHE_AGENT_R
 const TASK_TIMEOUT_MS = Number(process.env.SHE_EVAL_TIMEOUT_MS) || 150_000;
 process.env.SHE_MAX_TOOL_ROUNDS = process.env.SHE_MAX_TOOL_ROUNDS || '10';
 
+/*
+ * How many characters of prompt go into one token, for `promptWithinOverhead`.
+ *
+ * Measured, not chosen: 2026-10-02, deepseek-flash, fixed overhead ~48.9k characters → 14087 prompt
+ * tokens reported by the API, i.e. 3.47 chars/token. The constant is set to 3.3 so the ceiling sits
+ * ~5% above a request that carries nothing but the overhead.
+ *
+ * Re-measure it when the model or tokenizer changes (that, and not a prompt edit, is what moves it):
+ *   node evals/agent/run.mjs --only greeting-cheap --json
+ * then divide the reported `overheadChars` by `promptTokens`. If the check fails on a run that did
+ * not use tools, that ratio is the first thing to look at — the failure message says so too.
+ */
+const CHARS_PER_TOKEN = 3.3;
+
 /**
  * How many times to run the whole selection.
  *
@@ -102,7 +116,7 @@ function toolSummary(toolsUsed) {
  * kind of failure that an outcome-only check cannot see.
  */
 function gradeOne(check, ctx) {
-  const { workspaceRoot, reply, usage, turnPrompt = [], toolsUsed = [] } = ctx;
+  const { workspaceRoot, reply, usage, turnPrompt = [], toolsUsed = [], overheadChars = 0 } = ctx;
   try {
     if (check.type === 'fileContains') {
       const p = join(workspaceRoot, check.path);
@@ -137,6 +151,39 @@ function gradeOne(check, ctx) {
       return actual <= check.max
         ? { pass: true, detail: '' }
         : { pass: false, detail: `${check.metric ?? 'total'} tokens 过多: ${actual} > ${check.max}` };
+    }
+    /*
+     * 「这次请求只带了固定开销，没带别的」——问候语那条要说的就是这句话。
+     *
+     * 为什么不是写死的 token 上限：写死的数会在提示词长大时过期，而且**静默**过期。实测过一次：
+     * 上限 13000 是在固定开销 10300 时定的，之后的几轮里提示词长到了 14087，这条任务就一直红着，
+     * 读者看到的是"成本回归"，实际发生的是"基线长大了，天花板没人重测"。写死一个更大的数也不是
+     * 办法 —— 那是把尺子改成跟被测物一样长，下一条指令进来又要改一次。
+     *
+     * 这里比的是同一个时刻的两样东西：模型实际报的 prompt tokens，和这个 agent 此刻要发的固定
+     * 开销（系统提示词 + 工具表，直接问运行时拿）。两者同步长大，比值才是稳定的量。真正要抓的是
+     * **多出来的部分**：历史、被恢复的计划、整段回灌的工具结果 —— 它们动辄几千字符，一定撑破换算
+     * 上限，而"固定开销长长了一点"不会。
+     *
+     * 换算系数是实测的：2026-10-02，deepseek-flash，固定开销约 48.9k 字符 → 14087 prompt tokens，
+     * 即 3.47 字符/token；这里取 3.3 留 5% 余量。换模型/换分词器会让这个系数变，所以失败信息里
+     * 直接写了怎么重测（下面的 CHARS_PER_TOKEN 注释也写了）。
+     */
+    if (check.type === 'promptWithinOverhead') {
+      const tokens = usage.prompt_tokens ?? 0;
+      if (!(overheadChars > 0)) {
+        // 没有数据就判红，不判绿：静默通过的判据比没有判据更坏。
+        return { pass: false, detail: '取不到固定开销（系统提示词 + 工具表），无法判断这次请求多带了什么' };
+      }
+      const ceiling = Math.ceil(overheadChars / CHARS_PER_TOKEN);
+      if (tokens <= ceiling) return { pass: true, detail: '' };
+      return {
+        pass: false,
+        detail: `这次请求 ${tokens} prompt tokens，超过固定开销折算的上限 ${ceiling}`
+          + `（系统提示词 + 工具表共 ${overheadChars} 字符 ÷ ${CHARS_PER_TOKEN} 字符/token）。`
+          + `固定开销以外的部分只能来自会话状态（历史 / 恢复的计划 / 回灌的工具结果）—— 这句话不该带它们。`
+          + `若刚换过模型或分词器，先按 README 的方法重测 CHARS_PER_TOKEN。`,
+      };
     }
     if (check.type === 'fileAbsent') {
       return !existsSync(join(workspaceRoot, check.path))
@@ -339,9 +386,19 @@ async function runTask(task) {
   const ms = Date.now() - t0;
   const usage = agent.getTokenUsage();
 
+  /*
+   * The fixed overhead this run pays on every request: the assembled system prompt plus the tool
+   * table, both taken from the live agent rather than re-derived (see `Agent.getSystemPromptText`).
+   * Only `promptWithinOverhead` reads it, and it is computed unconditionally because it is free —
+   * and because a number that is only computed for the one task that uses it is a number nobody
+   * sees when it drifts.
+   */
+  const overheadChars = agent.getSystemPromptText().length
+    + JSON.stringify(agent.getToolDefinitions()).length;
+
   const g = timedOut
     ? { pass: false, detail: `超时 ${TASK_TIMEOUT_MS}ms（完成 ${turnsDone}/${turns.length} 轮）` }
-    : grade(task.check, { workspaceRoot: dir, reply, usage, turnPrompt, toolsUsed });
+    : grade(task.check, { workspaceRoot: dir, reply, usage, turnPrompt, toolsUsed, overheadChars });
 
   /*
    * Shut the language servers down before deleting the workspace.
@@ -394,6 +451,12 @@ async function runTask(task) {
     turnPrompt,
     toolCalls: toolsUsed.length,
     toolsUsed: [...new Set(toolsUsed.map((t) => t.name))],
+    /*
+     * 固定开销的字符数（系统提示词 + 工具表）。跟着结果一起报出来，有两个用处：`--json` 里能直接
+     * 算出 CHARS_PER_TOKEN（README 的重测方法就是这么写的），以及报表上能看出提示词长了多少 ——
+     * 这条曲线以前没人看，直到它把一条任务顶红。
+     */
+    overheadChars,
     prompt: turns[0],
     reply: reply.slice(0, 200),
     filesLeft,

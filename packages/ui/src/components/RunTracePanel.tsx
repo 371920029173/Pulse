@@ -46,7 +46,14 @@ export interface RunEvent {
   ticket_id?: string;
   path?: string;
   durationMs?: number;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  usage?: {
+    requests?: number;
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    cache_hit_tokens?: number;
+    cache_miss_tokens?: number;
+  };
   runs?: string[];
   reason?: string;
   /** `end`: the spare endpoint served this run. */
@@ -140,6 +147,21 @@ function ms(n: number | undefined): string {
   if (n === undefined) return '';
   if (n < 1000) return `${n}ms`;
   return `${(n / 1000).toFixed(1)}s`;
+}
+
+/**
+ * The share of this turn's prompt tokens the provider served from its cache, as a whole percent.
+ *
+ * Null when the provider reports no cache accounting at all (it is optional, and several
+ * OpenAI-compatible endpoints omit it) — a missing number is shown as missing rather than as 0%,
+ * because "your cache is broken" and "this endpoint does not tell us" are different problems and
+ * only one of them is actionable.
+ */
+function cacheShare(usage: { cache_hit_tokens?: number; cache_miss_tokens?: number } | undefined): number | null {
+  const hit = usage?.cache_hit_tokens ?? 0;
+  const miss = usage?.cache_miss_tokens ?? 0;
+  if (!hit && !miss) return null;
+  return Math.round((hit / (hit + miss)) * 100);
 }
 
 /**
@@ -390,6 +412,20 @@ export function RunTracePanel({ onClose, sessionId }: { onClose: () => void; ses
                             {e.reason ? ` · ${e.reason}` : ''}
                             {e.durationMs !== undefined ? ` · ${ms(e.durationMs)}` : ''}
                             {e.usage?.total_tokens ? ` · ${t('{n} tokens', { n: e.usage.total_tokens })}` : ''}
+                            {/*
+                              What the turn actually cost, on the row that closes it.
+
+                              `requests` is the multiplier: the same prompt re-sent 120 times is a
+                              different problem from one large prompt, and tokens alone cannot tell
+                              them apart. The cache share is here for the same reason — a prompt
+                              cache that stops hitting does not change what the run DOES, only the
+                              bill, so it is invisible until someone reads these two numbers
+                              together.
+                            */}
+                            {e.usage?.requests ? ` · ${t('{n} 次请求', { n: e.usage.requests })}` : ''}
+                            {cacheShare(e.usage) !== null
+                              ? ` · ${t('缓存命中 {n}%', { n: cacheShare(e.usage)! })}`
+                              : ''}
                             {/*
                               The spare endpoint, named on the closing event.
 

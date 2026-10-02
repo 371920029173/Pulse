@@ -21,11 +21,13 @@
  * 任务定义）必须真的被判出来，不能只测正例。
  * ─────────────────────────────────────────────────────────────────────────────
  */
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { hermeticEnv } from './lib/hermetic.mjs';
+import { removeTempDir } from './lib/temp.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -333,14 +335,13 @@ console.log('\n6. 接线：dry run 不联网，repeat 被认');
    * that is the property worth pinning: "check the tasks" must be safe to run anywhere, including
    * CI and a machine that has never been configured.
    */
-  const offlineEnv = {
-    ...process.env,
+  const offlineEnv = hermeticEnv({
     OPENAI_API_KEY: '',
     ANTHROPIC_API_KEY: '',
     OPENAI_BASE_URL: 'http://127.0.0.1:1',
     SHE_LLM_FALLBACK_BASE_URL: '',
     SHE_LLM_FALLBACK_MODEL: '',
-  };
+  });
 
   for (const [label, script] of [
     ['agent', join(ROOT, 'evals', 'agent', 'run.mjs')],
@@ -375,6 +376,142 @@ console.log('\n6. 接线：dry run 不联网，repeat 被认');
   check('--repeat 3 被认（回执里写着 3）', /重跑次数 3/.test(dryWith(['--repeat', '3'])), dryWith(['--repeat', '3']).slice(-200));
   check('--repeat 0 被夹到 1（否则会变成「一次都不跑」）', /重跑次数 1/.test(dryWith(['--repeat', '0'])), 'repeat 0 → 1');
   check('--repeat 乱填也被夹到 1', /重跑次数 1/.test(dryWith(['--repeat', 'abc'])), 'repeat abc → 1');
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 7. README 与真实任务/真实读数一致
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+console.log('\n7. README 不许与 tasks.json 漂移');
+
+{
+  /*
+   * `evals/README.md` 是这两套评测唯一对外的话。它漂过两次，而且两次都漂在「凭记忆写」的地方：
+   *
+   *   - 检索那一行写着 `hybrid 100% vs BM25 73%`，而 `node evals/retrieval/run.mjs` 当时印的是
+   *     80% / 67%（一次没人复跑过的引用）；
+   *   - 「已知局限」里写着「没有长程任务评测（>10 轮的）」，而 tasks.json 里躺着三个
+   *     `long-horizon-*`。
+   *
+   * 两处都不是笔误，是「文档说了一件代码里不成立的事」，而这正是这套检查存在的理由。所以这里
+   * 钉两条能从代码机械推出来的：任务表列全、以及「有没有长程任务」这句话不许和 tasks.json 相反。
+   */
+  const readmePath = join(ROOT, 'evals', 'README.md');
+  const readme = existsSync(readmePath) ? readFileSync(readmePath, 'utf8') : '';
+  check('evals/README.md 存在', readme.length > 0, readmePath);
+  check('README 引用了检索评测的真实入口（数字要能被人复跑）',
+    readme.includes('node evals/retrieval/run.mjs'), readme.slice(0, 200));
+
+  const agentIds = loadTasks(AGENT_TASKS).map((t) => t.id);
+  const verifyIds = loadTasks(VERIFY_TASKS).map((t) => t.id);
+  const missing = [...agentIds, ...verifyIds].filter((id) => !readme.includes(id));
+  check(`【关键】15 个 agent 任务每个都在 README 的任务表里（缺: ${missing.length}）`,
+    missing.length === 0, `没写进 README 的: ${missing.join(', ')}`);
+
+  const longIds = agentIds.filter((id) => id.startsWith('long-horizon-'));
+  /*
+   * 「长程」这句话两侧都要判：有任务时不许说没有（README 漂过的那次），没任务时也不许说有
+   * （否则删掉任务后这句话会变成新的假话）。
+   */
+  const claimsNoLongHorizon = /没有\*{0,2}长程任务/.test(readme);
+  check(`【关键】「有没有长程任务」这句话与 tasks.json 一致（有 ${longIds.length} 个 long-horizon-*）`,
+    longIds.length > 0 ? !claimsNoLongHorizon : claimsNoLongHorizon,
+    claimsNoLongHorizon ? 'README 说没有长程任务，但 tasks.json 里有' : 'README 没说，但也没有长程任务');
+  check('长程任务在 README 里被点名（不是只写了个数字）',
+    longIds.every((id) => readme.includes(id)), longIds.join(', '));
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 8. 每轮都要付的固定开销：离线量得到，所以离线钉住
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+console.log('\n8. 固定开销（系统提示词 + 工具表）不许无声长大');
+
+{
+  /*
+   * 「问候语」那条任务第五轮实测红过一次：prompt 14087 > 上限 13000。查下去的真正结论不是成本
+   * 回归，而是**基线自己长大了**（提示词 + 工具表从 ~35.7k 字符长到 48.9k 字符，几轮下来每轮加
+   * 一点：方言说明、姿态提示、等待出口、预检段……），而那条上限是照着当年的数字写死的。
+   *
+   * 两件事一起做才算修好：
+   *   - 那条任务改成跟自己比（`promptWithinOverhead`，见 evals/agent/run.mjs），它不会过期；
+   *   - 长大这件事本身要有地方看得见，而且**不必花钱**。固定开销是纯文本，离线就能量：
+   *     这里量一次，超预算就红，红了就在这一处做决定（删文本，或者明确改这个数）。
+   *
+   * 只量不判红是不够的：一条只会打印数字的检查没人看，而这条曲线的全部意义就是有人看。
+   */
+  const budget = 55_000;
+
+  /*
+   * 接线与 `evals/agent/run.mjs` 一致（同一批工具、同样 automationMode、同样没有会话号），
+   * 否则这里量到的不是那条任务真正付的钱。
+   */
+  let overhead = null;
+  let why = '';
+  try {
+    const { loadConfig } = await import('../packages/shared/dist/index.js');
+    const { KBStore, GroupKBEngine } = await import('../packages/kb/dist/index.js');
+    const { SandboxShell, createTools } = await import('../packages/sandbox/dist/index.js');
+    const { Agent } = await import('../packages/agent-runtime/dist/index.js');
+
+    const dir = mkdtempSync(join(tmpdir(), 'she-evals-overhead-'));
+    const cfg = loadConfig(ROOT);
+    cfg.workspace.root = dir;
+    cfg.automationMode = true;
+    cfg.sandbox.allowAllCommands = true;
+    mkdirSync(join(dir, '.she'), { recursive: true });
+    const store = new KBStore(join(dir, '.she', 'kb.sqlite'));
+    const engine = new GroupKBEngine(store, { ...cfg.kb, dbPath: join(dir, '.she', 'kb.sqlite') });
+    const tools = createTools(new SandboxShell(dir, cfg.sandbox), dir, {
+      allowAllCommands: true,
+      kbDbPath: join(dir, '.she', 'kb.sqlite'),
+    });
+    const agent = new Agent(cfg, engine, tools, null, { subagentRunner: { run: async () => ({}) } });
+    const promptChars = agent.getSystemPromptText().length;
+    const defs = agent.getToolDefinitions();
+    const toolChars = JSON.stringify(defs).length;
+    const biggest = defs
+      .map((d) => ({ name: d.name, chars: JSON.stringify(d).length }))
+      .sort((a, b) => b.chars - a.chars)[0];
+    overhead = { promptChars, toolChars, total: promptChars + toolChars, tools: defs.length, biggest };
+    await agent.dispose?.();
+    store.close();
+    removeTempDir(dir);
+  } catch (err) {
+    why = err.message;
+  }
+
+  check('能量到固定开销（提示词 + 工具表，不需要 API）', overhead !== null, why);
+  if (overhead) {
+    console.log(`        系统提示词 ${overhead.promptChars} 字符 + ${overhead.tools} 个工具 ${overhead.toolChars} 字符`
+      + ` = ${overhead.total} 字符（最肥的：${overhead.biggest.name} ${overhead.biggest.chars} 字符）`);
+    check(`【关键】固定开销在预算内（${overhead.total} ≤ ${budget} 字符，约 ${Math.round(overhead.total / 3.47)} prompt tokens）`,
+      overhead.total <= budget,
+      `超了 ${overhead.total - budget} 字符。每轮都要付这份钱，所以长大必须是有意的：`
+      + `要么删文本，要么在这个文件里明确抬高 budget（并在 evals/README.md 记下为什么）。`);
+  }
+
+  /*
+   * 那条任务不许再退回写死的绝对值：写死的数会在下一次提示词长大时静默过期（它已经过期过一次）。
+   * 判据本身也要有：`promptWithinOverhead` 必须真的在 runner 里实现，而不是只写在 JSON 里。
+   */
+  const greetingTask = loadTasks(AGENT_TASKS).find((t) => t.id === 'greeting-cheap');
+  check('【关键】问候语任务与自己比（promptWithinOverhead），而不是写死的 token 上限',
+    checksOf(greetingTask).some((c) => c.type === 'promptWithinOverhead'),
+    JSON.stringify(checksOf(greetingTask)));
+  check('不再留着过期的 usageBelow 绝对上限',
+    !checksOf(greetingTask).some((c) => c.type === 'usageBelow'),
+    JSON.stringify(checksOf(greetingTask)));
+  const runner = readFileSync(join(ROOT, 'evals', 'agent', 'run.mjs'), 'utf8');
+  check('runner 真的实现了这条判据（不是只写在任务 JSON 里）',
+    /if \(check\.type === 'promptWithinOverhead'\)/.test(runner));
+  check('换算系数由实测写成常量，且写了怎么重测',
+    /const CHARS_PER_TOKEN = [\d.]+;/.test(runner) && /重测/.test(runner));
+  check('取不到固定开销时判红，不判绿（静默通过的判据比没有判据更坏）',
+    /取不到固定开销[\s\S]{0,80}无法判断/.test(runner));
+  const readme = readFileSync(join(ROOT, 'evals', 'README.md'), 'utf8');
+  check('README 记着这个换算的实测值与日期（换模型的人知道去哪看）',
+    /字符\/token/.test(readme) && /3\.47/.test(readme));
 }
 
 console.log('');

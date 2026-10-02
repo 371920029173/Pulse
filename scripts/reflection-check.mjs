@@ -30,6 +30,7 @@ import { spawn } from 'node:child_process';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -559,13 +560,12 @@ const workspace = tempDir('she-reflect-live-');
 
 const child = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
-  env: {
-    ...process.env,
+  env: hermeticEnv({
     SHE_WORKSPACE: workspace,
     SHE_PORT: PORT,
     SHE_APP_DIR: join(workspace, 'appdir'),
     SHE_STATE_DIR: workspace,
-  },
+  }),
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });
@@ -705,10 +705,23 @@ console.log('\n9. 接线与提示词');
   check('reflection_check 对子智能体关闭（它读的是父级的目标，会让子任务以为自己在漂移）',
     /\|preflight_\|reflection_/.test(agentSrc), null);
 
-  check('置信度镜像是逐轮算一次的（每轮都变会让提示词缓存失效）',
-    /private beginRun[\s\S]{0,5000}?this\.calibrationBlock = this\.buildCalibrationBlock\(\)/.test(agentSrc), null);
-  check('同一个系统消息给到每一次迭代（前缀缓存靠这个）',
-    /messagesForRequest[\s\S]{0,600}?this\.calibrationBlock/.test(agentSrc), null);
+  /*
+   * 自评块在系统消息里，而系统消息是缓存前缀的头 —— 所以这一组钉的是「块什么时候可以变」。
+   *
+   * 这里原来钉的是「每轮重算一次」，而那条**恰恰是后来查出来的病**：块每轮变一次，块之后的整段
+   * 历史与整张工具表就跟着按全价重算（实测命中 94% → 37%）。判据现在反过来钉：构建点只有两个
+   * （构造时一次，以及「本来没证据 → 有了证据」那一次），之后冻结。
+   */
+  const calibrationBuilds = (agentSrc.match(/this\.buildCalibrationBlock\(\)/g) ?? []).length;
+  check('自评块只有两个构建点：构造时一次 + 「没证据→有证据」那一次（多一处就是每轮改前缀）',
+    calibrationBuilds === 2, `构建点 ${calibrationBuilds} 处`);
+  check('那次重建是「没冻结才建」，建完立刻冻结（同一会话里系统消息逐字节不变）',
+    /if \(!this\.calibrationFrozen\)[\s\S]{0,400}?this\.buildCalibrationBlock\(\)[\s\S]{0,200}?this\.calibrationFrozen = true;/.test(agentSrc), null);
+  check('构造时就建一次（读固定开销的检查在第一条请求之前拿到的就是准数）',
+    /this\.calibrationBlock = this\.buildCalibrationBlock\(\);[\s\S]{0,120}?this\.calibrationFrozen = this\.calibrationBlock !== '';/.test(agentSrc), null);
+  check('同一个系统消息给到每一次迭代与每一次续跑（前缀缓存靠这个）',
+    (agentSrc.match(/content: this\.systemMessageContent\(\)/g) ?? []).length >= 3
+      && !/content: this\.systemPrompt\b/.test(agentSrc), null);
   check('提示词里带上镜像读数', /renderCalibration/.test(agentSrc), null);
   check('提示词里有自省段，且说明是「关于你自己」的测量',
     /## Self-Review/.test(promptSrc) && /measurement of you, not of the work/.test(promptSrc), null);

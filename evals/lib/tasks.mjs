@@ -24,6 +24,15 @@ export const AGENT_CHECKS = new Set([
   'replyContains',
   'replyLengthBelow',
   'usageBelow',
+  /*
+   * 「这次请求只带了固定开销」——比 token 上限耐久的那条。
+   *
+   * `usageBelow` 数的是一个绝对值，提示词长大它就过期，而且是静默过期（一条红着的任务看起来
+   * 像成本回归，其实是天花板没人重测）。这条比的是同一个时刻的两样东西：模型报的 prompt
+   * tokens，和这个 agent 此刻要发的固定开销。多出来的部分只可能来自会话状态 —— 那才是要抓的。
+   * 详见 evals/agent/run.mjs 里 `promptWithinOverhead` 的注释。
+   */
+  'promptWithinOverhead',
   'fileAbsent',
   // Long-horizon: last turn's prompt vs the first turn's, to catch a context that keeps growing.
   'turnPromptGrowth',
