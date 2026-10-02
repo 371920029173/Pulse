@@ -20,6 +20,7 @@ import { spawn } from 'node:child_process';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -46,7 +47,7 @@ mkdirSync(join(workspace, '.she'), { recursive: true });
 
 const child = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
-  env: { ...process.env, SHE_WORKSPACE: workspace, SHE_PORT: PORT, SHE_APP_DIR: join(workspace, 'appdir'), SHE_STATE_DIR: workspace },
+  env: hermeticEnv({ SHE_WORKSPACE: workspace, SHE_PORT: PORT, SHE_APP_DIR: join(workspace, 'appdir'), SHE_STATE_DIR: workspace }),
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });

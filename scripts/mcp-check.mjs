@@ -53,6 +53,7 @@ import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
 import { mcpToolName } from '../packages/server/dist/mcp-bridge.js';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -351,9 +352,12 @@ let serverOutput = '';
 async function boot() {
   child = spawn('node', [SERVER_ENTRY], {
     cwd: SERVER_DIR,
-    // Pinned in the child env as well as the .env: ambient variables beat the file.
-    env: {
-      ...process.env,
+    /*
+     * 环境由检查自己钉死，不再整体继承外层：外层里只要有 `.env` 读进来的
+     * `OPENAI_BASE_URL` / `OPENAI_MODEL`，它们就会盖掉下面这个工作区的 `.env`（环境变量优先于
+     * 配置文件），于是 agent 去连真服务、桩模型一次请求都收不到 —— `offered=0`。见 `lib/hermetic.mjs`。
+     */
+    env: hermeticEnv({
       SHE_ENV_FILE: join(workspace, '.env'),
       SHE_PORT: String(PORT),
       SHE_WORKSPACE: workspace,
@@ -361,7 +365,7 @@ async function boot() {
       APPDATA: fakeAppData,
       USERPROFILE: fakeHome,
       HOME: fakeHome,
-    },
+    }),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });

@@ -31,6 +31,7 @@ import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
 import { controlHeaders } from './lib/control-auth.mjs';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -313,14 +314,13 @@ writeFileSync(cfgFile, LIVE_GOOD, 'utf8');
 
 const spawnServer = () => spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
-  env: {
-    ...process.env,
+  env: hermeticEnv({
     SHE_WORKSPACE: ws,
     SHE_PORT: PORT,
     SHE_APP_DIR: join(ws, 'appdir'),
     SHE_STATE_DIR: ws,
     SHE_CONFIG_FILE: cfgFile,
-  },
+  }),
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });

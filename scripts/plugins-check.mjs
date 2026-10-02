@@ -32,6 +32,7 @@ import { createServer } from 'node:http';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -189,13 +190,12 @@ async function boot() {
   child = spawn('node', [SERVER_ENTRY], {
     cwd: SERVER_DIR,
     // Pinned in the child env as well as the .env: ambient variables beat the file.
-    env: {
-      ...process.env,
+    env: hermeticEnv({
       SHE_ENV_FILE: join(workspace, '.env'),
       SHE_PORT: String(PORT),
       SHE_WORKSPACE: workspace,
       SHE_APP_DIR: appDir,
-    },
+    }),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });

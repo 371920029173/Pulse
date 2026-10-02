@@ -19,6 +19,7 @@
  *   node scripts/preflight-check.mjs
  */
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -35,6 +36,7 @@ import {
   getSystemPrompt,
 } from '../packages/agent-runtime/dist/index.js';
 import { removeTempDir } from './lib/temp.mjs';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 let failures = 0;
 const check = (label, cond, detail) => {
@@ -310,6 +312,32 @@ console.log('\n=== 接入真实 Agent ===');
   check('可用工具清单里也有它', /`preflight_record`/.test(prompt));
 
   store.close();
+}
+
+// ─── 5. 门禁脚本自己的环境卫生 ───────────────────────────────────────────────
+/*
+ * 检查脚本不许给子进程整体继承外层环境（把 process.env 展开进给子进程的 env 对象）。
+ *
+ * 这条守卫放在这里，是因为它的失败形状和这一区其它检查一样：**在别人机器上红**。SHE 自己的
+ * 沙箱把 server 的 process.env（里面已经有 `.env` 读进来的 `OPENAI_MODEL`）交给每条命令，
+ * 于是「在 SHE 里跑门禁」会让检查脚本自己的 `.env` 被外层环境盖掉 —— 实测过两处：`check:suites`
+ * 报 `packages/shared` 3 条红（期望 from-she-config，实得 deepseek-flash），`check:mcp` 的桩模型
+ * 一次请求都收不到（agent 去连了真服务）。修法是统一走 `lib/hermetic.mjs`，这里钉住不再长回来。
+ *
+ * 判据和「哪些脚本可以例外」都在 hermetic.mjs 里，这里只负责让它变成门禁的一条。
+ */
+console.log('\n=== 门禁脚本的环境卫生 ===');
+{
+  const r = spawnSync(process.execPath, [join(PROJECT_ROOT, 'scripts', 'lib', 'hermetic.mjs')], {
+    cwd: PROJECT_ROOT, encoding: 'utf8', timeout: 60_000, windowsHide: true,
+    // 自测本身要一个干净环境：它断言的是「现在仓库里没有违规」，别被测的东西影响。
+    env: hermeticEnv(),
+  });
+  const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+  check('密闭性自测通过（丢什么/留什么、前缀覆盖得住配置键、守卫判得出违规）',
+    r.status === 0, out.slice(-600));
+  check('【关键】检查脚本里没有整体继承外层环境的残留',
+    /仓库里现在没有违规/.test(out) && /PASS/.test(out), out.slice(-300));
 }
 
 removeTempDir(dir);

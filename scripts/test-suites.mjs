@@ -24,6 +24,7 @@
 import { spawn } from 'node:child_process';
 import { killTree } from './lib/kill-tree.mjs';
 import { ROOT, packagesWithTests, parseSuiteOutput } from './lib/suites.mjs';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 /**
  * How long the whole run may take before it is abandoned.
@@ -77,6 +78,15 @@ console.log(`\n跑全部套件（上限 ${limitWords}）：pnpm -r test\n`);
 const child = spawn('pnpm', ['-r', 'test'], {
   cwd: ROOT,
   shell: true,
+  /*
+   * 「套件在什么环境里跑」由这一步决定，不由「谁在跑这一步」决定。
+   *
+   * 不给 `env` 就是整体继承外层环境，而 `loadConfig` 的优先级是环境变量 > 配置文件 —— 于是在
+   * SHE 自己的沙箱里跑门禁（那个环境里有 `.env` 读进来的 `OPENAI_MODEL`）时，一遍全绿的套件
+   * 会变成 `packages/shared` 的 3 条红，报的还是「期望 from-she-config，实得 deepseek-flash」。
+   * 同一份代码，结论取决于命令从哪儿敲的 —— 那就不是门禁。见 `lib/hermetic.mjs`。
+   */
+  env: hermeticEnv(),
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 

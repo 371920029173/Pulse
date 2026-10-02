@@ -36,6 +36,7 @@ import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
 import { controlHeaders } from './lib/control-auth.mjs';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -287,14 +288,13 @@ seedRun.end({ ok: true });
 new ConfidenceMirror(workspace, 'sess-a').observe({ claimed: 0.9, attempted: 4, succeeded: 1, topic: '网关切换' });
 const child = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
-  env: {
-    ...process.env,
+  env: hermeticEnv({
     SHE_WORKSPACE: workspace,
     SHE_PORT: PORT,
     SHE_ENV_FILE: join(workspace, '.env'),
     SHE_APP_DIR: join(workspace, 'appdir'),
     SHE_STATE_DIR: workspace,
-  },
+  }),
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });
@@ -459,15 +459,14 @@ const OTHER_PORT = String(await pickSafePort(Number(process.env.SHE_RAIL_TEST_PO
 
 const liveChild = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
-  env: {
-    ...process.env,
+  env: hermeticEnv({
     SHE_WORKSPACE: liveRoot,
     SHE_PORT: OTHER_PORT,
     SHE_ENV_FILE: join(liveRoot, '.env'),
     SHE_APP_DIR: join(liveRoot, 'appdir'),
     // 刻意不设 SHE_STATE_DIR：状态目录要跟着工作区走。
     SHE_STATE_DIR: '',
-  },
+  }),
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });
@@ -641,15 +640,14 @@ const SPLIT_PORT = String(await pickSafePort(Number(process.env.SHE_SPLIT_TEST_P
 
 const splitChild = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
-  env: {
-    ...process.env,
+  env: hermeticEnv({
     SHE_WORKSPACE: splitWorkspace,
     SHE_PORT: SPLIT_PORT,
     SHE_ENV_FILE: join(splitWorkspace, '.env'),
     SHE_APP_DIR: join(splitWorkspace, 'appdir'),
     // 关键：状态目录**故意**不等于工作区。这是这个变量的正常用法，不是边角情况。
     SHE_STATE_DIR: splitState,
-  },
+  }),
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });
@@ -767,14 +765,13 @@ console.log('\n9. 临时工作区不写进 .env 默认（切走就忘），普�
 
   const envChild = spawn('node', [SERVER_ENTRY], {
     cwd: SERVER_DIR,
-    env: {
-      ...process.env,
+    env: hermeticEnv({
       SHE_WORKSPACE: envWorkspace,
       SHE_PORT: ENV_PORT,
       SHE_ENV_FILE: envFile,
       SHE_APP_DIR: join(envWorkspace, 'appdir'),
       SHE_STATE_DIR: '',
-    },
+    }),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -881,15 +878,14 @@ new MemoStore(moveSrc).add('切换前先冻结结算批次', 'user');
 
 const moveChild = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
-  env: {
-    ...process.env,
+  env: hermeticEnv({
     SHE_WORKSPACE: moveSrc,
     SHE_PORT: MOVE_PORT,
     SHE_ENV_FILE: join(moveSrc, '.env'),
     SHE_APP_DIR: join(moveSrc, 'appdir'),
     // 不设 SHE_STATE_DIR：状态目录跟着工作区走，`.she/sessions/<id>/` 才落在原项目下面。
     SHE_STATE_DIR: '',
-  },
+  }),
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });

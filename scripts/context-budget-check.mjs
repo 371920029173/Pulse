@@ -25,6 +25,7 @@ import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
 import { controlHeaders } from './lib/control-auth.mjs';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -57,14 +58,13 @@ const envFile = join(workspace, '.env');
 
 const child = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
-  env: {
-    ...process.env,
+  env: hermeticEnv({
     SHE_WORKSPACE: workspace,
     SHE_PORT: PORT,
     SHE_ENV_FILE: envFile,
     SHE_APP_DIR: join(workspace, 'appdir'),
     SHE_STATE_DIR: workspace,
-  },
+  }),
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });

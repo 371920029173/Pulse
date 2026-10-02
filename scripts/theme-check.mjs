@@ -35,6 +35,7 @@ import { spawn } from 'node:child_process';
 import { killTree } from './lib/kill-tree.mjs';
 import { controlHeaders } from './lib/control-auth.mjs';
 import { pickSafePort } from './safe-port.mjs';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -130,13 +131,12 @@ async function boot() {
      * its own — failing with a confusing EADDRINUSE, or worse, probing the dev server that is
      * already running and reporting on that instead of on this code.
      */
-    env: {
-      ...process.env,
+    env: hermeticEnv({
       SHE_ENV_FILE: join(workspace, '.env'),
       SHE_PORT: String(PORT),
       SHE_WORKSPACE: workspace,
       SHE_APP_DIR: appDirPath,
-    },
+    }),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });

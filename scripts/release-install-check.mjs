@@ -20,6 +20,7 @@ import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
 import { controlHeaders } from './lib/control-auth.mjs';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -64,7 +65,7 @@ function run(cmd, args, label) {
       // pnpm is a shim on Windows, so it needs a shell there.
       shell: process.platform === 'win32',
       timeout: 15 * 60_000,
-        env: { ...process.env, CI: '1', SHE_PORT: String(PORT) },
+        env: hermeticEnv({ CI: '1', SHE_PORT: String(PORT) }),
     });
     console.log('ok');
     return { ok: true, out: '' };
@@ -112,8 +113,7 @@ try {
   child = spawn('node', ['packages/server/dist/index.js'], {
     cwd: root,
     // A throwaway workspace so the install test cannot touch real data.
-      env: {
-        ...process.env,
+      env: hermeticEnv({
         SHE_PORT: String(PORT),
         SHE_WORKSPACE: root,
         SHE_STATE_DIR: root,
@@ -121,9 +121,11 @@ try {
         // directory (plugins, wallpaper, stylesheet) at someone else's folder during the test.
         SHE_APP_DIR: join(root, 'appdir'),
         // Point the model somewhere unreachable: this checks the HTTP surface, not
-        // whether a model answers.
-        OPENAI_BASE_URL: process.env.OPENAI_BASE_URL ?? 'http://127.0.0.1:1',
-      },
+        // whether a model answers. NOT `process.env.OPENAI_BASE_URL ?? …` — with a real
+        // `.env` loaded in the shell that reads back the user's true endpoint, and this
+        // check would then spend real tokens against a real model to test an HTTP code.
+        OPENAI_BASE_URL: 'http://127.0.0.1:1',
+      }),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });

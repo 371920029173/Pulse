@@ -14,14 +14,134 @@
  */
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { tryLoadYaml, unknownTopLevelKeys, loadConfig } from '../config.js';
 
 let dir: string;
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'she-yaml-')); });
-afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+/*
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 为什么这个文件要先把环境洗干净
+ *
+ * 下面几条断言的是「配置文件里的值被用上了」。但 `loadConfig` 的优先级是
+ * **真实环境变量 > 配置文件**（产品行为：`.env` 只是补上环境里没有的键，而操作系统里显式设过的
+ * 永远赢），而它读的 43 个键**全部**落在 `SHE_` / `OPENAI_` / `ANTHROPIC_` / `AGI_` 四个前缀下
+ * （`都在这四个前缀下` 那条用例会重新从源码里数一遍，防止这个前提失效）。
+ *
+ * 于是只要跑这个文件的进程里恰好带着 `OPENAI_MODEL`，断言期望的配置文件值就会被环境里的模型名
+ * 盖掉：
+ *
+ *   期望 from-she-config / from-override，实得 deepseek-flash
+ *   # tests 66 · # pass 63 · # fail 3
+ *
+ * 这不是假想：把本机 `.env` 里的 `OPENAI_MODEL=deepseek-flash` 放进环境再跑这个文件，得到的就是
+ * 上面这组数字，与门禁里那次逐字相同。而**门禁真的会带着它**：SHE 自己的沙箱里，后端启动时
+ * 已经把 `.env` 读进了自己的 `process.env`，它派生的每条命令都继承 —— 也就是说，用来验证这个
+ * 仓库的环境，恰好是会把 `OPENAI_MODEL` 带进来的那个环境。测试不该因此变红：红的不是代码，
+ * 是它读到了「谁在跑它」。
+ *
+ * 两个动作，各堵一条路：
+ *   1. `SHE_ENV_FILE` 钉在临时目录里（一个不存在的文件）。`resolveEnvFile` 的兜底顺序是
+ *      「项目根 → 当前工作目录」，所以只要测试进程的 cwd 恰好是某个带 `.env` 的目录（从仓库根
+ *      直接跑、或在别人的项目里跑），它就会把**那个项目的** `.env` 加载进来。钉住之后，
+ *      环境文件的来源与 cwd 无关。
+ *   2. 环境里那四个前缀的键先拿走，跑完放回去。
+ *
+ * 产品行为不动：`loadConfig` 仍然让真实环境变量赢（那是 .env 语义的一部分），`resolveEnvFile`
+ * 仍然有 cwd 兜底（它是「从子目录启动也能找到安装根 .env」那条用途，`resolveEnvFile` 那段用例
+ * 把它钉住）。要改的是**测试对环境的依赖**，不是产品。
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+/** 能盖过配置文件的键族。与 `loadConfig` 实际读到的集合一致，由下面的用例机械核对。 */
+const ENV_FAMILY = /^(SHE|OPENAI|ANTHROPIC|AGI)_/;
+
+let savedEnv: Record<string, string> = {};
+
+/** 把环境里能盖过配置文件的键拿走，记下来等着放回去。 */
+function cleanEnv(): void {
+  savedEnv = {};
+  for (const key of Object.keys(process.env)) {
+    if (ENV_FAMILY.test(key)) {
+      savedEnv[key] = process.env[key] as string;
+      delete process.env[key];
+    }
+  }
+}
+
+function restoreEnv(): void {
+  for (const key of Object.keys(process.env)) if (ENV_FAMILY.test(key)) delete process.env[key];
+  for (const [key, value] of Object.entries(savedEnv)) process.env[key] = value;
+  savedEnv = {};
+}
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'she-yaml-'));
+  cleanEnv();
+  // 一个不可能存在的环境文件：环境文件的来源从此与 cwd 无关。
+  process.env.SHE_ENV_FILE = join(dir, '.env');
+});
+
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+  restoreEnv();
+});
+
+describe('这个文件的环境卫生（它决定上面那些断言看不看得出真假）', () => {
+  it('清洗真的在干活：污染一个键，洗一遍就没了', () => {
+    process.env.OPENAI_MODEL = 'polluted';
+    process.env.SHE_MODEL = 'polluted';
+    assert.equal(process.env.OPENAI_MODEL, 'polluted');
+    cleanEnv();
+    assert.equal(process.env.OPENAI_MODEL, undefined, 'OPENAI_MODEL 没被清掉');
+    assert.equal(process.env.SHE_MODEL, undefined, 'SHE_MODEL 没被清掉');
+  });
+
+  it('环境文件的来源与 cwd 无关（cwd 兜底不再能把别人的 .env 拉进来）', () => {
+    /*
+     * `resolveEnvFile` 的顺序是「项目根 → 当前工作目录」：临时目录里没有 `.env` 时，它会去
+     * 测试进程的 cwd 找一个。从仓库根跑（cwd 就是那个带 `.env` 的目录）时，这个兜底就会把
+     * 仓库自己的 `.env` 加载进 `loadConfig(临时目录)`。把 `SHE_ENV_FILE` 钉在临时目录里，
+     * 这一条路就断了 —— 而且这正是 `SHE_ENV_FILE` 的文档用途（显式指定环境文件）。
+     */
+    assert.equal(process.env.SHE_ENV_FILE, join(dir, '.env'));
+  });
+
+  it('【关键】真实环境变量优先于配置文件 —— 这是产品行为，别为了测试把它改掉', () => {
+    /*
+     * 这条不测 bug，它测的是「修哪一边」。上一条把环境洗干净，是因为环境变量赢是**对的**：
+     * `.env` 的语义就是「补上环境里没有的键」，显式设过的永远算数。所以门禁里那 3 条红，
+     * 修的是测试对环境的依赖，不是这条优先级。哪天有人为了让测试变绿把它反过来，
+     * 这条会红并给出理由。
+     */
+    write('she.config.yaml', 'llm:\n  model: from-she-config\n');
+    process.env.OPENAI_MODEL = 'deepseek-flash';
+    try {
+      assert.equal(loadConfig(dir).llm.model, 'deepseek-flash',
+        '环境变量必须赢：红了说明改错了边（该改的是测试的环境，不是这条优先级）');
+    } finally {
+      delete process.env.OPENAI_MODEL;
+    }
+  });
+
+  it('都在这四个前缀下（loadConfig 读到的键没有一个跑在外面）', () => {
+    /*
+     * 清洗是按前缀做的，所以「前缀覆盖得住」是一个承重前提：`loadConfig` 哪天开始读一个别的
+     * 前缀的键（比如 `MODEL`、`HOME`、`NODE_ENV`），清洗就会漏掉它，而这个文件会重新变成
+     * 「在别人机器上红、在自己机器上绿」。断言直接从源码里数，避免手写清单过期。
+     */
+    const source = readFileSync(join(process.cwd(), 'src', 'config.ts'), 'utf8');
+    const names = new Set<string>();
+    for (const m of source.matchAll(/\benv\.([A-Z][A-Z0-9_]+)/g)) names.add(m[1]!);
+    for (const m of source.matchAll(/process\.env\[["']([A-Z][A-Z0-9_]+)["']\]/g)) names.add(m[1]!);
+    const outside = [...names].filter((n) => !ENV_FAMILY.test(n)).sort();
+    assert.ok(names.size >= 40, `只从 config.ts 里认出了 ${names.size} 个键，正则大概失效了`);
+    assert.deepEqual(outside, [],
+      `这些键不在清洗的前缀里，测试会被环境左右: ${outside.join(', ')}`);
+  });
+});
 
 /** Write a config file and parse it. No BOM — PowerShell's Set-Content adds one. */
 function write(name: string, content: string): string {

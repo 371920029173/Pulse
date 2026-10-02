@@ -49,6 +49,7 @@ import { createServer } from 'node:http';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -408,8 +409,7 @@ async function startLive({ ws, task, llmPort, port }) {
 
   const child = spawn('node', [SERVER_ENTRY], {
     cwd: SERVER_DIR,
-    env: {
-      ...process.env,
+    env: hermeticEnv({
       SHE_WORKSPACE: ws,
       SHE_PORT: String(port),
       SHE_APP_DIR: join(ws, 'appdir'),
@@ -419,7 +419,7 @@ async function startLive({ ws, task, llmPort, port }) {
       OPENAI_MODEL: 'stub',
       OPENAI_API_KEY: 'stub-key',
       SHE_SUBAGENT_TIMEOUT_MS: '30000',
-    },
+    }),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -788,8 +788,7 @@ const kbStub = makeKbHarvestLlm();
 await new Promise((r) => kbStub.server.listen(KB_LLM_PORT, '127.0.0.1', r));
 const kbChildProc = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
-  env: {
-    ...process.env,
+  env: hermeticEnv({
     SHE_WORKSPACE: ws3,
     SHE_PORT: String(KB_PORT),
     SHE_APP_DIR: join(ws3, 'appdir'),
@@ -799,7 +798,7 @@ const kbChildProc = spawn('node', [SERVER_ENTRY], {
     OPENAI_MODEL: 'stub',
     OPENAI_API_KEY: 'stub-key',
     SHE_SUBAGENT_TIMEOUT_MS: '30000',
-  },
+  }),
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });
@@ -1012,8 +1011,7 @@ const rawStub = makeRawAccessLlm();
 await new Promise((r) => rawStub.server.listen(RAW_LLM_PORT, '127.0.0.1', r));
 const rawChild = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
-  env: {
-    ...process.env,
+  env: hermeticEnv({
     SHE_WORKSPACE: ws4,
     SHE_PORT: String(RAW_PORT),
     SHE_APP_DIR: join(ws4, 'appdir'),
@@ -1022,7 +1020,7 @@ const rawChild = spawn('node', [SERVER_ENTRY], {
     OPENAI_BASE_URL: `http://127.0.0.1:${RAW_LLM_PORT}/v1`,
     OPENAI_MODEL: 'stub',
     OPENAI_API_KEY: 'stub-key',
-  },
+  }),
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });
@@ -1204,8 +1202,7 @@ const sharedStub = makeSharedKbLlm();
 await new Promise((r) => sharedStub.server.listen(SHARED_LLM_PORT, '127.0.0.1', r));
 const sharedChild = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
-  env: {
-    ...process.env,
+  env: hermeticEnv({
     SHE_WORKSPACE: ws5,
     SHE_PORT: String(SHARED_PORT),
     SHE_APP_DIR: join(ws5, 'appdir'),
@@ -1214,7 +1211,7 @@ const sharedChild = spawn('node', [SERVER_ENTRY], {
     OPENAI_BASE_URL: `http://127.0.0.1:${SHARED_LLM_PORT}/v1`,
     OPENAI_MODEL: 'stub',
     OPENAI_API_KEY: 'stub-key',
-  },
+  }),
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });
@@ -1365,8 +1362,7 @@ const timeoutStub = makeTimeoutLlm();
 await new Promise((r) => timeoutStub.server.listen(TIMEOUT_LLM_PORT, '127.0.0.1', r));
 const timeoutChild = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
-  env: {
-    ...process.env,
+  env: hermeticEnv({
     SHE_WORKSPACE: ws6,
     SHE_PORT: String(TIMEOUT_PORT),
     SHE_APP_DIR: join(ws6, 'appdir'),
@@ -1382,7 +1378,7 @@ const timeoutChild = spawn('node', [SERVER_ENTRY], {
      * so this still exercises the real timeout.
      */
     SHE_SUBAGENT_TIMEOUT_MS: String(TIMEOUT_ENV_SECONDS * 1000),
-  },
+  }),
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });

@@ -31,6 +31,7 @@ import { createServer } from 'node:http';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -373,8 +374,7 @@ writeFileSync(join(ws, 'secrets.txt'), `token: ${SECRETS.bearer}\n`, 'utf8');
 
 const child = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
-  env: {
-    ...process.env,
+  env: hermeticEnv({
     SHE_WORKSPACE: ws,
     SHE_PORT: PORT,
     SHE_APP_DIR: join(ws, 'appdir'),
@@ -400,7 +400,7 @@ const child = spawn('node', [SERVER_ENTRY], {
      * the guardrail assertions then fail for a reason that has nothing to do with the guardrail. The
      * stub below answers without tool calls, so the loop ends on its own after one model round.
      */
-  },
+  }),
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });

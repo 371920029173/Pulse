@@ -33,6 +33,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -67,6 +68,8 @@ console.log('=== 1. 池的不变量 ===');
     'packages/desktop/__tests__/backend-pool.test.cjs',
   ], {
     cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: POOL_TEST_TIMEOUT_MS,
+    // 单测在什么环境里跑由这里决定，不由「谁在跑门禁」决定 —— 见 lib/hermetic.mjs。
+    env: hermeticEnv(),
   });
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
   // 断言的是"全绿"，不只是退出码：--test 在 0 个用例时也返回 0，而"检查跑了个寂寞"正是这类

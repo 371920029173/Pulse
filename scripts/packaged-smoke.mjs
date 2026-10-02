@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { killTree } from './lib/kill-tree.mjs';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -58,8 +59,7 @@ async function api(path) {
 
 const child = spawn('node', [SERVER_ENTRY], {
   cwd: join(RUNTIME, 'server'),
-  env: {
-    ...process.env,
+  env: hermeticEnv({
     SHE_ENV_FILE: join(ws, '.env'),
     SHE_WORKSPACE: ws,
     SHE_APP_DIR: join(ws, 'appdir'),
@@ -71,7 +71,7 @@ const child = spawn('node', [SERVER_ENTRY], {
      * really an incomplete imitation of the launcher.
      */
     SHE_UI_DIR: join(RUNTIME, 'ui'),
-  },
+  }),
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });
