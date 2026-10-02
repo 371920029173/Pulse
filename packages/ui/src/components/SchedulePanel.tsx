@@ -19,6 +19,12 @@ interface ScheduledTask {
   lastError?: string;
   lastDeferredReason?: string;
   lastOverran?: boolean;
+  /** 连续失败了几次；成功一次后清零。 */
+  consecutiveFailures?: number;
+  /** 已排定的自动重试时刻；没有待重试的运行时就没有这个字段。 */
+  retryAt?: string;
+  /** 需要用户注意的一句话（连续失败 / 是否还会重试），没有问题时为空。 */
+  alert?: string | null;
   runCount: number;
   sessionId?: string;
   nextRun?: string;
@@ -32,6 +38,8 @@ interface ScheduleSnapshot {
   nextWindowStart: string | null;
   running: string[];
   tasks: ScheduledTask[];
+  /** 需要提醒的失败任务（面板顶部横幅用），没有失败时为空数组。 */
+  alerts?: { id: string; name: string; text: string }[];
 }
 
 const DAY_LABELS = ['日', '一', '二', '三', '四', '五', '六'];
@@ -165,6 +173,17 @@ export function SchedulePanel({ onClose }: { onClose?: () => void }) {
 
         {error ? <div className={styles.error}>{error}</div> : null}
 
+        {snap?.alerts?.length ? (
+          <div className={styles.alertBox}>
+            {t('有定时任务在反复失败：')}
+            <ul>
+              {snap.alerts.map((a) => (
+                <li key={a.id}>{a.name}：{a.text}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
         <div className={styles.toolbar}>
           <button type="button" className={styles.primary} onClick={() => setShowForm((v) => !v)}>
             {showForm ? t('取消') : t('+ 新建')}
@@ -295,7 +314,15 @@ export function SchedulePanel({ onClose }: { onClose?: () => void }) {
                     {task.lastDeferredReason ? (
                       <div className={styles.deferredNote}>{task.lastDeferredReason}</div>
                     ) : null}
-                    {task.lastError ? <div className={styles.error}>{task.lastError}</div> : null}
+                    {/*
+                      有告警时优先显示告警：它已经把 lastError 含在里面，并且多了「连续几次 / 还会不会重试
+                      这一层。两条都印会重复同一句话。
+                    */}
+                    {task.alert ? (
+                      <div className={styles.itemAlert}>{task.alert}</div>
+                    ) : task.lastError ? (
+                      <div className={styles.error}>{task.lastError}</div>
+                    ) : null}
                     <div className={styles.itemActions}>
                       <button
                         type="button"

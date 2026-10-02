@@ -165,6 +165,36 @@ function it_trailing() {
   // Section separator only; assertions for this section follow below.
 }
 
+console.log('\n=== 失败告警会随列表给到模型（第四轮 8b）===');
+{
+  /*
+   * 模型也是这份列表的读者。没有这条告警，智能体看到 `lastStatus: error` 之后很可能汇报
+   * 「定时任务在跑，上次失败了」—— 而真正要说的那句是「连续失败 3 次，已经不再自动重试」。
+   */
+  const bridge = {
+    list: () => [{
+      id: 'j1',
+      name: '每日构建',
+      prompt: '跑构建',
+      enabled: true,
+      when: '每天 09:00',
+      lastStatus: 'error',
+      lastError: 'boom',
+      alert: '已连续失败 3 次：boom；已停止自动重试，请检查任务后再手动执行',
+      runCount: 3,
+    }],
+    create: () => ({}),
+    remove: () => false,
+    window: () => null,
+    withinWindow: () => true,
+    nextWindowStart: () => null,
+  };
+  const r = await executeScheduleTool('schedule_list', {}, bridge, 'sess_1', () => {});
+  const out = String(r?.output ?? '');
+  check('列表里带上了失败告警', /已连续失败 3 次/.test(out), out.slice(0, 300));
+  check('并且说清已经不再自动重试（不是含糊的「上次失败」）', /已停止自动重试/.test(out), out.slice(0, 300));
+}
+
 console.log('\n=== 非调度工具名不被接管 ===');
 {
   const f = fakeBridge();

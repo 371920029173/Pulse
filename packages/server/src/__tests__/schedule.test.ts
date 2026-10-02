@@ -22,7 +22,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   ScheduleStore, Scheduler, withinWindow, nextWindowStart, minutesUntilWindowEnd,
-  validateTask, describeNextRun,
+  validateTask, describeNextRun, failureAlert, retryBackoffMs, MAX_AUTO_RETRIES,
+  TaskNotRetryableError,
   type ScheduledTask, type WorkingWindow,
 } from '../schedule.js';
 
@@ -494,5 +495,182 @@ describe('下次运行说明', () => {
 
   it('每日任务报告时间', () => {
     assert.match(describeNextRun(task({}), null, at(1, 3)), /每天 09:00/);
+  });
+});
+
+// ─── 失败重试与告警（第四轮 8b） ───
+
+/*
+ * 「失败」在列表里原来只有一档：`lastStatus: 'error'`。偶发一次（重试已经在排队）和一直失败
+ * （重试已经放弃）看起来一模一样，而后者才是要用户动手的。这一段钉住两件事：失败后有界重试、
+ * 以及这条区别被说出来。
+ */
+describe('失败重试与告警', () => {
+  /*
+   * 触发间隔取一天：初次必然到点（没有 lastStart 时 interval 视为到点），而失败之后它的触发器
+   * 当天不会再到点 —— 所以第二次执行**只可能**来自重试。用「每天 23:00」之类的触发反而证明不了
+   * 这一点：中午 12 点它压根不会跑第一次。
+   */
+  const SPARSE = { kind: 'interval', everyMinutes: 1440 } as const;
+
+  it('退避随失败次数增长，超过表长按最后一档封顶', () => {
+    assert.equal(retryBackoffMs(1), 60_000);
+    assert.equal(retryBackoffMs(2), 300_000);
+    assert.equal(retryBackoffMs(9), 300_000);
+  });
+
+  it('失败后排定重试，到点才真的再跑（触发器本身并不到点）', async () => {
+    const h = harness([spec({ id: 'j1', trigger: SPARSE })]);
+    h.setFailure(new Error('boom'));
+    await h.scheduler.tick();
+    await settle();
+    assert.deepEqual(h.runs, ['j1']);
+
+    const t1 = h.store.get('j1')!;
+    assert.equal(t1.lastStatus, 'error');
+    assert.equal(t1.consecutiveFailures, 1);
+    assert.ok(t1.retryAt, '失败后应当排定重试');
+    assert.equal(
+      new Date(t1.retryAt!).getTime() - new Date(t1.lastFinishedAt!).getTime(),
+      retryBackoffMs(1),
+    );
+    assert.match(failureAlert(t1)!, /已连续失败 1 次/);
+    assert.match(failureAlert(t1)!, /自动重试/);
+    assert.match(describeNextRun(t1, null, at(1, 12)), /自动重试/);
+
+    // 差一秒：不该跑。触发器当天也不会到点，所以这一次执行只可能来自重试。
+    h.setNow(new Date(new Date(t1.retryAt!).getTime() - 1000));
+    await h.scheduler.tick();
+    await settle();
+    assert.deepEqual(h.runs, ['j1'], '重试未到点不应执行');
+
+    h.setNow(new Date(new Date(t1.retryAt!).getTime() + 1000));
+    await h.scheduler.tick();
+    await settle();
+    assert.deepEqual(h.runs, ['j1', 'j1'], '到点后应当自动重试');
+
+    const t2 = h.store.get('j1')!;
+    assert.equal(t2.consecutiveFailures, 2);
+    assert.equal(
+      new Date(t2.retryAt!).getTime() - new Date(t2.lastFinishedAt!).getTime(),
+      retryBackoffMs(2),
+      '第二次失败要用更长的退避，否则等于原地重试',
+    );
+  });
+
+  it('连续失败超过上限后停止重试，并明确说是「停止」而不是「又失败了」', async () => {
+    const h = harness([spec({ id: 'j1', trigger: SPARSE })]);
+    h.setFailure(new Error('boom'));
+    for (let i = 0; i <= MAX_AUTO_RETRIES; i++) {
+      await h.scheduler.tick();
+      await settle();
+      const t = h.store.get('j1')!;
+      if (t.retryAt) h.setNow(new Date(new Date(t.retryAt).getTime() + 1000));
+    }
+    const t = h.store.get('j1')!;
+    assert.equal(t.consecutiveFailures, MAX_AUTO_RETRIES + 1);
+    assert.equal(t.retryAt, undefined, '超过上限不应再留下待重试');
+    assert.match(failureAlert(t)!, /已停止自动重试/);
+    assert.equal(describeNextRun(t, null, at(1, 12)), '已停止自动重试（连续失败）');
+
+    const before = h.runs.length;
+    await h.scheduler.tick();
+    await settle();
+    assert.equal(h.runs.length, before, '停止后不应再自动执行');
+  });
+
+  it('成功一次就把连续失败清零，告警消失', async () => {
+    const h = harness([spec({ id: 'j1', trigger: SPARSE })]);
+    h.setFailure(new Error('boom'));
+    await h.scheduler.tick();
+    await settle();
+    const t1 = h.store.get('j1')!;
+    assert.equal(t1.consecutiveFailures, 1);
+
+    h.setNow(new Date(new Date(t1.retryAt!).getTime() + 1000));
+    h.setFailure(null);
+    await h.scheduler.tick();
+    await settle();
+    const t2 = h.store.get('j1')!;
+    assert.equal(t2.lastStatus, 'ok');
+    assert.equal(t2.consecutiveFailures, undefined, '成功应当清零，否则告警永远挂着');
+    assert.equal(t2.retryAt, undefined);
+    assert.equal(failureAlert(t2), null);
+  });
+
+  it('重试不能绕过工作窗口：窗口外照样顺延', async () => {
+    const h = harness([spec({ id: 'j1', trigger: SPARSE })]);
+    h.setFailure(new Error('boom'));
+    await h.scheduler.tick();
+    await settle();
+    const t1 = h.store.get('j1')!;
+
+    h.setNow(new Date(new Date(t1.retryAt!).getTime() + 1000));
+    h.setWindow({ start: '01:00', end: '02:00' }); // 12:01 不在其中
+    await h.scheduler.tick();
+    await settle();
+    assert.deepEqual(h.runs, ['j1'], '窗口外的重试不应执行（否则重试成了后门）');
+    assert.match(h.store.get('j1')!.lastDeferredReason ?? '', /顺延|时间段/);
+  });
+
+  it('一次性任务失败后停用，且不留下一个不会发生的重试', async () => {
+    const h = harness([spec({ id: 'j1', trigger: { kind: 'once', at: at(1, 11).toISOString() } })]);
+    h.setFailure(new Error('boom'));
+    await h.scheduler.tick();
+    await settle();
+    const t = h.store.get('j1')!;
+    assert.equal(t.enabled, false);
+    assert.equal(t.retryAt, undefined);
+    assert.equal(t.consecutiveFailures, 1);
+    assert.match(failureAlert(t)!, /任务已停用/);
+  });
+
+  /*
+   * 用户刚按了停止的任务不该被自动重开：那等于让 agent 去做它刚被叫停的事。区别只能由抛出的
+   * 错误**类型**带过来（调度器读不到原因的语义），所以这里断言两件事：失败仍然被记录，重试没有。
+   */
+  it('调用方说「重试没用」时不排重试，但失败照记（用户按停止 / 撞了上限）', async () => {
+    const h = harness([spec({ id: 'j1', trigger: SPARSE })]);
+    h.setFailure(new TaskNotRetryableError('这一轮没有完成（aborted）：用户中止'));
+    await h.scheduler.tick();
+    await settle();
+
+    const t = h.store.get('j1')!;
+    assert.equal(t.lastStatus, 'error', '没跑成的任务不能记成 ok');
+    assert.equal(t.consecutiveFailures, 1, '连败要计数，否则「一直失败」又看不见了');
+    assert.match(t.lastError ?? '', /aborted/);
+    assert.equal(t.retryAt, undefined, '明知重试没用就不该排重试');
+    assert.doesNotMatch(failureAlert(t)!, /自动重试/);
+
+    // 一小时后再 tick：重试（若排了，1 分钟后就该到点）会跑，而触发器离 24h 还差得远。
+    h.setNow(at(1, 13));
+    await h.scheduler.tick();
+    await settle();
+    assert.deepEqual(h.runs, ['j1'], '不排重试就不该有第二次自动执行');
+  });
+
+  it('普通的失败（比如接口连不上）仍然照排重试 —— 上一条不是「永远不重试」', async () => {
+    const h = harness([spec({ id: 'j1', trigger: SPARSE })]);
+    h.setFailure(new Error('这一轮没有完成（turn_failed）：连接被拒绝'));
+    await h.scheduler.tick();
+    await settle();
+    assert.ok(h.store.get('j1')!.retryAt, '环境型失败要给重试机会');
+  });
+
+  it('连续失败与重试时刻会落盘，重启后仍然看得见', () => {
+    const s = store();
+    const t = s.create({
+      name: 'x', prompt: 'p', trigger: { kind: 'daily', at: '09:00' }, enabled: true, overlap: 'skip',
+    });
+    s.recordRun(t.id, {
+      consecutiveFailures: 2,
+      retryAt: '2026-09-14T04:05:00.000Z',
+      lastError: 'boom',
+      lastStatus: 'error',
+    });
+    const reloaded = store();
+    assert.equal(reloaded.get(t.id)?.consecutiveFailures, 2);
+    assert.equal(reloaded.get(t.id)?.retryAt, '2026-09-14T04:05:00.000Z');
+    assert.match(failureAlert(reloaded.get(t.id)!)!, /已连续失败 2 次/);
   });
 });

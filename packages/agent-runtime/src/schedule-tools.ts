@@ -27,6 +27,11 @@ export interface ScheduledTaskView {
   nextRun?: string;
   lastStatus?: string;
   lastError?: string;
+  /**
+   * One line when the task needs attention — a failure streak, whether a retry is queued, or
+   * whether retrying was given up. Present only when there is something to say.
+   */
+  alert?: string;
   runCount: number;
 }
 
@@ -277,6 +282,9 @@ export async function executeScheduleTool(
           ];
           if (t.nextRun) bits.push(`下次：${t.nextRun}`);
           if (t.deferredReason) bits.push(`⚠ ${t.deferredReason}`);
+          // Printed before the raw status line: "连续失败 3 次，已停止自动重试" is the actionable
+          // fact, and the bare `lastStatus: error` below does not carry it (第四轮 8b).
+          if (t.alert) bits.push(`⚠ ${t.alert}`);
           if (t.lastStatus) bits.push(`上次：${t.lastStatus}${t.lastError ? ` — ${t.lastError}` : ''}`);
           return `- ${bits.join(' ; ')}`;
         });

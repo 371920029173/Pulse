@@ -14,7 +14,8 @@
  *      WORKSPACE's plan has unfinished steps — naming them.
  *   3. The plan is the workspace's, not the conversation's: an unfinished plan in another
  *      workspace neither blocks a delivery here nor gets claimed by it, while one left open by
- *      another conversation in the SAME project does — and closing it honestly (done, or dropped
+ *      another conversation in the SAME project does — and so does a second plan in this one,
+ *      since nothing stops a second being created. Closing them honestly (done, or dropped
  *      with a reason) is what lets the delivery through.
  *   4. The artifact on disk says what the tool said, including what is still outstanding.
  *   5. `kind=report` is unchanged, so an analysis document is not forced through a delivery form.
@@ -85,6 +86,29 @@ console.log('1. 交付模板：结论和证据不是可选项');
   const emptyEvidence = await deliver(tools, { kind: 'delivery', title: 'T', status: 'done', conclusion, evidence: [] });
   check('evidence 是空数组也被拒绝（空证据 = 断言）', emptyEvidence.out.startsWith('Error: '), emptyEvidence.out);
 
+  /*
+   * 第四轮 7a：原来只校验「非空」，于是 `["done"]` 满足全部规则 —— 那一节的全部意义就是让结论
+   * 可以被推翻，却能被结论自己填满。这里钉住「非空 ≠ 有内容」，并确认拒绝会点名是哪一条。
+   */
+  const placeholder = await deliver(tools, {
+    kind: 'delivery', title: 'T', status: 'done', conclusion, evidence: [conclusion],
+  });
+  check('证据只是把结论说一遍（原样抄 conclusion）会被拒绝', placeholder.out.startsWith('Error: '), placeholder.out);
+  check('拒绝里点名了那条假证据', /无法核对|只是把结论/.test(placeholder.out), placeholder.out);
+  check('归为参数错误（模型能改）', kindOf(placeholder.out) === 'invalid_args', kindOf(placeholder.out));
+
+  for (const thin of ['done', '已完成', 'ok', '没问题', '状态: 完成']) {
+    const out = await deliver(tools, { kind: 'delivery', title: 'T', status: 'done', conclusion, evidence: [thin] });
+    check(`占位证据「${thin}」被拒绝`, out.out.startsWith('Error: '), out.out);
+  }
+
+  const mixed = await deliver(tools, {
+    kind: 'delivery', title: 'T', status: 'done', conclusion,
+    evidence: ['shell: pnpm test → exit code: 0', 'done'],
+  });
+  check('混着一条真的和一条假的，整单还是会被拒绝（不是只看第一条）', mixed.out.startsWith('Error: '), mixed.out);
+  check('并且点名的是那条假的', /"done"/.test(mixed.out), mixed.out);
+
   const fullNoLists = await deliver(tools, { kind: 'delivery', title: 'T', status: 'done', mode: 'full', conclusion, evidence });
   check('详版必须显式给出 assumptions 和 risks', /assumptions/.test(fullNoLists.out) && fullNoLists.out.startsWith('Error: '), fullNoLists.out);
   check('归为参数错误', kindOf(fullNoLists.out) === 'invalid_args', kindOf(fullNoLists.out));
@@ -93,6 +117,16 @@ console.log('1. 交付模板：结论和证据不是可选项');
   check('写错的 kind 会被拒绝，而不是悄悄当 report', badKind.out.startsWith('Error: '), badKind.out);
 
   check('被拒绝时不会留下半个文件', reports().length === before, reports().join(', '));
+
+  /*
+   * 控制组：门槛不是「必须写命令」。一条 file:line、一个文件名，都是读者能自己去查的东西，
+   * 必须放行 —— 否则规则会退化成「照我写的格式写」，模型只会学着凑格式。
+   */
+  const locOnly = await deliver(tools, {
+    kind: 'delivery', title: '定位型证据', status: 'done', conclusion,
+    evidence: ['packages/server/src/index.ts:975 短路了策略检查', '读了 config.ts 里的默认值'],
+  });
+  check('file:line / 文件名就算证据（不要求必须有命令输出）', !locOnly.out.startsWith('Error: '), locOnly.out);
 }
 
 console.log('\n2. 未确认不标完成');
@@ -182,6 +216,31 @@ console.log('\n3. 别的工作区的计划不拦；同一项目里别人留下�
   await call(tools, 'plan_update', { step_id: 's2', status: 'done' });
   const after = await deliver(tools, { kind: 'delivery', title: '收口后', status: 'done', conclusion, evidence });
   check('把步骤收口（dropped 带理由 + done）之后 done 通过', !after.out.startsWith('Error: '), after.out);
+
+  /*
+   * 6a：`plan_create` 不拦第二份计划，所以「还没做完」的账必须按**所有** open 计划算。
+   *
+   * 只算最近动过的那一份时，回执里那句「还没做完的步骤」对一份计划是真的、对另一份只字不提 ——
+   * 而读到它的人会以为这就是全部。步骤 id（s1/s2）在各份计划里本来就重复，所以拒绝与产物都带
+   * 计划名，否则读者不知道该去哪份里收口。
+   */
+  await toolsFor('sess-two-a').execute('plan_create', { title: '第一件没做完的活', steps: ['备份'] });
+  await toolsFor('sess-two-b').execute('plan_create', { title: '第二件没做完的活', steps: ['起服务'] });
+
+  const two = await deliver(tools, { kind: 'delivery', title: '两份都开着', status: 'done', conclusion, evidence });
+  check('【关键】两份未收口计划都会拦住 done（不是只看最近动过的那份）', two.out.startsWith('Error: '), two.out);
+  check('拒绝里两份计划都点名',
+    /第一件没做完的活/.test(two.out) && /第二件没做完的活/.test(two.out), two.out);
+
+  const partialTwo = await deliver(tools, {
+    kind: 'delivery', title: '两份都开着但要交', status: 'partial', conclusion, evidence,
+    open: ['两份计划都没做完'],
+  });
+  check('同一件事写成 partial 能交', !partialTwo.out.startsWith('Error: '), partialTwo.out);
+  check('产物里两份计划的未完成步骤都列了出来，各带计划名',
+    /第一件没做完的活 · s1 备份 \[active\]/.test(partialTwo.text)
+    && /第二件没做完的活 · s1 起服务 \[active\]/.test(partialTwo.text),
+    partialTwo.text.slice(-500));
 }
 
 console.log('\n4. 简版 / 详版：区别在「有没有想过」，不在字数');
@@ -235,6 +294,7 @@ console.log('\n6. 提示词里写了这套交付规则');
     /conclusion/.test(prompt) && /evidence/.test(prompt) && /assumptions/.test(prompt)
     && /risks/.test(prompt) && /open questions/.test(prompt), null);
   check('提示词写明「未验证的不能算 done」', /Not verified is not \`done\`/.test(prompt), null);
+  check('提示词写明证据会被查内容、不只是查非空', /checked for substance/.test(prompt), null);
   check('提示词写明简版/详版的取舍', /mode: "brief"/.test(prompt) && /mode: "full"/.test(prompt), null);
   check('提示词区分 delivery 与 report', /kind: "report"/.test(prompt), null);
   /*

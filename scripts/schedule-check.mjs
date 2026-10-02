@@ -206,6 +206,12 @@ try {
 
     // The model endpoint is a closed port, so the run will fail; what matters is
     // that the failure is recorded rather than swallowed.
+    //
+    // Note this failure does NOT throw out of the turn: `chat()` turns a provider
+    // error into a normal-looking reply so the transcript stays usable. That is
+    // exactly the case a headless run has to read correctly, so this also pins
+    // "a failed turn counts as a failed run" rather than "the API was unreachable
+    // and the schedule said ok".
     await sleep(3000);
     const after = await api('/api/schedule');
     const t = (after.body?.tasks ?? []).find((x) => x.id === taskId);
@@ -213,6 +219,29 @@ try {
       !!t && ['ok', 'error', 'running'].includes(t.lastStatus), `lastStatus=${t?.lastStatus}`);
     // A failed run must release the flag, or the task would never run again.
     check('失败后不残留运行标记', t?.running !== true, `running=${t?.running}`);
+
+    /*
+     * 第四轮 8b：一次失败和一直失败原来长得一样（都只是 `lastStatus: 'error'`），而后者才是要
+     * 用户动手的。这里钉住三件事：连败被计数、失败后有界重试被排定、以及这条信息真的出现在接口上
+     * （面板与智能体读的是同一个字段）。
+     */
+    check('前提：这一轮真的失败了（端点关着），否则下面几条是空转',
+      t?.lastStatus === 'error', `lastStatus=${t?.lastStatus}`);
+    check('失败被计数（不是只有一档 lastStatus）', (t?.consecutiveFailures ?? 0) >= 1,
+      `consecutiveFailures=${t?.consecutiveFailures}`);
+    check('失败原因是这一轮真的没完成，而不是笼统的「失败」',
+      /没有完成/.test(String(t?.lastError ?? '')), `lastError=${t?.lastError}`);
+    check('【关键】失败后排定了自动重试，且在将来',
+      typeof t?.retryAt === 'string' && new Date(t.retryAt).getTime() > Date.now(),
+      `retryAt=${t?.retryAt}`);
+    check('【关键】接口给出了要用户看的告警（连续几次 + 会不会重试）',
+      typeof t?.alert === 'string' && /连续失败/.test(t.alert) && /重试/.test(t.alert),
+      `alert=${t?.alert}`);
+    check('告警也汇总在顶层，面板不用自己再算一遍',
+      Array.isArray(after.body?.alerts) && after.body.alerts.some((a) => a.id === taskId),
+      JSON.stringify(after.body?.alerts));
+    check('下次运行说明优先说重试，而不是「每天 23:59」',
+      /重试/.test(String(t?.nextRun ?? '')), `nextRun=${t?.nextRun}`);
   }
 
   await shutdown();
@@ -238,6 +267,46 @@ try {
       check('窗口外手动执行被拒（409 而不是静默执行）', run.status === 409, `status=${run.status}`);
       check('拒绝理由说明这是「顺延」而不是「不能跑」',
         /顺延|时间段/.test(JSON.stringify(run.body ?? {})), JSON.stringify(run.body));
+    }
+  }
+
+  await shutdown();
+
+  // ── 6b. A window that wraps midnight is ONE continuous period (第四轮 8c) ──
+  /*
+   * 22:00–06:00 是 end < start，最容易被当成空区间 —— 那会让整晚每次到点都被判成"窗口外"。
+   * 这一段不依赖"现在几点"：先按跨夜规则算出正确答案，再要求服务端给出同一个答案。三条判据分别
+   * 钉住"窗口非空"、"窗口外会顺延"、以及最容易错的那一步："下次开窗"是**当天** 22:00，不是 24
+   * 小时以后。
+   */
+  {
+    writeEnv(['SHE_SCHEDULE_WINDOW=22:00-06:00']);
+    if (!await boot()) throw new Error('跨夜窗口启动失败');
+
+    const s = await api('/api/schedule');
+    const w = s.body?.workingWindow;
+    check('跨夜窗口被读成 start/end，而不是被当成非法值丢掉',
+      w?.start === '22:00' && w?.end === '06:00', JSON.stringify(w));
+
+    const pad = (n) => String(n).padStart(2, '0');
+    const hhmm = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const inOvernight = (d) => {
+      const m = d.getHours() * 60 + d.getMinutes();
+      return m >= 22 * 60 || m < 6 * 60;
+    };
+    const now = new Date();
+    check('「现在是否在窗口内」与跨夜规则一致（空区间会把它判成永远为假）',
+      s.body?.withinWindow === inOvernight(now),
+      `now=${hhmm(now)} withinWindow=${s.body?.withinWindow} 期望=${inOvernight(now)}`);
+
+    const next = s.body?.nextWindowStart ? new Date(s.body.nextWindowStart) : null;
+    if (s.body?.withinWindow) {
+      check('窗口内：给出的时刻仍在窗口内（这一段没有被从中间截断）',
+        next !== null && inOvernight(next), `nextWindowStart=${s.body?.nextWindowStart}`);
+    } else {
+      check('窗口外：下一次开窗是当天的 22:00，不是 24 小时以后',
+        next !== null && hhmm(next) === '22:00' && next.getDate() === now.getDate(),
+        `next=${next?.toLocaleString()} now=${now.toLocaleString()}`);
     }
   }
 

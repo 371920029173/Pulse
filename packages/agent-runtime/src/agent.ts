@@ -2256,6 +2256,23 @@ export class Agent {
     return this.turnActive;
   }
 
+  /**
+   * Why the last finished turn failed, or null when it completed.
+   *
+   * `chat()` deliberately does not throw on a provider error — it returns a normal-looking
+   * message and leaves the transcript usable, so the user can just say "continue". That is right
+   * for a chat and wrong for a caller that has no user watching: a headless run (a scheduled
+   * task) that reads only the returned message cannot tell "the API was unreachable" from "the
+   * job ran", so it recorded a failure as success and `consecutiveFailures`/retry/alert — the
+   * machinery built for exactly this — could never fire for the most common failure of all.
+   *
+   * Cleared at the start of every turn (`beginRun`), so this always describes the turn that just
+   * finished.
+   */
+  lastRunFailure(): { reason: string; text?: string } | null {
+    return this.runFailure ? { ...this.runFailure } : null;
+  }
+
   async confirmTool(
     ticketId: string,
     onChunk?: (chunk: StreamChunk) => void,

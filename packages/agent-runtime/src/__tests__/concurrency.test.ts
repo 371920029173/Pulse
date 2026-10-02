@@ -229,6 +229,14 @@ describe('同一会话的并发', () => {
     const reply = await agent.chat('你好');
     assert.match(String(reply.content), /这一轮没有完成/);
     assert.equal(agent.isRunning(), false);
+    /*
+     * A failed turn RETURNS a normal message, so a caller with no user watching could not tell it
+     * from a completed one — which is how a scheduled task reported `ok` for a night of provider
+     * errors. `lastRunFailure()` is the signal that fixes that, and it has to survive the turn
+     * (i.e. still be readable after `chat` resolves).
+     */
+    assert.equal(agent.lastRunFailure()?.reason, 'turn_failed',
+      '失败的一轮必须在跑完之后仍然可查，否则无头调用分不出「跑完了」和「没跑成」');
     const disk = agent.historyForDisk();
     const last = disk[disk.length - 1];
     assert.equal(last.role, 'assistant');
@@ -236,6 +244,8 @@ describe('同一会话的并发', () => {
     (agent as unknown as { provider: LLMProvider }).provider = new EchoProvider();
     const next = await agent.chat('再试');
     assert.match(String(next.content), /再试/);
+    // A turn that finished clears it — otherwise one bad night would mark every later run failed.
+    assert.equal(agent.lastRunFailure(), null, '成功的一轮应当清掉上一次的失败标记');
   });
 
   it('补充消息不会插进尚未结束的工具调用中间', async () => {

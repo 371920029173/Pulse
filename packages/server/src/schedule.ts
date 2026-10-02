@@ -47,6 +47,18 @@ export type ScheduleTrigger =
 
 export type RunStatus = 'ok' | 'error' | 'deferred' | 'skipped' | 'running';
 
+/**
+ * How many automatic retries a failing task gets before retrying is stopped.
+ *
+ * Bounded on purpose: an unbounded retry on a task that fails for a reason retrying cannot fix
+ * (a missing file, a bad prompt) is a way to spend a night of tokens on the same error. Two is
+ * enough to ride out a transient failure and few enough that the worst case stays cheap.
+ */
+export const MAX_AUTO_RETRIES = 2;
+
+/** Minutes to wait before retry N (1-based). A flat one-minute retry would hammer the same wall. */
+export const RETRY_BACKOFF_MINUTES = [1, 5];
+
 export interface ScheduledTask {
   id: string;
   name: string;
@@ -78,6 +90,21 @@ export interface ScheduledTask {
   lastDurationMs?: number;
   /** Set when the last run exceeded `softLimitMinutes`; cleared on the next run. */
   lastOverran?: boolean;
+  /**
+   * Failed runs since the last success, reset to 0 by a successful run.
+   *
+   * Recorded because one failure is an incident and five is a broken task: without a streak the
+   * list is identical in both cases (`lastStatus: 'error'`), so "it keeps failing" — the thing a
+   * user actually needs to act on — was invisible (第四轮 8b).
+   */
+  consecutiveFailures?: number;
+  /**
+   * When the automatic retry is due, if one is scheduled.
+   *
+   * Absent means no retry is pending: either the last run succeeded, the task is disabled, or the
+   * streak passed `MAX_AUTO_RETRIES` and retrying was stopped on purpose.
+   */
+  retryAt?: string;
   /** True while a run is in flight. Not persisted across restarts, by design. */
   running?: boolean;
   runCount: number;
@@ -125,6 +152,46 @@ function isDue(task: ScheduledTask, now: Date, lastStart: Date | null): boolean 
 /** Has a once-task's own trigger already fired? (Manual runs do not count.) */
 function onceFired(task: ScheduledTask): boolean {
   return task.firedOnce ?? task.runCount > 0;
+}
+
+/** How long to wait before the retry that follows `failures` consecutive failures. */
+export function retryBackoffMs(failures: number): number {
+  const idx = Math.max(0, Math.min(failures - 1, RETRY_BACKOFF_MINUTES.length - 1));
+  return RETRY_BACKOFF_MINUTES[idx] * 60_000;
+}
+
+/**
+ * Is a scheduled automatic retry due?
+ *
+ * Deliberately not folded into `isDue`: a retry overrides the TRIGGER (the daily task that failed
+ * at 09:00 must not wait until tomorrow), but it is still a normal start — it goes through the
+ * window check and the busy check exactly like a scheduled one.
+ */
+export function retryDue(task: ScheduledTask, now: Date): boolean {
+  if (!task.enabled || !task.retryAt || task.running) return false;
+  const at = new Date(task.retryAt);
+  return Number.isFinite(at.getTime()) && now.getTime() >= at.getTime();
+}
+
+/**
+ * A sentence for the user when a task keeps failing, or null when there is nothing to say.
+ *
+ * The point of the streak is this line: `lastStatus: 'error'` alone cannot distinguish "failed once,
+ * a retry is already queued" from "failed five times and will keep failing". Whether a retry is
+ * pending, and whether retrying has been given up, are the two facts the reader needs.
+ */
+export function failureAlert(task: ScheduledTask): string | null {
+  const n = task.consecutiveFailures ?? 0;
+  if (n <= 0) return null;
+  const why = task.lastError ? `：${task.lastError}` : '';
+  if (!task.enabled) return `已连续失败 ${n} 次${why}；任务已停用`;
+  if (task.retryAt) {
+    return `已连续失败 ${n} 次${why}；将于 ${new Date(task.retryAt).toLocaleString()} 自动重试（第 ${n} 次失败后）`;
+  }
+  if (n > MAX_AUTO_RETRIES) {
+    return `已连续失败 ${n} 次${why}；已停止自动重试，请检查任务后再手动执行`;
+  }
+  return `已连续失败 ${n} 次${why}`;
 }
 
 /** Finished one-shot tasks older than this are pruned from the list. */
@@ -258,6 +325,8 @@ function normalizeScheduleFile(raw: ScheduleFile): ScheduleFile {
       lastDeferredReason: t.lastDeferredReason,
       lastDurationMs: t.lastDurationMs,
       lastOverran: t.lastOverran,
+      consecutiveFailures: Number.isFinite(t.consecutiveFailures) ? Number(t.consecutiveFailures) : undefined,
+      retryAt: typeof t.retryAt === 'string' ? t.retryAt : undefined,
       runCount: Number.isFinite(t.runCount) ? Number(t.runCount) : 0,
       createdAt: typeof t.createdAt === 'string' ? t.createdAt : new Date().toISOString(),
       updatedAt: typeof t.updatedAt === 'string' ? t.updatedAt : new Date().toISOString(),
@@ -396,6 +465,22 @@ export class SessionBusyError extends Error {
   constructor(message = '目标会话正在进行一轮对话') {
     super(message);
     this.name = 'SessionBusyError';
+  }
+}
+
+/**
+ * A failure the runner knows retrying cannot fix.
+ *
+ * The automatic retry exists for failures that may clear on their own — a provider blip, a busy
+ * port. It must not apply to a run that was stopped ON PURPOSE: restarting a task the user just
+ * aborted is the agent doing the thing it was told to stop, and a budget or tool-call ceiling hit
+ * again in the next run is the same wall. The run is still recorded as a failure (it did not
+ * deliver, and that has to be visible); only the retry is skipped.
+ */
+export class TaskNotRetryableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TaskNotRetryableError';
   }
 }
 
@@ -538,7 +623,13 @@ export class Scheduler {
 
         const wasQueued = this.queued.has(task.id);
         const lastStart = task.lastStartedAt ? new Date(task.lastStartedAt) : null;
-        if (!wasQueued && !isDue(task, now, lastStart)) continue;
+        /*
+         * A pending retry overrides the trigger: the daily task that failed at 09:00 must be
+         * retried now, not tomorrow. It is not a separate path — it still goes through the window
+         * and busy checks below, so a retry outside the working window is deferred like any other
+         * start rather than becoming a hole in the boundary.
+         */
+        if (!wasQueued && !retryDue(task, now) && !isDue(task, now, lastStart)) continue;
 
         // Window check happens only at START time, and a blocked start is
         // deferred rather than lost.
@@ -595,9 +686,15 @@ export class Scheduler {
 
     let error: string | undefined;
     let requeued = false;
+    /*
+     * Whether a retry is worth scheduling. Set from the error TYPE rather than its message: the
+     * runner knows things the scheduler cannot read out of a string (see `TaskNotRetryableError`).
+     */
+    let retryable = true;
     try {
       await this.deps.run(task);
     } catch (err) {
+      if (err instanceof TaskNotRetryableError) retryable = false;
       if (err instanceof SessionBusyError) {
         /*
          * Lost the race: the conversation became busy between the check and the start.
@@ -618,6 +715,28 @@ export class Scheduler {
       const limitMs = task.softLimitMinutes ? task.softLimitMinutes * 60_000 : null;
       const overran = limitMs !== null && durationMs > limitMs;
       this.inFlight.delete(task.id);
+      const previousFailures = this.deps.store.get(task.id)?.consecutiveFailures ?? 0;
+      const failures = error ? previousFailures + 1 : 0;
+      /*
+       * A once-task disables itself after its OWN trigger fired. A manual run leaves the
+       * scheduled fire intact (and pins `firedOnce` so the bumped runCount is not misread).
+       */
+      const oncePatch = task.trigger.kind === 'once'
+        ? (manual ? { firedOnce: onceFired(task) } : { enabled: false, firedOnce: true })
+        : {};
+      /*
+       * A failing task gets a bounded number of automatic retries, with backoff, and the schedule
+       * says so out loud (第四轮 8b). Two things are being bought: a transient failure — a busy
+       * provider, a flaky command — does not need the user, and a PERMANENT one stops instead of
+       * retrying all night. After `MAX_AUTO_RETRIES` the alert says retrying was given up, which
+       * is a different message from "it failed once".
+       *
+       * No retry is scheduled for a task that is about to be disabled: a pending `retryAt` on a
+       * stopped task would read as "it will try again" when nothing will.
+       */
+      const retryAt = error && retryable && oncePatch.enabled !== false && failures <= MAX_AUTO_RETRIES
+        ? new Date(finishedAt.getTime() + retryBackoffMs(failures)).toISOString()
+        : undefined;
       this.deps.store.recordRun(task.id, {
         lastStatus: error ? 'error' : 'ok',
         running: false,
@@ -625,13 +744,20 @@ export class Scheduler {
         lastDurationMs: durationMs,
         lastError: error,
         lastOverran: overran,
+        consecutiveFailures: failures || undefined,
+        retryAt,
         runCount: (this.deps.store.get(task.id)?.runCount ?? 0) + 1,
-        // A once-task disables itself after its OWN trigger fired. A manual run leaves the
-        // scheduled fire intact (and pins `firedOnce` so the bumped runCount is not misread).
-        ...(task.trigger.kind === 'once'
-          ? (manual ? { firedOnce: onceFired(task) } : { enabled: false, firedOnce: true })
-          : {}),
+        ...oncePatch,
       });
+      if (retryAt) {
+        log.warn(
+          `任务「${task.name}」第 ${failures} 次失败，将于 ${new Date(retryAt).toLocaleString()} 自动重试`,
+        );
+      } else if (error && failures > MAX_AUTO_RETRIES) {
+        log.error(
+          `任务「${task.name}」已连续失败 ${failures} 次，停止自动重试。最后一次的失败原因: ${error}`,
+        );
+      }
 
       /*
        * Reported, never enforced. Stopping a run because it "should" have finished
@@ -664,6 +790,18 @@ export class Scheduler {
 /** A human-readable summary of when a task next becomes eligible to start. */
 export function describeNextRun(task: ScheduledTask, window: WorkingWindow | null, now = new Date()): string {
   if (!task.enabled) return '已停用';
+  /*
+   * A pending retry is the next thing that will actually happen, so that is what is stated.
+   * "每天 09:00" would be true and useless here: the reader needs to know the last run failed
+   * and a retry is already queued (第四轮 8b).
+   */
+  if (task.retryAt) {
+    const at = new Date(task.retryAt);
+    if (Number.isFinite(at.getTime())) {
+      return at.getTime() > now.getTime() ? `失败后自动重试 ${at.toLocaleString()}` : '即将自动重试';
+    }
+  }
+  if ((task.consecutiveFailures ?? 0) > MAX_AUTO_RETRIES) return '已停止自动重试（连续失败）';
   const lastStart = task.lastStartedAt ? new Date(task.lastStartedAt) : null;
   if (isDue(task, now, lastStart)) {
     if (withinWindow(now, window)) return '即将执行';

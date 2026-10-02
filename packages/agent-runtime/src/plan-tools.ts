@@ -296,6 +296,20 @@ export class PlanStore {
   }
 
   /**
+   * Every plan still open in this scope, newest first.
+   *
+   * `active()` answers "where was I?" and has to give ONE answer. This answers "is anything in
+   * this scope unfinished?", where one is the wrong number: nothing stops a second plan being
+   * created in the same workspace (`plan_create` pushes), and the prompt calls the leftover one
+   * out. Accounting for unfinished work through `active()` alone therefore reported only the
+   * newest open plan — a delivery's "what is still outstanding" list was true about one plan and
+   * silent about the rest (第四轮 6a).
+   */
+  openPlans(): Plan[] {
+    return this.list().filter((p) => p.status === 'open');
+  }
+
+  /**
    * The step to hand to the agent when this plan is resumed.
    *
    * Kept in the store rather than derived by the caller because "where was I?" has to be the
@@ -632,6 +646,43 @@ const STATUS_LABEL: Record<'done' | 'partial' | 'needs_confirmation' | 'blocked'
 function listLines(items: string[], empty: string): string[] {
   if (!items.length) return [empty];
   return items.map((i) => (i.startsWith('- ') ? i : `- ${i}`));
+}
+
+/**
+ * A line that is nothing but the claim, however it is spelled.
+ *
+ * Anchored whole-line on purpose: "done" is an assertion, but "done: 12/12 specs pass" is
+ * evidence, and a rule that rejected any line mentioning the word would teach the model to avoid
+ * the word rather than to bring the output.
+ */
+const EVIDENCE_ASSERTION_ONLY =
+  /^(done|ok|okay|yes|no|pass|passed|success|successful|fixed|works|working|tested|verified|confirmed|sure|good|finish(ed)?|complete[d]?|n\/?a|none|无|好|好了|完成|已完成|搞定了?|通过|成功了?|已修复|已改好|已验证|已确认|已测试|没问题|正常|可以)$/i;
+
+/**
+ * Something observed rather than asserted: a location, a number, or quoted output.
+ *
+ * Deliberately generous — it is written by a model free to phrase evidence however it likes, and
+ * a false rejection costs a round trip. Everything it refuses shares one property: the reader
+ * cannot go and check it, because it does not point at anything. Note there is no bare-colon
+ * signal: `状态: 完成` is an assertion wearing a field name, and accepting it would reopen the
+ * hole this closes.
+ */
+const EVIDENCE_SIGNAL =
+  /(\d|`|→|->|=>|\bexit\b|\bcode\b|\bstdout\b|\bstderr\b|\blogs?\b|\btests?\b|\bspecs?\b|\.(ts|tsx|js|mjs|cjs|json|md|sql|css|html|py|yml|yaml|toml|sh|ps1)\b|日志|输出|命令|测试|报错|行号|退出码)/i;
+
+/**
+ * Does this line name something a reader could check?
+ *
+ * 第四轮 7a: evidence was validated as "not empty". Non-empty is not the same as substantive —
+ * `["done"]` passed every rule, so the one section that exists to make a conclusion falsifiable
+ * could be filled with the conclusion itself. The bar here is low and mechanical: point at a
+ * location, a number, or a piece of real output. Assertion-only lines are refused.
+ */
+export function looksLikeEvidence(text: string): boolean {
+  const s = String(text ?? '').trim();
+  if (s.length < 3) return false;
+  if (EVIDENCE_ASSERTION_ONLY.test(s)) return false;
+  return EVIDENCE_SIGNAL.test(s);
 }
 
 export interface RenderPlanOptions {
@@ -1112,7 +1163,8 @@ export function createPlanTools(
           evidence: {
             type: 'array',
             items: { type: 'string' },
-            description: 'delivery only, required: what you actually observed — command output, file:line, test result',
+            description: 'delivery only, required: what you actually observed — command output, file:line, test result. '
+              + 'Each entry must be checkable; a line that only restates the conclusion ("done", "已完成") is refused.',
           },
           assumptions: { type: 'array', items: { type: 'string' }, description: 'delivery only: what you took as given' },
           risks: { type: 'array', items: { type: 'string' }, description: 'delivery only: what could still go wrong' },
@@ -1162,7 +1214,13 @@ export function createPlanTools(
         assumptions: string[];
         risks: string[];
         open: string[];
-        unmet: PlanStep[];
+        /**
+         * Unfinished steps, with the plan each came from.
+         *
+         * The plan title rides along because step ids repeat between plans and the artifact is
+         * read later by someone who has to go and find the plan being named.
+         */
+        unmet: Array<{ plan: string; step: PlanStep }>;
       } | null = null;
 
       if (kind === 'delivery') {
@@ -1182,6 +1240,17 @@ export function createPlanTools(
         const evidence = strList(a.evidence);
         if (!evidence.length) {
           return 'Error: kind=delivery 必须给出 evidence（证据），至少一条——没有证据的结论是断言';
+        }
+        /*
+         * Non-empty is not the same as substantive (第四轮 7a). Without this, `["done"]` satisfied
+         * every rule and the one section whose whole job is to make the conclusion falsifiable
+         * could be filled with the conclusion. Naming the offending line is the point: the model
+         * has to know which of five entries was the assertion.
+         */
+        const asserted = evidence.filter((e) => !looksLikeEvidence(e));
+        if (asserted.length) {
+          return `Error: evidence 里有 ${asserted.length} 条只是把结论又说了一遍，读者无法核对（"${asserted[0].slice(0, 60)}"）——`
+            + '证据要能被查：命令与退出码、file:line、测试结果或真实输出片段';
         }
         if (mode === 'full' && (a.assumptions === undefined || a.risks === undefined)) {
           return 'Error: mode=full 必须给出 assumptions 和 risks（空数组也行——那说明你想过，没有就是没有）';
@@ -1211,12 +1280,18 @@ export function createPlanTools(
          * properly, instead of a private note that expires when its chat scrolls away. The refusal
          * names the steps, and closing them honestly (done, or dropped with a reason) is the
          * intended way past it — marking them done to unlock the word "done" is what this checks.
+         *
+         * EVERY open plan, not just the newest: `plan_create` does not stop a second plan existing
+         * in the same workspace, and reading only the active one made this section true about one
+         * plan while silent about the rest. The plan title is carried along because step ids
+         * (`s1`, `s2`) repeat between plans and an id alone would not say which plan to go close.
          */
-        const mine = plans.mine();
-        const unmet = mine ? mine.steps.filter((s) => s.status !== 'done' && s.status !== 'dropped') : [];
-        if (status === 'done' && unmet.length) {
+        const unfinished = plans.openPlans().flatMap((p) => p.steps
+          .filter((s) => s.status !== 'done' && s.status !== 'dropped')
+          .map((step) => ({ plan: p.title, step })));
+        if (status === 'done' && unfinished.length) {
           return `Error: status=done 但本工作区的计划还没有做完：`
-            + `${unmet.map((s) => `${s.id} ${s.title}（${s.status}）`).join('、')}——`
+            + `${unfinished.map((u) => `${u.plan} ${u.step.id} ${u.step.title}（${u.step.status}）`).join('、')}——`
             + '要么把这些步骤做完或明确标成 dropped，要么这次交付写成 partial 并把它们放进 open';
         }
 
@@ -1227,7 +1302,7 @@ export function createPlanTools(
           assumptions,
           risks,
           open,
-          unmet,
+          unmet: unfinished,
         };
       }
 
@@ -1268,7 +1343,7 @@ export function createPlanTools(
         parts.push('', '## 待确认', '', ...listLines(delivery.open, '（无——本次交付没有未验证的部分）'));
         if (delivery.unmet.length) {
           parts.push('', '### 计划里还没做完的步骤（交付时点）', '',
-            ...delivery.unmet.map((s) => `- ${s.id} ${s.title} [${s.status}]`));
+            ...delivery.unmet.map((u) => `- ${u.plan} · ${u.step.id} ${u.step.title} [${u.step.status}]`));
         }
       }
 

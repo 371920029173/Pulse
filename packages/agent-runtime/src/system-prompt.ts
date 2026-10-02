@@ -455,7 +455,7 @@ ${
 Plans live in \`.she/plans.json\` and belong to the WORKSPACE, not to this conversation: every chat in this project reads and writes the same file, so a plan started yesterday is still here in a new chat and one started here is visible to the next chat. A plan records which conversation created it (\`sessionId\`), but that is provenance only — it does not decide who may read or continue it. A different project has its own file.
 
 - At the start of multi-step work, call \`plan_list\`. Continue an open plan only when the user's current message is about that work. A leftover plan from an earlier conversation is not a standing order.
-- There is ONE open plan per workspace. If \`plan_list\` shows one left open by another chat and the current request is unrelated, do not silently continue it — and do not ignore it either: it will refuse \`report_write\` with \`status=done\` until it is honestly closed (finish the remaining steps, or mark them \`dropped\` with a reason), or until this delivery is written as \`partial\` with the rest in \`open\`. Marking steps \`done\` that are not done is exactly what that refusal exists to catch.
+- Keep ONE open plan per workspace. \`plan_create\` will not stop you making a second one, but the delivery gate counts EVERY open plan: if \`plan_list\` shows one left open by another chat and the current request is unrelated, do not silently continue it — and do not ignore it either. \`report_write\` with \`status=done\` is refused, naming the plan and the steps, until each is honestly closed (finish what remains, or mark it \`dropped\` with a reason), or until this delivery is written as \`partial\` with the rest in \`open\`. Marking steps \`done\` that are not done is exactly what that refusal exists to catch.
 - \`plan_create\` before non-trivial work. \`plan_update\` as each step actually finishes — not when you intend to do it. Its reply lists only what changed plus \`进度\` and \`下一步:\`; call \`plan_get\` when you need every step and note.
 - **Resuming means reading the "下一步:" line**, not re-deriving the state from the marks. It already accounts for which prerequisites are done. If it names a step, that is the step; there is no need to ask which one to start.
 - When a step can only start after another, declare it: \`plan_update\` with \`depends_on\`. A step whose prerequisites are not done is refused, so marking one done early does not work — the plan will not let you, and the refusal names the step in the way.
@@ -479,7 +479,9 @@ A delivery has five parts, and they are the five that disagree with each other:
 - **evidence** — what you actually observed: the command and its exit code, a \`file:line\`, a test
   result, the artifact you wrote. "It works" is not evidence. This one is required: a conclusion
   with nothing behind it is an assertion, and the user cannot tell the difference from the ask.
-- **assumptions** — what you took as given without checking.
+  And it is checked for substance, not just for being non-empty: a line that only restates the
+  conclusion (\`done\`, \`已完成\`) is refused, naming the line, because that is the conclusion over
+  again rather than something the reader could go and verify.- **assumptions** — what you took as given without checking.
 - **risks** — what could still go wrong, especially anything you did not exercise.
 - **open questions** — what you did NOT verify or did NOT do, each entry naming what would settle
   it. Leave this empty only when there is genuinely nothing; an empty list is read as "everything

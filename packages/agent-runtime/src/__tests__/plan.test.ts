@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { PlanStore, renderPlan, createPlanTools, adoptSessionPlansIntoWorkspace } from '../plan-tools.js';
+import { PlanStore, renderPlan, createPlanTools, adoptSessionPlansIntoWorkspace, looksLikeEvidence } from '../plan-tools.js';
 import type { StepStatus } from '../plan-tools.js';
 import { WORKSPACE_SCOPE } from '../session-state.js';
 import { classifyToolResult } from '../tool-result.js';
@@ -660,6 +660,45 @@ describe('交付模板', () => {
     );
   });
 
+  /*
+   * 第四轮 7a：证据原来只校验「非空」，于是 `["done"]` 满足全部规则 —— 而那一节的整个用途就是
+   * 让结论可以被推翻。这里钉住「非空 ≠ 有内容」，两头都要响：占位的话要拦，能查的东西要放。
+   */
+  it('证据必须是能核对的东西，不能只是把结论又说一遍', async () => {
+    const conclusion = '迁移脚本跑通了，本地库结构与目标一致';
+
+    const placeholder = await report('T', { status: 'done', conclusion, evidence: [conclusion] });
+    assert.match(placeholder.out, /^Error: /);
+    assert.match(placeholder.out, /无法核对|把结论又说了一遍/);
+    assert.equal(classifyToolResult('report_write', placeholder.out).kind, 'invalid_args');
+
+    for (const thin of ['done', 'ok', '已完成', '没问题', '状态: 完成']) {
+      const out = await report('T', { status: 'done', conclusion, evidence: [thin] });
+      assert.match(out.out, /^Error: /, `「${thin}」不该算证据`);
+    }
+
+    // 一条真的 + 一条假的 = 整单拒绝，并且点名的是假的那条（否则模型不知道改哪条）。
+    const mixed = await report('T', {
+      status: 'done', conclusion, evidence: ['shell: pnpm test → exit code: 0', 'done'],
+    });
+    assert.match(mixed.out, /^Error: /);
+    assert.match(mixed.out, /"done"/);
+  });
+
+  it('判据不要求必须是命令输出：file:line 和文件名都算', async () => {
+    for (const line of [
+      'packages/server/src/index.ts:975 短路了策略检查',
+      '读了 config.ts 里的默认值',
+      'pnpm test → 1682 passed',
+      '`report_write` 的 refusal 走 invalid_args',
+    ]) {
+      assert.equal(looksLikeEvidence(line), true, `「${line}」应当算证据`);
+    }
+    for (const line of ['done', '通过', '看起来没问题', '已修复']) {
+      assert.equal(looksLikeEvidence(line), false, `「${line}」不该算证据`);
+    }
+  });
+
   it('详版要求显式给出假设和风险（空数组是结论，不是遗漏）', async () => {
     const missing = await report('T', { status: 'done', mode: 'full', conclusion: '做完了', evidence });
     assert.match(missing.out, /^Error: /);
@@ -755,7 +794,7 @@ describe('交付模板', () => {
     const rel = /\.she\/reports\/[^\s]+\.md/.exec(out)![0];
     const text = readFileSync(join(dir, rel), 'utf8');
     assert.ok(text.includes('计划里还没做完的步骤'), '不带计划状态的话，读者得自己去翻');
-    assert.match(text, /s2 验证 \[active\]/, '状态要真实（s1 完成后 s2 已经开始了）');
+    assert.match(text, /迁移 · s2 验证 \[active\]/, '状态要真实（s1 完成后 s2 已经开始了），且要带计划名——计划之间步骤 id 会重名');
   });
 
   it('kind=report 不走交付模板', async () => {

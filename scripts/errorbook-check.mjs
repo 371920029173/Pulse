@@ -10,12 +10,14 @@
  *   1. Real failures from real tools → real rows under `errors/<tool>`.
  *   2. A repeat of the same failure → one row, count 2.
  *   3. A fact in the KB → NOT an entry, even when its text matches the query.
- *   4. A real Agent turn → the loop's own recording path, including a stuck loop.
- *   5. Pre-flight → the book's contents reach the analysis.
- *   6. Retirement → an entry can be taken out of circulation with a reason, and a repeat
- *      puts it back.
+ *   4. Query semantics, both directions: `query` finds a real entry (so "always returns nothing"
+ *      cannot pass as "no mistakes were made"), and it never returns anything outside the book.
+ *   5. A real Agent turn → the loop's own recording path, including a stuck loop.
+ *   6. Retirement → an entry can be taken out of circulation with a reason, and a repeat puts it
+ *      back — on BOTH write paths, tool failure and reflection, since they share one upsert.
+ *   7. Pre-flight → the book's contents reach the analysis.
  *
- * Sections 4 and 5 are the ratchet: they fail if the agent stops handing failures to the book,
+ * Sections 5 and 6 are the ratchet: they fail if the agent stops handing failures to the book,
  * which is the only way this feature can be silently lost.
  */
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -244,6 +246,27 @@ console.log('\n=== 查询 ===');
     `${all[0]?.lastSeenAt} … ${all[all.length - 1]?.lastSeenAt}`);
   check('limit 生效', book.lookup({ limit: 1 }).length === 1 && book.lookup({ limit: 2 }).length === 2);
   check('查不存在的工具返回空，不是全部', book.lookup({ tool: 'never_used_at_all' }).length === 0);
+
+  /*
+   * 10c：`query` 这条路径的**正向**判据。
+   *
+   * 第 3 节只证明了「知识库的东西不会被当成错题」，那半边在 `query` 永远返回空的时候也照样绿 ——
+   * 而"永远返回空"正是这个函数曾经的真实 bug（引擎渲染的组路径是 `errors → shell`，代码里假定的
+   * 是斜杠，于是每次查询都交白卷），它和"确实没犯过错"在调用方看来一模一样。
+   *
+   * 所以两边都要响：真错题必须被它查出来，无关的错题不能被它带出来。
+   */
+  const byQuery = book.lookup({ query: 'boom' });
+  check('【关键】query 查得到真实错题本身（不是永远返回空）',
+    byQuery.some((e) => e.tool === 'shell' && /boom/.test(e.detail)),
+    JSON.stringify(byQuery.map((e) => [e.tool, e.detail.slice(0, 30)])));
+  check('query 的结果仍然只来自错题本自己的子树',
+    byQuery.every((e) => e.group.startsWith(`${ERRORBOOK_ROOT}/`)),
+    JSON.stringify(byQuery.map((e) => e.group)));
+  check('query 不带上无关的错题（查 ZONK 不会顺手返回 shell 的）',
+    !book.lookup({ query: NO_MATCH }).some((e) => e.tool === 'shell'),
+    JSON.stringify(book.lookup({ query: NO_MATCH }).map((e) => e.tool)));
+  check('query 也吃 limit', book.lookup({ query: 'boom', limit: 1 }).length <= 1);
 }
 
 // ─── 5. 接进真实 Agent ──────────────────────────────────────────────────────
@@ -394,6 +417,34 @@ console.log('\n=== 退役一条错题 ===');
   const missing = await run(tools, 'errorbook_forget', { id: 'no-such-id' });
   check('退一条不存在的 id 是明确的失败，不是静默成功',
     /没有 id 为/.test(missing), missing.slice(0, 200));
+
+  /*
+   * 10d：退役-复发这条闭环在**自省**那条写入路径上也必须成立。
+   *
+   * 5b 走的是工具失败（`book.record`），而退役最常被用到的场景恰恰是自省：一条把知识库检索
+   * 当成漂移的误报，用户没法靠改代码消掉它。两条写入路径共用同一个 upsert，所以这一条不是重复
+   * 5b，而是钉住"共用"这件事本身 —— 哪天有人给自省单独写一条路径，5b 会绿，这一条会红。
+   */
+  const REPORT_TOPIC = 'retire_probe_reflection';
+  const firstReflection = book.recordReflection({
+    topic: REPORT_TOPIC, lesson: '把一次正常的检索读成了漂移', evidence: '本轮 0.50/需留意', sessionId: 's-r1',
+  });
+  check('前提：自省也能写进错题本', book.lookup({ tool: REPORT_TOPIC }).length === 1,
+    JSON.stringify(book.lookup({ tool: REPORT_TOPIC })));
+
+  await run(tools, 'errorbook_forget', { id: firstReflection.entry.id, reason: '误报：这是正常的检索' });
+  check('退役一条自省后查询不再返回它', book.lookup({ tool: REPORT_TOPIC }).length === 0,
+    JSON.stringify(book.lookup({ tool: REPORT_TOPIC })));
+
+  const reflectionAgain = book.recordReflection({
+    topic: REPORT_TOPIC, lesson: '把一次正常的检索读成了漂移（换了说法）', evidence: '本轮 0.50/需留意', sessionId: 's-r2',
+  });
+  check('【关键】同主题的自省复发会把它重新打开，而不是被静音埋掉',
+    reflectionAgain.reopened === true
+    && book.lookup({ tool: REPORT_TOPIC }).some((e) => e.id === firstReflection.entry.id),
+    JSON.stringify({ reopened: reflectionAgain.reopened, seen: book.lookup({ tool: REPORT_TOPIC }) }));
+  check('复发用同一个 id（退役不是"删掉再新建一条"）',
+    reflectionAgain.entry.id === firstReflection.entry.id, reflectionAgain.entry.id);
 }
 
 // ─── 6. 开工前会去查 ────────────────────────────────────────────────────────

@@ -39,7 +39,7 @@ import {
   loadTheme, saveTheme, clearTheme, setThemeEnabled, revertTheme,
   validateCss, themeBytes, themePaths, THEME_MAX_BYTES,
 } from './theme.js';
-import { ScheduleStore, Scheduler, SessionBusyError, describeNextRun, nextWindowStart, withinWindow } from './schedule.js';
+import { ScheduleStore, Scheduler, SessionBusyError, TaskNotRetryableError, describeNextRun, failureAlert, nextWindowStart, withinWindow } from './schedule.js';
 import type { ScheduledTask, WorkingWindow } from './schedule.js';
 import { Router, HttpError, sendJSON, sendError, sendSSEEvent, startSSE, endSSE, parseBody, readRawBody, corsHeaders } from './router.js';
 import { SessionStore, chooseStartupSession } from './sessions.js';
@@ -1853,6 +1853,29 @@ async function runScheduledTask(task: ScheduledTask): Promise<void> {
   const usageBefore = agent.getTokenUsage();
   try {
     const reply = await agent.chat(task.prompt);
+    /*
+     * A turn can fail WITHOUT throwing: `chat()` turns a provider error into a normal-looking
+     * assistant message so the conversation stays usable. For a headless run that would be the
+     * worst outcome — the schedule would report `ok` for a night of unreachable-API failures, and
+     * the streak/retry/alert path (第四轮 8b) would never engage. The run is a failure unless the
+     * turn itself finished, and it is thrown so the scheduler records it like any other.
+     *
+     * Three reasons are not errors but still mean the run did not deliver: `aborted` (the user
+     * pressed stop on this job's session), `budget` and `max_iterations` (a ceiling was reached —
+     * `agent.ts` calls these "not an error" because the conversation can be resumed). They are
+     * recorded as failures so an unfinished job is never reported as done, but they are NOT
+     * retried: restarting work the user just stopped is worse than useless, and the next run
+     * would hit the same ceiling with the same prompt.
+     */
+    const failure = agent.lastRunFailure();
+    if (failure) {
+      recordTurnMetrics(agent, turnStart, usageBefore, false);
+      const message = `这一轮没有完成（${failure.reason}）：${failure.text ?? '未给出原因'}`;
+      const stoppedOnPurpose = failure.reason === 'aborted'
+        || failure.reason === 'budget'
+        || failure.reason === 'max_iterations';
+      throw stoppedOnPurpose ? new TaskNotRetryableError(message) : new Error(message);
+    }
     // A one-line breadcrumb so a run is identifiable in the transcript.
     const note = `[定时任务「${task.name}」] ${reply.content?.slice(0, 200) ?? ''}`;
     log.info(note);
@@ -1903,6 +1926,9 @@ function scheduleBridge(): import('@she/agent-runtime').ScheduleBridge {
       nextRun: describeNextRun(t, workingWindow()),
       lastStatus: t.lastStatus,
       lastError: t.lastError,
+      // The model is a reader of this list too: a task that keeps failing has to say so, or the
+      // agent will report "定时任务正常" while the evidence says otherwise.
+      alert: failureAlert(t) ?? undefined,
       runCount: t.runCount,
     })),
     create: (input) => {
@@ -2514,7 +2540,13 @@ function registerRoutes(router: Router): void {
       tasks: schedule.list().map((t) => ({
         ...t,
         nextRun: describeNextRun(t, workingWindow(), now),
+        // The one-line "this needs your attention" sentence, or null. Same function the bridge and
+        // the panel use, so the three surfaces cannot drift (第四轮 8b).
+        alert: failureAlert(t),
       })),
+      alerts: schedule.list()
+        .map((t) => ({ id: t.id, name: t.name, text: failureAlert(t) }))
+        .filter((a): a is { id: string; name: string; text: string } => a.text !== null),
       recovery: schedule.recoveryNotice,
     });
   });
