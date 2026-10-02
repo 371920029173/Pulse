@@ -661,14 +661,35 @@ const EVIDENCE_ASSERTION_ONLY =
 /**
  * Something observed rather than asserted: a location, a number, or quoted output.
  *
- * Deliberately generous — it is written by a model free to phrase evidence however it likes, and
- * a false rejection costs a round trip. Everything it refuses shares one property: the reader
- * cannot go and check it, because it does not point at anything. Note there is no bare-colon
- * signal: `状态: 完成` is an assertion wearing a field name, and accepting it would reopen the
- * hole this closes.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHAT COUNTS, AND WHAT DELIBERATELY DOES NOT
+ *
+ * A signal is a LOCATION (`file:line`, a path, a known extension), a NUMBER (a count, a line, an
+ * exit code), a BACKTICKED identifier, an ARROW into a result, an exit/stream word, the text of an
+ * error, or an errno. Those are things a reader can go and check.
+ *
+ * Topic words are NOT signals: `测试`, `日志`, `输出`, `命令`, `报错`, `tests`, `logs`, `specs`. They
+ * were accepted until this was tightened, and that was the hole. Naming the topic is not bringing
+ * the result — "测试通过" and "跑了测试，全绿" mention a test, so they passed the rule whose entire
+ * job is to refuse "把结论又说了一遍". The check was one word away from the thing it was built to
+ * catch, which is the same defect as the non-empty rule it replaced, one level up.
+ *
+ * Still deliberately generous in the other direction: a false rejection costs a round trip, so a
+ * bare path (`src/index`), a bare errno (`ENOENT`) and an extension-less location all count. There
+ * is still no bare-colon signal: `状态: 完成` is an assertion wearing a field name.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 const EVIDENCE_SIGNAL =
-  /(\d|`|→|->|=>|\bexit\b|\bcode\b|\bstdout\b|\bstderr\b|\blogs?\b|\btests?\b|\bspecs?\b|\.(ts|tsx|js|mjs|cjs|json|md|sql|css|html|py|yml|yaml|toml|sh|ps1)\b|日志|输出|命令|测试|报错|行号|退出码)/i;
+  /(\d|`|→|->|=>|\bexit\b|\bstdout\b|\bstderr\b|\b\w*Error\b|\b\w*Exception\b|\b\w*Traceback\b|\w+[/\\][\w.-]+|\.(ts|tsx|js|mjs|cjs|json|md|sql|css|html|py|yml|yaml|toml|sh|ps1|txt|log|csv)\b|行号|退出码)/i;
+
+/**
+ * An errno, matched case-SENSITIVELY and on its own.
+ *
+ * `ENOENT` is real evidence — it is the kernel's own answer — but folding it into the case-insensitive
+ * pattern above would make `\bE[A-Z]{3,}\b` match "everything", so `everything works` would read as
+ * evidence. Same word shape, opposite meaning: the case is the whole signal.
+ */
+const EVIDENCE_ERRNO = /\bE[A-Z]{4,}\b/;
 
 /**
  * Does this line name something a reader could check?
@@ -682,7 +703,7 @@ export function looksLikeEvidence(text: string): boolean {
   const s = String(text ?? '').trim();
   if (s.length < 3) return false;
   if (EVIDENCE_ASSERTION_ONLY.test(s)) return false;
-  return EVIDENCE_SIGNAL.test(s);
+  return EVIDENCE_SIGNAL.test(s) || EVIDENCE_ERRNO.test(s);
 }
 
 export interface RenderPlanOptions {

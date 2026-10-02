@@ -481,7 +481,9 @@ A delivery has five parts, and they are the five that disagree with each other:
   with nothing behind it is an assertion, and the user cannot tell the difference from the ask.
   And it is checked for substance, not just for being non-empty: a line that only restates the
   conclusion (\`done\`, \`已完成\`) is refused, naming the line, because that is the conclusion over
-  again rather than something the reader could go and verify.- **assumptions** — what you took as given without checking.
+  again rather than something the reader could go and verify. Naming the topic is not bringing the
+  result either — \`测试通过\`, \`日志显示一切正常\` are refused for the same reason, so quote the count,
+  the exit code, the \`file:line\`, or the output line itself.- **assumptions** — what you took as given without checking.
 - **risks** — what could still go wrong, especially anything you did not exercise.
 - **open questions** — what you did NOT verify or did NOT do, each entry naming what would settle
   it. Leave this empty only when there is genuinely nothing; an empty list is read as "everything

@@ -102,6 +102,18 @@ console.log('1. 交付模板：结论和证据不是可选项');
     check(`占位证据「${thin}」被拒绝`, out.out.startsWith('Error: '), out.out);
   }
 
+  /*
+   * 只提到话题、没有结果的句子同样是断言。
+   *
+   * 这一组回填的是判据自己的一个洞：`测试`、`日志`、`输出`、`命令` 这些词原来单独就算信号，于是
+   * 「测试通过」能过 —— 而它和「把结论又说了一遍」是同一句话，只是多了一个话题名词。判据离它要挡
+   * 的东西只差一个词，等于没挡。
+   */
+  for (const topical of ['测试通过', '跑了测试，全绿', '日志显示一切正常', '命令跑完了']) {
+    const out = await deliver(tools, { kind: 'delivery', title: 'T', status: 'done', conclusion, evidence: [topical] });
+    check(`只提话题、没有结果的「${topical}」被拒绝`, out.out.startsWith('Error: '), out.out);
+  }
+
   const mixed = await deliver(tools, {
     kind: 'delivery', title: 'T', status: 'done', conclusion,
     evidence: ['shell: pnpm test → exit code: 0', 'done'],
@@ -127,6 +139,17 @@ console.log('1. 交付模板：结论和证据不是可选项');
     evidence: ['packages/server/src/index.ts:975 短路了策略检查', '读了 config.ts 里的默认值'],
   });
   check('file:line / 文件名就算证据（不要求必须有命令输出）', !locOnly.out.startsWith('Error: '), locOnly.out);
+
+  /*
+   * 收紧之后仍然要放行这些：不带扩展名的路径、errno、被引下来的报错原文。判据要的是「指向哪个
+   * 东西」，不是「必须写成某个格式」—— 否则模型只会学着凑格式，而不是把输出带回来。
+   */
+  const otherShapes = await deliver(tools, {
+    kind: 'delivery', title: '别的形状的证据', status: 'done', conclusion,
+    evidence: ['读了 src/index 的导出', '删除失败，errno 是 ENOENT'],
+  });
+  check('不带扩展名的路径 / errno 也算证据（判据要的是指向东西，不是格式）',
+    !otherShapes.out.startsWith('Error: '), otherShapes.out);
 }
 
 console.log('\n2. 未确认不标完成');

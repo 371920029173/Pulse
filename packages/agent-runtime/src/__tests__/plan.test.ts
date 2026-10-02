@@ -672,7 +672,7 @@ describe('交付模板', () => {
     assert.match(placeholder.out, /无法核对|把结论又说了一遍/);
     assert.equal(classifyToolResult('report_write', placeholder.out).kind, 'invalid_args');
 
-    for (const thin of ['done', 'ok', '已完成', '没问题', '状态: 完成']) {
+    for (const thin of ['done', 'ok', '已完成', '没问题', '状态: 完成', '测试通过']) {
       const out = await report('T', { status: 'done', conclusion, evidence: [thin] });
       assert.match(out.out, /^Error: /, `「${thin}」不该算证据`);
     }
@@ -691,11 +691,22 @@ describe('交付模板', () => {
       '读了 config.ts 里的默认值',
       'pnpm test → 1682 passed',
       '`report_write` 的 refusal 走 invalid_args',
+      // 不带扩展名的路径、errno、以及被引下来的报错原文，都是读者能自己去查的东西。
+      '读了 src/index 的导出',
+      '删除失败，errno 是 ENOENT',
+      'Node 抛 TypeError: Cannot read properties of undefined',
     ]) {
       assert.equal(looksLikeEvidence(line), true, `「${line}」应当算证据`);
     }
     for (const line of ['done', '通过', '看起来没问题', '已修复']) {
       assert.equal(looksLikeEvidence(line), false, `「${line}」不该算证据`);
+    }
+    /*
+     * 这个话题词单独不算信号 —— 否则「测试通过」就能过，而它和「把结论又说了一遍」是同一句话，
+     * 只是多了一个话题名词。规则离它要挡的东西只差一个词，等于没挡。
+     */
+    for (const line of ['测试通过', 'tests ok', '跑了测试，全绿', '日志显示一切正常', '命令跑完了', 'everything works']) {
+      assert.equal(looksLikeEvidence(line), false, `「${line}」只是提到了话题，不该算证据`);
     }
   });
 
