@@ -420,6 +420,55 @@ console.log('\n=== 接入真实 Agent ===');
   check('落盘的 history 与模型看到的一致（含注释）', historyText.includes('[tool-result]'));
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * 空扫描判据的**适用范围**：只有安全扫描器才判，别的工具提到"没有漏洞"不算
+ *
+ * 这一节是补上去的，对应一次真实的误判。第一版只看「文本里有"没有漏洞"」+「工作区没有依赖清单」，
+ * 于是任何工具的输出只要提到这几个字就被判成空扫描。实测在一个没有清单的工作区里，六条里五条是
+ * 误报；其中两条还被写进了错题本（`vacuous` 在该记名单里）—— 读一份自己的会话记录被记成"做错了
+ * 事"，会让模型下次不敢用它。
+ *
+ * 两边都要响：不是扫描器的不许判（否则又退回"乱说"），是扫描器的在没清单时**必须**判（否则收窄
+ * 会被一路收到"永远不判"而没人发现）。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+console.log('\n空扫描判据：只对安全扫描器生效，别的工具提到"没有漏洞"不算');
+{
+  const bareWorkspace = mkdtempSync(join(tmpdir(), 'she-vacuous-gate-'));
+  const SCAN_OUT = '# Security Scan Results (package.json)\n\n'
+    + '✅ **No known security vulnerabilities found!**\n\n'
+    + '❌ composer.json file not found in this directory.';
+  const CN_CLEAN = '结论：没有漏洞';
+
+  // 反向：不是扫描器的那些工具，提到这句话也只是普通成功。
+  const notScanners = ['fs_read', 'plan_list', 'grep', 'shell', 'kb_query', 'fs_list', 'report_write'];
+  for (const tool of notScanners) {
+    const v = classifyToolResult(tool, CN_CLEAN, { workspaceRoot: bareWorkspace });
+    check(`不是扫描器：${tool} 提到"没有漏洞"不判空扫描`,
+      v.kind !== 'vacuous' && v.ok === true, `${v.kind}`);
+  }
+  const enNotScanner = classifyToolResult('fs_read', SCAN_OUT, { workspaceRoot: bareWorkspace });
+  check('不是扫描器：英文的"没有漏洞"同样不判', enNotScanner.kind === 'none', enNotScanner.kind);
+
+  // 正向：真的扫描器，在没有清单的工作区里必须判空扫描。
+  for (const tool of ['mcp_guardian_check_vulnerabilities', 'security_scan', 'npm_audit', 'snyk_test']) {
+    const v = classifyToolResult(tool, SCAN_OUT, { workspaceRoot: bareWorkspace });
+    check(`是扫描器：${tool} 在无清单工作区里判空扫描`, v.kind === 'vacuous' && v.ok === false, v.kind);
+  }
+
+  /*
+   * 另一头也不能松：有清单时同一个扫描器是**普通成功**。少了这条，"永远判空扫描"也会让上面那组
+   * 全绿 —— 而那会把真扫过的项目无端指控成空扫描，是第一版之后修掉的那个方向。
+   */
+  const withManifest = mkdtempSync(join(tmpdir(), 'she-vacuous-gate-ok-'));
+  writeFileSync(join(withManifest, 'package.json'), '{}', 'utf8');
+  const real = classifyToolResult('mcp_guardian_check_vulnerabilities', SCAN_OUT, { workspaceRoot: withManifest });
+  check('有依赖清单时同一个扫描器是普通成功（上面那条不是"永远为真"）', real.kind === 'none', real.kind);
+
+  removeTempDir(bareWorkspace);
+  removeTempDir(withManifest);
+}
+
 store.close();
 removeTempDir(dir);
 console.log(failures ? `\n${failures} 项失败` : '\n全部通过');

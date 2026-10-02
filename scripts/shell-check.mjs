@@ -33,6 +33,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
+import { loadConfig, sandboxPostureNotice } from '../packages/shared/dist/index.js';
 import { removeTempDir } from './lib/temp.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -242,6 +243,80 @@ console.log('\n=== 任意代码执行：识别出来并如实说明（不假装�
 }
 
 removeTempDir(workspace);
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 自动化模式与沙箱姿态是**两个问题**
+ *
+ * 第四轮评测的 2a：`automationMode=true` 会把 `sandbox.allowAllCommands` 强制成 `true`、并关掉
+ * 破坏性命令拦截 —— 只在 `SHE_ALLOW_ALL_COMMANDS` 未显式设置时发生，且**没有任何提示**。也就是
+ * 「能不能自己接着干」这个开关顺手改掉了「能碰哪里」这个开关。
+ *
+ * 这一节钉三件相反的事，缺一条都不够：
+ *   1. 打开自动化**不改**沙箱姿态（不然用户没有同意过一次边界放宽）；
+ *   2. 但那个张力要**说出来**（不然"自动化会在确认处停下"会变成一次莫名其妙的停顿）；
+ *   3. 明确设了 `SHE_ALLOW_ALL_COMMANDS` 仍然照常生效（不然"永远不动"也能让第 1 条通过，
+ *      而那等于把用户的显式设置删掉）。
+ *
+ * 全部走 `loadConfig` + 一个显式 env，不依赖本机 `.env` 的内容。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+console.log('\n=== 自动化模式不改沙箱姿态，但把张力说出来 ===');
+{
+  const cfgRoot = mkdtempSync(join(tmpdir(), 'she-posture-'));
+  /*
+   * `loadConfig` 会去读 `<root>/.env`，所以这里显式给一个不含相关变量的 SHE_ENV_FILE，
+   * 免得本机真实的 `.env` 把结论污染掉（那会让这一节在某些机器上绿、在另一些上红）。
+   */
+  const envFile = join(cfgRoot, '.env');
+  writeFileSync(envFile, 'SHE_WORKSPACE=' + cfgRoot + '\n', 'utf8');
+
+  const load = (extra) => {
+    const keys = ['SHE_AUTOMATION_MODE', 'SHE_ALLOW_ALL_COMMANDS', 'SHE_DENY_DESTRUCTIVE'];
+    const saved = {};
+    for (const k of keys) { saved[k] = process.env[k]; delete process.env[k]; }
+    Object.assign(process.env, extra, { SHE_ENV_FILE: envFile, SHE_WORKSPACE: cfgRoot });
+    try {
+      return loadConfig(cfgRoot);
+    } finally {
+      for (const k of keys) {
+        if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+      }
+    }
+  };
+
+  const manual = load({ SHE_AUTOMATION_MODE: 'false' });
+  const auto = load({ SHE_AUTOMATION_MODE: 'true' });
+
+  check('【关键】打开自动化不改变「工作区内是否免问」',
+    manual.sandbox.allowAllCommands === auto.sandbox.allowAllCommands,
+    `manual=${manual.sandbox.allowAllCommands} auto=${auto.sandbox.allowAllCommands}`);
+  check('【关键】打开自动化不关掉破坏性命令拦截',
+    manual.sandbox.denyDestructiveByDefault === auto.sandbox.denyDestructiveByDefault,
+    `manual=${manual.sandbox.denyDestructiveByDefault} auto=${auto.sandbox.denyDestructiveByDefault}`);
+  check('【关键】打开自动化不改变工作区外围墙的档位',
+    manual.sandbox.outsideWorkspace.policy === auto.sandbox.outsideWorkspace.policy,
+    `manual=${manual.sandbox.outsideWorkspace.policy} auto=${auto.sandbox.outsideWorkspace.policy}`);
+  check('而且姿态确实是 fail-closed 的那一份（上面三条不是"两边都放宽"）',
+    auto.sandbox.allowAllCommands === false && auto.sandbox.denyDestructiveByDefault === true,
+    JSON.stringify(auto.sandbox));
+
+  // 2. 张力要说出来：自动化 + 严格姿态 → 有提示；手动 → 不出现提示（一条永远出现的提醒等于没有）。
+  check('【关键】自动化 + 严格姿态：提示说清会为什么停下',
+    /停在.*确认|停下来等/.test(String(sandboxPostureNotice(auto))) && /破坏性命令/.test(String(sandboxPostureNotice(auto))),
+    String(sandboxPostureNotice(auto)));
+  check('手动模式没有这条提示（它只在真的会停住无人值守那一轮时才出现）',
+    sandboxPostureNotice(manual) === null, String(sandboxPostureNotice(manual)));
+
+  // 3. 显式设置仍然生效。
+  const explicit = load({ SHE_AUTOMATION_MODE: 'true', SHE_ALLOW_ALL_COMMANDS: 'true' });
+  check('【关键】显式设了 SHE_ALLOW_ALL_COMMANDS 仍然放宽（上面那条不是"永远不动"）',
+    explicit.sandbox.allowAllCommands === true && explicit.sandbox.denyDestructiveByDefault === false,
+    JSON.stringify(explicit.sandbox));
+  check('放宽之后就不再报那个张力（没有要停的地方了）',
+    sandboxPostureNotice(explicit) === null, String(sandboxPostureNotice(explicit)));
+
+  removeTempDir(cfgRoot);
+}
 
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`);
 process.exit(failures === 0 ? 0 : 1);

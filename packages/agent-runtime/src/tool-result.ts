@@ -326,6 +326,27 @@ const EMPTY_SENTINELS = [
  */
 const CLEAN_VERDICT = /no known (?:security )?vulnerabilit|0 vulnerabilit|未(?:发现|检出)[^\n]{0,8}漏洞|无已知漏洞|没有(?:已知)?漏洞/i;
 
+/**
+ * 哪些工具是**安全扫描器** —— 空扫描判据的适用范围。
+ *
+ * 这条限定是补上去的，原因是一次真实的误判：第一版只要求「输出里有"没有漏洞"这句话」且「工作区
+ * 里没有依赖清单」，于是**任何**工具的输出只要碰巧提到这几个字就会被判成空扫描。实测（本地，
+ * 无清单的工作区）六条里五条是误报：
+ *
+ *   - `fs_read` 读一份会话记录，里面存着上一轮报告的文字含「没有漏洞」→ 误判
+ *   - `plan_list` 的计划标题里含这几个字 → 误判
+ *   - `grep` 命中一行注释、`shell` 打印了 CHANGELOG、`kb_query` 检索到相关节点 → 全部误判
+ *
+ * 危害不止是"多一句提示"：`vacuous` 在错题本的**该记**名单里，所以这些误判被写成了 agent 的错题
+ * （实测两条落在 `.she/kb.sqlite`：`fs_read` 失败类型 vacuous、`plan_list` 失败类型 vacuous）。读一份
+ * 自己的会话记录被记成"做错了事"，比漏报更糟 —— 它会让模型下次不敢用这些工具。
+ *
+ * 收窄到工具名，而不是继续在文案上找特征：第三方输出的措辞会变，工具名是我们的。判断方向也换了 ——
+ * 名字不像扫描器就**不判**。这样漏报一个名字古怪的扫描器（少说一句），而不是把普通工具的活动指控成
+ * 空扫描（乱说一句）。
+ */
+const SCANNER_TOOL = /vulnerab|security[_-]?scan|scan[_-]?(?:security|deps?|dependencies)|dependency[_-]?(?:scan|check|audit)|npm[_-]?audit|snyk|trivy|grype|dependabot/i;
+
 /** 任一存在就说明"有东西可扫"，这时扫描结果是真结论。 */
 const DEPENDENCY_MANIFESTS = [
   'package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock',
@@ -505,10 +526,17 @@ export function classifyToolResult(
    * 空扫描，判在 `^Error:` 之前。
    *
    * 一个安全扫描器的"没有漏洞"是**成功**返回（guardian 那条 `ok: true, failure: none`），所以
-   * 它永远走不到下面那段错误分类里 —— 想让它被看见，只能在这里截住。两条都要满足才判定：
-   * 文本给出了"干净"结论，且工作区里一份依赖清单都没有。缺任何一条都退回原路径，绝不猜。
+   * 它永远走不到下面那段错误分类里 —— 想让它被看见，只能在这里截住。三条都要满足才判定：这次调用
+   * **是安全扫描器**、文本给出了"干净"结论、且工作区里一份依赖清单都没有。缺任何一条都退回原路径，
+   * 绝不猜。第一条是后补的：没有它，任何输出里碰巧提到"没有漏洞"的工具都会被误判（详见
+   * `SCANNER_TOOL` 的注释）。
    */
-  if (opts.workspaceRoot && CLEAN_VERDICT.test(trimmed) && !hasDependencyManifest(opts.workspaceRoot)) {
+  if (
+    opts.workspaceRoot
+    && SCANNER_TOOL.test(name)
+    && CLEAN_VERDICT.test(trimmed)
+    && !hasDependencyManifest(opts.workspaceRoot)
+  ) {
     return verdict('vacuous');
   }
 

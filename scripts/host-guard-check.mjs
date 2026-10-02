@@ -141,8 +141,24 @@ console.log('\n请求守卫检查（真实服务，临时工作区）\n');
 try {
   // ── Bound to loopback: the safe default ──
   console.log('=== 默认（只绑本机）===');
-  if (!await boot('127.0.0.1', '')) throw new Error('启动失败');
+  const loopbackLog = await boot('127.0.0.1', '');
+  if (!loopbackLog) throw new Error('启动失败');
   {
+    /*
+     * 未鉴权时那句自我说明必须与事实一致。
+     *
+     * 原来写的是「只接受本机来源」，而 `guardRequest` 检查的是 `Host`/`Origin` 头 —— 那挡的是浏览器
+     * 里的一个网页，不挡"谁能连上来"（`tenancy.ts` 开头就写着：本机同用户的进程 forge 这两个头毫无
+     * 难度）。在只绑回环时那句话算一句正确的免责；绑到别的地址之后它就是**一句错的**。
+     *
+     * 所以这里两头都钉：回环时要说清"本机可达"意味着什么，暴露时不许再声称只有本机。
+     */
+    check('未鉴权 + 只绑回环：日志说清本机可达的含义（不是只提"本机来源"）',
+      /仅本机可达/.test(loopbackLog) && /本机/.test(loopbackLog) && /控制面/.test(loopbackLog),
+      loopbackLog.slice(-500));
+    check('未鉴权 + 只绑回环：日志给出出路（SHE_AUTH_TOKEN）',
+      /SHE_AUTH_TOKEN/.test(loopbackLog), loopbackLog.slice(-300));
+
     check('localhost 可用', await request(`localhost:${PORT}`) === 200);
     check('127.0.0.1 可用', await request(`127.0.0.1:${PORT}`) === 200);
     // A literal IP is allowed by rule 2, which is what makes LAN use work.
@@ -179,8 +195,24 @@ try {
 
   // ── Bound externally (container / LAN): the deployment case ──
   console.log('\n=== SHE_HOST=0.0.0.0（容器/局域网部署）===');
-  if (!await boot('0.0.0.0', '')) throw new Error('启动失败');
+  const externalLog = await boot('0.0.0.0', '');
+  if (!externalLog) throw new Error('启动失败');
   {
+    /*
+     * 这一格是第四轮评测 2b 指的地方：没有凭据、又能从本机之外写入的控制面。
+     *
+     * 这里**不拒绝启动** —— `SHE_HOST=0.0.0.0` 是仓库有意支持的部署形态（下面几条用例就是它的
+     * 契约），拦掉它等于替用户否掉他显式配置过的东西。但也不许再**声称**它是本机的：两句话必须
+     * 二选一地说准，而且暴露那一句要说明这意味着什么（任何人能改沙箱档位与工作区）。
+     */
+    check('未鉴权 + 暴露到本机之外：日志如实点名「已暴露」，不再声称只有本机能连',
+      /已暴露到本机之外/.test(externalLog) && !/仅本机可达/.test(externalLog),
+      externalLog.slice(-500));
+    check('未鉴权 + 暴露：日志说明无凭据的实际后果（改沙箱档位）',
+      /沙箱档位/.test(externalLog), externalLog.slice(-300));
+    check('未鉴权 + 暴露：日志给出两条出路（回环或 token）',
+      /SHE_AUTH_TOKEN/.test(externalLog), externalLog.slice(-300));
+
     check('本机 localhost 仍可用', await request(`localhost:${PORT}`) === 200);
     const ip = await request(`172.17.0.1:${PORT}`);
     check('容器内的 IP 可用', ip === 200, `status=${ip}`);

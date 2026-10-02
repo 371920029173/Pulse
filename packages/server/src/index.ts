@@ -5,7 +5,7 @@ import { join, extname, resolve, dirname, basename, relative, isAbsolute, sep } 
 import { realpathSync, createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { createLogger, loadConfig, resolveEnvFile, mergeMissingEnvFile, updateEnvFile, THINKING_LEVELS, getConfigRecovery, getConfigFileInUse, lastGoodConfigPath, lastGoodConfigMetaPath } from '@she/shared';
+import { createLogger, loadConfig, resolveEnvFile, mergeMissingEnvFile, updateEnvFile, THINKING_LEVELS, getConfigRecovery, getConfigFileInUse, lastGoodConfigPath, lastGoodConfigMetaPath, sandboxPostureNotice } from '@she/shared';
 import { isScratchWorkspace } from './scratch-workspace.js';
 import type { SheConfig, StreamChunk, EdgeKind, SkillProfile, ThinkingLevel } from '@she/shared';
 import { KBStore, GroupKBEngine, mergeKnowledgeBases } from '@she/kb';
@@ -179,6 +179,23 @@ function guardRequest(
   }
 
   return null;
+}
+
+/**
+ * Is this listen address reachable only from this machine?
+ *
+ * Used for one decision, and the direction matters: it decides whether an unauthenticated control
+ * plane is acceptable. A value we do NOT recognise counts as **not** loopback, so an address this
+ * function has never seen fails closed rather than being waved through as local.
+ *
+ * `''` and `0.0.0.0`/`::` are the "every interface" forms — those are the opposite of local.
+ */
+function isLoopbackHost(host: string): boolean {
+  const h = String(host ?? '').trim().toLowerCase();
+  if (!h) return false;
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]') return true;
+  // 整个 127/8 都是回环（`127.0.0.53` 这类本机解析器地址也在这里面）。
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
 }
 
 /**
@@ -3369,6 +3386,14 @@ router.put('/api/settings', async (req, res) => {
           allow: config.sandbox.outsideWorkspace.allow,
           policy: config.sandbox.outsideWorkspace.policy,
         },
+        /*
+         * 姿态与自动化模式之间的张力，如实回给界面。
+         *
+         * 放在这里而不是让界面自己推：界面推要重复一遍"哪种姿态会在无人值守时停住"的规则，而两处
+         * 写同一个判断就是两处会不一致。`null` = 没有张力，界面上不出现任何提示 —— 一条永远出现的
+         * 提醒等于没有提醒。
+         */
+        notice: sandboxPostureNotice(config),
       },
     });
   });
@@ -6433,7 +6458,35 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
   if (tenancyError) {
     log.error(`鉴权配置有误，所有请求都会被拒绝：${tenancyError}`);
   } else if (!tenancy.enabled) {
-    log.info('鉴权：未开启（只接受本机来源；如需多用户或反代访问，设置 SHE_AUTH_TOKEN）');
+    /*
+     * 鉴权关着的时候，这句话必须**说准它到底听了哪里**。
+     *
+     * 原来这里写的是"只接受本机来源"，而 `guardRequest` 检查的只是 `Host`/`Origin` 头 —— 那挡的是
+     * 浏览器里的一个网页（DNS rebinding / 跨站），不挡"谁能连上来"。第四轮评测的 2b 就是这条：
+     * 无凭据 `PUT /api/settings` 改掉了 `.env` 里的沙箱档位。本机同用户的进程 forge 这两个头毫无
+     * 难度（`tenancy.ts` 开头也写着这句），所以"只接受本机来源"在 loopback 上是一句正确的免责，
+     * 一旦 `SHE_HOST` 指到别的地址、或前面挂了反代，它就是**一句错的**。
+     *
+     * 局面不变，措辞和事实一致：说清监听地址，并说明未鉴权意味着什么。
+     */
+    const onLoopback = isLoopbackHost(config.server.host);
+    log.info(
+      `鉴权：未开启 —— 监听 ${config.server.host}:${config.server.port}，`
+      + (onLoopback
+        ? '仅本机可达；本机以你的身份运行的任何进程都能调用控制面（含改 .env）'
+        : '【已暴露到本机之外】控制面没有凭据，任何能连到这个端口的人都能改沙箱档位与工作区')
+      + '。需要鉴权就设置 SHE_AUTH_TOKEN（或 SHE_AUTH_TOKENS）。',
+    );
+    /*
+     * 未鉴权 + 监听在 loopback 之外 = 这一格**没有**被任何一次权衡选中过。
+     *
+     * 这一条**不拒绝启动**，理由是不越权：`check:host` 里有一组用例是故意用 `SHE_HOST=0.0.0.0`
+     * 且不带 token 启动的（容器 / 局域网部署），那是仓库里有意支持的方式，`SHE_ALLOWED_HOSTS` 的
+     * 注释也是照着它写的。把启动拦掉等于替用户否掉他显式配置过的部署形态 —— 而这件事该由他定。
+     *
+     * 所以这里只把事实说清楚（上面那行日志），并把这一格**记下来**供门禁与面板读取；
+     * 见 `scripts/host-guard-check.mjs` 里对这一格的断言。
+     */
   } else {
     log.info(`鉴权：已开启，${tenancy.tenants.length} 个租户（token 从 ${AUTH_HEADER} 或 Authorization: Bearer 读取）`);
     const adoptTo = process.env.SHE_TENANT_ADOPT_TO?.trim();
@@ -6567,6 +6620,15 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
     console.log('  │                                      │');
     console.log('  └──────────────────────────────────────┘');
     console.log('');
+
+    /*
+     * 自动化模式与沙箱姿态的张力，也写进启动日志。
+     *
+     * 只放在接口里不够：这个张力的后果是"无人值守的那一轮会停在确认上等人"，而那时用户多半不在
+     * 界面前面 —— 他下次看日志时得能读到这句话，而不是去翻界面上的一个提示。
+     */
+    const postureNotice = sandboxPostureNotice(config);
+    if (postureNotice) log.info(postureNotice);
   });
 
   process.on('SIGINT', () => { disposeAllAgents(); tenantLedger().flush(); server.close(() => process.exit(0)); });

@@ -284,19 +284,66 @@ describe('空扫描：说了"干净"，但没有东西可扫', () => {
     const root = tempWorkspace();
     mkdirSync(join(root, 'packages', 'app'), { recursive: true });
     writeFileSync(join(root, 'packages', 'app', 'package.json'), '{}', 'utf8');
-    assert.equal(classifyToolResult('scan', CLEAN, { workspaceRoot: root }).kind, 'none');
+    assert.equal(classifyToolResult('mcp_guardian_check_vulnerabilities', CLEAN, { workspaceRoot: root }).kind, 'none');
   });
 
   it('不传 workspaceRoot 时保持纯字符串判定（脚本与测试的旧调用方式不变）', () => {
     // 没有工作区就没法核对依据，这时只能按文案走 —— 判成成功，而不是凭空指控。
-    assert.equal(classifyToolResult('scan', CLEAN).kind, 'none');
+    assert.equal(classifyToolResult('mcp_guardian_check_vulnerabilities', CLEAN).kind, 'none');
   });
 
   it('没有"干净"结论的普通扫描输出不受影响', () => {
-    const v = classifyToolResult('scan', '# Security Scan Results\n\nFound 3 issues in package.json', {
+    const v = classifyToolResult('mcp_guardian_check_vulnerabilities', '# Security Scan Results\n\nFound 3 issues in package.json', {
       workspaceRoot: tempWorkspace(),
     });
     assert.equal(v.kind, 'none');
+  });
+
+  /*
+   * ─── 反向钉子：别把"碰巧提到没有漏洞"当成空扫描 ───
+   *
+   * 这一组是补上去的，对应一次真实的误判。第一版判据只看「文本里有"没有漏洞"」+「没有依赖清单」，
+   * 于是任何工具的输出只要提到这几个字就被判成空扫描。实测在一个没有清单的工作区里，六条里五条
+   * 是误报 —— 其中两条（`fs_read` 读会话记录、`plan_list`）**被写进了错题本**，因为 `vacuous` 在
+   * 该记名单里。读自己的会话记录被记成"做错了事"，会让模型下次不敢用它。
+   *
+   * 所以这里逐条钉住"不是扫描器就不判"，同时保留上面那条"是扫描器就判"—— 两边都要响，否则收窄
+   * 很容易被一路收窄到"永远不判"而没人发现。
+   */
+  it('【关键】不是安全扫描器的工具，提到"没有漏洞"也不许判成空扫描', () => {
+    const root = tempWorkspace(); // 刻意没有依赖清单：这是误判最容易发生的条件
+    const CLEAN_TEXT = '结论：没有漏洞';
+    for (const tool of [
+      'fs_read',        // 读一份内容里含这句话的文件
+      'plan_list',      // 计划标题里含这句话
+      'grep',           // 命中一行含这句话的注释
+      'shell',          // 打印了一段含这句话的文字
+      'kb_query',       // 检索到相关节点
+      'fs_list',        // 目录列表里有个同名文件
+      'report_write',   // 往报告里写这句话
+    ]) {
+      const v = classifyToolResult(tool, CLEAN_TEXT, { workspaceRoot: root });
+      assert.notEqual(v.kind, 'vacuous', `${tool} 不该被判成空扫描`);
+      assert.equal(v.ok, true, `${tool} 的这一条是成功，不是失败`);
+    }
+  });
+
+  it('【关键】真正的扫描器在没有清单时仍然判空扫描（收窄没把它一起收掉）', () => {
+    const root = tempWorkspace();
+    for (const tool of [
+      'mcp_guardian_check_vulnerabilities',
+      'security_scan',
+      'npm_audit',
+      'snyk_test',
+    ]) {
+      assert.equal(classifyToolResult(tool, CLEAN, { workspaceRoot: root }).kind, 'vacuous', tool);
+    }
+  });
+
+  it('英文的"没有漏洞"同样只在扫描器上判空（两种语言同一个判据）', () => {
+    const root = tempWorkspace();
+    assert.equal(classifyToolResult('fs_read', CLEAN, { workspaceRoot: root }).kind, 'none');
+    assert.equal(classifyToolResult('mcp_guardian_check_vulnerabilities', CLEAN, { workspaceRoot: root }).kind, 'vacuous');
   });
 });
 

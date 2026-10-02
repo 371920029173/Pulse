@@ -591,6 +591,42 @@ export function getConfigRecovery(): ConfigRecovery | null {
   return configRecovery;
 }
 
+/**
+ * 自动化模式与沙箱姿态之间的**张力**，如实报出来 —— 不替用户做选择，也不让它悄悄发生。
+ *
+ * 背景：以前 `SHE_ALLOW_ALL_COMMANDS` 未显式设置时，`automationMode` 为真会顺手把沙箱放宽成
+ * "全部放行 + 不拦破坏性命令"。那个改动是静默的，理由是"严格姿态下自动化会在第一次确认处停下"。
+ * 现在两者分开（见 `loadConfig` 里的注释），这个函数负责把那句**真实的**后果说出来：
+ *
+ *   自动化模式开着，而姿态仍然会拦下需要确认的操作 —— 于是无人值守的一轮会在那里停下来等人。
+ *
+ * 这是一句提醒，不是一条错误：停下来等人正是「人一直不回应就暂停，不自己做危险的事」要的行为。
+ * 需要它自己接着干的人，自己去放宽（`SHE_ALLOW_ALL_COMMANDS` 或设置页）。
+ *
+ * 纯函数，`config` 是入参：这样它能在不启动服务的情况下被断言，也不会因为读错一个全局状态而给出
+ * 与用户实际看到的不同的结论。
+ */
+export function sandboxPostureNotice(config: SheConfig): string | null {
+  if (!config.automationMode) return null;
+
+  const s = config.sandbox;
+  const blockers: string[] = [];
+  /*
+   * 只有**真的会停下来等人**的原因才算。`outsideWorkspace.policy` 是 `readonly` 时，工作区外的读
+   * 直接放行、写才要问 —— 所以"边界不是 all"不等于"一定会停"，只有"工作区外的写要问"这一半会在
+   * 无人值守时停住。把整个 `readonly` 都算成阻塞会让这条提醒天天出现，然后被无视。
+   */
+  if (s.denyDestructiveByDefault) blockers.push('破坏性命令');
+  if (!s.allowAllCommands && s.outsideWorkspace.policy !== 'all') blockers.push('工作区外的写');
+  if (s.allowedCommands.length > 0) blockers.push('白名单外的命令');
+  if (blockers.length === 0) return null;
+
+  return `自动化模式已开启，但沙箱仍会为这些操作停下来等你确认：${blockers.join('、')}。`
+    + '无人值守的一轮会在那里暂停，直到你回应 —— 这是刻意的（它不会自己批准危险操作）。'
+    + '如果确实要让它一路跑完，请自己放宽沙箱档位（`SHE_ALLOW_ALL_COMMANDS` 或设置页），'
+    + '而不是让"打开自动化"顺手把边界改掉。';
+}
+
 /** Test/embedding seam: forget the recorded fallback. */
 export function clearConfigRecovery(): void {
   configRecovery = null;
@@ -807,18 +843,32 @@ export function loadConfig(workspaceRoot?: string): SheConfig {
   if (env.SHE_KB_PATH) config.kb.dbPath = env.SHE_KB_PATH;  if (env.SHE_AUTOMATION_MODE === '0' || env.SHE_AUTOMATION_MODE === 'false') config.automationMode = false;
   if (env.SHE_AUTOMATION_MODE === '1' || env.SHE_AUTOMATION_MODE === 'true') config.automationMode = true;
 
-  // Automation means the agent keeps working. Forcing a confirm on every
-  // command makes that mode stop after the first shell call, which is manual
-  // mode under another name. An explicit SHE_ALLOW_ALL_COMMANDS still wins.
-  if (env.SHE_ALLOW_ALL_COMMANDS === undefined) {
-    if (config.automationMode) {
-      config.sandbox.allowAllCommands = true;
-      config.sandbox.denyDestructiveByDefault = false;
-    } else {
-      config.sandbox.allowAllCommands = false;
-      config.sandbox.denyDestructiveByDefault = true;
-    }
-  }
+  /*
+   * 自动化模式**不改**沙箱姿态。
+   *
+   * 这里原先有一段：`SHE_ALLOW_ALL_COMMANDS` 未显式设置时，`automationMode` 为真就把
+   * `sandbox.allowAllCommands` 强制成 `true`、`denyDestructiveByDefault` 强制成 `false`。理由是
+   * "每条命令都要确认会让自动化模式在第一条 shell 调用之后就停下"。
+   *
+   * 那个理由是真的，但它管的是**另一个问题**：它说明的是"自动化模式在严格姿态下会停下来等人"，
+   * 而不是"自动化模式应该放宽边界"。把前者当成后者的理由，结果就是**打开自动化**（一个关于"它能不
+   * 能自己接着干"的开关）顺手改掉了一个关于"它能碰哪里"的开关 —— 而用户没有同意后者，界面上也没
+   * 有任何一处说明发生了这件事。实测过：只开自动化模式去改 `.env`，沙箱档位跟着变了。
+   *
+   * 两个问题分开，各自回答：
+   *
+   *   - 「能碰哪里」由 `outsideWorkspace` / `allowAllCommands` / `denyDestructiveByDefault` 回答，
+   *     默认是 fail-closed（见 DEFAULTS 里 `outsideWorkspace` 的注释）。要放宽就显式设
+   *     `SHE_ALLOW_ALL_COMMANDS` 或走设置页 —— 那是**用户**的决定。
+   *   - 「自动化模式在严格姿态下会停在确认上」由 `sandboxPostureNotice()` 如实说出来，让人自己选，
+   *     而不是替他做了这个选择。这就是本仓库对这类问题的既有做法：收敛 MCP 根要回显、坏配置要报
+   *     `degraded`、未隔离要说"未隔离" —— 改动可以发生，但不能不吭声。
+   *
+   * 显式的 `SHE_ALLOW_ALL_COMMANDS` 仍然照常生效，只是处理它的是下面那两段既有的代码（在
+   * `SHE_DENY_DESTRUCTIVE` 与 `outsideWorkspace` 缺省推导之前），这里不再重复一遍 —— 两处读同一个
+   * 变量就是两处会不一致。
+   */
+
   if (env.SHE_THINKING_LEVEL && THINKING_LEVELS.includes(env.SHE_THINKING_LEVEL as never)) {
     config.llm.thinkingLevel = env.SHE_THINKING_LEVEL as typeof config.llm.thinkingLevel;
   }

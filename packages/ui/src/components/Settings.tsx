@@ -29,6 +29,11 @@ interface SettingsData {
     timeout?: number;
     /** 「允许工作区外命令」+ 档位。老服务端没有这个字段。 */
     outsideWorkspace?: { allow?: boolean; policy?: 'all' | 'readonly' | 'deny' };
+    /**
+     * 自动化模式与沙箱姿态之间的张力（服务端算好回传，见 `sandboxPostureNotice`）。
+     * `null`/缺省 = 没有张力，界面上不出现任何东西。
+     */
+    notice?: string | null;
   };
 }
 
@@ -191,6 +196,13 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
    */
   const [outsideAllow, setOutsideAllow] = useState<boolean | null>(null);
   const [outsidePolicy, setOutsidePolicy] = useState<'all' | 'readonly' | 'deny'>('readonly');
+  /**
+   * 服务端算好的"自动化模式 vs 沙箱姿态"提示。空 = 不显示。
+   *
+   * 由服务端给，不是界面自己推：判据（哪种姿态会在无人值守时真的停住）只该有一份，两处写就是两处
+   * 会不一致。第四轮评测 2a 的另一半就是这条 —— 姿态以前被静默改掉，现在改成"不改，但说出来"。
+   */
+  const [postureNotice, setPostureNotice] = useState<string | null>(null);
   const [kbDbPath, setKbDbPath] = useState('');
   const [kbMode, setKbMode] = useState<'env' | 'shared' | 'local' | ''>('');
   const [sharePath, setSharePath] = useState('');
@@ -235,6 +247,7 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
             ? ow.policy
             : (d.sandbox?.allowAllCommands ? 'all' : 'readonly'),
         );
+        setPostureNotice(typeof d.sandbox?.notice === 'string' && d.sandbox.notice ? d.sandbox.notice : null);
         void refreshKbLink();
       })
       .catch((e) => setMsg(String(e.message || e)));
@@ -395,6 +408,7 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
       setData(d);
       setAllowAllCommands(Boolean(d.sandbox?.allowAllCommands));
       setAutomationMode(d.automationMode !== false);
+      setPostureNotice(typeof d.sandbox?.notice === 'string' && d.sandbox.notice ? d.sandbox.notice : null);
       setKbDbPath(d.kb?.dbPath || '');
       setWorkspaceRoot(d.workspace.root);
     } catch (e: any) {
@@ -581,6 +595,14 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
           <p className={styles.hint}>
             {t('这里决定 Agent 执行命令时会不会先来问你。改完点保存，立即生效，不用重启。')}
           </p>
+          {/*
+            自动化模式与沙箱姿态的张力。服务端只在**真的会停住无人值守那一轮**时才给这段话，所以
+            它出现就意味着"你勾了自动化，但它仍会在某些操作上停下来等确认" —— 这件事以前是被静默
+            处理掉的（打开自动化顺手把边界放宽），现在是说出来让人自己决定要不要放宽。
+          */}
+          {postureNotice && (
+            <p className={styles.warn} role="status">{postureNotice}</p>
+          )}
           <label className={styles.checkRow}>
             <input
               type="checkbox"
