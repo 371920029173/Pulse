@@ -22,6 +22,7 @@ import { spawnSync } from 'node:child_process';
 // "Which packages must report" and "what did each report" live in the lib: `test-suites.mjs` needs
 // the same two answers, and two copies of them would drift.
 import { readJson, packagesWithTests, parseSuiteOutput } from './lib/suites.mjs';
+import { hermeticEnv } from './lib/hermetic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -75,7 +76,7 @@ const SUITE_RUN_TIMEOUT_MS = 15 * 60_000;
 
 /** Run every suite once and hand back its output. */
 function runSuites() {
-  const env = { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' };
+  const env = hermeticEnv({ FORCE_COLOR: '0', NO_COLOR: '1' });
   delete env.CI;
 
   const out = spawnSync('pnpm', ['-r', 'test'], {
@@ -372,14 +373,27 @@ console.log('\n=== 文档里引用的数字与实际一致 ===');
    * not. Requiring it would create busywork; allowing a WRONG one is worse, so this
    * asserts only that no stale number survives. The guidance for docs is therefore:
    * describe what runs, do not count it.
+   *
+   * Two bugs in the way that was implemented, both found by being wrong rather than by reading it:
+   *
+   *   1. The matches were written into a Map keyed by file, so only the LAST number in each file
+   *      survived. A doc could keep a stale total as long as it mentioned a correct one afterwards.
+   *   2. `第 7 步` is not a claim about the gate's size — it is "the run died at its 7th stage", which
+   *      is exactly the "describe what runs" sentence the paragraph above asks for. The rule
+   *      nonetheless rejected it: it forbade correct documentation, and a check that does that is one
+   *      people work around. (This is not hypothetical — it was the single red in the round that
+   *      added the sentence, and the sentence was true.)
+   *
+   * So: every non-ordinal `N 步` claim is checked, `第 N 步` is skipped.
    */
-  const gateMentions = new Map();
+  const gateMentions = [];
   for (const [file, text] of texts) {
-    for (const m of text.matchAll(/(\d+)\s*(?:步|steps)/g)) {
-      gateMentions.set(file, Number(m[1]));
+    for (const m of text.matchAll(/(第\s*)?(\d+)\s*(?:步|steps)/g)) {
+      if (m[1]) continue; // 「跑到第 7 步」—— 说第几个阶段，不是说一共几步
+      gateMentions.push([file, Number(m[2])]);
     }
   }
-  const wrong = [...gateMentions.entries()].filter(([, n]) => !allowedSteps.has(n));
+  const wrong = gateMentions.filter(([, n]) => !allowedSteps.has(n));
   const EXPECTED = [...allowedSteps].sort((a, b) => a - b).join(' 或 ');
   check(
     `没有过时的步数表述（若写了就必须是 ${EXPECTED}）`,

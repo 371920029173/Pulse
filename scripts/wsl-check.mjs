@@ -150,6 +150,35 @@ const wsl = (args) => execFileSync('wsl.exe', args, {
  */
 const timedOut = (e) => e?.code === 'ETIMEDOUT' || e?.signal === 'SIGKILL';
 
+/**
+ * 「WSL 服务答不上话」那句话。
+ *
+ * 与 `timedOut` 分开，因为两种失败要求的动作不同（超时是"等/重启"，服务错误是"重启"），而共同点是：
+ * 两者都**不等于**"没装发行版"，也都**不是**这个仓库的结论。
+ *
+ * 输出是 UTF-16LE 被按 UTF-8 读过的结果（字节交错着 NUL），所以先把 NUL 拿掉、再取其中的 ASCII 片段 ——
+ * 要认的那个错误码（`Wsl/Service/E_UNEXPECTED`）本来就是 ASCII，取得出；中文在解码时已经丢了。
+ */
+const wslServiceDetail = (e, distro) => {
+  const recover = '\n        恢复：wsl --shutdown（实测这条之后同一台机器立刻恢复），再重开一个终端跑这条门禁。';
+  if (timedOut(e)) {
+    return `wsl.exe 超过 ${WSL_TIMEOUT_MS / 1000} 秒没返回（发行版 ${distro} 列得出来，但跑不动命令）`
+      + ' —— WSL 服务卡住了，不是"仓库不可达"，也不是"没装 Linux"。' + recover;
+  }
+  /*
+   * 认错误码，别的都别贴。UTF-16LE 被按 UTF-8 读之后剩下的 ASCII 片段里，除了
+   * `Wsl/Service/E_UNEXPECTED` 还有 `x:` 这类碎屑（实测：WSL 自己的诊断句里 `启动 Wsl/Service/...`
+   * 这种"解释文字"是中文，解码时丢了，只剩一个孤零零的 `x:`）。贴出来只会让诊断句变长，
+   * 而读者要的只有那个错误码。
+   */
+  const text = String(e?.stdout ?? e?.stderr ?? '').replace(/\0/g, '');
+  const code = (text.match(/Wsl\/[A-Za-z0-9_]+(?:\/[A-Za-z0-9_]+)*/) ?? [])[0];
+  const ascii = (code ?? (text.match(/[\x20-\x7e]{4,}/g) ?? []).map((s) => s.trim()).filter(Boolean).slice(0, 2).join(' / ')).trim();
+  return `wsl.exe 拒绝执行命令${ascii ? `：${ascii}` : ''} —— 这是 WSL 服务自己的状态（实测见过 Wsl/Service/E_UNEXPECTED：发行版列得出来、状态 Running，但任何命令都不执行），不是"仓库不可达"，也不是"没装 Linux"。`
+    + recover
+    + '\n        记成阻塞而不是失败：一次服务抖动不该被当成这个仓库的结论，更不该把后面还没跑的检查一起带走。';
+};
+
 if (process.platform !== 'win32') {
   note('WSL 探测', '当前不是 Windows，跳过（在 Linux 上这些检查应当直接由 CI 执行）');
 } else {
@@ -195,96 +224,99 @@ if (process.platform !== 'win32') {
      */
     wslSh = (script) => wsl(['-d', distro, '--cd', ROOT, '-e', 'bash', '-lc', script]);
 
-    const reachable = wslSh('test -d . && echo yes').includes('yes');
-    check(`仓库在 WSL 下可达（${linuxCwd}）`, Boolean(reachable));
-
-    let uname = '';
-    try {
-      uname = wslSh('uname -srm').trim();
-    } catch (e) {
-      uname = `uname 失败：${e.message}`;
-    }
-    console.log(`  --    内核： ${uname}`);
-
     /*
-     * Look for Node through a login shell, because nvm lives in the profile and is
-     * invisible to a non-login `bash -c`.
+     * 「WSL 服务此刻答不答得上话」必须先问一次，而且这一问**不许把门禁带下去**。
      *
-     * The result must also be a LINUX node. WSL puts the Windows PATH into the Linux
-     * PATH, and on this machine 36 `/mnt/...` entries arrive that way, so a Windows
-     * `node.exe` shim can satisfy `command -v node` and print a version while being
-     * unusable for a Linux command. Asking only for `-v` would have accepted it, and
-     * the "Linux" gate would then have been a claim about a Windows binary. The same
-     * check lives in the sandbox's isolation probe (`ISOLATION_PROBE`); this one stays
-     * dependency-free on purpose so `check:wsl` can run before anything is built.
+     * 这一行原来是裸的 `wslSh(...)`。实测后果：一次完整的 check:offline 跑到第 7 步（52 步里的第 7 步）
+     * 时 WSL 服务进入了 `Wsl/Service/E_UNEXPECTED` —— 发行版列得出来、状态是 Running，但任何命令都不执行。
+     * 于是这个脚本抛栈退出，后面 45 个检查一个都没跑。那条命令本身没错，错的是**把一次服务抖动当成了这个
+     * 仓库的结论**，代价却是整条链上还没跑的检查全部拿不到证据 —— 比它自己要报的那条失败严重得多。
+     * `wsl --shutdown` 之后同一台机器立刻恢复（实测），所以恢复动作是确定的。
+     *
+     * 收在这里而不是给每个探测各加一层 try：服务答不上话时，后面每个探测（uname / node -v / 跑脚本）都会
+     * 失败，而它们的失败文案会指向错误的原因（"没有 Node"、"脚本失败"）—— 那正是本文件开头警告的
+     * 「把卡住说成没装」。所以这一格记成**阻塞**：不是通过，也不是这个仓库的失败，说清是哪一种、以及那条
+     * 已知有效的恢复命令。
      */
+    let reachable = false;
+    let reachFailure = null;
     try {
-      linuxNode = wslSh(
-        'n=$(command -v node 2>/dev/null); '
-        + '[ -z "$n" ] && n=$(ls "$HOME"/.nvm/versions/node/*/bin/node 2>/dev/null | tail -1); '
-        + 'case "$n" in /mnt/*) echo "windows-binary($n)"; exit 0;; esac; '
-        + 'if [ -n "$n" ]; then p=$("$n" -p "process.platform" 2>/dev/null); '
-        + 'if [ "$p" = linux ]; then "$n" -v; else echo "not-linux($p)"; fi; '
-        + 'else echo none; fi',
-      ).trim();
+      reachable = wslSh('test -d . && echo yes').includes('yes');
     } catch (e) {
-      linuxNode = timedOut(e) ? `timeout(${WSL_TIMEOUT_MS / 1000}s)` : 'none';
+      reachFailure = e;
     }
 
-    const version = /^v(\d+)/.exec(linuxNode)?.[1];
-    if (!version || Number(version) < 20) {
-      note(
-        '在 WSL 里跑真实 Linux 测试',
-        linuxNode.startsWith('timeout(')
-          ? `探测 Node 的 wsl 命令超过 ${WSL_TIMEOUT_MS / 1000} 秒没返回 —— WSL 卡住了，不是"没有 Node"。`
-            + '\n        先 wsl --shutdown 再重开终端；这期间 Linux 侧到底有没有 Node 是未知的，不要当成"没有"。'
-          : `WSL 里没有可用的 Node（探测结果 "${linuxNode}"，仓库要求 >= 20）。`
-            + `\n        装上之后这条会自己开始跑： wsl -d ${distro} -- bash -lc "curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs"`
-            + '\n        注意 /mnt/d 是 drvfs，Windows 侧的 node_modules 含 win32 版 esbuild，Linux 侧需要各自安装。',
-      );
+    if (!reachable) {
+      note('WSL Linux 运行时', wslServiceDetail(reachFailure, distro));
     } else {
-      console.log(`  --    Node： ${linuxNode}`);
-      /*
-       * The list is split by whether a script can actually run with nothing but Node.
-       *
-       * The previous list was documented as "dependency-free gates" but was not: `encoding-check`
-       * and `docs-check` load the workspace's modules, and those modules are NATIVE — they were
-       * installed on Windows, so the Linux side cannot load them at all. Measured here:
-       *
-       *   better-sqlite3/build/Release/better_sqlite3.node: invalid ELF header
-       *
-       * That is a PE binary. The failure is environmental, not a Linux-correctness signal, and it
-       * would have been reported as a red FAIL forever — the exact "silently blocked" outcome this
-       * file's header warns about, and which nobody could clear without a full Linux install.
-       *
-       * So: run what is genuinely dependency-free, and say BLOCKED (with the one command that fixes
-       * it) for what needs native modules. A blocked item is not a pass.
-       */
-      const dependencyFree = ['portability-check.mjs', 'i18n-check.mjs'];
-      const needsNativeModules = ['encoding-check.mjs', 'docs-check.mjs'];
-
-      for (const script of dependencyFree) {
-        let ok = true;
-        let detail = '';
-        try {
-          wslSh(`node scripts/${script}`);
-        } catch (e) {
-          ok = false;
-          detail = timedOut(e)
-            ? `wsl 命令超过 ${WSL_TIMEOUT_MS / 1000} 秒没返回 —— 卡住了，不是这条检查失败`
-            : String(e.stdout ?? e.message).split('\n').slice(-12).join('\n        ');
-        }
-        check(`WSL 里 node scripts/${script}`, ok, detail);
-      }
-
-      let nativeUsable = false;
+      check(`仓库在 WSL 下可达（${linuxCwd}）`, reachable);
+  
+      let uname = '';
       try {
-        nativeUsable = wslSh('node -e "require(\'better-sqlite3\')" >/dev/null 2>&1 && echo yes || echo no').includes('yes');
-      } catch {
-        nativeUsable = false;
+        uname = wslSh('uname -srm').trim();
+      } catch (e) {
+        uname = `uname 失败：${e.message}`;
       }
-      if (nativeUsable) {
-        for (const script of needsNativeModules) {
+      console.log(`  --    内核： ${uname}`);
+  
+      /*
+       * Look for Node through a login shell, because nvm lives in the profile and is
+       * invisible to a non-login `bash -c`.
+       *
+       * The result must also be a LINUX node. WSL puts the Windows PATH into the Linux
+       * PATH, and on this machine 36 `/mnt/...` entries arrive that way, so a Windows
+       * `node.exe` shim can satisfy `command -v node` and print a version while being
+       * unusable for a Linux command. Asking only for `-v` would have accepted it, and
+       * the "Linux" gate would then have been a claim about a Windows binary. The same
+       * check lives in the sandbox's isolation probe (`ISOLATION_PROBE`); this one stays
+       * dependency-free on purpose so `check:wsl` can run before anything is built.
+       */
+      try {
+        linuxNode = wslSh(
+          'n=$(command -v node 2>/dev/null); '
+          + '[ -z "$n" ] && n=$(ls "$HOME"/.nvm/versions/node/*/bin/node 2>/dev/null | tail -1); '
+          + 'case "$n" in /mnt/*) echo "windows-binary($n)"; exit 0;; esac; '
+          + 'if [ -n "$n" ]; then p=$("$n" -p "process.platform" 2>/dev/null); '
+          + 'if [ "$p" = linux ]; then "$n" -v; else echo "not-linux($p)"; fi; '
+          + 'else echo none; fi',
+        ).trim();
+      } catch (e) {
+        linuxNode = timedOut(e) ? `timeout(${WSL_TIMEOUT_MS / 1000}s)` : 'none';
+      }
+  
+      const version = /^v(\d+)/.exec(linuxNode)?.[1];
+      if (!version || Number(version) < 20) {
+        note(
+          '在 WSL 里跑真实 Linux 测试',
+          linuxNode.startsWith('timeout(')
+            ? `探测 Node 的 wsl 命令超过 ${WSL_TIMEOUT_MS / 1000} 秒没返回 —— WSL 卡住了，不是"没有 Node"。`
+              + '\n        先 wsl --shutdown 再重开终端；这期间 Linux 侧到底有没有 Node 是未知的，不要当成"没有"。'
+            : `WSL 里没有可用的 Node（探测结果 "${linuxNode}"，仓库要求 >= 20）。`
+              + `\n        装上之后这条会自己开始跑： wsl -d ${distro} -- bash -lc "curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs"`
+              + '\n        注意 /mnt/d 是 drvfs，Windows 侧的 node_modules 含 win32 版 esbuild，Linux 侧需要各自安装。',
+        );
+      } else {
+        console.log(`  --    Node： ${linuxNode}`);
+        /*
+         * The list is split by whether a script can actually run with nothing but Node.
+         *
+         * The previous list was documented as "dependency-free gates" but was not: `encoding-check`
+         * and `docs-check` load the workspace's modules, and those modules are NATIVE — they were
+         * installed on Windows, so the Linux side cannot load them at all. Measured here:
+         *
+         *   better-sqlite3/build/Release/better_sqlite3.node: invalid ELF header
+         *
+         * That is a PE binary. The failure is environmental, not a Linux-correctness signal, and it
+         * would have been reported as a red FAIL forever — the exact "silently blocked" outcome this
+         * file's header warns about, and which nobody could clear without a full Linux install.
+         *
+         * So: run what is genuinely dependency-free, and say BLOCKED (with the one command that fixes
+         * it) for what needs native modules. A blocked item is not a pass.
+         */
+        const dependencyFree = ['portability-check.mjs', 'i18n-check.mjs'];
+        const needsNativeModules = ['encoding-check.mjs', 'docs-check.mjs'];
+  
+        for (const script of dependencyFree) {
           let ok = true;
           let detail = '';
           try {
@@ -297,13 +329,35 @@ if (process.platform !== 'win32') {
           }
           check(`WSL 里 node scripts/${script}`, ok, detail);
         }
-      } else {
-        for (const script of needsNativeModules) {
-          note(
-            `WSL 里 node scripts/${script}`,
-            '需要原生模块，而 node_modules 是 Windows 侧装的（better-sqlite3 是 PE 二进制，Linux 侧报 invalid ELF header）。'
-            + `\n        Linux 侧装一份之后这条会自己开始跑： wsl -d ${distro} --cd ${linuxCwd} -e bash -lc "pnpm install"`,
-          );
+  
+        let nativeUsable = false;
+        try {
+          nativeUsable = wslSh('node -e "require(\'better-sqlite3\')" >/dev/null 2>&1 && echo yes || echo no').includes('yes');
+        } catch {
+          nativeUsable = false;
+        }
+        if (nativeUsable) {
+          for (const script of needsNativeModules) {
+            let ok = true;
+            let detail = '';
+            try {
+              wslSh(`node scripts/${script}`);
+            } catch (e) {
+              ok = false;
+              detail = timedOut(e)
+                ? `wsl 命令超过 ${WSL_TIMEOUT_MS / 1000} 秒没返回 —— 卡住了，不是这条检查失败`
+                : String(e.stdout ?? e.message).split('\n').slice(-12).join('\n        ');
+            }
+            check(`WSL 里 node scripts/${script}`, ok, detail);
+          }
+        } else {
+          for (const script of needsNativeModules) {
+            note(
+              `WSL 里 node scripts/${script}`,
+              '需要原生模块，而 node_modules 是 Windows 侧装的（better-sqlite3 是 PE 二进制，Linux 侧报 invalid ELF header）。'
+              + `\n        Linux 侧装一份之后这条会自己开始跑： wsl -d ${distro} --cd ${linuxCwd} -e bash -lc "pnpm install"`,
+            );
+          }
         }
       }
     }
