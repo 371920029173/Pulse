@@ -34,6 +34,7 @@ import {
   classifyToolResult,
   isWorthRemembering,
   formatErrorEntry,
+  retireKnownFalsePositives,
 } from '../packages/agent-runtime/dist/index.js';
 import { removeTempDir } from './lib/temp.mjs';
 
@@ -100,12 +101,19 @@ console.log('\n=== 真实工具失败 → 真的写进 KB ===');
   const cases = [
     ['shell 非零退出码', 'shell', { command: exit3 }, 'nonzero_exit'],
     ['fs_read 文件不存在', 'fs_read', { path: 'nope/missing.ts' }, 'not_found'],
-    ['fs_read 工作区外', 'fs_read', { path: '../../../etc/passwd' }, 'permission'],
+    /*
+     * 工作区外是**策略边界**，不是 `permission`（第四轮 10a）。
+     *
+     * 它仍然是"真实工具产生的真实拒绝"，只是不该被记成 agent 的错题，所以它在下面既验 kind，
+     * 又验"没被写进书"。
+     */
+    ['fs_read 工作区外', 'fs_read', { path: '../../../etc/passwd' }, 'policy_denied'],
     ['未知工具', 'definitely_not_a_tool', {}, 'unavailable'],
     ['grep 无匹配', 'grep', { pattern: NO_MATCH }, 'empty'],
   ];
 
   let recordable = 0;
+  const policyDenials = [];
   for (const [label, name, args, expected] of cases) {
     const raw = await run(sandboxTools, name, args);
     const v = classifyToolResult(name, raw);
@@ -117,7 +125,10 @@ console.log('\n=== 真实工具失败 → 真的写进 KB ===');
      * admitting weather (`timeout`, `service`), the count assertion below fails rather than
      * the book quietly filling up with network noise.
      */
-    if (!isWorthRemembering(v.kind)) continue;
+    if (!isWorthRemembering(v.kind)) {
+      if (v.kind === 'policy_denied') policyDenials.push({ name, detail: raw });
+      continue;
+    }
     recordable++;
     const { entry } = book.record({
       tool: name,
@@ -130,6 +141,26 @@ console.log('\n=== 真实工具失败 → 真的写进 KB ===');
     check(`  ${label} 落到 errors/${name}`,
       entry.group === `${ERRORBOOK_ROOT}/${name}` && entry.count === 1, entry.group);
   }
+
+  /*
+   * 10a 的判据本身：策略拒绝不进错题本。
+   *
+   * 实测的代价是三条主动触发的边界探测（`DENIED:`）全成了"你以前犯过"，于是之后每次
+   * `errorbook_lookup` 都在指控一件按设计发生的事。它们的去路改由分类器当场写在工具结果里
+   * （`refusalRemedy`），所以这里两条都要成立：不落库，且那一次的结果里带着具体路线。
+   */
+  check('前提：真的遇到了策略拒绝（否则下面的断言是空转）', policyDenials.length > 0,
+    JSON.stringify(policyDenials.map((d) => d.name)));
+  check('策略拒绝没被写进错题本',
+    !book.lookup({ limit: 100 }).some((e) => e.kind === 'policy_denied'
+      || policyDenials.some((d) => e.detail.includes(String(d.detail).slice(0, 40)))),
+    JSON.stringify(book.lookup({ limit: 50 }).map((e) => [e.tool, e.kind])));
+  check('策略拒绝的路线当场写在结果里（不进书也不丢）',
+    policyDenials.every((d) => /只在工作区内操作/.test(String(classifyToolResult(d.name, d.detail).remedy))),
+    JSON.stringify(policyDenials.map((d) => classifyToolResult(d.name, d.detail).remedy)));
+  check('环境的拒绝访问是另一种 kind，且仍然该记',
+    classifyToolResult('fs_write', "Error: EACCES: permission denied, open '/srv/x'").kind === 'permission'
+    && isWorthRemembering('permission') === true);
 
   check('只记了「做错了」的那些', book.count() === recordable,
     `条数 ${book.count()}，应记 ${recordable}`);
@@ -423,6 +454,50 @@ console.log('\n=== 只在自己的子树下写东西 ===');
   const retired = rows.filter((m) => m.metadata?.errorForgotten === true).length;
   check('错题本没有自己的持久化文件（用的是 KB 原语）', rows.length === book.count() + retired,
     `rows=${rows.length} entries=${book.count()} retired=${retired}`);
+}
+
+// ─── 8. 把旧判据写下的策略拒绝退掉 ──────────────────────────────────────────
+console.log('\n=== 迁移：旧判据写下的策略拒绝退役，环境权限不足留着 ===');
+{
+  /*
+   * 这一节是 10a 的**存量**那一半。
+   *
+   * 新判据只保证"以后不再写进去"；已经写进去的那些还在库里，还在每次 `errorbook_lookup` 时指控
+   * 一件按设计发生的事（第四轮实测 3 条）。所以 `retireKnownFalsePositives` 里加了一条：拿**现在的**
+   * 分类器重判当时那条输出，只有今天会判成 `policy_denied` 的才退。
+   *
+   * 驱动的是真 SQLite 行、真模型对象，而不是重述那条 matcher。
+   */
+  const legacyShell = book.record({
+    tool: 'shell', kind: 'permission', detail: 'DENIED: 路径在工作区外: ..', sessionId: 'sess-legacy',
+  }).entry;
+  const legacyKb = book.record({
+    tool: 'kb_ingest_scan', kind: 'permission',
+    detail: 'Error: Path escapes workspace: ..（知识入库只允许工作区内的路径）', sessionId: 'sess-legacy',
+  }).entry;
+  const envDenied = book.record({
+    tool: 'fs_write', kind: 'permission', detail: "Error: EACCES: permission denied, open '/srv/app/x'",
+    sessionId: 'sess-legacy',
+  }).entry;
+
+  const liveBefore = book.count();
+  const res = retireKnownFalsePositives(engine, store, { workspaceRoot: dir, kbPath: join(dir, 'kb.sqlite') });
+  check('迁移跑起来了（不是跳过）', res.status === 'ran', JSON.stringify(res));
+  check('两条旧判据写下的策略拒绝被退役',
+    res.retired.length === 2
+    && [legacyShell.id, legacyKb.id].sort().join() === res.retired.map((r) => r.id).sort().join(),
+    JSON.stringify(res.retired));
+  check('环境权限不足的那条留着（那是真实的教训）',
+    store.getMemory(envDenied.id)?.metadata?.errorForgotten !== true);
+  check('退役是标记不是删除，档案里写清了原因', (() => {
+    const row = store.getMemory(legacyShell.id);
+    return Boolean(row) && row.metadata?.errorForgotten === true
+      && /policy-denial-as-mistake/.test(String(row.metadata?.errorForgottenReason));
+  })(), JSON.stringify(store.getMemory(legacyShell.id)?.metadata));
+  check('退役后查询不再返回它们', !book.lookup({ limit: 100 }).some((e) => e.id === legacyShell.id));
+  check('账目对得上：三条旧记录只退掉两条',
+    book.count() === liveBefore - 2 && book.lookup({ limit: 100 }).some((e) => e.id === envDenied.id),
+    `before=${liveBefore} after=${book.count()} envDenied 在书里=${book.lookup({ limit: 100 }).some((e) => e.id === envDenied.id)}`);
 }
 
 store.close();

@@ -119,6 +119,9 @@
 
 .errline { margin-top: 3px; font-size: 10.5px; color: var(--danger); }
 
+/* 收敛说明（不是错误，只是"东西去哪了"）—— 用弱一档的颜色，别和失败提示抢注意力。 */
+.hintline { margin-top: 3px; font-size: 10.5px; color: var(--text-tertiary); }
+
 .itemActions { display: flex; gap: 5px; margin-top: 7px; }
 
 .smallBtn {

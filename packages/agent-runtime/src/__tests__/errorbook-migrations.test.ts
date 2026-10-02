@@ -10,7 +10,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ErrorBook } from '../errorbook.js';
+import { ErrorBook, isWorthRemembering } from '../errorbook.js';
+import { classifyToolResult } from '../tool-result.js';
 import type { ErrorbookEngineLike, ErrorbookStoreLike } from '../errorbook.js';
 import { detectDrift } from '../reflection.js';
 import {
@@ -18,6 +19,7 @@ import {
   parseReflectionEvidence,
   isAllowListConstraintFalsePositive,
   migrationsMarkerPath,
+  FALSE_POSITIVE_REGISTRY_VERSION,
 } from '../errorbook-migrations.js';
 
 function fakeEngine() {
@@ -174,6 +176,49 @@ describe('errorbook 迁移：退役已修复的 reflection 误报', () => {
     assert.equal(forgotten(kb, odd.id), false);
   });
 
+  it('【第四轮 10a】旧分类器把策略拒绝记成的错题被退役，环境权限不足的留着', () => {
+    const kb = fakeEngine();
+    const book = new ErrorBook(kb, kb);
+    /*
+     * 三条真的在评测里出现过的形状：前缀式拒绝、抛出的越界、知识库直读写。旧分类器把它们判成
+     * `permission` 并写进了书，于是之后每次查询都在指控一件按设计发生的事。
+     */
+    const denied = book.record({ tool: 'shell', kind: 'permission', detail: 'DENIED: 路径在工作区外: ..' }).entry;
+    const escaped = book.record({ tool: 'fs_read', kind: 'permission', detail: 'Error: Path escapes workspace: ../README.md' }).entry;
+    const kbDirect = book.record({
+      tool: 'shell', kind: 'permission', detail: 'DENIED: 知识库文件只能通过 kb_* 工具访问：直读直写会跳过共振排序。',
+    }).entry;
+    // 环境权限不足：今天仍然是 permission，是一件要记住的教训，不能一起退掉。
+    const envDenied = book.record({
+      tool: 'fs_write', kind: 'permission', detail: "Error: EACCES: permission denied, open '/srv/app/x'",
+    }).entry;
+    // 一条真正的越权（不是策略拒绝的措辞）也留着。
+    const other = book.record({ tool: 'shell', kind: 'nonzero_exit', detail: 'exit code: 1' }).entry;
+
+    const res = retireKnownFalsePositives(kb, kb, { workspaceRoot: ws, kbPath: 'kb.sqlite' });
+    assert.equal(res.status, 'ran');
+    assert.deepEqual(res.retired.map((r) => r.id).sort(), [denied.id, escaped.id, kbDirect.id].sort());
+    assert.match(String(kb.memories.find((m) => m.id === denied.id)!.metadata.errorForgottenReason),
+      /policy-denial-as-mistake$/);
+    assert.equal(forgotten(kb, envDenied.id), false, '环境拒绝访问是一件真实的教训');
+    assert.equal(forgotten(kb, other.id), false);
+    assert.equal(book.count(), 2);
+  });
+
+  it('退役之后，重新发生同样的拒绝也不会让它回来（它不再进书）', () => {
+    const kb = fakeEngine();
+    const book = new ErrorBook(kb, kb);
+    const denied = book.record({ tool: 'shell', kind: 'permission', detail: 'DENIED: 路径在工作区外: ..' }).entry;
+    retireKnownFalsePositives(kb, kb, { workspaceRoot: ws, kbPath: 'kb.sqlite' });
+    assert.equal(forgotten(kb, denied.id), true);
+    /*
+     * 关键的一半：过去"复发会自己回来"是正确的（同样的失败可能真的又一次是 agent 的错）。现在
+     * 分类器把这条判成 `policy_denied`，而 `isWorthRemembering` 对它答 false —— 循环根本不会再写
+     * 这条记录，所以退役不会被撤销。
+     */
+    assert.equal(isWorthRemembering(classifyToolResult('shell', 'DENIED: 路径在工作区外: ..').kind), false);
+  });
+
   it('第二次运行是空操作（有标记就跳过；删了标记也找不到新的可退役条目）', () => {
     const { kb } = seed();
     const opts = { workspaceRoot: ws, kbPath: join(ws, '.she', 'kb.sqlite') };
@@ -188,7 +233,7 @@ describe('errorbook 迁移：退役已修复的 reflection 误报', () => {
     assert.deepEqual(third.retired, []);
     assert.equal(JSON.stringify(kb.memories), snapshot);
     const marker = JSON.parse(readFileSync(migrationsMarkerPath(ws), 'utf8'));
-    assert.equal(Object.values(marker.errorbook_known_false_positives as Record<string, { registryVersion: number }>)[0].registryVersion, 1);
+    assert.equal(Object.values(marker.errorbook_known_false_positives as Record<string, { registryVersion: number }>)[0].registryVersion, FALSE_POSITIVE_REGISTRY_VERSION);
   });
 
   it('出错不抛：日志里记一条，启动继续', () => {

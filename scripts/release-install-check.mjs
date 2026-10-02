@@ -19,6 +19,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
+import { controlHeaders } from './lib/control-auth.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -152,9 +153,12 @@ try {
 
   // ─── A couple of core APIs ───
   if (health) {
-    const apiCheck = async (path, label) => {
+    const apiCheck = async (path, label, headers) => {
       try {
-        const r = await fetch(`http://127.0.0.1:${PORT}${path}`, { signal: AbortSignal.timeout(5000) });
+        const r = await fetch(`http://127.0.0.1:${PORT}${path}`, {
+          signal: AbortSignal.timeout(5000),
+          headers,
+        });
         check(label, r.ok, `status=${r.status}`);
         return r.ok;
       } catch (err) {
@@ -162,7 +166,8 @@ try {
         return false;
       }
     };
-    await apiCheck('/api/settings', '/api/settings 可用');
+    // /api/settings 是控制面，第四轮起要带凭据（令牌按服务端同一套规则找，见 lib/control-auth.mjs）。
+    await apiCheck('/api/settings', '/api/settings 可用', controlHeaders(join(root, 'appdir')));
     await apiCheck('/api/metrics', '/api/metrics 可用');
     await apiCheck('/api/schedule', '/api/schedule 可用');
   }

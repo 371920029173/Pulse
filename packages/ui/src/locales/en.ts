@@ -330,4 +330,9 @@ registerDictionary('en', {
   '实际注册给智能体的工具数': 'Tools actually registered to the agent',
   '⚠ 探测到 {probe} 个工具，但只有 {injected} 个注册给了智能体':
     '⚠ Probe found {probe} tools, but only {injected} are registered to the agent',
+  '允许根已收敛到当前工作区，原本指向：{roots}':
+    'Allowed roots confined to the current workspace; originally: {roots}',
+  '产物目录已随工作区固定：{dir}': 'Output directory pinned to the workspace: {dir}',
+  '工作区外还留着 {n} 项历史产物（本通道的新产物已改在工作区内，这些要删你自己删）：{dir}':
+    '{n} legacy artifact(s) remain outside the workspace (this channel now writes inside it; deleting them is up to you): {dir}',
 });

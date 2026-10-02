@@ -153,11 +153,18 @@ export const ERRORBOOK_ROOT = 'errors';
  *     searches.
  *   - `precondition` — "no plan is open" is procedural and stated by the tool itself every
  *     time. It is a thing to do next, not a thing to remember.
+ *   - `policy_denied` — the sandbox refused because a boundary held, which is the boundary
+ *     working as designed. Measured (R4, deduction 10a): three deliberate boundary probes all
+ *     became entries, so every later lookup accused the agent of something that never went
+ *     wrong. The concrete route out of the refusal is written on the result itself
+ *     (`refusalRemedy` in `tool-result.ts`) — at the moment it is useful, instead of six
+ *     sessions later behind a lookup.
  *   - `none` — nothing failed.
  *
- * What is left is what the agent got WRONG: bad arguments, a refused action, a tool that does
- * not exist, a path that is not there, a command that failed, and a failure nobody has
- * classified yet. Those are worth reading before doing similar work again.
+ * What is left is what the agent got WRONG: bad arguments, a tool that does not exist, a path that
+ * is not there, a command that failed, a permission the ENVIRONMENT refuses (as opposed to one the
+ * policy refuses), and a failure nobody has classified yet. Those are worth reading before doing
+ * similar work again.
  *
  * `reflection` is in the yes-list by a different route: it is not a tool failure at all, it is a
  * self-review finding written by `reflection.ts` (drift, over-confidence, a repeated loop). It
@@ -187,6 +194,11 @@ export function isWorthRemembering(kind: ErrorbookKind | string): boolean {
     case 'none':
     case 'empty':
     case 'precondition':
+    /*
+     * 策略边界拒绝了这次调用 —— 那是边界在按设计工作，不是 agent 做错了什么（详见本文件开头
+     * 那张表的说明）。它的去路写在工具结果里，由 `refusalRemedy` 当场给出。
+     */
+    case 'policy_denied':
     case 'service':
     case 'timeout':
     case 'rate_limited':
@@ -254,48 +266,7 @@ export function withExpectFailureParam(def: ToolDefinition): ToolDefinition {
 }
 
 /**
- * The concrete "do this instead" for a policy refusal, or null when the refusal is not one of the
- * known kinds.
- *
- * The classifier's remedy is a pure function of the KIND (it feeds the stuck-loop signature), so for
- * every `permission` it can only say "the sandbox refused; don't retry" — true, and useless as a
- * lesson six sessions later. The book is read later and out of context, so it stores the specific
- * route instead, derived from the refusal text the sandbox and guardrail actually produce
- * (`sandbox/shell.ts`, `sandbox/tools.ts`, `guardrail.ts`). Matched on the tool's own wording,
- * most specific first; the remedy is still a pure function of the failure, so a repeat of the same
- * refusal keeps the same entry.
- */
-export function policyRemedy(report: { tool?: string; call?: string; detail: string }): string | null {
-  const d = String(report.detail ?? '');
-  if (/只能通过 kb_\*? ?工具|知识库文件/.test(d)) {
-    return '知识库只能走 kb_* 工具：查用 kb_query，写用 kb_upsert / kb_link。'
-      + '不要用 shell（sqlite3 等）或 fs_* 直接读写库文件（.she/kb.sqlite 及其 -wal/-shm）。';
-  }
-  if (/检测到敏感内容|已拒绝写入/.test(d)) {
-    return '交付文件里不要写入密钥/令牌等敏感值：改用环境变量或占位符（如 ${API_KEY}），真值由用户自己填。';
-  }
-  if (/escapes workspace|工作区外|只允许工作区内|命令包含 \.\.\//i.test(d)) {
-    return '只在工作区内操作：用相对工作区根的路径，不要用 ../、绝对路径、cd 或重定向跳到工作区外；'
-      + '需要外部文件就请用户把它复制进工作区。';
-  }
-  if (/重定向（> 或 <）|重定向目标/.test(d)) {
-    return '白名单模式下不要用 > / < 重定向：写文件用 fs_write，读文件用 fs_read。';
-  }
-  if (/\$\(\) 或反引号/.test(d)) {
-    return '白名单模式下不要用 $() 或反引号嵌套命令：拆成几次独立的 shell 调用，前一次的输出自己读完再用。';
-  }
-  if (/不在白名单内/.test(d)) {
-    return '这个命令不在白名单里：改用白名单内的命令，或用内置工具代替（读文件 fs_read、列目录 fs_list、'
-      + '搜索 grep、写文件 fs_write、看仓库 git_status / git_diff / git_log）；确实需要就向用户说明，由用户放行。';
-  }
-  if (/destructive command blocked/i.test(d)) {
-    return '破坏性命令（rm -rf、del /s、git reset --hard、format 等）被策略拦截：改单个文件用 fs_write，'
-      + '确需删除或回滚就向用户说明要删什么、为什么，由用户确认后执行。';
-  }
-  return null;
-}
-
-/** Metadata marker, so a node can be recognised as an entry without guessing from the group. */
+ * Metadata marker, so a node can be recognised as an entry without guessing from the group. */
 const MARKER = 'errorbook';
 
 /**
@@ -402,10 +373,9 @@ export class ErrorBook {
       kind: report.kind,
       call: oneLine(report.call ?? '', MAX_CALL),
       detail: oneLine(report.detail, MAX_DETAIL),
-      // A refusal gets the specific sanctioned route (see `policyRemedy`); anything else keeps the
-      // classifier's advice.
-      remedy: (report.kind === 'permission' || report.kind === 'unknown' ? policyRemedy(report) : null)
-        ?? report.remedy ?? null,
+      // 去路由分类器给：策略拒绝的具体路线写在工具结果里（`refusalRemedy`），这里不再另算一份 ——
+      // 两份算法必然会在某一天分叉，而这一份的产物只在六个会话之后才被读到。
+      remedy: report.remedy ?? null,
       sessionId: report.sessionId ?? null,
     });
   }

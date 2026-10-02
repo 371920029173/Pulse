@@ -2,6 +2,7 @@ export {
   SandboxShell, DESTRUCTIVE_PATTERNS, resolveInsideWorkspace, splitShellCommands,
   hasCommandSubstitution, hasUninspectableRedirection, workspaceEscapeReason,
   detectInlineCodeExecution, codeExecutionDisclosure,
+  detectShellDialectMismatch, shellDialectDisclosure,
 } from './shell.js';
 export {
   toWslPath, workspaceRelative, buildConfinedScript, buildWslArgv, planIsolation,

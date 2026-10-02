@@ -30,6 +30,7 @@ import { spawn } from 'node:child_process';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
+import { controlHeaders } from './lib/control-auth.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -336,7 +337,12 @@ async function waitForHealth(timeoutMs = 30_000) {
   }
 }
 
-const api = (path, init) => fetch(`http://127.0.0.1:${PORT}${path}`, { signal: AbortSignal.timeout(8000), ...init });
+const api = (path, init) => fetch(`http://127.0.0.1:${PORT}${path}`, {
+  signal: AbortSignal.timeout(8000),
+  ...init,
+  // /api/config/recovery 与 /api/config/rollback 都在控制面里（第四轮起要凭据）。
+  headers: { ...controlHeaders(join(ws, 'appdir')), ...(init?.headers ?? {}) },
+});
 const post = (path, body) => api(path, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },

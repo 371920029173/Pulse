@@ -2,6 +2,7 @@ const { app, BrowserWindow, shell, Tray, Menu, globalShortcut, nativeImage, nati
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const net = require('node:net');
+const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const { BackendPool } = require('./backend-pool.cjs');
@@ -38,6 +39,38 @@ function dataRoot() {
   try { return app.getPath('userData'); } catch { return path.join(ROOT, '.she-userdata'); }
 }
 const LOG_DIR = IS_PACKAGED ? path.join(dataRoot(), 'logs') : path.join(path.resolve(__dirname, '../..'), '.she');
+
+/**
+ * 后端把控制面凭据写在哪。
+ *
+ * 必须和后端 `appDir()` 的解析**完全一致**（`packages/server/src/index.ts`）：`SHE_APP_DIR`，否则
+ * `~/.she-app`。桌面端不给后端设 `SHE_APP_DIR`（那会搬走插件 / 主题 / 后台任务，是另一件事），
+ * 所以两边默认都落在同一个 `~/.she-app` 上。不一致的后果是界面永远拿到 `null` 凭据、每个控制面
+ * 请求都 401 —— 而这种故障看起来像"服务端坏了"，不像配错路径。
+ */
+function controlTokenPath() {
+  const appDir = process.env.SHE_APP_DIR ? path.resolve(process.env.SHE_APP_DIR) : path.join(os.homedir(), '.she-app');
+  return path.join(appDir, 'control-token');
+}
+
+/**
+ * 交给前端的控制面凭据；没有就返回 `null`（例如用户显式关掉了校验，或后端还没起来）。
+ *
+ * 优先用环境里显式给的（`SHE_CONTROL_TOKEN`），否则读后端生成的那份文件。**不做任何异步等待**：
+ * preload 在开窗那一刻就要用到它，而开窗之前调用方已经等过 `/api/health`（见 `ensureBackend`），
+ * 所以文件此刻已经存在。读不到就如实返回 null，界面会收到 401 并把原因说出来 —— 比给一个空字符串
+ * 去冒充凭据好。
+ */
+function readControlToken() {
+  const fromEnv = (process.env.SHE_CONTROL_TOKEN || '').trim();
+  if (fromEnv) return fromEnv;
+  try {
+    const v = fs.readFileSync(controlTokenPath(), 'utf8').trim();
+    return v || null;
+  } catch {
+    return null;
+  }
+}
 
 /** @type {{child: import('node:child_process').ChildProcess, name: string}[]} */
 const children = [];
@@ -580,10 +613,21 @@ function createWindow(origin) {
        * single-token form can be passed: `SHE_AUTH_TOKENS` holds several tenants' tokens and picking
        * one for the desktop would silently make this shell one tenant's client, which is a decision
        * the operator has to make on purpose instead.
+       *
+       * 控制面凭据也走同一条路（第四轮评测 2b）：设置 / 工作区 / 配置这几个接口现在要求一份凭据，
+       * 而它由后端生成在 `<appDir>/control-token`。桌面端读出来交给 preload，用户因此**不需要**
+       * 手输任何东西 —— 否则"更安全"的代价会变成每个人都去关掉它。
+       *
+       * 两个凭据是两件事，可以同时存在：租户 token 回答"你是谁"，控制面凭据回答"你能不能改运行
+       * 档位"。前端的 `lib/api.ts` 只发一个头（`x-she-token`），所以这里把两份合并成一份前端凭据：
+       * 只要有一份能过对应的门，请求就能到。
        */
-      additionalArguments: process.env.SHE_AUTH_TOKEN
-        ? [`--she-auth-token=${process.env.SHE_AUTH_TOKEN}`]
-        : [],
+      additionalArguments: (() => {
+        const tenant = process.env.SHE_AUTH_TOKEN;
+        if (tenant) return [`--she-auth-token=${tenant}`];
+        const control = readControlToken();
+        return control ? [`--she-auth-token=${control}`] : [];
+      })(),
       preload: path.join(__dirname, 'preload.cjs'),
     },
   });

@@ -43,7 +43,7 @@
  *     server and hides the host's Cursor config on purpose, so it behaves the same on CI.
  * ─────────────────────────────────────────────────────────────────────────────
  */
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync, realpathSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -76,6 +76,21 @@ const check = (label, cond, detail) => {
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 同一个目录在 Windows 上可以有短名/长名/大小写三种写法，比路径得先归一。
+ *
+ * 这个检查跑在临时目录里，`os.tmpdir()` 在本机给的是 `C:\Users\ADMINI~1\...`（短名），而子进程
+ * 报回来的 cwd 可能已经是长名 —— 直接比字符串会得到"看起来失败"的假红。
+ */
+const samePath = (a, b) => {
+  const norm = (p) => {
+    let real;
+    try { real = realpathSync.native(p); } catch { real = resolve(p); }
+    return process.platform === 'win32' ? real.toLowerCase() : real;
+  };
+  return norm(a) === norm(b);
+};
 
 /** Poll until `fn` is true. Fixed sleeps encode a guess about machine speed. */
 async function waitFor(fn, { timeoutMs = 30_000, stepMs = 250, what = '条件' } = {}) {
@@ -148,8 +163,47 @@ createInterface({ input: process.stdin }).on('line', (line) => {
 });
 `;
 
-/* ─── Stub model ─── */
+/**
+ * A playwright-flavoured stdio server: it does at startup exactly what the real one does with
+ * its cwd.
+ *
+ * The real playwright MCP derives its artifact directory from the process cwd —
+ * `join(cwd, '.playwright-mcp')` in `outputDir()` (`playwright-core/lib/coreBundle.js`), falling
+ * back to the system temp dir only when cwd is unwritable. Observed on a real machine: 340 items
+ * (screenshots, `console-*.log`) in `C:\Users\Administrator\.playwright-mcp` while the workspace
+ * was elsewhere — the channel's products landed outside the boundary, where nothing cleans them
+ * up and `.gitignore` cannot see them.
+ *
+ * This stub writes a marker there at startup, so the marker's LOCATION is the child's cwd. That
+ * covers both spawn paths (the panel's probe and the bridge) without needing a tool call, and it
+ * fails if either one goes back to inheriting SHE's launch directory.
+ */
+const FAKE_PW_MCP = String.raw`
+import { mkdirSync, writeFileSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
+import { createInterface } from 'node:readline';
+const dir = join(process.cwd(), '.playwright-mcp');
+mkdirSync(dir, { recursive: true });
+writeFileSync(join(dir, 'cwd-marker.txt'), realpathSync.native(process.cwd()), 'utf8');
+const send = (m) => process.stdout.write(JSON.stringify(m) + '\n');
+const tools = [{ name: 'shot', description: 'Pretend screenshot', inputSchema: { type: 'object', properties: {} } }];
+createInterface({ input: process.stdin }).on('line', (line) => {
+  let msg;
+  try { msg = JSON.parse(line); } catch { return; }
+  const { id, method, params } = msg;
+  if (method === 'initialize') {
+    send({ jsonrpc: '2.0', id, result: { protocolVersion: params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'pw-demo', version: '1' } } });
+  } else if (method === 'tools/list') {
+    send({ jsonrpc: '2.0', id, result: { tools } });
+  } else if (method === 'tools/call') {
+    send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'shot-ok' }] } });
+  } else if (id !== undefined) {
+    send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found' } });
+  }
+});
+`;
 
+/* ─── Stub model ─── */
 /**
  * Records the tool list the agent offered on EVERY request, so "the agent can see the MCP tool"
  * is assertable without asking the model anything meaningful.
@@ -226,12 +280,23 @@ const fakeMcp = join(workspace, 'fake-mcp.mjs');
 writeFileSync(fakeMcp, FAKE_MCP, 'utf8');
 
 /*
- * SHE's own MCP file: the server this check drives. Everything else is hidden below, so the
- * inventory is exactly these two tools no matter what the developer has in Cursor.
+ * 文件名里带 `playwright-mcp`，才会被当作"按 cwd 派生产物位置"的那一类 —— 这是服务器自己的
+ * 命名约定（`@playwright/mcp` / `playwright-mcp` / `mcp-server-playwright`），不是位置巧合。
+ */
+const fakePwMcp = join(workspace, 'fake-playwright-mcp.mjs');
+writeFileSync(fakePwMcp, FAKE_PW_MCP, 'utf8');
+
+/*
+ * SHE's own MCP file: the servers this check drives. Everything else is hidden below, so the
+ * inventory is exactly these tools no matter what the developer has in Cursor.
  */
 const SERVER_NAME = 'demo';
+const PW_SERVER = 'pw';
 writeFileSync(join(workspace, '.she', 'mcp.json'), JSON.stringify({
-  mcpServers: { [SERVER_NAME]: { command: 'node', args: [fakeMcp] } },
+  mcpServers: {
+    [SERVER_NAME]: { command: 'node', args: [fakeMcp] },
+    [PW_SERVER]: { command: 'node', args: [fakePwMcp] },
+  },
 }, null, 2) + '\n', 'utf8');
 
 const stub = createStubModel();
@@ -251,6 +316,18 @@ const fakeHome = join(workspace, 'home');
 const fakeAppData = join(workspace, 'appdata');
 mkdirSync(fakeHome, { recursive: true });
 mkdirSync(fakeAppData, { recursive: true });
+
+/*
+ * 用户主目录里的历史产物（旧行为的现场）。
+ *
+ * 真实机器上这里躺着 340 项：`01-boot-zero-chats.png`、`console-*.log`，是智能体用 playwright
+ * 通道做界面验证时留下的。收敛管得住新产物，管不住已经攒下的，所以这里放两项进去，看面板说不
+ * 说得出"以前写在这儿、现在不写了"，以及这一轮跑完它有没有变多。
+ */
+const LEGACY_ITEMS = 2;
+const legacyDir = join(fakeHome, '.playwright-mcp');
+mkdirSync(legacyDir, { recursive: true });
+for (let i = 1; i <= LEGACY_ITEMS; i++) writeFileSync(join(legacyDir, `old-${i}.png`), 'x', 'utf8');
 
 writeFileSync(join(workspace, '.env'), [
   'OPENAI_API_KEY=stub-key-not-used',
@@ -359,8 +436,8 @@ try {
     const servers = r.json?.servers ?? [];
     const demo = servers.find((s) => s.name === SERVER_NAME);
 
-    check('工作区里只有我们配的那一个 MCP server（没读到本机的 Cursor 配置）',
-      servers.length === 1,
+    check('工作区里只有我们配的那两个 MCP server（没读到本机的 Cursor 配置）',
+      servers.length === 2,
       `servers=${servers.map((s) => `${s.name}(source=${s.source})`).join(', ')}`);
     check('MCP server 可达且工具数被探测到', Boolean(demo?.reachable) && demo?.toolCount === 2,
       JSON.stringify(demo));
@@ -445,6 +522,48 @@ try {
     check('MCP 的 isError 变成模型看得见的失败（不是静默成功）',
       !boom || /^Error|isError|mcp-boom/i.test(String(boom.content ?? '')),
       String(boom?.content ?? '(没有结果)').slice(0, 240));
+  }
+
+  // ── 5. MCP 通道不出工作区（评测报告 9b）──
+  /*
+   * 被观测到的事实：`C:\Users\Administrator\.playwright-mcp` 里 340 项 —— 截图与 console 日志，
+   * 全是智能体用 playwright 通道做界面验证时留下的，而工作区在别处。SHE 的边界盖住了文件工具与
+   * shell，但 MCP 跑在自己的进程里，`spawn` 没给 cwd 就继承了 SHE 的启动目录，于是产物落到边界外。
+   *
+   * 这里分三件事验：配置层（cwd 钉在工作区、产物目录要回显）、行为层（子进程真的把产物写进了工作
+   * 区、没写进 SHE 的启动目录）、历史层（工作区外已经攒下的那些只报不改、而且不再增长）。
+   */
+  {
+    const listed = (await api('/api/mcp/servers')).json?.servers ?? [];
+    const pw = listed.find((s) => s.name === PW_SERVER);
+
+    check('每个 MCP server 的 cwd 都是工作区（面板看得见）',
+      listed.length > 0 && listed.every((s) => samePath(s.cwd ?? '', workspace)),
+      listed.map((s) => `${s.name}: cwd=${s.cwd}`).join('; '));
+
+    check('按 cwd 产物件的 server 报出产物目录在工作区内',
+      samePath(pw?.confinedOutputDir ?? '', join(resolve(workspace), '.playwright-mcp')),
+      `confinedOutputDir=${pw?.confinedOutputDir ?? '(无)'}`);
+
+    const marker = join(resolve(workspace), '.playwright-mcp', 'cwd-marker.txt');
+    const markerCwd = existsSync(marker) ? readFileSync(marker, 'utf8').trim() : '';
+    check('【关键】playwright 型通道的产物落在工作区里（说明子进程的 cwd 真是工作区）',
+      markerCwd !== '' && samePath(markerCwd, workspace),
+      `marker=${markerCwd || '(没有)'}，期望 ${resolve(workspace)}`);
+
+    // 旧行为的下落处：子进程继承 SHE 的启动目录，也就是这个检查里 packages/server。
+    const leak = join(SERVER_DIR, '.playwright-mcp', 'cwd-marker.txt');
+    const leaked = existsSync(leak);
+    if (leaked) rmSync(leak, { force: true });
+    check('产物没有落进 SHE 的启动目录（那正是旧行为的位置）', !leaked, leak);
+
+    const legacy = pw?.legacyOutputDir;
+    check('工作区外的历史产物被报了出来（只报不改）',
+      samePath(legacy?.path ?? '', legacyDir) && legacy?.entries === LEGACY_ITEMS,
+      JSON.stringify(legacy ?? null));
+
+    const grew = existsSync(legacyDir) ? readdirSync(legacyDir).length : 0;
+    check(`旧位置不再增长（跑完一整轮，仍然只有那 ${LEGACY_ITEMS} 项）`, grew === LEGACY_ITEMS, `${grew} 项`);
   }
 } catch (err) {
   check('检查过程未抛异常', false, err.stack ?? err.message);

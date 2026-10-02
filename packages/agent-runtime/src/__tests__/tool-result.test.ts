@@ -112,13 +112,33 @@ describe('退出码（旧代码当成成功的那一类）', () => {
 });
 
 describe('权限', () => {
-  it('沙箱拒绝是权限问题，且明确不可重试、不可绕开', () => {
+  it('沙箱拒绝是策略边界，且明确不可重试、不可绕开', () => {
     // shell.ts: stderr: 'DENIED: destructive command blocked by sandbox policy'
     // tools.ts: return `DENIED: ${result.stderr}`;
     const v = classifyToolResult('shell', 'DENIED: DENIED: destructive command blocked by sandbox policy');
-    assert.equal(v.kind, 'permission');
+    assert.equal(v.kind, 'policy_denied');
     assert.equal(v.retryable, false);
-    assert.match(String(v.remedy), /由用户决定是否放行/);
+    assert.match(String(v.remedy), /由用户确认/);
+  });
+
+  it('环境层面的拒绝访问是 permission，不是策略边界（两者的下一步相反）', () => {
+    // node fs: `EACCES: permission denied, open '…'` / `EPERM: operation not permitted`
+    // theme.ts 把它译成 `… 无法写入（权限不足）`；Windows cmd 说 `Access is denied.`
+    // portability-check:allow —— 下面是**夹具数据**：系统自己会打印带盘符的路径，要测的正是这种文本
+    // 能不能被认出来。它不来自任何默认值，也不会成为代码里用的路径。
+    for (const detail of ["Error: EACCES: permission denied, open '/srv/app/x'",
+      "Error: EPERM: operation not permitted, unlink 'C:\\readonly\\x'",
+      'Error: D:\\locked\\theme.css 无法写入（权限不足）。',
+      "Error: Access is denied."]) {
+      assert.equal(classifyToolResult('fs_write', detail).kind, 'permission', detail);
+    }
+  });
+
+  it('策略边界与环境权限是两种 kind，去路也不同', () => {
+    const policy = classifyToolResult('shell', 'DENIED: 路径在工作区外: ..');
+    const env = classifyToolResult('fs_write', "Error: EACCES: permission denied, open '/srv/x'");
+    assert.notEqual(policy.kind, env.kind);
+    assert.notEqual(policy.remedy, env.remedy);
   });
 
   it('输出里出现 DENIED 不算拒绝（只有前缀才算）', () => {
@@ -148,9 +168,9 @@ describe('失败原因分类', () => {
     ['kb-tools.ts', 'Error: unknown KB tool "kb_fake"', 'unavailable'],
     ['plugins.ts', 'Error: plugin tool "x" is not available', 'unavailable'],
     // A refusal that arrives as a thrown Error rather than the `DENIED:` prefix.
-    ['shell.ts', 'Error: Path escapes workspace: ../../../etc/passwd', 'permission'],
-    ['shell.ts', 'Error: cd 目标在工作区外: C:\\Windows', 'permission'],
-    ['ingest-tools.ts', 'Error: 不在工作区（知识入库只允许工作区内的路径）', 'permission'],
+    ['shell.ts', 'Error: Path escapes workspace: ../../../etc/passwd', 'policy_denied'],
+    ['shell.ts', 'Error: cd 目标在工作区外: C:\\Windows', 'policy_denied'],
+    ['ingest-tools.ts', 'Error: 不在工作区（知识入库只允许工作区内的路径）', 'policy_denied'],
     // Well-formed but the state does not allow it: changing the arguments cannot help.
     ['preflight.ts', 'Error: 当前没有可分析的用户请求（这条工具是给收到用户消息的那一轮用的）。', 'precondition'],
     ['batch tools', 'Error: 没有可用的 batch', 'precondition'],
@@ -166,11 +186,12 @@ describe('失败原因分类', () => {
   }
 
   it('每一种失败都给出不同的去路，并且不可重试的都不建议重试', () => {
-    const kinds = ['invalid_args', 'permission', 'unavailable', 'not_found', 'precondition', 'empty',
+    const kinds = ['invalid_args', 'permission', 'policy_denied', 'unavailable', 'not_found', 'precondition', 'empty',
       'service', 'timeout', 'rate_limited', 'nonzero_exit', 'unknown'] as const;
     const samples: Record<string, string> = {
       invalid_args: 'Error: steps are required',
-      permission: 'DENIED: nope',
+      permission: "Error: EACCES: permission denied, open '/srv/x'",
+      policy_denied: 'DENIED: nope',
       unavailable: 'Error: unknown tool "x"',
       not_found: 'Error: 路径不存在: x',
       precondition: 'Error: 当前没有可分析的用户请求',

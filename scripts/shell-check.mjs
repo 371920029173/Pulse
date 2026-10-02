@@ -318,5 +318,91 @@ console.log('\n=== 自动化模式不改沙箱姿态，但把张力说出来 ===
   removeTempDir(cfgRoot);
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * shell 方言：**说在前面**，错了也说清楚（第四轮 3a / 3b）
+ *
+ * 3b：工具描述里没写这条命令按哪个 shell 的语法跑 —— 模型没法为一个没被告知的 shell 写命令。
+ * 3a：在 Windows 上只有 cmd.exe，而模型按 POSIX 习惯写 `$VAR` / `$(…)` / `'a b'` / `~/x`，
+ *     cmd.exe 语法上不认这些，于是命令**跑了、退出码 0、输出却不是那个意思**。这是最难被发现的
+ *     一类失败：没有任何错误可看。
+ *
+ * 这一节钉住两半，且刻意**不**断言拒绝 —— 方言差异不是安全问题，说成"不许写"只会让人把命令藏起来
+ * （`node -e` 那次的教训）。所以检查的形状是：退出码 0 + 输出是错的 + 回执点名了差异。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+console.log('\n=== 命令按哪个 shell 的语法跑：描述里说、回执里报 ===');
+{
+  const { detectShellDialectMismatch, shellDialectDisclosure, createTools } =
+    await import('../packages/sandbox/dist/index.js');
+  const shell = new SandboxShell(workspace, { allowAllCommands: true, denyDestructiveByDefault: false });
+  const tools = createTools(shell, workspace, { allowAllCommands: true });
+  const dialect = shell.dialect();
+
+  // 1. 描述里点名了真正会解析命令的那个 shell（3b）。
+  const shellTool = tools.definitions.find((d) => d.name === 'shell');
+  check('【关键】shell 工具的描述里写了真正解析命令的 shell（3b）',
+    !!shellTool && shellTool.description.includes(shell.shellName()),
+    `shellName=${shell.shellName()}`);
+  check('（回执里点名的是这台机器上真会用的那个）',
+    (dialect === 'cmd') === (process.platform === 'win32' && shell.shellName() === 'cmd.exe'),
+    `platform=${process.platform} dialect=${dialect} name=${shell.shellName()}`);
+
+  /*
+   * 每台机器上只有一半适用，但两半都要有判据：
+   *   cmd 档位 → 描述必须把差异逐条写出来，且真实命令的回执必须点名；
+   *   POSIX 档位 → 描述不许出现 cmd 专用写法（否则 Linux 上会教人写 %VAR%），且 POSIX 写法照常生效。
+   */
+  if (dialect === 'cmd') {
+    // 2. 写之前就知道：差异在描述里（不是错了才知道）。
+    for (const marker of ['%VAR%', '$(…)', '单引号', '%USERPROFILE%', 'nul', 'rem']) {
+      check(`描述里说明了 ${marker} 的 cmd 写法`, !!shellTool && shellTool.description.includes(marker));
+    }
+
+    // 3. 错了就说出来：拿真命令跑，断言"跑了、退出码 0、结果不是那个意思"这一整件事。
+    const literal = await shell.exec('echo $HOME');
+    // portability-check:allow — 下面这行是**断言文案**，点名解释器而不是调用它。
+    check('【关键】POSIX 写法在 cmd.exe 下**不会失败**（退出码 0 才是这类失败难发现的原因）',
+      literal.exitCode === 0 && /\$HOME/.test(literal.stdout),
+      `exit=${literal.exitCode} stdout=${JSON.stringify(literal.stdout)}`);
+    check('【关键】结果里点名了这处差异', literal.shellDialect?.gaps?.some((g) => g.construct === '${VAR} / $VAR') === true,
+      JSON.stringify(literal.shellDialect ?? null));
+
+    const out = await tools.execute('shell', { command: 'echo ${HOME}' });
+    check('【关键】模型读到的回执里有这段说明', out.includes('shell 方言') && out.includes('%VAR%'),
+      JSON.stringify(out).slice(0, 200));
+    check('说明不能读成拒绝：命令确实跑了（否则读者会重跑同样错的命令）',
+      out.includes('exit code: 0') && !out.includes('DENIED'), JSON.stringify(out).slice(0, 200));
+
+    // 4. 反面：写对了、或交给别的解释器，就不吭声。
+    const correct = await shell.exec('echo %USERPROFILE%');
+    check('cmd 写法不报差异', correct.shellDialect === undefined, JSON.stringify(correct.shellDialect ?? null));
+    const plain = await tools.execute('shell', { command: 'node -v' });
+    check('普通命令的回执里没有这段（一条永远出现的提示等于噪音）', !plain.includes('shell 方言'));
+  } else {
+    check('POSIX 机器上描述不出现 cmd 专用写法（否则是教人写错）',
+      !!shellTool && !shellTool.description.includes('%VAR%'), shellTool?.description.slice(-80));
+    const r = await shell.exec('echo $HOME');
+    check('POSIX 机器上 $HOME 正常展开，且没有方言报告',
+      r.exitCode === 0 && r.shellDialect === undefined, `stdout=${JSON.stringify(r.stdout)}`);
+  }
+
+  // 5. 交给别的解释器的程序文本不越权（`node -e "a${b}c"` 里的 ${b} 是 JS 模板字符串）。
+  check('别的解释器的程序文本不被误报',
+    detectShellDialectMismatch('node -e "console.log(`${a}`)"').length === 0
+    && detectShellDialectMismatch('powershell -Command "Write-Host $(Get-Date)"').length === 0);
+  check('嵌套 cmd 的程序文本照报（`cmd /c "…"` 里仍是 cmd 语法）',
+    detectShellDialectMismatch('cmd /c "echo ${HOME}"').length > 0);
+  check('不误报 cmd 自己的写法', detectShellDialectMismatch('copy a.txt b.txt && dir /b').length === 0);
+
+  // 6. 文案三件事齐全，且不能读成拒绝。
+  // portability-check:allow — 这条是夹具：构造一份 cmd 档位的报告来验文案，不是调用 cmd.exe。
+  const text = shellDialectDisclosure({ shell: 'cmd.exe', dialect: 'cmd', gaps: [{ construct: '~/', behavior: 'b', instead: 'i' }] });
+  check('披露文案说清 shell / 差异 / 该怎么写',
+    /cmd\.exe/.test(text) && /~/.test(text) && /i/.test(text) && /命令跑了/.test(text));
+  check('披露文案不读成拒绝', !/DENIED|已拒绝|被拦|禁止/.test(text));
+
+  await shell.stopAll();
+}
+
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`);
 process.exit(failures === 0 ? 0 : 1);

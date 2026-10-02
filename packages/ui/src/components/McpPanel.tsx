@@ -26,6 +26,15 @@ interface McpServer {
    * 悄悄改掉用户的配置比不收敛更糟。
    */
   confinedRoots?: string[];
+  /**
+   * 产物目录因 `cwd` 被钉到工作区而变化时，这是它**现在**写在哪（缺省 = 没这个说法）。
+   *
+   * MCP 子进程的 cwd 曾经继承 SHE 的 cwd，于是 playwright 通道按 `join(cwd, '.playwright-mcp')`
+   * 算出来的产物目录取决于"你怎么启动 SHE" —— 实测那一份落在用户主目录里，340 项。
+   */
+  confinedOutputDir?: string;
+  /** 旧版本留在工作区之外的历史产物（只报不删，删不删是用户的决定）。 */
+  legacyOutputDir?: { path: string; entries: number };
 }
 
 /**
@@ -176,6 +185,21 @@ export function McpPanel() {
               {s.confinedRoots?.length ? (
                 <div className={styles.errline}>
                   {t('允许根已收敛到当前工作区，原本指向：{roots}', { roots: s.confinedRoots.join('、') })}
+                </div>
+              ) : null}
+
+              {s.confinedOutputDir ? (
+                <div className={styles.hintline}>
+                  {t('产物目录已随工作区固定：{dir}', { dir: s.confinedOutputDir })}
+                </div>
+              ) : null}
+
+              {s.legacyOutputDir ? (
+                <div className={styles.errline}>
+                  {t('工作区外还留着 {n} 项历史产物（本通道的新产物已改在工作区内，这些要删你自己删）：{dir}', {
+                    n: s.legacyOutputDir.entries,
+                    dir: s.legacyOutputDir.path,
+                  })}
                 </div>
               ) : null}
 

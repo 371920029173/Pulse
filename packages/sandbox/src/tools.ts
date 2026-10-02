@@ -7,7 +7,7 @@ import type {
   ToolDefinition, SandboxResult, SandboxJobView, SandboxJobKillReason,
 } from '@she/shared';
 import type { SandboxShell } from './shell.js';
-import { classifyCommand, codeExecutionDisclosure } from './shell.js';
+import { classifyCommand, codeExecutionDisclosure, shellDialectDisclosure } from './shell.js';
 import type { IsolationInEffect } from '@she/shared';
 
 /**
@@ -20,6 +20,37 @@ import type { IsolationInEffect } from '@she/shared';
  */
 function isolationNote(iso: IsolationInEffect | undefined): string[] {
   return iso ? [`[真隔离] ${iso.detail}`] : [];
+}
+
+/**
+ * 这条命令由哪个 shell 解析，写给模型看（评测 3b：描述未标 shell 类型）。
+ *
+ * 分两半，因为两句话解决的不是同一件事：
+ *
+ *   - 前一句**陈述事实**：具体是 `cmd.exe`、`/bin/sh` 还是隔离里的 `bash`。这是让模型写对的第一
+ *     个条件 —— 它没法为一个没被告知的 shell 写命令。
+ *   - 后一句**只在方言要对齐时才出现**：cmd.exe 那一套与 POSIX 的差异逐条列出。写在描述里而不是
+ *     等出错再报，是因为代价不对等：一次描述的几十个 token 换掉的是"命令跑了、退出码 0、结果不是
+ *     你要的"这种读者最难发现的失败。
+ *
+ * POSIX 侧不列差异：模型默认就按 POSIX 写，把 "cmd.exe 里要写 %VAR%" 反过来念一遍只是噪音。
+ *
+ * 拿不到 shell 名时**不猜**（返回空串）：`injection.test.ts` 里那种只实现 `exec` 的替身不是沙箱，
+ * 替它编一个方言是在描述里写一句没人能核对的话。少一句说明，好过多一句错的。
+ */
+function shellDialectDescription(shell: SandboxShell): string {
+  if (typeof shell.shellName !== 'function' || typeof shell.dialect !== 'function') return '';
+  const name = shell.shellName();
+  const dialect = shell.dialect();
+  const head = `这个工作区里的命令由 ${name} 解析。`;
+  if (dialect !== 'cmd') return head;
+  return head
+    + `注意这是 ${name} 的语法，不是 POSIX：环境变量写 %VAR% 而不是 $VAR 或 \${VAR}，`
+    + "没有命令替换（$(…) 和反引号都只是普通字符，不会被展开），单引号不是引号（'a b' 会被拆成两个参数），"
+    + '~ 不会展开成主目录（用 %USERPROFILE%），`VAR=x 命令` 这种前缀写法不成立（用 set VAR=x && 命令），'
+    + '空设备是 nul 而不是 /dev/null，注释写 rem 而不是 #。'
+    + '需要 POSIX 语法时，把整段交给 powershell -NoProfile -Command "…"，或分成多次调用；'
+    + '真隔离（WSL）开着的时候命令在 bash -lc 里跑，那时 POSIX 语法才是对的。';
 }
 import { ConfirmTicketStore } from './tickets.js';
 import { computerClick, computerKey, computerScroll, computerType, computerUseEnabled } from './computer.js';
@@ -144,6 +175,7 @@ function renderShellResult(result: SandboxResult): string {
   const disclosure = [
     ...isolationNote(result.isolation),
     ...(result.codeExecution ? [codeExecutionDisclosure(result.codeExecution)] : []),
+    ...(result.shellDialect ? [shellDialectDisclosure(result.shellDialect)] : []),
   ];
   if (result.jobId) {
     return [
@@ -168,6 +200,7 @@ function renderJobStarted(job: SandboxJobView): string {
     ...outputBlocks(job.stdout, job.stderr),
   ];
   if (job.codeExecution) parts.push(codeExecutionDisclosure(job.codeExecution));
+  if (job.shellDialect) parts.push(shellDialectDisclosure(job.shellDialect));
   parts.push(...isolationNote(job.isolation));
   return parts.join('\n');
 }
@@ -229,6 +262,7 @@ function renderJobView(view: SandboxJobView): string {
    * question "was this process path-contained?" has the same answer every time.
    */
   if (view.codeExecution) parts.push(codeExecutionDisclosure(view.codeExecution));
+  if (view.shellDialect) parts.push(shellDialectDisclosure(view.shellDialect));
   parts.push(...isolationNote(view.isolation));
   return parts.join('\n');
 }
@@ -278,12 +312,35 @@ const KB_DIRECT_ACCESS_REASON =
   '知识库文件只能通过 kb_* 工具访问：直读直写会跳过共振排序、不计访问计数，'
   + '还可能锁住服务端已打开的库文件。查用 kb_query，写用 kb_upsert / kb_link。';
 
+/**
+ * 为什么控制面凭据这个文件要拒绝访问。
+ *
+ * 第四轮评测 2b：不带凭据就能 `PUT /api/settings` 改掉 `.env` 里的沙箱档位 —— 也就是**给自己
+ * 换一套边界**。控制面凭据（`<appDir>/control-token`，见 server 的 `control-token.ts`）是为了把
+ * 这件事从"一行 curl"变成"要拿出一份凭据"；如果沙箱里能直接把这个文件读出来，那这份凭据就白加了：
+ * 读得到就等于拿得到，拿得到就还能给自己放宽沙箱。
+ *
+ * 所以它和知识库那条是同一个形状：**精确拒绝**这一个文件，而不是把整个安装私有目录锁上
+ * （那里还放着插件、主题、后台任务，读它们是无害的）。
+ *
+ * 写清"sandbox 拒绝"和"凭据真正的边界"两件事，免得读者以为这是万无一失的隔离：同机同用户的其它
+ * 程序仍然挡不住，这条管的是**工作区里的 Agent**。
+ */
+const CONTROL_TOKEN_REASON =
+  '控制面凭据不能直接读取：它决定沙箱档位能被谁改，读得到就等于给自己换一套边界。'
+  + '需要改设置请说明想改什么、为什么，由用户在自己的界面上决定 —— 这不是你可以自己开的门。';
+
 export function createTools(
   shell: SandboxShell,
   workspaceRoot: string,
   opts?: {
     allowAllCommands?: boolean;
     kbDbPath?: string;
+    /**
+     * 控制面凭据文件（`<appDir>/control-token`）。传了就精确拒绝直读 —— 理由见
+     * `CONTROL_TOKEN_REASON`。不传时不做任何事（脚本与测试的旧调用方式不变）。
+     */
+    controlTokenPath?: string;
     /** 「允许工作区外命令」+ 档位。见 `config.sandbox.outsideWorkspace`。 */
     outsideWorkspace?: { allow: boolean; policy: 'all' | 'readonly' | 'deny' };
   },
@@ -304,6 +361,8 @@ export function createTools(
 
   // Off-limits to `shell` and `fs_*`; reachable through the `kb_*` tools that own it.
   if (opts?.kbDbPath) shell.protectDatabase(opts.kbDbPath, KB_DIRECT_ACCESS_REASON);
+  // 同理，但保护的是"能改边界"的那份凭据 —— 读得到就等于给自己换一套边界。
+  if (opts?.controlTokenPath) shell.protectDatabase(opts.controlTokenPath, CONTROL_TOKEN_REASON);
 
   const toolMap = new Map<string, { def: ToolDefinition; fn: (args: Record<string, unknown>) => Promise<string> }>();
 
@@ -349,7 +408,8 @@ export function createTools(
         + 'is long-running, so the turn is not blocked while it starts. '
         + 'A command whose program is inline (node -e, python -c, powershell -Command, sh -c …) is '
         + 'allowed but reported: the workspace boundary is checked over the command text, so paths '
-        + 'inside that program are not inspected and the child process is not contained.',
+        + 'inside that program are not inspected and the child process is not contained. '
+        + shellDialectDescription(shell),
       parameters: {
         type: 'object',
         properties: {

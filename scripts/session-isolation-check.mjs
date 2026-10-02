@@ -35,6 +35,7 @@ import { spawn } from 'node:child_process';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
+import { controlHeaders } from './lib/control-auth.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -313,7 +314,11 @@ async function waitForHealth(timeoutMs = 30_000) {
   }
 }
 
-const api = (path, init) => fetch(`http://127.0.0.1:${PORT}${path}`, { signal: AbortSignal.timeout(8000), ...init });
+const api = (path, init) => fetch(`http://127.0.0.1:${PORT}${path}`, {
+  signal: AbortSignal.timeout(8000),
+  ...init,
+  headers: { ...controlHeaders(join(workspace, 'appdir')), ...(init?.headers ?? {}) },
+});
 const get = async (path) => {
   const r = await api(path);
   return { status: r.status, body: await r.json().catch(() => null) };
@@ -470,7 +475,12 @@ let liveOut = '';
 liveChild.stdout.on('data', (c) => { liveOut += c; });
 liveChild.stderr.on('data', (c) => { liveOut += c; });
 
-const live = (path, init) => fetch(`http://127.0.0.1:${OTHER_PORT}${path}`, { signal: AbortSignal.timeout(8000), ...init });
+const live = (path, init) => fetch(`http://127.0.0.1:${OTHER_PORT}${path}`, {
+  signal: AbortSignal.timeout(8000),
+  ...init,
+  // 控制面（/api/workspaces*）从第四轮起要认凭据，令牌按服务端同一套规则找（见 lib/control-auth.mjs）。
+  headers: { ...controlHeaders(join(liveRoot, 'appdir')), ...(init?.headers ?? {}) },
+});
 const liveGet = async (path) => {
   const r = await live(path);
   return { status: r.status, body: await r.json().catch(() => null) };
@@ -790,7 +800,7 @@ console.log('\n9. 临时工作区不写进 .env 默认（切走就忘），普�
     try {
       const switchTo = (root) => fetch(`http://127.0.0.1:${ENV_PORT}/api/workspaces/switch`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...controlHeaders(join(envWorkspace, 'appdir')), 'Content-Type': 'application/json' },
         body: JSON.stringify({ root }),
         signal: AbortSignal.timeout(8000),
       });

@@ -1,8 +1,9 @@
 /**
  * Retiring error-book entries that a since-fixed checker wrote by mistake.
  *
- * `reflection_check` files its verdicts into the error book (`errors/自省`), and the book replays
- * them as lessons. When the CHECKER turns out to have been wrong — and the bug is fixed — the
+ * Two writers can be wrong in a way this has to clean up after. `reflection_check` files its verdicts
+ * into the error book (`errors/自省`), and `tool-result.ts` files classified tool failures under
+ * `errors/<tool>`. When either CHECKER turns out to have been wrong — and the bug is fixed — the
  * entries it already wrote are still there, still accusing the agent of the thing the fix just
  * proved it did not do. Nothing else will clean them up: the fixed checker simply stops writing new
  * ones, and an old entry only leaves the book when someone calls `errorbook_forget` on it.
@@ -25,6 +26,7 @@ import { randomUUID } from 'node:crypto';
 import { ErrorBook, ERRORBOOK_ROOT } from './errorbook.js';
 import type { ErrorbookEngineLike, ErrorbookStoreLike } from './errorbook.js';
 import { prohibitionObject } from './reflection.js';
+import { classifyToolResult } from './tool-result.js';
 
 // ─── Evidence parsing ───────────────────────────────────────────────────────
 
@@ -151,7 +153,7 @@ export interface KnownFalsePositive {
  * Bump when a signature is added or a matcher changes, so every KB is swept once more.
  * The marker records the version it ran at; a lower one means "not yet".
  */
-export const FALSE_POSITIVE_REGISTRY_VERSION = 1;
+export const FALSE_POSITIVE_REGISTRY_VERSION = 2;
 
 export const KNOWN_FALSE_POSITIVES: KnownFalsePositive[] = [
   {
@@ -182,6 +184,23 @@ export const KNOWN_FALSE_POSITIVES: KnownFalsePositive[] = [
       if (!allFixed) return false;
       // A drift verdict needs a major signal; it must be one of the fixed ones.
       return signals.some((s) => (s.kind === 'goal_unrelated' && s.actions === 5) || s.kind === 'constraint');
+    },
+  },
+  {
+    id: 'policy-denial-as-mistake',
+    fixedIn: '0.4.0',
+    description: '策略拒绝被记成 agent 的错题（第四轮 10a）：沙箱按规则拒绝的一次调用是边界在工作，'
+      + '不是"做错了"，而旧分类器把它判成 permission 并写进了书 —— 于是之后每次查询都在指控一件按设计'
+      + '发生的事。实测三条主动触发的边界探测全部中招。',
+    matches: (e) => {
+      if (e.kind !== 'permission' && e.kind !== 'unknown') return false;
+      /*
+       * 用**现在的**分类器重判当时那条输出（和上面那条 allow-list 判据同一个原则）。
+       *
+       * 只有今天会判成 `policy_denied` 的才退：真正的环境权限（EACCES/EPERM）今天仍然是
+       * `permission`，留下来；输出被截断到认不出、或本来就是别的原因的，也留下来。宁可少退。
+       */
+      return classifyToolResult(e.tool, e.detail).kind === 'policy_denied';
     },
   },
 ];

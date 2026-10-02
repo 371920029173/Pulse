@@ -39,8 +39,24 @@ export type ToolFailureKind =
   | 'none'
   /** The arguments are wrong, missing or unusable. */
   | 'invalid_args'
-  /** The sandbox refused the action, by policy or by jail. */
+  /**
+   * 运行环境/账号层面的权限不足：OS 说"你不能"（EACCES / EPERM、Windows 的 `Access is denied.`），
+   * 或远端回了 401 / 403。
+   *
+   * 和下面那条的区别是**谁决定的**：这一条是环境挡住了一件事，而且挡住它的不是这条命令的写法 ——
+   * 换个位置、补上凭据往往真能成，所以"这台机器上那个目录写不进去"是一条值得记住的教训。
+   */
   | 'permission'
+  /**
+   * 策略边界按规则拒绝了这次调用：沙箱 jail、命令白名单、知识库直读直写、交付物敏感内容。
+   *
+   * 单独一条、而不是并进 `permission`，因为**它不是 agent 的错题，是边界在按设计工作**。第四轮
+   * 评测 10a 就是这条：三条主动触发的边界探测（`DENIED:`）全被记成"你以前犯过"，于是之后每次
+   * `errorbook_lookup` 都在指控一件根本没出错的事。所以 `isWorthRemembering` 对它答 false，
+   * 具体该走哪条路由 `refusalRemedy` **当场**写在结果里 —— 那一刻正是它有用的时候，而不是留给
+   * 六个会话之后的一次查找。
+   */
+  | 'policy_denied'
   /** The tool itself is not available in this session. */
   | 'unavailable'
   /** The thing the call names does not exist. */
@@ -98,9 +114,11 @@ export interface ToolResultVerdict {
   /**
    * One line telling the model what to do next, or null when nothing needs saying.
    *
-   * MUST be a pure function of the kind. It is appended to the tool result, and the
-   * stuck-loop signature is built from that result: a remedy carrying a timestamp or a
-   * counter would make every repeat look different and silently disable loop detection.
+   * MUST be DETERMINISTIC: a pure function of the result text — never of the clock, a counter, or
+   * call order. It is appended to the tool result, and the stuck-loop signature is built from that
+   * result, so a remedy carrying a timestamp would make every repeat look different and silently
+   * disable loop detection. Depending on the TEXT is fine and intended (two different refusals
+   * genuinely need two different next moves, see `refusalRemedy`); it is the same text every time.
    */
   remedy: string | null;
 }
@@ -115,6 +133,10 @@ export interface ToolResultVerdict {
  *
  * `ok` and `retryable` live here rather than at each detection site for the same reason:
  * two places deciding whether a kind is retryable is two places to disagree.
+ *
+ * The `remedy` here is the kind's default. One kind refines it from the text: a policy refusal names
+ * the concrete route that was closed off (see `refusalRemedy`), which a single sentence per kind
+ * cannot carry. `ok` and `retryable` are never refined.
  */
 const KINDS: Record<ToolFailureKind, { ok: boolean; retryable: boolean; remedy: string | null }> = {
   none: { ok: true, retryable: false, remedy: null },
@@ -129,8 +151,15 @@ const KINDS: Record<ToolFailureKind, { ok: boolean; retryable: boolean; remedy: 
   permission: {
     ok: false,
     retryable: false,
-    remedy: '沙箱按策略拒绝了这次调用。不要重试，也不要换一种写法去达成同一件事——'
-      + '需要的话说明想做什么、为什么，由用户决定是否放行。',
+    remedy: '这次调用被运行环境拒了（文件/目录权限、账号或凭据），不是你参数写错了。'
+      + '换一个能写的位置、补上凭据，或说明缺什么权限由用户来开——原样重试不会有不同结果。',
+  },
+
+  policy_denied: {
+    ok: false,
+    retryable: false,
+    remedy: '沙箱按策略拒绝了这次调用：这是边界在按规则工作，不是失败，也不是参数写错了。'
+      + '不要重试，也不要换一种写法去达成同一件事——需要的话说明想做什么、为什么，由用户决定是否放行。',
   },
 
   unavailable: {
@@ -208,6 +237,61 @@ const KINDS: Record<ToolFailureKind, { ok: boolean; retryable: boolean; remedy: 
 const verdict = (kind: ToolFailureKind): ToolResultVerdict => ({ kind, ...KINDS[kind] });
 
 /**
+ * 这条拒绝**具体**该走哪条路，认不出时 null。
+ *
+ * 「沙箱拒绝了」对下一次调用是够的，对六个会话之后的一次查找是不够的 —— 所以每一条能认出的拒绝
+ * 都给一个点名到具体工具/具体做法的去路。
+ *
+ * 从 `errorbook.ts` 搬过来的（第四轮评测 10a）：那时它写在错题本里，因为拒绝会被记成一条错题；
+ * 现在策略拒绝根本不进书（见 `policy_denied`），所以它必须**当场**写在工具结果里 —— 那一刻正是
+ * 它有用的时候。
+ *
+ * 判据是产生者自己的措辞（`sandbox/shell.ts`、`sandbox/tools.ts`、`guardrail.ts`），具体在前、
+ * 笼统在后。仍然是**纯函数**：同一段拒绝文本永远给同一个去路，所以同一次拒绝重复出现时签名不变，
+ * 卡死循环检测照旧。
+ */
+export function refusalRemedy(detail: string): string | null {
+  const d = String(detail ?? '');
+  if (/只能通过 kb_\*? ?工具|知识库文件/.test(d)) {
+    return '知识库只能走 kb_* 工具：查用 kb_query，写用 kb_upsert / kb_link。'
+      + '不要用 shell（sqlite3 等）或 fs_* 直接读写库文件（.she/kb.sqlite 及其 -wal/-shm）。';
+  }
+  if (/检测到敏感内容|已拒绝写入/.test(d)) {
+    return '交付文件里不要写入密钥/令牌等敏感值：改用环境变量或占位符（如 ${API_KEY}），真值由用户自己填。';
+  }
+  if (/escapes workspace|工作区外|只允许工作区内|命令包含 \.\.\//i.test(d)) {
+    return '只在工作区内操作：用相对工作区根的路径，不要用 ../、绝对路径、cd 或重定向跳到工作区外；'
+      + '需要外部文件就请用户把它复制进工作区。';
+  }
+  if (/重定向（> 或 <）|重定向目标/.test(d)) {
+    return '白名单模式下不要用 > / < 重定向：写文件用 fs_write，读文件用 fs_read。';
+  }
+  if (/\$\(\) 或反引号/.test(d)) {
+    return '白名单模式下不要用 $() 或反引号嵌套命令：拆成几次独立的 shell 调用，前一次的输出自己读完再用。';
+  }
+  if (/不在白名单内/.test(d)) {
+    return '这个命令不在白名单里：改用白名单内的命令，或用内置工具代替（读文件 fs_read、列目录 fs_list、'
+      + '搜索 grep、写文件 fs_write、看仓库 git_status / git_diff / git_log）；确实需要就向用户说明，由用户放行。';
+  }
+  if (/destructive command blocked/i.test(d)) {
+    return '破坏性命令（rm -rf、del /s、git reset --hard、format 等）被策略拦截：改单个文件用 fs_write，'
+      + '确需删除或回滚就向用户说明要删什么、为什么，由用户确认后执行。';
+  }
+  return null;
+}
+
+/**
+ * 一次策略拒绝的判定：`policy_denied`，加上这条拒绝**具体**该走哪条路。
+ *
+ * 去路跟着文本走，不是跟着 kind 走的唯一一处（见 `refusalRemedy`）；`ok` 与 `retryable` 仍然只由
+ * kind 决定，所以那一半的不变量没有松动。
+ */
+const refused = (text: string): ToolResultVerdict => ({
+  ...verdict('policy_denied'),
+  remedy: refusalRemedy(text) ?? KINDS.policy_denied.remedy,
+});
+
+/**
  * A rule, tested in order.
  *
  * Order is load-bearing, not cosmetic. A refusal and a transport failure are both reported
@@ -242,7 +326,7 @@ const RULES: Rule[] = [
    * and no rewrite of the path will help".
    */
   {
-    kind: 'permission',
+    kind: 'policy_denied',
     re: /escapes workspace|工作区外|只允许工作区内/i,
     from: 'shell.ts `Path escapes workspace`, `cd 目标在工作区外`, ingest-tools.ts',
   },
@@ -253,7 +337,7 @@ const RULES: Rule[] = [
    * the model "something failed" would invite it to retry, which is the wrong move twice over.
    */
   {
-    kind: 'permission',
+    kind: 'policy_denied',
     re: /已拒绝写入|检测到敏感内容/,
     from: 'guardrail.ts `交付文件里检测到敏感内容，已拒绝写入`',
   },
@@ -263,9 +347,23 @@ const RULES: Rule[] = [
    * failure: the same call will be refused again and the fix is a different tool.
    */
   {
-    kind: 'permission',
+    kind: 'policy_denied',
     re: /只能通过 kb_\* 工具访问/,
     from: 'sandbox tools.ts KB_DIRECT_ACCESS_REASON (fs_* on the KB database)',
+  },
+  /*
+   * ── 环境说"你不能"，而这次调用本身没写错。 ──
+   *
+   * 放在策略规则**之后**：两者都会说"拒绝/不允许"，而下一步动作是相反的 —— 策略边界是"别再试，
+   * 问用户"，环境权限是"换个位置或补凭据"。先判更具体的策略，剩下的才轮到环境。
+   *
+   * 三条真实来源：Node 的 `EACCES: permission denied, open '…'`、`EPERM: operation not permitted`、
+   * `theme.ts` 把它译成的 `… 无法写入（权限不足）`、以及 Windows cmd 的 `Access is denied.`。
+   */
+  {
+    kind: 'permission',
+    re: /EACCES|EPERM|permission denied|access is denied|拒绝访问|权限不足/i,
+    from: 'node fs errors (EACCES/EPERM), theme.ts `无法写入（权限不足）`, Windows cmd `Access is denied.`',
   },
   {
     kind: 'invalid_args',
@@ -491,8 +589,11 @@ export function classifyToolResult(
    * `DENIED:` is the sandbox's own prefix (tools.ts), so it is read AS a prefix rather than
    * matched inside a message: `grep DENIED` would otherwise classify its own search hits —
    * or a genuine command's output quoting the word — as a refusal.
+   *
+   * 归 `policy_denied` 而不是 `permission`：这条前缀只由沙箱的策略层产生（jail、白名单、破坏性
+   * 命令、知识库直读写、控制面凭据），全是"边界按规则工作"，不是环境/凭据层面的权限不足。
    */
-  if (/^DENIED:/i.test(trimmed)) return verdict('permission');
+  if (/^DENIED:/i.test(trimmed)) return refused(trimmed);
 
   /*
    * Emptiness is decided before the error rules, because a tool returning nothing is not an
@@ -554,7 +655,10 @@ export function classifyToolResult(
   if (status) return verdict(kindForStatus(Number(status[1])));
 
   for (const rule of RULES) {
-    if (rule.re.test(body)) return verdict(rule.kind);
+    if (rule.re.test(body)) {
+      // 策略拒绝带上这条拒绝**具体**该走的路（见 `refused`）；其余按 kind 给。
+      return rule.kind === 'policy_denied' ? refused(body) : verdict(rule.kind);
+    }
   }
 
   /*

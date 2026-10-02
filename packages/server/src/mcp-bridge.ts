@@ -22,7 +22,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { ToolDefinition } from '@she/shared';
 import { ConfirmTicketStore } from '@she/sandbox';
-import { discoverMcpServers, type McpServerConfig } from './mcp.js';
+import { discoverMcpServers, mcpSpawnSpec, type McpServerConfig } from './mcp.js';
 import { productVersion } from './version.js';
 
 export const MCP_PROTOCOL_VERSION = '2024-11-05';
@@ -146,8 +146,25 @@ interface Pending {
 }
 
 /** One long-lived stdio connection to an MCP server (newline-delimited JSON-RPC). */
-export class McpSession {
-  tools: McpRemoteTool[] = [];
+/**
+ * 起不来的服务器，stderr 里最该给人看的那两行。
+ *
+ * 取"最后三行"是错的，而且错得很有欺骗性：Node 崩溃的结尾是 `}` 加版本横幅
+ * （`Node.js v22.16.0`），于是面板上报的启动失败**看不到原因**。实测（2026-10-02）：
+ * filesystem 服务器被以 `node <工作区目录>` 启动（见 `mcp.ts` 的 `firstArgumentIndex`），
+ * exit 1，而唯一留下的线索就是那句横幅 —— 看起来像服务器自己的毛病。
+ *
+ * 所以先找错误行（`Error:` / `ERR_*` / `Cannot find` / `EACCES` …），连它下面那一行
+ * （通常是 `at …` 的定位）一起给出；找不到才退回最后三行。
+ */
+export function stderrReason(stderr: string): string {
+  const lines = stderr.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const at = lines.findIndex((l) => /(?:^|\s)(?:Error|ERR_[A-Z]+|EACCES|ENOENT|Cannot find|is not recognized|SyntaxError|TypeError|MODULE_NOT_FOUND)/.test(l));
+  const picked = at >= 0 ? lines.slice(at, at + 2) : lines.slice(-3);
+  return picked.join(' | ').slice(0, 400);
+}
+
+export class McpSession {  tools: McpRemoteTool[] = [];
   private child: ChildProcess | null = null;
   private buffer = '';
   private nextId = 1;
@@ -168,12 +185,10 @@ export class McpSession {
     this.buffer = '';
     this.stderrTail = '';
     const decoder = new StringDecoder('utf8');
-    const child = spawn(this.cfg.command, this.cfg.args, {
-      env: { ...process.env, ...(this.cfg.env ?? {}) },
-      stdio: ['pipe', 'pipe', 'pipe'],
-      shell: process.platform === 'win32',
-      windowsHide: true,
-    });
+    // cwd 钉在工作区：理由见 mcp.ts 的 `confineMcpServer`（评测报告 9b —— playwright 通道把
+    // 340 项产物写进了用户主目录，就是因为这里没给 cwd）。
+    const spec = mcpSpawnSpec(this.cfg);
+    const child = spawn(spec.command, spec.args, spec.options);
     this.child = child;
     this.exitInfo = null;
     // Events from a previous child (after a restart) must not touch the new one.
@@ -266,8 +281,8 @@ export class McpSession {
 
   private markDead(reason: string): void {
     if (this.exitInfo !== null) return;
-    const tail = this.stderrTail.trim().split(/\r?\n/).slice(-3).join(' | ');
-    this.exitInfo = tail ? `${reason}; stderr: ${tail.slice(0, 400)}` : reason;
+    const tail = stderrReason(this.stderrTail);
+    this.exitInfo = tail ? `${reason}; stderr: ${tail}` : reason;
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
       p.reject(new Error(`MCP server ${this.name}: ${this.exitInfo}`));

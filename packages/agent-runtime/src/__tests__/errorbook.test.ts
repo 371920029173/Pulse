@@ -8,10 +8,9 @@ import {
   renderErrorbook,
   isIntentionalFailure,
   withExpectFailureParam,
-  policyRemedy,
   EXPECT_FAILURE_ARG,
 } from '../errorbook.js';
-import { classifyToolResult } from '../tool-result.js';
+import { classifyToolResult, refusalRemedy } from '../tool-result.js';
 import type { ErrorbookEngineLike, ErrorbookStoreLike } from '../errorbook.js';
 
 /**
@@ -273,7 +272,7 @@ describe('isWorthRemembering', () => {
     for (const kind of ['invalid_args', 'permission', 'unavailable', 'not_found', 'nonzero_exit', 'vacuous', 'unknown', 'stuck_loop', 'reflection'] as const) {
       assert.equal(isWorthRemembering(kind), true, `${kind} 该记`);
     }
-    for (const kind of ['none', 'empty', 'precondition', 'service', 'timeout', 'rate_limited'] as const) {
+    for (const kind of ['none', 'empty', 'precondition', 'policy_denied', 'service', 'timeout', 'rate_limited'] as const) {
       assert.equal(isWorthRemembering(kind), false, `${kind} 不该记`);
     }
   });
@@ -526,35 +525,44 @@ describe('errorbook_lookup 表头计数', () => {
   });
 });
 
-/** 越权/策略拒绝的「去路」要点名该走的路，而不是泛泛一句「沙箱拒绝了」。 */
-describe('ErrorBook 策略拒绝的去路', () => {
-  const KB_REFUSAL = 'DENIED: 知识库文件只能通过 kb_* 工具访问：直读直写会跳过共振排序、不计访问计数，'
-    + '还可能锁住服务端已打开的库文件。查用 kb_query，写用 kb_upsert / kb_link。';
-
-  it('直接碰知识库文件：点名 kb_* 工具', () => {
-    const book = newBook(fakeEngine());
-    const { entry } = book.record(report({
-      kind: 'permission', call: '{"command":"sqlite3 .she/kb.sqlite \\"select 1\\""}', detail: KB_REFUSAL,
-      remedy: '沙箱按策略拒绝了这次调用。',
-    }));
-    assert.match(String(entry.remedy), /kb_query/);
-    assert.match(String(entry.remedy), /kb_upsert/);
-    assert.match(String(entry.remedy), /sqlite3/);
-    assert.equal(book.lookup({ tool: 'shell' })[0].remedy, entry.remedy, '存下来的也是具体的去路');
+/**
+ * 策略拒绝**不是**错题 —— 这是第四轮评测 10a 的判据。
+ *
+ * 实测：三条主动触发的边界探测（`DENIED:`）全被记成条目，于是之后每次查询都在指控一件按设计
+ * 发生的事。边界拒绝该走的路由分类器**当场**写在工具结果里（`refusalRemedy`），不进书。
+ */
+describe('ErrorBook 策略拒绝不进错题本', () => {
+  it('policy_denied 不在「该记」名单里，而环境权限不足在', () => {
+    assert.equal(isWorthRemembering('policy_denied'), false, '边界按规则工作不是错题');
+    assert.equal(isWorthRemembering('permission'), true, 'OS 拒绝访问是一件要记住的教训');
   });
 
-  it('fs_* 碰知识库文件（Error: 前缀）也归为策略拒绝，并给同样的去路', () => {
+  it('分类器把沙箱拒绝判成 policy_denied，把 OS 拒绝判成 permission', () => {
+    const denied = classifyToolResult('shell', 'DENIED: 路径在工作区外: ..');
+    assert.equal(denied.kind, 'policy_denied');
+    assert.equal(classifyToolResult('fs_read', 'Error: EACCES: permission denied, open \'/srv/x\'').kind, 'permission');
+  });
+
+  it('拒绝的去路是当场给的，而且点名该走哪条路', () => {
+    const detail = 'DENIED: 知识库文件只能通过 kb_* 工具访问：直读直写会跳过共振排序。查用 kb_query，'
+      + '写用 kb_upsert / kb_link。';
+    const v = classifyToolResult('shell', detail);
+    assert.equal(v.kind, 'policy_denied');
+    assert.match(String(v.remedy), /kb_query/);
+    assert.match(String(v.remedy), /kb_upsert/);
+  });
+
+  it('fs_* 碰知识库文件（Error: 前缀）也是 policy_denied，给同样的去路', () => {
     const detail = 'Error: 知识库文件只能通过 kb_* 工具访问：直读直写会跳过共振排序。';
     const v = classifyToolResult('fs_read', detail);
-    assert.equal(v.kind, 'permission');
-    const { entry } = newBook(fakeEngine()).record({ tool: 'fs_read', kind: v.kind, detail, remedy: v.remedy });
-    assert.match(String(entry.remedy), /kb_query/);
+    assert.equal(v.kind, 'policy_denied');
+    assert.match(String(v.remedy), /kb_query/);
   });
 
   it('跳出工作区：要求留在工作区内', () => {
     for (const detail of ['Error: Path escapes workspace: ../../etc/passwd', 'DENIED: cd 目标在工作区外: C:\\Windows',
       'DENIED: 路径在工作区外: 命令包含 ../']) {
-      assert.match(String(policyRemedy({ detail })), /只在工作区内操作/, detail);
+      assert.match(String(refusalRemedy(detail)), /只在工作区内操作/, detail);
     }
   });
 
@@ -568,18 +576,21 @@ describe('ErrorBook 策略拒绝的去路', () => {
     ];
     const seen = new Set<string>();
     for (const [detail, re] of cases) {
-      const r = policyRemedy({ detail });
+      const r = refusalRemedy(detail);
       assert.match(String(r), re, detail);
       seen.add(String(r));
     }
     assert.equal(seen.size, cases.length, '每种拒绝的去路都不一样');
   });
 
-  it('认不出的拒绝保留分类器的去路；非拒绝的失败不受影响', () => {
-    const book = newBook(fakeEngine());
-    const odd = book.record(report({ kind: 'permission', detail: 'DENIED: something new', remedy: '由用户决定是否放行' }));
-    assert.equal(odd.entry.remedy, '由用户决定是否放行');
-    const exit = book.record(report({ detail: 'exit code: 3 工作区外' }));
-    assert.equal(exit.entry.remedy, '读 stderr', 'nonzero_exit 的输出里碰巧有关键词也不能改去路');
+  it('认不出的拒绝退回分类器那条，而环境的错误不会被当成拒绝', () => {
+    assert.equal(refusalRemedy('DENIED: something new'), null);
+    // `nonzero_exit` 的输出里碰巧出现"工作区外"这四个字，不是一次拒绝。
+    assert.equal(refusalRemedy(''), null);
+  });
+
+  it('record 原样存分类器给的去路，不再自己算一份', () => {
+    const { entry } = newBook(fakeEngine()).record(report({ detail: 'boom\nexit code: 3', remedy: '读 stderr' }));
+    assert.equal(entry.remedy, '读 stderr');
   });
 });

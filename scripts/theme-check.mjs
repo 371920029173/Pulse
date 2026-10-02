@@ -33,6 +33,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { killTree } from './lib/kill-tree.mjs';
+import { controlHeaders } from './lib/control-auth.mjs';
 import { pickSafePort } from './safe-port.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -59,7 +60,11 @@ function raw(path, { method = 'GET', body, raw: rawBody } = {}) {
         port: u.port,
         path: u.pathname + u.search,
         method,
-        headers: payload ? { 'Content-Type': 'application/json', 'Content-Length': payload.length } : {},
+        headers: {
+          ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': payload.length } : {}),
+          // 控制面要凭据（改设置 / 工作区 / 配置的接口）。见 lib/control-auth.mjs。
+          ...controlHeaders(appDirPath),
+        },
       },
       (res) => {
         let text = '';

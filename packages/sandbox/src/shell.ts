@@ -5,7 +5,7 @@ import { spawn, execFile } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import type {
   SheConfig, SandboxResult, SandboxOptions, SandboxJobView, SandboxJobStatus, SandboxJobKillReason,
-  CodeExecutionOnCommandLine, IsolationInEffect,
+  CodeExecutionOnCommandLine, IsolationInEffect, ShellDialect, ShellDialectGap, ShellDialectReport,
 } from '@she/shared';
 import {
   buildConfinedScript, buildWslArgv, planIsolation, isolationInEffect, isolationSpawnEnv,
@@ -579,6 +579,149 @@ export function codeExecutionDisclosure(finding: CodeExecutionOnCommandLine): st
 
 /**
  * ─────────────────────────────────────────────────────────────────────────────
+ * THE COMMAND THAT RAN IS NOT THE COMMAND THAT WAS WRITTEN
+ *
+ * A model writes shell out of habit, and the habit is POSIX: `$VAR`, `$(…)`, `'a b'`, `~/x`,
+ * `VAR=x cmd`, `# comment`, `2>/dev/null`. On Windows the sandbox hands that text to `cmd.exe`
+ * (see `spawnCommand`), which speaks none of it — and the failure mode is the worst one available:
+ *
+ *   echo $HOME          → prints the literal `$HOME`      exit 0
+ *   cp 'a b.txt' out    → `'a` and `b.txt'` as two args   exit 0 or a confusing error
+ *   echo $(date)        → prints the literal `$(date)`    exit 0
+ *
+ * The exit code is 0 and the text looks close enough to plausible that the mistake is read as
+ * output. The tool description names the shell BEFORE the call (3b: the model is told what it is
+ * writing for); this scan is the after-the-fact half (3a): when a POSIX-only construct is present
+ * anyway, the result says which construct it was and what cmd.exe did with it, instead of leaving
+ * the reader to notice a subtle difference in the output.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHAT IS DELIBERATELY NOT DONE
+ *
+ * Not refused. Every construct below has a legitimate reading — `git commit -m "fix $X"` may well
+ * mean the literal text — and refusing ordinary commands teaches people to obfuscate them. The
+ * honest answer is the same one `codeExecutionDisclosure` gives: run it, and say what happened.
+ *
+ * Not a rewriter. Translating `${VAR}` → `%VAR%` looks helpful and is wrong: the same text can be
+ * inside a `node -e` program (a JS template literal), a regex, or a commit message. Guessing would
+ * turn a reported difference into a silent corruption.
+ *
+ * Not scanned inside a foreign program. `node -e "a${b}c"` and `powershell -Command "$(Get-Date)"`
+ * hand the string to another language, which has its own meaning for it — the segment head decides.
+ * `cmd /c "…"` is the exception: that program is still cmd's own text, so it IS scanned.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+const CMD_POSIX_GAPS: ReadonlyArray<{ construct: string; test: RegExp; behavior: string; instead: string }> = [
+  {
+    construct: '$(…)',
+    test: /\$\(/,
+    behavior: '不做命令替换，`$(…)` 原样留在参数里（程序收到的是这段字面文本）',
+    instead: '拆成两次调用：先跑那条命令，再用它的结果；或者整段交给 powershell -NoProfile -Command "…"',
+  },
+  {
+    construct: '`…`（反引号）',
+    test: /`/,
+    behavior: '不认反引号，它是普通字符',
+    instead: '同上：拆成两次调用，或改用 powershell',
+  },
+  {
+    construct: '${VAR} / $VAR',
+    test: /\$\{|\$[A-Za-z_]/,
+    behavior: '取环境变量用 %VAR%，`$VAR` 是字面文本',
+    instead: '写成 %VAR%',
+  },
+  {
+    construct: "'单引号'",
+    test: /'[^']*\s[^']*'/,
+    behavior: '不认单引号：引号原样传给程序，里面的空格把一个参数拆成两个',
+    instead: '用双引号 "…"',
+  },
+  {
+    construct: '~/',
+    test: /(?:^|[\s"=])~(?:[\\/]|$)/,
+    behavior: '不做 ~ 展开，它被当成名为 `~` 的目录',
+    instead: '用 %USERPROFILE%',
+  },
+  {
+    construct: 'VAR=value 前缀',
+    test: /^[A-Za-z_][A-Za-z0-9_]*=/,
+    behavior: '把 `VAR=value` 当成程序名（"VAR" 不是内部或外部命令）',
+    instead: '写成 set VAR=value && 命令',
+  },
+  {
+    construct: '/dev/null',
+    test: /\/dev\/(?:null|stdout|stderr)/,
+    behavior: '没有 /dev/null，它的空设备叫 nul —— 重定向会去写一个名为 \\dev\\null 的路径',
+    instead: '丢弃输出写成 >nul 2>&1',
+  },
+  {
+    construct: '# 注释',
+    test: /(?:^|[\s&|;])#\s/,
+    behavior: '把 `#` 当命令执行（"# 不是内部或外部命令"）',
+    instead: '注释写成 rem …',
+  },
+];
+
+/** Quoted regions removed, both quote characters. Used to skip a foreign program's own text. */
+function stripQuotedText(text: string): string {
+  let out = '';
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * The POSIX-only constructs in this command, deduplicated, most three.
+ *
+ * Capped at three because the point is to name the mistake, not to enumerate it: eight lines of
+ * findings on a command whose first line already failed is noise the reader has to pay for. The
+ * dedupe is per construct, not per occurrence — `$A` and `$B` are one thing to learn.
+ */
+export function detectShellDialectMismatch(command: string): ShellDialectGap[] {
+  const gaps: ShellDialectGap[] = [];
+  for (const segment of splitCmdSegments(command)) {
+    if (!segment.trim()) continue;
+    const hit = inlineCodeInSegment(segment);
+    // A foreign interpreter's inline program is its own language; a nested cmd's program is not.
+    const text = hit && hit.interpreter !== 'cmd' ? stripQuotedText(segment) : segment;
+    for (const gap of CMD_POSIX_GAPS) {
+      if (gaps.length >= 3) return gaps;
+      if (gaps.some((g) => g.construct === gap.construct)) continue;
+      if (gap.test.test(text)) gaps.push({ construct: gap.construct, behavior: gap.behavior, instead: gap.instead });
+    }
+  }
+  return gaps;
+}
+
+/**
+ * What the model is told when its POSIX habit met cmd.exe.
+ *
+ * States three things and stops: which shell parsed it, which construct came out wrong, and what to
+ * write instead. It must NOT read as a refusal (the command ran) or as a failure (the exit code is
+ * what the program really returned) — a reader that thinks the command failed re-runs it and gets
+ * the same silence.
+ */
+export function shellDialectDisclosure(report: ShellDialectReport): string {
+  const lines = [
+    // The shell name is already in the sentence, so the parenthetical says which GRAMMAR it
+    // speaks rather than repeating a hardcoded interpreter name (portability: no literal here).
+    `【shell 方言】这条命令由 ${report.shell} 解析（${report.dialect === 'cmd' ? `${report.shell} 语法` : report.dialect}），`
+    + `其中 ${report.gaps.length} 处写法在这里不是你想的意思 —— 命令跑了，但跑的不是你写的那条：`,
+  ];
+  for (const gap of report.gaps) lines.push(`  · ${gap.construct}：${gap.behavior}；改成 ${gap.instead}`);
+  return lines.join('\n');
+}
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
  * WHAT A COMMAND IS PROVEN TO DO, AS OPPOSED TO WHAT IT MIGHT DO
  *
  * `workspaceEscapeReason` answers "does the text name a path outside the workspace?". That is a
@@ -1147,6 +1290,14 @@ interface Proc {
    * actually in, not the one the current config would have asked for.
    */
   isolation?: IsolationPlan;
+  /**
+   * Set when the command text was written in a dialect the shell that ran it does not speak.
+   *
+   * On the process rather than passed to each caller, for the same reason as `codeExecution`: a
+   * command promoted to a background job must still say so in every later `shell_wait`, and the
+   * later view has no access to the original `admit()` result.
+   */
+  shellDialect?: ShellDialectReport;
 }
 
 export class SandboxShell {
@@ -1464,12 +1615,31 @@ export class SandboxShell {
     const iso = planIsolation(this.config.isolation, this.workspaceRoot, cwd, this.config.wslDistro);
     if (iso && 'error' in iso) return deny(iso.error);
 
+    /*
+     * 3a. The dialect of the text against the dialect of the shell that will parse it.
+     *
+     * Computed here, at the same single choke point as `codeExecution` and the boundary, for the
+     * same reason: every command passes through `admit()`, so no path can run a POSIX line under
+     * cmd.exe and stay quiet about it. The shell is the one that actually runs — with isolation in
+     * effect the text is parsed by `bash -lc` inside the namespace, where POSIX is correct, and
+     * reporting a "gap" there would be the false alarm.
+     *
+     * Only attached when there IS a gap: the shell is named in the tool description up front, and a
+     * line repeated on every call is a context cost with no reader.
+     */
+    const dialect = iso ? 'posix' : this.dialect();
+    const gaps = dialect === 'cmd' ? detectShellDialectMismatch(command) : [];
+    const shellDialect: ShellDialectReport | null = gaps.length
+      ? { shell: iso ? 'bash -lc（WSL 隔离内）' : this.resolveShell(), dialect, gaps }
+      : null;
+
     return {
       cwd,
       timeout: options?.timeout ?? this.config.timeout,
       maxOutput: options?.maxOutputBytes ?? this.config.maxOutputBytes,
       ...(codeExecution ? { codeExecution } : {}),
       ...(iso ? { isolation: iso } : {}),
+      ...(shellDialect ? { shellDialect } : {}),
     };
   }
 
@@ -1532,6 +1702,7 @@ export class SandboxShell {
             // Carried on the process, so the foreground answer, the job view and a later `shell_wait`
             // all say the same thing about whether this process was path-contained.
             ...(proc.codeExecution ? { codeExecution: proc.codeExecution } : {}),
+            ...(proc.shellDialect ? { shellDialect: proc.shellDialect } : {}),
             ...(isolationInEffect(proc.isolation ?? null) ? { isolation: isolationInEffect(proc.isolation ?? null) } : {}),
           });
           return;
@@ -1733,6 +1904,7 @@ export class SandboxShell {
       maxOutput: number;
       codeExecution?: CodeExecutionOnCommandLine;
       isolation?: { plan: IsolationPlan; cwdRel: string };
+      shellDialect?: ShellDialectReport;
     },
     options?: SandboxOptions,
   ): Proc {
@@ -1811,6 +1983,7 @@ export class SandboxShell {
       closed: false,
       ...(admitted.codeExecution ? { codeExecution: admitted.codeExecution } : {}),
       ...(admitted.isolation ? { isolation: admitted.isolation.plan } : {}),
+      ...(admitted.shellDialect ? { shellDialect: admitted.shellDialect } : {}),
     };
 
     const capOutput = admitted.maxOutput > 0;
@@ -1873,6 +2046,7 @@ export class SandboxShell {
       timedOut,
       durationMs: Date.now() - proc.startedAt,
       ...(proc.codeExecution ? { codeExecution: proc.codeExecution } : {}),
+      ...(proc.shellDialect ? { shellDialect: proc.shellDialect } : {}),
       ...(isolationInEffect(proc.isolation ?? null) ? { isolation: isolationInEffect(proc.isolation ?? null) } : {}),
     };
   }
@@ -2268,6 +2442,12 @@ export class SandboxShell {
     if (proc.killedBy) view.killedBy = proc.killedBy;
     if (proc.codeExecution) view.codeExecution = proc.codeExecution;
     /*
+     * The dialect note is on every view too, and for the same reason as the boundary note below:
+     * a `shell_wait` three calls later is read as a fresh result, and "the command running here is
+     * not the command you wrote" is not something a later reader can re-derive.
+     */
+    if (proc.shellDialect) view.shellDialect = proc.shellDialect;
+    /*
      * The boundary is reported on every view, including the status-only one: a `shell_jobs` listing
      * that omitted it would let a reader assume the wrong thing about a running job, and the note
      * costs one line.
@@ -2399,5 +2579,31 @@ export class SandboxShell {
     if (pref === 'cmd') return 'cmd.exe';
     if (pref === 'powershell') return 'powershell.exe';
     return pref;
+  }
+
+  /**
+   * The shell a command will actually be parsed by — public because the `shell` tool's own
+   * DESCRIPTION has to name it (评测 3b: 描述未标 shell 类型).
+   *
+   * A model cannot write for a shell it was not told about, and the cost of not saying is the whole
+   * class of failure `detectShellDialectMismatch` exists to report after the fact. Telling it before
+   * the call is the cheaper half of the same fix.
+   *
+   * Reports the isolation shell when isolation is on, because that is what runs: `bash -lc` inside
+   * the namespace (see `buildConfinedScript`), where POSIX is the correct dialect rather than a gap.
+   */
+  shellName(): string {
+    return this.config.isolation !== 'off' ? 'bash -lc（WSL 隔离内）' : this.resolveShell();
+  }
+
+  /** The language {shellName} speaks. `cmd` is the one with the gap table above. */
+  dialect(): ShellDialect {
+    if (this.config.isolation !== 'off') return 'posix';
+    // Strip the extension instead of naming it: `resolveShell()` may return a bare `cmd`, a
+    // `cmd.exe`, or a full path to it, and all three speak the same dialect.
+    const shell = this.resolveShell().toLowerCase().replace(/\.exe$/, '');
+    if (shell === 'cmd') return 'cmd';
+    if (shell.includes('powershell') || shell === 'pwsh') return 'powershell';
+    return 'posix';
   }
 }

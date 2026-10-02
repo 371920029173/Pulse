@@ -3,6 +3,7 @@ import http from 'node:http';
 import { performance } from 'node:perf_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
+import { controlHeadersFromEnv } from './lib/control-auth.mjs';
 
 const BASE = process.env.SHE_API || `http://127.0.0.1:${process.env.SHE_PORT || 5577}`;
 // Relative to the current directory, so the output lands in whichever clone is
@@ -20,9 +21,13 @@ function req(method, urlPath, body) {
         port: u.port,
         path: u.pathname + u.search,
         method,
-        headers: payload
-          ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
-          : {},
+        headers: {
+          ...(payload
+            ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
+            : {}),
+          // 打的是已经在跑的服务，所以按服务端同样的规则找凭据（见 lib/control-auth.mjs）。
+          ...controlHeadersFromEnv(),
+        },
       },
       (res) => {
         const chunks = [];

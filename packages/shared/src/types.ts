@@ -358,6 +358,14 @@ export interface SandboxResult {
    */
   isolation?: IsolationInEffect;
   /**
+   * Set when the command text was written in a dialect the shell that ran it does not speak.
+   *
+   * See `ShellDialectReport`. The command was NOT refused and did NOT fail — it did something other
+   * than what was written, with exit code 0, which is why the difference is reported rather than
+   * left for the reader to infer from the output.
+   */
+  shellDialect?: ShellDialectReport;
+  /**
    * Set when the command did not finish and is now running as a background job.
    *
    * `timedOut` is true in that case too (the wait really did end without an exit code), but the
@@ -367,6 +375,46 @@ export interface SandboxResult {
    * duplicate of something that is still running.
    */
   jobId?: string;
+}
+
+/** Which language a command line is actually parsed by. See `ShellDialectReport`. */
+export type ShellDialect = 'cmd' | 'posix' | 'powershell';
+
+/**
+ * One place where a POSIX habit does not mean, under this shell, what it means in `sh`.
+ *
+ * Carried as text rather than as a code the renderer looks up: the reader of a result is a model
+ * deciding what to do next, and "`${VAR}` stays literal under cmd.exe, write `%VAR%`" is actionable
+ * where "dialect_gap_2" is not.
+ */
+export interface ShellDialectGap {
+  /** The construct as written, e.g. `$(…)`. */
+  construct: string;
+  /** What the shell that actually ran does with it. */
+  behavior: string;
+  /** What to write instead, so the next call works. */
+  instead: string;
+}
+
+/**
+ * Set when the command was written in a dialect the shell that ran it does not speak.
+ *
+ * The sandbox picks the shell (cmd.exe on Windows, /bin/sh elsewhere), and a model that writes POSIX
+ * out of habit gets a command that RUNS and means something else — `$VAR` becomes the literal text
+ * `$VAR`, quoted single-word arguments split in two, `$(…)` never expands. Nothing failed, nothing
+ * was refused, and the exit code is 0, which is exactly the shape of failure a reader cannot notice.
+ * So the difference is reported instead of being left to be discovered in the output.
+ *
+ * Absent means "no gap was found", never "the dialect was not checked": the effective shell is named
+ * in the `shell` tool's own description, which is where a model is told before it writes anything.
+ */
+export interface ShellDialectReport {
+  /** The interpreter that parsed the text: `cmd.exe`, `/bin/sh`, `bash` (isolation in effect)… */
+  shell: string;
+  /** The language that interpreter speaks. */
+  dialect: ShellDialect;
+  /** Non-empty — the report is only attached when there is something to say. */
+  gaps: ShellDialectGap[];
 }
 
 /** An interpreter invoked with its program inline, where the path jail cannot see the paths. */
@@ -459,6 +507,14 @@ export interface SandboxJobView {
    * what it can reach, and that is not a detail to omit from the cheap view.
    */
   isolation?: IsolationInEffect;
+  /**
+   * The same dialect note as on `SandboxResult`, for a job.
+   *
+   * Present on the status-only listing too, for the same reason the boundary note is: a model that
+   * comes back to a job three waits later is reading a fresh result, and "the command you wrote is
+   * not the command that is running" is not a detail to drop from a later view.
+   */
+  shellDialect?: ShellDialectReport;
   found: boolean;
 }
 

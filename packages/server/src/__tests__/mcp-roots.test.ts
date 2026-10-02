@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { discoverMcpServers } from '../mcp.js';
+import { discoverMcpServers, mcpSpawnSpec } from '../mcp.js';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -154,6 +154,130 @@ describe('文件系统型 MCP：允许根从工作区派生', () => {
       assert.ok(fs);
       const roots = fs.args.filter((a) => !a.startsWith('-') && a !== '@modelcontextprotocol/server-filesystem');
       assert.deepEqual(roots, [resolve(workspace)], `没有补上工作区: ${JSON.stringify(fs.args)}`);
+    } finally {
+      restore();
+    }
+  });
+});
+
+/**
+ * MCP 子进程的 cwd（评测报告 9b）。
+ *
+ * 实测：`C:\Users\Administrator\.playwright-mcp` 里 340 项 —— 截图与 console 日志，全是智能体用
+ * playwright 通道做界面验证时留下的，而工作区在 `D:\AGI\she-agent-cloud`。根因不是 playwright，
+ * 是 `spawn` 没给 cwd：playwright MCP 按 `join(cwd, '.playwright-mcp')` 算产物目录（`playwright-core`
+ * 的 `outputDir()`，cwd 不可写时才退到系统临时目录），而 cwd 继承自 SHE 的启动方式。
+ *
+ * 这里钉住：cwd 恒为工作区；cwd 派生产物的服务器要回显产物去哪了；换 cwd 不会把相对命令弄坏。
+ */
+describe('MCP 进程的 cwd：产物与相对路径都留在工作区', () => {
+  it('每个发现的服务器都以工作区为 cwd', () => {
+    const { workspace, restore } = withFakeCursorConfig({
+      anything: { command: 'node', args: ['server.js'] },
+    });
+    try {
+      const servers = discoverMcpServers(workspace);
+      assert.ok(servers.length > 0);
+      for (const s of servers) {
+        assert.equal(s.cwd, resolve(workspace), `${s.name} 的 cwd 不是工作区：${s.cwd}`);
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  it('playwright 一族的服务器回显产物目录已落在工作区内', () => {
+    const { workspace, restore } = withFakeCursorConfig({
+      playwright: { command: 'npx', args: ['-y', '@playwright/mcp@latest'] },
+    });
+    try {
+      const pw = discoverMcpServers(workspace).find((s) => s.name === 'playwright');
+      assert.ok(pw);
+      assert.equal(pw.confinedOutputDir, join(resolve(workspace), '.playwright-mcp'),
+        '产物目录没有被回显 —— 那 340 项是怎么来的就没人说得清了');
+    } finally {
+      restore();
+    }
+  });
+
+  it('别的服务器不套 playwright 的产物目录说法', () => {
+    const { workspace, restore } = withFakeCursorConfig({
+      memory: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-memory'] },
+    });
+    try {
+      const mem = discoverMcpServers(workspace).find((s) => s.name === 'memory');
+      assert.ok(mem);
+      assert.equal(mem.confinedOutputDir, undefined, '不该给不按 cwd 产出物件的服务器编一个产物目录');
+    } finally {
+      restore();
+    }
+  });
+
+  it('相对命令被钉成工作区里的绝对路径（换 cwd 不会让原本能起的服务器起不来）', () => {
+    const { workspace, restore } = withFakeCursorConfig({});
+    try {
+      // SHE 自己的文件：这里才能既写相对命令又控制工作区目录。
+      mkdirSync(join(workspace, 'tools'), { recursive: true });
+      const script = join(workspace, 'tools', 'my-mcp.js');
+      writeFileSync(script, '// not run by this test\n', 'utf8');
+      writeFileSync(join(workspace, '.she', 'mcp.json'), JSON.stringify({
+        mcpServers: { local: { command: './tools/my-mcp.js', args: [] } },
+      }), 'utf8');
+
+      const s = discoverMcpServers(workspace).find((x) => x.name === 'local');
+      assert.ok(s);
+      assert.equal(s.command, script, `相对命令没被钉成绝对路径: ${s.command}`);
+
+      // 裸名字留给 PATH —— 钉成路径反而会让 `node`/`npx` 起不来。
+      writeFileSync(join(workspace, '.she', 'mcp.json'), JSON.stringify({
+        mcpServers: { bare: { command: 'npx', args: ['-y', 'some-mcp'] } },
+      }), 'utf8');
+      const bare = discoverMcpServers(workspace).find((x) => x.name === 'bare');
+      assert.ok(bare);
+      assert.equal(bare.command, 'npx');
+    } finally {
+      restore();
+    }
+  });
+
+  it('Windows 上过 shell 时，带空格的命令与参数自己补引号（cmd.exe 不替我们做）', () => {
+    const win = process.platform === 'win32';
+    // 用拼出来的路径，避免在源码里写盘符字面量（那会被 portability 门禁拦下）。
+    const spaced = join(tmpdir(), 'Program Files', 'my mcp', 'server.js');
+    const spec = mcpSpawnSpec({
+      name: 'spaced', command: spaced, args: ['-y', spaced, '--already', '"quoted"'], source: 'she', cwd: tmpdir(),
+    });
+
+    assert.equal(spec.options.shell, win, '过不过 shell 是平台决定');
+    assert.equal(spec.options.cwd, tmpdir(), 'cwd 必须带到 spawn 选项里，否则产物又跑出边界');
+    if (win) {
+      // 实测过：`shell: true` 时 Node 用空格把命令和参数拼成一行交给 cmd.exe，带空格的参数
+      // 到了子进程手里会被拆成好几个 —— 不加引号就是"配置没错、起来就崩"。
+      assert.equal(spec.command, `"${spaced}"`);
+      assert.equal(spec.args[1], `"${spaced}"`);
+      assert.equal(spec.args[0], '-y', '没有空白的参数不该被动');
+      assert.equal(spec.args[3], '"quoted"', '已经带引号的参数保留原样，不猜用户的引号意图');
+    } else {
+      assert.equal(spec.command, spaced, 'POSIX 不过 shell，参数原样传');
+    }
+  });
+
+  it('工作区内大小写不同的根算同一个目录（不报一次没发生的收敛）', () => {
+    const { workspace, restore } = withFakeCursorConfig({});
+    try {
+      const ws = resolve(workspace);
+      // Windows 上大小写不同是同一个目录，POSIX 上不是 —— 断言按平台分支。
+      const sameDir = process.platform === 'win32' ? ws.toUpperCase() : ws;
+      writeFileSync(join(workspace, '.she', 'mcp.json'), JSON.stringify({
+        mcpServers: {
+          filesystem: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', sameDir] },
+        },
+      }), 'utf8');
+
+      const fs = discoverMcpServers(workspace).find((s) => s.name === 'filesystem');
+      assert.ok(fs);
+      assert.equal(fs.confinedRoots, undefined, '把工作区内的根判成区外，会报出一次没发生的收敛');
+      assert.ok(fs.args.includes(sameDir), '工作区内的根应当原样保留');
     } finally {
       restore();
     }

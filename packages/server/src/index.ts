@@ -6,6 +6,7 @@ import { realpathSync, createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { createLogger, loadConfig, resolveEnvFile, mergeMissingEnvFile, updateEnvFile, THINKING_LEVELS, getConfigRecovery, getConfigFileInUse, lastGoodConfigPath, lastGoodConfigMetaPath, sandboxPostureNotice } from '@she/shared';
+import { type ControlAuth, presentsControlToken, resolveControlAuth } from './control-token.js';
 import { isScratchWorkspace } from './scratch-workspace.js';
 import type { SheConfig, StreamChunk, EdgeKind, SkillProfile, ThinkingLevel } from '@she/shared';
 import { KBStore, GroupKBEngine, mergeKnowledgeBases } from '@she/kb';
@@ -743,9 +744,36 @@ try {
   tenancyError = err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * 控制面凭据（这一台机器上"谁能改运行档位"）。
+ *
+ * 在 `startServer` 里赋值而不是在这里 —— 模块级就要做文件 I/O 会让**导入这个模块**的单元测试在
+ * 真实的 `~/.she-app` 里生成凭据，而导入一个模块不该有这种副作用。`tenancy` 可以在模块级是因为
+ * 它只读 `process.env`。
+ */
+let controlAuth: ControlAuth | null = null;
+
+/**
+ * 这个请求改的是不是**这台机器怎么跑**（而不是"让 Agent 干一件事"）。
+ *
+ * 划定得偏保守：设置、工作区、配置回退 —— 这三个都能改变边界的宽度（设置直接写 `.env` 里的沙箱
+ * 档位，工作区决定边界画在哪，回退会换成另一份配置）。其余接口（聊天、会话、知识库、轨迹）不在这里，
+ * 因为它们的权限问题**已经**由 tenancy 那套回答，而给它们再加一把锁只会让界面多一次认证。
+ *
+ * 前缀匹配是刻意的：`/api/workspaces/anything` 以后新增的路由默认也在里面。漏掉一个新接口的代价
+ * （控制面又开一个口）比多保护一个的代价（多一次 401）大得多。
+ */
+function isControlPlanePath(pathname: string): boolean {
+  // 控制面的**读**也要凭据：`GET /api/settings` 会回出 `.env` 里那一套档位，而"先读出来确认哪一档
+  // 好改"是改写的前一半。所以这里不看 method。
+  if (pathname === '/api/settings') return true;
+  if (pathname === '/api/config/rollback' || pathname === '/api/config/recovery') return true;
+  if (pathname === '/api/workspaces' || pathname.startsWith('/api/workspaces/')) return true;
+  return false;
+}
+
 /** Session → tenant, kept per workspace like the audit log. */
-let ledger: TenantLedger | null = null;
-let ledgerRoot = '';
+let ledger: TenantLedger | null = null;let ledgerRoot = '';
 function tenantLedger(): TenantLedger {
   const root = resolve(config.workspace.root);
   if (!ledger || ledgerRoot !== root) {
@@ -1030,6 +1058,8 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
         allowAllCommands: parentCfg.sandbox.allowAllCommands,
         // Same rule as the parent's: the child's KB copy is `kb_*`-only too.
         kbDbPath: childKbPath,
+        // 子代理也不能读控制面凭据 —— 它和父代理同在工作区内，越权是一样的越权。
+        controlTokenPath: controlAuth?.token ? controlAuth.path : undefined,
       });
       const child = new Agent(childCfg, engineFor(childKbPath), tools, childSession.id, {
         isSubagent: true,
@@ -1491,6 +1521,8 @@ function makeAgent(cfg: SheConfig, sessionId?: string | null): Agent {
     outsideWorkspace: local.sandbox.outsideWorkspace,
     // The KB is reachable only through `kb_*`; raw access is refused by the shell itself.
     kbDbPath: local.kb.dbPath,
+    // 控制面凭据同样拒绝直读：读得到就等于能给自己换一套沙箱档位（见 control-token.ts）。
+    controlTokenPath: controlAuth?.token ? controlAuth.path : undefined,
   });
 
   /*
@@ -6347,6 +6379,15 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
   }
   const { port, host } = config.server;
 
+  /*
+   * 控制面凭据：没有显式给就生成一份并落在安装私有目录（`<appDir>/control-token`）。
+   *
+   * 放在这里而不是模块级：`appDir()` 读环境变量，而模块级就要做文件 I/O 会让导入这个模块的单元
+   * 测试在真实的 `~/.she-app` 里生成凭据。放在 `listen` 之前则是因为凭据解决不了就不该开始服务 ——
+   * 一个"以为控制面被保护着、其实没校验"的进程比拒绝启动危险得多（同 `tenancy.ts` 里那条）。
+   */
+  controlAuth = resolveControlAuth(appDir());
+
   remountKnowledgeBase(config.kb.dbPath);
 
   // Sessions / rooms live with the workspace, not with the process cwd (which
@@ -6444,6 +6485,22 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
   }
 
   log.info('All components initialized');
+  /*
+   * 控制面凭据这件事必须说出来。
+   *
+   * 一个运维（或评测方）要知道两件事才能判断端口安不安全：这次**有没有**校验，以及凭据在哪。
+   * 含糊其辞的日志会让人用"PUT 一下试试"来推断 —— 而那恰好是要被拒绝的动作。
+   */
+  if (!controlAuth?.token) {
+    log.warn('控制面凭据：**未校验**（SHE_CONTROL_AUTH 被显式关掉）—— 任何能连到本端口的调用方'
+      + '都能改设置 / 工作区 / 回退配置，包括给自己换一套沙箱档位。');
+  } else if (controlAuth.source === 'generated') {
+    log.info(`控制面凭据：已生成一份并写入 ${controlAuth.path}（桌面端会自动读取并带上；`
+      + '沙箱里的 Agent 读不到这个文件，也调不动控制面）。');
+  } else {
+    log.info(`控制面凭据：已启用（来自 ${controlAuth.source === 'env' ? 'SHE_CONTROL_TOKEN' : '已有文件'}），`
+      + `受保护的是设置 / 工作区 / 配置回退这类接口。`);
+  }
   // One-time tidying: the old version stored the wallpaper per workspace and left it there.
   cleanLegacyWorkspaceBackground();
 
@@ -6557,9 +6614,40 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
       return;
     }
 
+    /*
+     * 最后一个问题：这个请求改的是不是**这台机器怎么跑**。
+     *
+     * 和上面那层分开，而不是把控制面塞进 tenancy 的 token 列表里，原因见 `control-token.ts` 开头：
+     * 租户 token 回答"你是谁"（开了就全站都要），控制面凭据回答"你能不能改运行档位"（只管设置 /
+     * 工作区 / 配置回退）。一个在单用户桌面上用界面的人不该被迫配租户 token，而一个 Agent 不该能
+     * 给自己换沙箱档位 —— 这两件事得分开答。
+     *
+     * tenancy 开着的时候不再重复要求：那一层已经要过凭据了，再要一次只是让界面多走一遍同样的门。
+     */
+    if (
+      controlAuth?.token
+      && !tenancy.enabled
+      && isControlPlanePath(pathname)
+      && !presentsControlToken(req.headers, controlAuth.token)
+    ) {
+      auditSafe({
+        kind: 'auth',
+        path: `${method} ${pathname}`,
+        presented: presentedTokens(req.headers).length > 0,
+        note: '控制面凭据缺失',
+      });
+      log.warn(`Refused (control plane): ${method} ${url}`);
+      sendError(
+        res,
+        'Unauthorized：控制面需要凭据（改运行档位 / 工作区 / 配置的接口）。'
+        + `凭据在 ${controlAuth.path}，桌面端会自动带上；命令行可用 x-she-token 头或 Authorization: Bearer。`,
+        401,
+      );
+      return;
+    }
+
     try {
-      const handled = await runInTenant(auth.tenant, () => router.handle(req, res));
-      if (!handled) {
+      const handled = await runInTenant(auth.tenant, () => router.handle(req, res));      if (!handled) {
         if (method === 'GET' && !url.startsWith('/api/')) {
           if (!tryServeStatic(req, res)) {
             sendError(res, 'Not Found', 404);

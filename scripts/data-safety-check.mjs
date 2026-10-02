@@ -24,6 +24,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
+import { controlHeaders } from './lib/control-auth.mjs';
 import { pickSafePort } from './safe-port.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -187,7 +188,13 @@ async function bootOnce(workspace, probe) {
   }
 
   if (healthy && probe) {
-    try { await probe(`http://127.0.0.1:${PORT}`); } catch (err) { console.error(`probe 失败: ${err.message}`); }
+    /*
+     * 第二个参数是控制面凭据：`/api/workspaces*` 从第四轮起要认令牌（见 lib/control-auth.mjs），
+     * 而令牌这轮是**每次启动生成**的（`<appDir>/control-token`），所以由这里按同一个 workspace
+     * 算出来交给探针，而不是让门禁脚本去猜路径。
+     */
+    const call = controlHeaders(join(workspace, 'appdir'));
+    try { await probe(`http://127.0.0.1:${PORT}`, call); } catch (err) { console.error(`probe 失败: ${err.message}`); }
   }
 
   // Recovery runs during boot; give it a moment to finish writing.
@@ -548,11 +555,11 @@ console.log('\n数据安全回归（会启动真实服务，用临时工作区�
   let seen = '';
   let switchDetail = '';
 
-  const { healthy } = await bootOnce(wsA, async (base) => {
+  const { healthy } = await bootOnce(wsA, async (base, control) => {
     const call = async (method, path, body) => {
       const r = await fetch(base + path, {
         method,
-        headers: body ? { 'content-type': 'application/json' } : undefined,
+        headers: body ? { ...control, 'content-type': 'application/json' } : control,
         body: body ? JSON.stringify(body) : undefined,
         signal: AbortSignal.timeout(15_000),
       });
@@ -653,11 +660,11 @@ if (process.platform === 'win32') {
     let detail = '';
     let allListed = false;
     let titlesKept = false;
-    const { healthy } = await bootOnce(ws, async (base) => {
+    const { healthy } = await bootOnce(ws, async (base, control) => {
       const call = async (method, path, body) => {
         const r = await fetch(base + path, {
           method,
-          headers: body ? { 'content-type': 'application/json' } : undefined,
+          headers: body ? { ...control, 'content-type': 'application/json' } : control,
           body: body ? JSON.stringify(body) : undefined,
           signal: AbortSignal.timeout(15_000),
         });
@@ -752,11 +759,11 @@ if (process.platform === 'win32') {
   let opens = false;
   let messageLands = false;
 
-  const { healthy } = await bootOnce(wsA, async (base) => {
+  const { healthy } = await bootOnce(wsA, async (base, control) => {
     const call = async (method, path, body) => {
       const r = await fetch(base + path, {
         method,
-        headers: body ? { 'content-type': 'application/json' } : undefined,
+        headers: body ? { ...control, 'content-type': 'application/json' } : control,
         body: body ? JSON.stringify(body) : undefined,
         signal: AbortSignal.timeout(15_000),
       });

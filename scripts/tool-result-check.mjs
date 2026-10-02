@@ -29,6 +29,7 @@ import {
   classifyToolResult,
   annotateToolResult,
   isToolFailure,
+  isWorthRemembering,
 } from '../packages/agent-runtime/dist/index.js';
 import { removeTempDir } from './lib/temp.mjs';
 
@@ -112,7 +113,7 @@ console.log('\n=== 真实工具产出的结果 ===');
      */
     ['破坏性命令先要确认（不是失败）', strictTools, 'shell', { command: destructiveProbe }, 'none'],
     ['fs_read 文件不存在', sandboxTools, 'fs_read', { path: 'nope/missing.ts' }, 'not_found'],
-    ['fs_read 工作区外（越权）', sandboxTools, 'fs_read', { path: '../../../etc/passwd' }, 'permission'],
+    ['fs_read 工作区外（越权）', sandboxTools, 'fs_read', { path: '../../../etc/passwd' }, 'policy_denied'],
     ['未知工具', sandboxTools, 'definitely_not_a_tool', {}, 'unavailable'],
     ['plan_update 状态词写错', planTools, 'plan_update', { plan_id: 'p', step_id: 's', status: '乱七八糟' }, 'invalid_args'],
     ['kb_query 无结果', kbTools, 'kb_query', { query: 'zzz_nothing_matches_zzz' }, 'empty'],
@@ -182,8 +183,18 @@ console.log('\n=== 真实工具产出的结果 ===');
   const refused = await strictShell.exec(destructiveProbe);
   check('沙箱确实拒绝破坏性命令', refused.denied === true && /^DENIED:/.test(refused.stderr),
     JSON.stringify(refused).slice(0, 200));
-  check('DENIED 结果 → permission',
-    classifyToolResult('shell', `DENIED: ${refused.stderr}`).kind === 'permission');
+  const denial = classifyToolResult('shell', `DENIED: ${refused.stderr}`);
+  check('DENIED 结果 → policy_denied（边界，不是 agent 的错题）',
+    denial.kind === 'policy_denied' && isWorthRemembering(denial.kind) === false,
+    `kind=${denial.kind} worth=${isWorthRemembering(denial.kind)}`);
+  /*
+   * 第四轮 10a：拒绝**具体**该走哪条路，必须当场写在结果里。
+   *
+   * 它以前是由错题本存的（`policyRemedy`），代价是每次拒绝都成了一条"你以前犯过"；现在拒绝
+   * 不进书，所以这句必须出现在模型这一轮读到的那段文字里，否则那条路线就真的丢了。
+   */
+  check('破坏性命令的拒绝点名由用户确认',
+    /由用户确认/.test(String(denial.remedy)), String(denial.remedy));
 
   /*
    * A deny-list refusal that is NOT a destructive command, which is the other way a `DENIED`
@@ -193,9 +204,20 @@ console.log('\n=== 真实工具产出的结果 ===');
   // Any command the allow-list does not name; spelled per platform for the same reason as above.
   const notListed = await allowListed.exec(IS_WINDOWS ? 'cmd /c dir' : 'ls');
   check('白名单外的命令被拒绝', notListed.denied === true, JSON.stringify(notListed).slice(0, 200));
-  check('白名单拒绝 → permission',
-    classifyToolResult('shell', `DENIED: ${notListed.stderr}`).kind === 'permission',
+  const notListedVerdict = classifyToolResult('shell', `DENIED: ${notListed.stderr}`);
+  check('白名单拒绝 → policy_denied',
+    notListedVerdict.kind === 'policy_denied',
     notListed.stderr);
+  check('白名单拒绝的去路点名了替代工具（而不是泛泛一句「沙箱拒绝了」）',
+    /fs_read/.test(String(notListedVerdict.remedy)), String(notListedVerdict.remedy));
+  /*
+   * 环境层面的拒绝访问是**另一回事**：那件"下次别这么写"的教训值得记住，而边界拒绝不值得。
+   * 两种 kind 分开就是为了这一条能写出来（第四轮 10a 的判据）。
+   */
+  check('策略边界与环境权限是两种 kind，只有后者进错题本',
+    denial.kind === 'policy_denied' && isWorthRemembering('policy_denied') === false
+    && classifyToolResult('fs_write', "Error: EACCES: permission denied, open '/srv/x'").kind === 'permission'
+    && isWorthRemembering('permission') === true);
 
   /*
    * A timeout must NOT be reported as an ordinary failed command: only one of the two is
