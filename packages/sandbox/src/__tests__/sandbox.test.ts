@@ -498,6 +498,100 @@ describe('知识库文件禁止直连', () => {
   });
 });
 
+/*
+ * 控制面凭据的保护必须**点名即拦、撞名不拦**。
+ *
+ * 第五轮评测实测到的那条：保护的是 `<appDir>/control-token`，判据是"命令文本里出现这个名字"，
+ * 于是 `cat packages/server/src/control-token.ts` 被拒 —— 读本仓库自己的源码撞上了凭据的名字，
+ * 而同一个目录下的 `tenancy.ts` 照读不误。真实凭据确实要拦（读得到就等于能给自己换沙箱档位），
+ * 但"名字是它的一部分"不是"它是它"。
+ *
+ * 所以这一组钉住两个方向，缺一个都不算修好：
+ *   - 拦得住：真实凭据的各种写法（POSIX / Windows / 引号 / 通配）都拒。
+ *   - 不误伤：`control-token.ts`、`mycontrol-token` 这类只是名字里含有它的文件不被拒。
+ */
+describe('控制面凭据：拦真实文件，不拦同名的源码', () => {
+  /*
+   * 凭据的落点（`<appDir>/control-token`）按设计在工作区**之外**，所以夹具要的是「一个工作区外的
+   * 绝对路径」，不是「某个平台的某个真实路径」。用 `tmpdir()/she-outside-appdir` 拼出来：工作区是
+   * `tmpdir()` 下的另一个目录，两者是兄弟 —— 既满足"越界"，又不用写盘符字面量（`check:portability`
+   * 对硬编码的 Windows 盘符和未分支的 POSIX 绝对路径都判红，它是真的在 WSL 两侧跑）。
+   */
+  const TOKEN = join(tmpdir(), 'she-outside-appdir', 'control-token');
+  function withToken() {
+    const s = new SandboxShell(tempDir);
+    const tools = createTools(s, tempDir, { controlTokenPath: TOKEN });
+    return { s, tools };
+  }
+  const reasonOf = (command: string) => withToken().s.protectedReasonInCommand(command);
+
+  it('真实凭据的常见写法都拒（POSIX / Windows / 引号 / 通配）', () => {
+    for (const command of [
+      `cat ${TOKEN}`,
+      `cat "${TOKEN}"`,
+      `cat '${TOKEN}'`,
+      'type %USERPROFILE%\\.she-app\\control-token',
+      `rm -f ${TOKEN}*`,
+      `cp "${TOKEN}" .`,
+    ]) {
+      assert.ok(reasonOf(command), `应当被拒：${command}`);
+    }
+  });
+
+  it('【关键】名字里含有它的其它文件不拒 —— 读本仓库源码不该撞上这道门', () => {
+    for (const command of [
+      'cat packages/server/src/control-token.ts',
+      'grep -n "presentsControlToken" packages/server/src/control-token.ts',
+      'cat packages/server/src/control-token.ts.md',
+      'echo mycontrol-token',
+    ]) {
+      assert.equal(reasonOf(command), null, `不该被拒：${command}`);
+    }
+  });
+
+  it('shell 与 fs_* 两条路径都拦真实凭据', async () => {
+    const { tools } = withToken();
+    const viaShell = await tools.execute('shell', { command: `cat ${TOKEN}` });
+    assert.ok(viaShell.includes('DENIED'), viaShell);
+    assert.ok(viaShell.includes('换一套边界'), viaShell);
+
+    const viaFs = await tools.execute('fs_read', { path: TOKEN });
+    assert.ok(viaFs.includes('换一套边界'), viaFs);
+  });
+
+  it('开了「允许工作区外」也读不到凭据（凭据本来就在工作区外）', async () => {
+    /*
+     * 凭据按设计放在工作区之外，所以"越界检查"是它唯一的另一道门 —— 而那道门可以被用户打开。
+     * 打开之后 `fs_read` 必须仍然拒，否则同一份凭据会有两个答案：`cat` 被拒、读工具放行。
+     */
+    const s = new SandboxShell(tempDir);
+    const tools = createTools(s, tempDir, {
+      controlTokenPath: TOKEN,
+      outsideWorkspace: { allow: true, policy: 'readonly' },
+    });
+    const viaFs = await tools.execute('fs_read', { path: TOKEN });
+    assert.ok(viaFs.includes('换一套边界'), viaFs);
+  });
+
+  it('源码文件真的能读（不是靠"命令本身别的原因失败"蒙过去的）', async () => {
+    const { tools } = withToken();
+    await writeFile(join(tempDir, 'control-token.ts'), 'export const CONTROL_TOKEN_FILE = "control-token";\n');
+    const result = await tools.execute('fs_read', { path: 'control-token.ts' });
+    assert.ok(result.includes('CONTROL_TOKEN_FILE'), result);
+  });
+
+  it('知识库的三种写法仍然拦得住（边界判据没有放过它）', () => {
+    const s = new SandboxShell(tempDir);
+    const kbDir = join(tempDir, '.she');
+    s.protectDatabase(join(kbDir, 'kb.sqlite'), 'KB');
+    assert.ok(s.protectedReasonInCommand('sqlite3 .she/kb.sqlite "SELECT * FROM memories"'));
+    assert.ok(s.protectedReasonInCommand('rm .she/kb.sqlite-wal'));
+    assert.ok(s.protectedReasonInCommand('rm -rf .she/kb.sqlite*'));
+    // 只是名字里含有 `kb.sqlite` 的另一个文件不算。
+    assert.equal(s.protectedReasonInCommand('cat mykb.sqlite.txt'), null);
+  });
+});
+
 describe('grep glob filter', () => {
   it('handles multi-star and brace globs instead of silently matching nothing', () => {
     assert.equal(globToRegExp('*.json*').test('runs.jsonl'), true);

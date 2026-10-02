@@ -28,12 +28,13 @@
  *
  *   node scripts/shell-check.mjs
  */
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { loadConfig, sandboxPostureNotice } from '../packages/shared/dist/index.js';
+import { describeIsolation, isolationNotice } from '../packages/sandbox/dist/index.js';
 import { removeTempDir } from './lib/temp.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -402,6 +403,81 @@ console.log('\n=== 命令按哪个 shell 的语法跑：描述里说、回执里
   check('披露文案不读成拒绝', !/DENIED|已拒绝|被拦|禁止/.test(text));
 
   await shell.stopAll();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 真隔离（层 4.2）：能不能开、现在开没开、要不要说
+ *
+ * 第五轮复验对到的那条：`isolation:'off'` 是默认档位，代码在（层 4.2 的 `planIsolation` /
+ * `buildWslArgv` 都在），但**界面上完全看不见**。两边的代价不对称：
+ *   - 有这个能力却看不见 → 用户不会去翻一个不知道存在的开关，等于没有；
+ *   - 设了 `wsl` 而那台机器用不了 → 命令会被**拒绝**，而拒绝的理由（"这台机器没有可用的 WSL"）
+ *     原来只有日志里的人知道，界面上等着命令跑完的人只觉得它卡住了。
+ * 所以「能不能 / 现在什么档 / 要不要说」三件事各自要有出口，而且判据要能离线判定。
+ *
+ * 这一节刻意**不探测 WSL 能不能用**：`isolationNotice` 是纯函数，四种组合全部构造出来断言；
+ * `describeIsolation` 只断言形状和那条**不变量**（`requestedButUnavailable` 只可能在
+ * `wsl` / `auto` 上为真），不断言这台机器行不行 —— 那是 `check:wsl` 那一节的事，而且它必须是
+ * 可以在任何机器上给出同一个结论的。接线另用静态断言盯住：这两句话没接进 `/api/settings` 与启动
+ * 日志，就等于没修（第四轮那条"界面看不见"正是这么来的）。
+ * ══════════════════════════════════════════════════════════════════════════ */
+console.log('\n=== 真隔离的可用性与提示 ===');
+{
+  /** 一台机器的可用性，字段全给，测哪一格就改哪一格。 */
+  const avail = (patch) => ({
+    mode: 'off', available: true, distro: 'Ubuntu', unavailable: null, requestedButUnavailable: false, ...patch,
+  });
+  const NO_WSL = { available: false, distro: null, unavailable: '这台机器没有可用的 WSL 发行版' };
+
+  // 1. describeIsolation 的形状 + 那条不变量（真探一次，但不断言结果是什么）。
+  for (const mode of ['off', 'auto', 'wsl']) {
+    const a = describeIsolation(mode, ROOT);
+    check(`describeIsolation(${mode}) 字段齐全`,
+      a.mode === mode && typeof a.available === 'boolean'
+      && (a.available
+        ? typeof a.distro === 'string' && a.unavailable === null
+        : typeof a.unavailable === 'string' && a.distro === null),
+      JSON.stringify(a));
+    check(`【关键】describeIsolation(${mode})：「以为有边界其实没有」只在 wsl/auto 上才为真`,
+      a.requestedButUnavailable === (!a.available && mode !== 'off'), JSON.stringify(a));
+  }
+
+  // 2. isolationNotice 该不该说话 —— 判据是「说了会不会改变一个决定」，四格逐格钉。
+  const onButOff = isolationNotice(avail({}));
+  check('能用但关着 → 说，且给出打开它的开关（不说就等于这个能力不存在）',
+    /SHE_SANDBOX_ISOLATION/.test(String(onButOff)) && /关着/.test(String(onButOff)), String(onButOff));
+  check('能用且开着 → 不说（每条命令的回执自己带着 isolationInEffect 的披露，够了）',
+    isolationNotice(avail({ mode: 'auto' })) === null && isolationNotice(avail({ mode: 'wsl' })) === null);
+  check('不能用且关着 → 不说（这台机器上没有边界是唯一选项，天天提醒就等于没有提醒）',
+    isolationNotice(avail({ ...NO_WSL })) === null);
+
+  const wslBroken = isolationNotice(avail({ ...NO_WSL, mode: 'wsl', requestedButUnavailable: true }));
+  check('【关键】要求了 wsl 但用不了 → 必须说，且说清是「拒绝执行」而不是悄悄降级到主机',
+    /拒绝/.test(String(wslBroken)) && /不会降级到主机/.test(String(wslBroken))
+    && !/照旧在主机上跑/.test(String(wslBroken)), String(wslBroken));
+  check('这条提示点名了不可用的原因（从 describeIsolation 里带过来的那句话）',
+    String(wslBroken).includes(NO_WSL.unavailable), String(wslBroken));
+
+  const autoBroken = isolationNotice(avail({ ...NO_WSL, mode: 'auto', requestedButUnavailable: true }));
+  check('【关键】设了 auto 但用不了 → 说清"退回主机"是 auto 的约定（不是"有边界但没生效"）',
+    /auto/.test(String(autoBroken)) && /照旧在主机上跑/.test(String(autoBroken))
+    && !/会被\*\*拒绝\*\*执行/.test(String(autoBroken)), String(autoBroken));
+  check('【关键】这两格的处置相反、话也不同（一句通用警告就等于没说）',
+    new Set([onButOff, wslBroken, autoBroken].map(String)).size === 3,
+    `${String(onButOff)}\n        ${String(wslBroken)}\n        ${String(autoBroken)}`);
+
+  // 3. 接线：静态断言。没接进接口/日志的话，上面那些纯函数断言全绿而用户仍然看不见。
+  const serverSrc = readFileSync(join(ROOT, 'packages', 'server', 'src', 'index.ts'), 'utf8');
+  check('server 从 @she/sandbox 引入这两个函数',
+    /describeIsolation/.test(serverSrc) && /isolationNotice/.test(serverSrc)
+    && /import \{[^}]*describeIsolation[^}]*\} from '@she\/sandbox'/.test(serverSrc));
+  check('【关键】/api/settings 的响应里带 isolation 字段（否则界面还是看不见）',
+    /isolation:\s*\(\(\) => \{/.test(serverSrc) && /describeIsolation\(/.test(serverSrc));
+  check('【关键】启动日志也报一次（不看设置接口的部署同样看得到）',
+    /const isoNotice = isolationNotice\(describeIsolation\(/.test(serverSrc));
+  const sandboxIndex = readFileSync(join(ROOT, 'packages', 'sandbox', 'src', 'index.ts'), 'utf8');
+  check('@she/sandbox 导出了这两个函数（不然上面两处编译不过，是接线不是导出）',
+    /describeIsolation, isolationNotice,/.test(sandboxIndex) && /IsolationAvailability/.test(sandboxIndex));
 }
 
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`);

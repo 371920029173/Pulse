@@ -8,8 +8,9 @@ export {
   toWslPath, workspaceRelative, buildConfinedScript, buildWslArgv, planIsolation,
   isolationInEffect, resolveWslIsolation, resetIsolationProbeCache, isolationDetail,
   isolationSpawnEnv, ISOLATION_PROBE, WORKSPACE_NOT_IN_WSL_EXIT, NOT_IN_NAMESPACE_EXIT,
+  describeIsolation, isolationNotice,
 } from './isolation.js';
-export type { IsolationMode, IsolationPlan, IsolationResolution } from './isolation.js';
+export type { IsolationMode, IsolationPlan, IsolationResolution, IsolationAvailability } from './isolation.js';
 export { createTools } from './tools.js';
 export type { ToolSet } from './tools.js';
 export { ConfirmTicketStore } from './tickets.js';

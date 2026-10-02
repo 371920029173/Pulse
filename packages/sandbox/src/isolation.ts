@@ -232,6 +232,86 @@ export function isolationDetail(distro: string): string {
 }
 
 /**
+ * 这台机器**能不能**真隔离，以及现在的档位 —— 给界面和启动日志用。
+ *
+ * 为什么要单独有这个：层 4.2 的默认档位是 `off`（不把某个平台的假设当所有人的默认），于是"这台机器
+ * 其实能开真隔离"这件事在界面上完全看不见 —— 用户没有理由去翻一个他不知道存在的开关。反过来，
+ * `auto` / `wsl` 在**用不了**的机器上也不能不出声：`wsl` 档位下的命令会被拒绝执行，而拒绝的理由
+ * 只有看日志的人知道，界面里等着命令跑完的人只会觉得它卡住了。
+ *
+ * 三个字段各有分工：`available` 说这台机器行不行，`mode` 说用户要的是什么，`requestedButUnavailable`
+ * 是唯一危险的那一格（以为有边界、其实没有）。它的判据就是 **`mode !== 'off'`**，也就是 `wsl` 与
+ * `auto` 上都会为真 —— 但两格的**处置相反**，所以提示必须分开写：`auto` 用不了就退回主机（提示是
+ * "这是 auto 的约定"），`wsl` 用不了就拒绝执行（提示是"命令会被拒绝"）。判断"要不要提醒"的是
+ * `isolationNotice`，不是调用方。
+ */
+export interface IsolationAvailability {
+  mode: IsolationMode;
+  available: boolean;
+  /** 可用时：真的会用的那个发行版（空串＝WSL 的默认发行版）。不可用时为 null。 */
+  distro: string | null;
+  /** 不可用时：为什么 —— 与拒绝执行时同一句话，不另写一份。 */
+  unavailable: string | null;
+  requestedButUnavailable: boolean;
+}
+
+export function describeIsolation(
+  mode: IsolationMode,
+  workspaceRoot: string,
+  distro = '',
+): IsolationAvailability {
+  const resolved = resolveWslIsolation(workspaceRoot, distro);
+  if ('unavailable' in resolved) {
+    return {
+      mode,
+      available: false,
+      distro: null,
+      unavailable: resolved.unavailable,
+      requestedButUnavailable: mode !== 'off',
+    };
+  }
+  return {
+    mode,
+    available: true,
+    distro: resolved.plan.distro,
+    unavailable: null,
+    requestedButUnavailable: false,
+  };
+}
+
+/**
+ * 该对用户说的那句话，或者 null（没什么可说的）。
+ *
+ * 判据是「说了会不会改变一个决定」：
+ *   - 能用而关着 → 说，并给出打开它的开关（否则这个能力等于不存在）；
+ *   - 能用且开着 → 不说（每条命令的结果自己带着 `isolationInEffect` 的披露，够了）；
+ *   - 不能用且关着 → 不说（没有边界是这台机器上的唯一选项，天天提醒就等于没有提醒）；
+ *   - 不能用但要求了 `wsl` → 说，而且是必须说的：命令会被拒绝，不会静默降级到主机上跑；
+ *   - 不能用但设了 `auto` → 说一句：这是 `auto` 的约定（用不了就退回主机），别把它当成边界。
+ *
+ * 纯函数，不探测：探测过一次的结果由调用方传进来，这样它能在不启动服务的情况下被断言。
+ */
+export function isolationNotice(a: IsolationAvailability): string | null {
+  const switchHint = '打开它：`SHE_SANDBOX_ISOLATION=auto`（用不上时自动退回主机）'
+    + '或 `SHE_SANDBOX_ISOLATION=wsl`（用不上时拒绝执行，而不是悄悄降级）。';
+  if (a.available) {
+    if (a.mode !== 'off') return null;
+    return `这台机器可以用真隔离（WSL：${a.distro || '默认发行版'}），现在是关着的：`
+      + '命令直接在主机上跑，沙箱只按命令文本拦（写在 `node -e` 里的路径它看不见）。' + switchHint;
+  }
+  if (a.mode === 'wsl') {
+    return `已要求真隔离（wsl），但这台机器用不了：${a.unavailable}。`
+      + '命令会被**拒绝**执行，不会降级到主机上跑 —— 拒绝比悄悄没有边界好。';
+  }
+  if (a.mode === 'auto') {
+    return `真隔离设成了 auto，但这台机器用不了：${a.unavailable}。`
+      + '命令照旧在主机上跑 —— 这是 auto 的约定（能开才开），不是"有边界但没生效"。'
+      + '要边界本身就必须失败的话，改用 `wsl` 档位。';
+  }
+  return null;
+}
+
+/**
  * Probe WSL once per process.
  *
  * `spawnSync` because the sandbox builds a spawn call synchronously and cannot await a probe mid

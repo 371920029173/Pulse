@@ -1,4 +1,4 @@
-import { resolve, normalize, relative, sep, dirname, basename, join } from 'node:path';
+import { resolve, normalize, relative, sep, dirname, basename, join, isAbsolute } from 'node:path';
 import { realpathSync } from 'node:fs';
 import { platform } from 'node:os';
 import { spawn, execFile } from 'node:child_process';
@@ -51,6 +51,42 @@ function canonicalPath(p: string): string {
     /* Not created yet — the absolute path is all there is to compare. */
   }
   return IS_WINDOWS ? real.toLowerCase() : real;
+}
+
+/**
+ * Is this NAME named in this command — as a whole name, or only as a fragment of a longer one?
+ *
+ * A plain `includes(name)` looked right until it was measured (5th-round review, reproducible):
+ * the control-plane credential lives at `<appDir>/control-token`, so its name is `control-token`
+ * — and `cat packages/server/src/control-token.ts` was refused. Reading the repo's own source
+ * hit the credential's name, while `tenancy.ts` in the same directory read fine. That kind of
+ * refusal is worse than the one it prevents: the model learns "something in this repo is
+ * off-limits" and cannot tell a real boundary from a false one.
+ *
+ * A fragment is a fragment because of what surrounds it. A real name has nothing
+ * filename-ish on either side — separators (`/`, `\`, quotes, `=`, space, start/end of the
+ * command, even a trailing `*`) are all fine, while another letter, digit, `_`, `.` or `-`
+ * makes it a different file (`control-token.ts`, `control-token.bak`, `mykb.sqlite`).
+ *
+ * This does not leave the real file reachable: the only way to name it is to spell it exactly,
+ * and spelling it exactly cannot produce a filename character next to it. Both spellings the
+ * sandbox has to catch keep matching:
+ *
+ *   cat ~/.she-app/control-token      type %USERPROFILE%\.she-app\control-token
+ *   cat "./control-token"             sqlite3 .she/kb.sqlite "SELECT …"
+ */
+function namesFileInCommand(haystack: string, name: string): boolean {
+  /** Characters that continue a filename — a match touching one is part of a longer name. */
+  const continues = /[a-z0-9_.-]/;
+  let from = 0;
+  for (;;) {
+    const at = haystack.indexOf(name, from);
+    if (at < 0) return false;
+    const before = at > 0 ? haystack[at - 1] : '';
+    const after = haystack[at + name.length] ?? '';
+    if (!continues.test(before) && !continues.test(after)) return true;
+    from = at + 1;
+  }
 }
 
 /**
@@ -1475,15 +1511,16 @@ export class SandboxShell {
    *
    * This matches the file NAME rather than resolving the path, because a shell command's
    * spelling of a path is not reliably resolvable (`cd`, quoting, `%VAR%`). A command that
-   * names the database is already doing what this guard exists to stop, and a false
-   * positive here costs the model one clear sentence, while a false negative costs it a
-   * second handle on the live database.
+   * names the file is already doing what this guard exists to stop.
+   *
+   * Matching is on whole names, not substrings — see `namesFileInCommand` for what went
+   * wrong without it (reading this repo's own `control-token.ts` was refused).
    */
   protectedReasonInCommand(command: string): string | null {
     const haystack = command.toLowerCase();
     for (const [target, reason] of this.protectedPaths) {
       const name = basename(target).toLowerCase();
-      if (name && haystack.includes(name)) return reason;
+      if (name && namesFileInCommand(haystack, name)) return reason;
     }
     return null;
   }
@@ -1493,15 +1530,22 @@ export class SandboxShell {
    *
    * Never throws, so a caller can ask ahead of doing anything — the tool layer uses this to
    * refuse BEFORE the confirmation gate, where a "yes" from the user would otherwise let
-   * the write through. A path that escapes the workspace returns null here and is refused
-   * by the escape check, which has the better message for that case.
+   * the write through.
+   *
+   * 比两次，因为受保护的文件**可以不在工作区里**（控制面凭据就按设计放在 `~/.she-app`）。原来
+   * 只比"解析进工作区之后"的那条路径，越界的输入在这里直接落到 catch、返回 null，唯一挡着它的
+   * 就剩越界检查 —— 而越界检查是可以被用户打开的档位（「允许工作区外」）。于是同一份凭据会有两个
+   * 答案：开着那个档位时 `fs_read` 读得到，`cat` 读不到（第五轮实测的边角）。先按工作区里解析比
+   * 一次，比不中再按绝对值比一次，两条路径收敛到同一个答案。
    */
   protectedReasonFor(requestedPath: string): string | null {
     try {
-      return this.protectedReason(resolveInsideWorkspace(this.workspaceRoot, requestedPath));
+      const inside = this.protectedReason(resolveInsideWorkspace(this.workspaceRoot, requestedPath));
+      if (inside) return inside;
     } catch {
-      return null;
+      /* 工作区外：下面按绝对值再比一次，凭据按设计就在那儿。 */
     }
+    return this.protectedReason(isAbsolute(requestedPath) ? requestedPath : join(this.workspaceRoot, requestedPath));
   }
 
   validatePath(requestedPath: string): string {

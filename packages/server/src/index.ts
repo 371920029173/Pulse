@@ -12,7 +12,7 @@ import type { SheConfig, StreamChunk, EdgeKind, SkillProfile, ThinkingLevel } fr
 import { KBStore, GroupKBEngine, mergeKnowledgeBases } from '@she/kb';
 import type { KBMemoryPatch } from '@she/kb';
 import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLink } from './kb-link.js';
-import { SandboxShell, createTools, ConfirmTicketStore } from '@she/sandbox';
+import { SandboxShell, createTools, ConfirmTicketStore, describeIsolation, isolationNotice } from '@she/sandbox';
 import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, armSubagentWrapUp, selectHarvestNotes, allocateContext, pricingConfigured, pricingNote } from '@she/agent-runtime';
 import type { SubagentRunner, SubagentResult, SubagentKbHarvest, UsageLike } from '@she/agent-runtime';
 import {
@@ -3459,6 +3459,21 @@ router.put('/api/settings', async (req, res) => {
          */
         notice: sandboxPostureNotice(config),
       },
+      /*
+       * 真隔离（层 4.2）：这台机器能不能开、现在开着没有、要不要说点什么。
+       *
+       * 默认档位是 `off`，理由是"不拿某个平台的假设当所有人的默认"，代价是**这个能力在界面上原本
+       * 完全看不见** —— 用户不会去翻一个不知道存在的开关；反过来 `wsl` 档位在某台机器上用不了时，
+       * 命令会被拒绝，而拒绝的理由只有日志里的人知道。所以这里把结论直接回给界面：能不能、现在什么
+       * 档、以及该说的一句话（`isolationNotice` 决定要不要说，不是界面决定）。
+       *
+       * 探测惰性 + 进程内记忆（`resolveWslIsolation` 自己缓存）：首次读设置会起一次短命的 wsl.exe
+       * （约 1 秒），之后不再付钱；启动本身不为它变慢。
+       */
+      isolation: (() => {
+        const a = describeIsolation(config.sandbox.isolation, config.workspace.root, config.sandbox.wslDistro);
+        return { ...a, notice: isolationNotice(a) };
+      })(),
     });
   });
 
@@ -6749,6 +6764,17 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
      */
     const postureNotice = sandboxPostureNotice(config);
     if (postureNotice) log.info(postureNotice);
+
+    /*
+     * 真隔离的可用性也写进启动日志。
+     *
+     * 与上面同一条理由，但动机不同：那条是"默认姿态会停住"，这条是"这台机器上没有这个能力"或
+     * "有这个能力但关着"。探测是惰性的（`resolveWslIsolation` 进程内缓存），这里没读设置接口的
+     * 部署也能在日志里看到，第一次会付约 1 秒的 wsl.exe 探测；`off` 且不可用时 `isolationNotice`
+     * 返回 null，启动日志不为一句没信息量的话变长。
+     */
+    const isoNotice = isolationNotice(describeIsolation(config.sandbox.isolation, config.workspace.root, config.sandbox.wslDistro));
+    if (isoNotice) log.info(isoNotice);
   });
 
   process.on('SIGINT', () => { disposeAllAgents(); tenantLedger().flush(); server.close(() => process.exit(0)); });
