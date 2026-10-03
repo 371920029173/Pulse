@@ -376,6 +376,21 @@ const RULES: Rule[] = [
     re: /not found|no such file|不存在|未找到|找不到/i,
     from: 'sandbox tools.ts `路径不存在`, kb-tools.ts `未找到条目`, plan-tools.ts `plan not found`',
   },
+  /*
+   * `skill_read` (skill-tools.ts). No name at all is a malformed call; a name that is not in the
+   * index is the same shape as a missing path — the reply lists the names that do exist, so the
+   * fix is to pick one of them, not to retry.
+   */
+  {
+    kind: 'invalid_args',
+    re: /skill_read 需要 name/,
+    from: 'skill-tools.ts `skill_read 需要 name（技能索引里列出的名字）`',
+  },
+  {
+    kind: 'not_found',
+    re: /没有名为「[^」]*」的技能/,
+    from: 'skill-tools.ts `没有名为「…」的技能`',
+  },
 
   /*
    * ── Something else has to happen first. ──

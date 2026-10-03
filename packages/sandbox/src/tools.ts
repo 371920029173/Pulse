@@ -1105,7 +1105,7 @@ async function execute(name: string, args: Record<string, unknown>): Promise<str
      * 这是第二轮返工的核心。旧的判定只有一句 `entry.def.isDangerous && !allowAll`，它把两个问题
      * 焊在一起："这条命令危险吗"和"它在哪一侧动"。结果两个方向都错（实测 V12–V17）：
      *
-     *   开了「允许所有命令」→ `type "D:\AGI\README.txt"` 仍然 DENIED（该放没放）
+     *   开了「允许所有命令」→ `type "D:\other\README.txt"` 仍然 DENIED（该放没放）
      *   关了 → `type %TEMP%\x` 一路放行（该问没问）
      *
      * 因为唯一在看的 `workspaceEscapeReason` 只认命令文本里的字面路径，而环境变量、`for /f`

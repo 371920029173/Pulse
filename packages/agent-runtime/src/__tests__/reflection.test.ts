@@ -217,7 +217,7 @@ describe('detectDrift — 约束', () => {
       const args = JSON.stringify({
         tasks: [{
           description: '符号清单核对（只读）',
-          prompt: '工作区 d:\\AGI\\_she-live-test（Windows cmd shell，无 cat/which）。任务：读取两个文件……',
+          prompt: '工作区 C:\\work\\demo（Windows cmd shell，无 cat/which）。任务：读取两个文件……',
           deliverable: '一份清单',
         }],
       });
@@ -242,18 +242,22 @@ describe('detectDrift — 约束', () => {
       assert.equal(judge('fs_write', args).level, 'none');
     });
 
+    /*
+     * 被排除的对象是禁止词后面的 `/dev/null`。「shell 为 Windows cmd：无 cat/which」是对 shell 的描述，
+     * 评审轮之后不再被读成对象（同类的「shell 由 cmd.exe 解析，不能用 POSIX 写法」曾把每次 shell 调用都记成越界）。
+     */
     it('但 path 就是那个对象时照旧算越界（正文豁免不能变成整体豁免）', () => {
-      const args = JSON.stringify({ path: 'cat/which', content: '随便写点什么' });
+      const args = JSON.stringify({ path: '/dev/null', content: '随便写点什么' });
       assert.equal(judge('fs_write', args).level, 'drift');
     });
 
     it('shell 的命令行照旧查 —— 命令本身就是动作，没有「正文」这层', () => {
-      const args = JSON.stringify({ command: 'del /f cat/which' });
+      const args = JSON.stringify({ command: 'echo x > /dev/null' });
       assert.equal(judge('shell', args).level, 'drift');
     });
 
     it('嵌套的交接单里，scope 不在豁免之列（声明要改什么仍然是行动）', () => {
-      const args = JSON.stringify({ tasks: [{ description: '改文件', scope: ['cat/which'], prompt: '随便' }] });
+      const args = JSON.stringify({ tasks: [{ description: '改文件', scope: ['/dev/null'], prompt: '随便' }] });
       assert.equal(judge('task_spawn', args).level, 'drift');
     });
   });
@@ -789,8 +793,8 @@ describe('reflection false positives from live audit', () => {
   it('a provenance id inside a constraint is not the excluded object', () => {
     const report = detectDrift({
       goal: '整理知识库链接',
-      constraints: ['不要修改工作区文件；来源：e4fa0b5e'],
-      actions: [{ tool: 'kb_link', args: JSON.stringify({ from: '6369f703', to: 'e4fa0b5e' }) }],
+      constraints: ['不要修改工作区文件；来源：a1b2c3d4'],
+      actions: [{ tool: 'kb_link', args: JSON.stringify({ from: 'b2c3d4e5', to: 'a1b2c3d4' }) }],
     });
     assert.equal(report.signals.some((s) => s.kind === 'constraint_violated'), false);
   });
@@ -798,12 +802,12 @@ describe('reflection false positives from live audit', () => {
   it('parenthesised provenance is dropped too, the real object still fires', () => {
     const report = detectDrift({
       goal: '修复登录',
-      constraints: ['不要改 legacy.ts（source: 250c9a40）'],
+      constraints: ['不要改 legacy.ts（source: c3d4e5f6）'],
       actions: [{ tool: 'fs_write', args: JSON.stringify({ path: 'legacy.ts' }) }],
     });
     const hit = report.signals.find((s) => s.kind === 'constraint_violated');
     assert.ok(hit?.detail.includes('对象「legacy.ts」'), hit?.detail);
-    assert.ok(!hit?.detail.includes('对象「250c9a40」'));
+    assert.ok(!hit?.detail.includes('对象「c3d4e5f6」'));
   });
 });
 

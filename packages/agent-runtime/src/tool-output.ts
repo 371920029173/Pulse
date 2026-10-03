@@ -9,7 +9,7 @@
  * in the session) — the multiplier, not the size, is what makes this the largest cost in the
  * product.
  *
- * Measured (2026-10-03, a real self-evaluation session, `sess_8cd40d35a3cb`):
+ * Measured (2026-10-03, a real self-evaluation session, `sess_a1b2c3d4e5f6`):
  *
  *   transcript                964,280 characters over 131 messages
  *   one `shell_wait` result   732,633 characters — 76% of the whole session, from ONE call
@@ -38,6 +38,11 @@
  *   2. **Honest.** The elision is stated with the real sizes, and it names the concrete call that
  *      gets the rest — the same shape `kb_query` already uses for `full=true`.
  */
+
+import { createHash } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join, sep } from 'node:path';
+import { sessionStateRelDir } from './session-state.js';
 
 /**
  * How many characters one tool result may contribute to the context.
@@ -102,6 +107,43 @@ const REMEDIES: ReadonlyArray<readonly [RegExp, string]> = [
 ];
 
 const GENERIC_REMEDY = '把这次调用的范围改小（加过滤条件、限定路径、分段取）再调一次。';
+
+/**
+ * Command logs: the tools whose result is what a process printed.
+ *
+ * `shell_kill` is here because it renders through the same job view as `shell_wait` (the output a
+ * job printed since the last read). `shell_jobs` is not: it lists jobs and reads no output.
+ */
+const LOG_TOOLS = /^shell$|^shell_wait$|^shell_kill$/;
+
+/**
+ * The budget for a command log, tighter and more tail-heavy than the generic one.
+ *
+ * Measured on a real session (2026-10-03): command logs are the bulk of what tool results cost, and
+ * what the reader acts on is the ending — the exit code, the test summary, the error that stopped
+ * it. The head is kept small but not zero: it says which command started and, for `shell_wait`,
+ * carries the job status line.
+ *
+ * What makes cutting this hard safe is that nothing is thrown away: the full text is written to a
+ * file under the workspace (see `spillToolOutput`) and the note names it, so the middle is one
+ * `fs_read` away instead of one re-run away.
+ */
+export const LOG_RESULT_HEAD_CHARS = 1_000;
+export const LOG_RESULT_TAIL_CHARS = 8_000;
+
+/** Below this much over the head + tail, eliding would save about what the note costs. */
+const LOG_RESULT_SLACK_CHARS = 1_000;
+
+/**
+ * The most the tail may grow to keep the status trailer whole. Bounded so that head + note + tail
+ * stays under `TOOL_RESULT_CONTEXT_CHARS`, which keeps `fitToolResultsToBudget` a no-op for it.
+ */
+const LOG_RESULT_TAIL_MAX_CHARS = 12_000;
+
+/** True for the tools whose results get the command-log budget and a full-output file. */
+export function isLogTool(toolName: string): boolean {
+  return LOG_TOOLS.test(toolName);
+}
 
 /** The remedy line for a tool whose result was elided. */
 export function elisionRemedy(toolName: string): string {
@@ -181,6 +223,134 @@ export function budgetToolResult(
     fullChars,
     elidedChars,
   };
+}
+
+export interface ArrivedToolResult extends BudgetedToolResult {
+  /** Workspace-relative path the full text was written to, or null when nothing was written. */
+  savedTo: string | null;
+}
+
+/** `exit code: N` exactly as the sandbox renders it — the line the tail must never lose. */
+const EXIT_CODE_LINE = /^exit code:\s*-?\d+\s*$/gm;
+
+/** Index where the LAST `exit code:` line starts, or -1. The last one wins (see tool-result.ts). */
+function lastExitCodeAt(text: string): number {
+  EXIT_CODE_LINE.lastIndex = 0;
+  let at = -1;
+  let m: RegExpExecArray | null;
+  while ((m = EXIT_CODE_LINE.exec(text)) !== null) {
+    at = m.index;
+    if (m.index === EXIT_CODE_LINE.lastIndex) EXIT_CODE_LINE.lastIndex++;
+  }
+  return at;
+}
+
+function countNewlines(text: string, end: number): number {
+  let n = 0;
+  for (let i = text.indexOf('\n'); i !== -1 && i < end; i = text.indexOf('\n', i + 1)) n++;
+  return n;
+}
+
+/**
+ * Bound a tool result at the moment it is PRODUCED — the only moment it may be cut.
+ *
+ * Everything except a command log goes through `budgetToolResult` unchanged, so this changes
+ * nothing for any other tool. A command log over `head + tail + slack` keeps its first ~1k and last
+ * ~8k characters (snapped to line boundaries), and the full text is handed to `save` — called only
+ * when something is actually elided — which returns the workspace-relative path it wrote.
+ *
+ * Never cut, whatever the sizes:
+ *   - the `exit code:` line and everything after it (`(timed out)`, the isolation and dialect
+ *     disclosures, the `[tool-result]` remedy): the tail is extended back to that line;
+ *   - an `Error:` / `DENIED:` / job-status opening: it is the head.
+ *
+ * Pure in its text (the path comes from `save`, which derives it from the call id and a hash of the
+ * text), and applied exactly once, before the result enters the history. It must never be applied
+ * to a result that has already been sent: that would change the cached prefix. That is why
+ * `fitToolResultsToBudget` keeps using the generic budget only.
+ */
+export function budgetToolResultOnArrival(
+  raw: string,
+  toolName: string,
+  save?: (fullText: string) => string | null,
+): ArrivedToolResult {
+  const text = typeof raw === 'string' ? raw : String(raw ?? '');
+  const fullChars = text.length;
+  if (!isLogTool(toolName) || fullChars <= LOG_RESULT_HEAD_CHARS + LOG_RESULT_TAIL_CHARS + LOG_RESULT_SLACK_CHARS) {
+    return { ...budgetToolResult(text, toolName), savedTo: null };
+  }
+
+  // Head: end on a line boundary when one is reasonably close, so the head is whole lines.
+  let headEnd = LOG_RESULT_HEAD_CHARS;
+  const headNl = text.lastIndexOf('\n', headEnd - 1);
+  if (headNl >= headEnd / 2) headEnd = headNl + 1;
+
+  // Tail: start on a line boundary, then reach back far enough to keep the status trailer whole.
+  let tailStart = fullChars - LOG_RESULT_TAIL_CHARS;
+  const tailNl = text.indexOf('\n', tailStart);
+  if (tailNl !== -1 && tailNl - tailStart <= LOG_RESULT_TAIL_CHARS / 8) tailStart = tailNl + 1;
+  const exitAt = lastExitCodeAt(text);
+  if (exitAt !== -1 && exitAt < tailStart && fullChars - exitAt <= LOG_RESULT_TAIL_MAX_CHARS) tailStart = exitAt;
+  if (tailStart <= headEnd) return { ...budgetToolResult(text, toolName), savedTo: null };
+
+  const elidedChars = tailStart - headEnd;
+  const firstLine = countNewlines(text, headEnd) + 1;
+  const lastLine = countNewlines(text, tailStart) + (text[tailStart - 1] === '\n' ? 0 : 1);
+  const totalLines = countNewlines(text, fullChars) + 1;
+
+  let savedTo: string | null = null;
+  try {
+    savedTo = save ? save(text) : null;
+  } catch {
+    savedTo = null;
+  }
+  const where = savedTo
+    ? `完整输出（${fullChars} 字符，${totalLines} 行）已存到 ${savedTo}：要看中间那段用 fs_read 加 startLine / endLine 分段读，不要为了看全量重跑命令。`
+    : `完整输出没有存下来。${elisionRemedy(toolName)}`;
+  const note = [
+    '',
+    `[... 省略了中间 ${elidedChars} 字符（第 ${firstLine}–${lastLine} 行）：这次调用返回 ${fullChars} 字符，`
+    + `命令输出只保留开头 ${headEnd} 和结尾 ${fullChars - tailStart} 字符；退出码和结尾的状态行总在结尾里。]`,
+    `[tool-result] ${where}`,
+    '',
+  ].join('\n');
+
+  return {
+    text: `${text.slice(0, headEnd)}${note}${text.slice(tailStart)}`,
+    truncated: true,
+    fullChars,
+    elidedChars,
+    savedTo,
+  };
+}
+
+/**
+ * Write a command log's full text where `fs_read` can read it back, and return that path relative
+ * to the workspace (forward slashes, so the note reads the same on every platform).
+ *
+ * Under the session's own state directory when there is a session (`.she/sessions/<id>/tool-output/`),
+ * so it follows the same isolation as runs and plans and goes away with the session; `.she/tool-output/`
+ * otherwise. The file name is the call id plus a hash of the text: stable for the same output, and a
+ * provider that reuses call ids (`call_0` every turn) cannot overwrite an earlier log.
+ *
+ * Throws on failure; `budgetToolResultOnArrival` turns that into "not saved" in the note.
+ */
+export function spillToolOutput(
+  workspaceRoot: string,
+  sessionId: string | null | undefined,
+  callId: string,
+  fullText: string,
+): string {
+  const dir = sessionId
+    ? `${sessionStateRelDir(sessionId).split(sep).join('/')}/tool-output`
+    : '.she/tool-output';
+  const id = (callId || 'call').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
+  const hash = createHash('sha1').update(fullText).digest('hex').slice(0, 8);
+  const rel = `${dir}/${id}-${hash}.log`;
+  const abs = join(workspaceRoot, ...rel.split('/'));
+  mkdirSync(dirname(abs), { recursive: true });
+  writeFileSync(abs, fullText, 'utf8');
+  return rel;
 }
 
 /** The shape this needs from a stored message — structural, so it does not depend on `LLMMessage`. */

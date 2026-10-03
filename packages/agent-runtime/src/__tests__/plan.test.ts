@@ -511,6 +511,71 @@ describe('plan tools', () => {
 });
 
 /**
+ * `plan_list` 默认只展开**当前**计划（进行中的那个；都收口了就取最近动过的），其余计划一行带过：
+ * 一个工作区会攒下一堆做完的计划，每次开工都全文重印一遍，是在为没人问的历史付费（每次之后的请求都重发）。
+ * `all: true` 还是原来的全量。仍在进行的别的计划要**点名**——提示词要求"别的会话留下的未收口计划不能装没看见"。
+ */
+describe('plan_list 默认只展开当前计划', () => {
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+
+  it('只有一个计划时与 all=true 完全一样（没有多余的那行）', async () => {
+    const tools = createPlanTools(dir, 'sess-pl1');
+    await tools.execute('plan_create', { title: '唯一', steps: ['a'] });
+    const def = await tools.execute('plan_list', {});
+    assert.equal(def, await tools.execute('plan_list', { all: true }));
+    assert.doesNotMatch(def, /另有/);
+  });
+
+  it('默认只展开进行中的那个，收口的只计数；all=true 全部印出', async () => {
+    const tools = createPlanTools(dir, 'sess-pl2');
+    await tools.execute('plan_create', { title: '旧活一', steps: ['a'] });
+    await tools.execute('plan_update', { step_id: 's1', status: 'done', note: '旧活一的备注' });
+    await tick();
+    await tools.execute('plan_create', { title: '旧活二', steps: ['b'] });
+    await tools.execute('plan_update', { step_id: 's1', status: 'done' });
+    await tick();
+    await tools.execute('plan_create', { title: '眼下这件', steps: ['c', 'd'] });
+    await tools.execute('plan_update', { step_id: 's1', status: 'done', note: '眼下的备注' });
+
+    const def = await tools.execute('plan_list', {});
+    assert.match(def, /眼下这件/);
+    assert.ok(def.includes('眼下的备注'), '当前计划的备注要全量印出');
+    assert.doesNotMatch(def, /旧活一|旧活二/, `收口的计划不该展开: ${def}`);
+    assert.match(def, /另有 2 个计划没有展开：2 个已收口/);
+    assert.match(def, /plan_list all=true/);
+
+    const all = await tools.execute('plan_list', { all: true });
+    for (const t of ['眼下这件', '旧活一', '旧活二', '旧活一的备注']) assert.ok(all.includes(t), `all=true 缺 ${t}`);
+    assert.ok(def.length < all.length);
+  });
+
+  it('另一个仍在进行的计划会被点名（id + 标题 + 进度），不会被藏起来', async () => {
+    const tools = createPlanTools(dir, 'sess-pl3');
+    const first = await tools.execute('plan_create', { title: '别的会话留下的', steps: ['a', 'b'] });
+    const leftoverId = first.match(/Plan (plan_\w+)/)![1];
+    await tick();
+    await tools.execute('plan_create', { title: '新开的', steps: ['x'] });
+    const def = await tools.execute('plan_list', {});
+    assert.match(def, /Plan plan_\w+ — 新开的/);
+    assert.match(def, new RegExp(`1 个仍在进行 ${leftoverId}「别的会话留下的」0/2`));
+    assert.doesNotMatch(def, /\[[ >]\] s2 b/, '点名不等于展开');
+  });
+
+  it('都收口了就展开最近动过的那个', async () => {
+    const tools = createPlanTools(dir, 'sess-pl4');
+    await tools.execute('plan_create', { title: '早的', steps: ['a'] });
+    await tools.execute('plan_update', { step_id: 's1', status: 'done' });
+    await tick();
+    await tools.execute('plan_create', { title: '晚的', steps: ['b'] });
+    await tools.execute('plan_update', { step_id: 's1', status: 'done' });
+    const def = await tools.execute('plan_list', {});
+    assert.match(def, /晚的/);
+    assert.doesNotMatch(def, /早的/);
+    assert.match(def, /1 个已收口/);
+  });
+});
+
+/**
  * The reply to `plan_update` is sent once per step of progress, a dozen times on a long task, so
  * what it repeats is what the task pays for again and again.
  *

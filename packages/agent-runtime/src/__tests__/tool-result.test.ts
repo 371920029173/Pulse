@@ -262,7 +262,7 @@ describe('等人在确认是一个状态，不是失败', () => {
 
 describe('空扫描：说了"干净"，但没有东西可扫', () => {
   /*
-   * 这段的原话来自 `_she-live-test_2` 的真实 run 记录（`mcp_guardian_check_vulnerabilities`，
+   * 这段的原话来自 `_she-scratch_2` 的真实 run 记录（`mcp_guardian_check_vulnerabilities`，
    * `scan_mode=summary`）：工作区里没有 `package.json`，它照样回"没有已知漏洞"，而这条结论被当成
    * "安全检查已通过"。
    *

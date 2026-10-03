@@ -81,9 +81,16 @@ export function goalTerms(text: string): string[] {
   return found.filter((t) => t.length >= 2);
 }
 
+/*
+ * Both sides lowercased. The text always was, the terms were not: goal terms come in lowercased, but a
+ * prohibition object is kept as written, so 「不要改 README.md」 could never match a call writing
+ * README.md (reviewer, round 3). Path separators are folded too (`packages\migrations` in a cmd.exe
+ * command, JSON-escaped, is `packages/migrations`). The term is returned as written, for the report.
+ */
 function containsAny(text: string, terms: string[]): string | null {
-  const hay = String(text ?? '').toLowerCase();
-  for (const t of terms) if (hay.includes(t)) return t;
+  const norm = (x: unknown) => String(x ?? '').toLowerCase().replace(/\\+/g, '/');
+  const hay = norm(text);
+  for (const t of terms) if (hay.includes(norm(t))) return t;
   return null;
 }
 
@@ -128,6 +135,12 @@ export interface DriftInput {
   currentStep?: string | null;
   stepsUsed?: number;
   stepBudget?: number;
+  /**
+   * The agent's registered tool names. An object that is a tool name is compared with the tool that
+   * was CALLED, never with arguments ("不要用 shell" is not broken by `fs_read src/shell/index.ts`).
+   * Omitted: the built-in list (`isKnownToolName`). The run's own calls are always added.
+   */
+  toolNames?: string[];
 }
 
 export interface DriftReport {
@@ -148,7 +161,12 @@ export interface DriftReport {
  * find. "Do not touch the migrations" is a constraint where nothing else will notice, and where
  * noticing afterwards is too late.
  */
-const PROHIBITION = /(不要|不得|不准|不许|禁止|严禁|避免|别去|别动|别改|不可以|不能|do\s+not|don'?t|never|avoid|must\s+not|should\s+not)/i;
+/*
+ * Colloquial forms count too (reviewer, after R7): "别用 fs_write" and "勿用 X" were not prohibitions at
+ * all, so calling X was never flagged. "别" only together with a verb — on its own it is also "别的"
+ * (other), and "用别的工具" must stay a permission.
+ */
+const PROHIBITION = /(不要|不得|不准|不许|禁止|严禁|避免|别去|别动|别改|不可以|不能|千万别|别(?:用|使用|调用|碰|再|跑|执行|运行|删|写|读|直接|乱|装|提交|推)|勿|不允许|禁用|do\s+not|don'?t|never|avoid|must\s+not|should\s+not|cannot|can'?t|mustn'?t|shouldn'?t|may\s+not|refrain\s+from|stop\s+using)/i;
 
 /**
  * Words that introduce an EXCEPTION to a prohibition, i.e. something the constraint permits.
@@ -185,7 +203,420 @@ const EXCEPTION = /^(只(?:用|能用|使用|许用|准用|走|通过|调用)|�
 const WHITELIST_START = /(?=只(?:用|能用|使用|许用|准用|走|通过|调用)|仅(?:用|使用|通过)|\buse\s+only\b|\bonly\s+use\b)/i;
 
 /**
- * Provenance notes inside a constraint: "来源：e4fa0b5e", "(source: 250c9a40)", "参见：…".
+ * A constraint that NAMES A TOOL in order to prescribe it: "用 shell 跑测试", "改用 fs_patch",
+ * "must call kb_query first", "run git via shell", "shell 是唯一可用的工具".
+ *
+ * Measured (tester round R7, rate 1.00): the model writes its constraints as one sentence that
+ * mixes what to use with what to avoid — 「用 shell 跑测试，不要用 fs_write」 — and a clause that
+ * is neither a prohibition nor an "只用/仅通过" whitelist was glued onto the prohibition (a comma
+ * alone does not end a clause, so lists survive). The tool it prescribed then became one of the
+ * two "forbidden" objects, and every obedient call to it was reported as a hard violation.
+ *
+ * So a clause with no prohibition and no negation that opens with a use-verb aimed at something
+ * code-like (an ASCII name or a quoted span), or that says what is the only / allowed choice, is
+ * the PERMITTED half, read like an exception. A use-verb has to be followed by a name: "用户配置",
+ * "调用方的代码" are nouns, not instructions, and stay in the prohibition as before.
+ */
+const NEGATION = /(不|别|勿|没|无|非|莫|未|\bnot\b|n't\b|\bcannot\b|\bno\b|\bnever\b|\bwithout\b)/i;
+const NAME_AHEAD = String.raw`(?=\s*[\x60"'“「A-Za-z_./])`;
+const PERMISSION: RegExp[] = [
+  // 用 shell / 先用 kb_query / 必须先调用 kb_query / 通过 shell / 改用 fs_patch / 跑 pnpm test
+  new RegExp(String.raw`^(?:请|要|需要?|必须|务必|应该?|应当|一律|统一|全部|都|就|则|还|也|并且?|而且?|而是?|然后|之后|随后|再|先|优先)*\s*`
+    + String.raw`(?:使用|调用|通过|经由|借助|采用|运行|执行|(?:改|换|转)?(?:用|走|跑))` + NAME_AHEAD),
+  // 测试用 shell 跑 / git 通过 shell 执行
+  // (费用 API / 应用 X / 作用 are nouns: their 用 is not "use")
+  new RegExp(String.raw`^[^，,；;。]{0,12}?(?<![不别勿没无非莫未费作信应有通适引占享专备常惯启录雇实运公])(?:用|使用|调用|通过|经由|借助)` + NAME_AHEAD),
+  // use shell / must call kb_query first / instead use fs_patch / run git via shell
+  /^(?:(?:and|then|but|instead|so|please|always|first|also|just)\s*,?\s+)*(?:(?:you|we)\s+)?(?:(?:must|should|shall|need\s+to|needs\s+to|have\s+to|has\s+to|always|first|to)\s+)*(?:use|call|invoke|run|prefer|go\s+(?:through|via)|via|through|switch\s+to|stick\s+(?:to|with)|rely\s+on|instead)\b/i,
+  // tests run via shell
+  /^[^,;.]{0,30}?\b(?:via|through)\s+[`"'A-Za-z_]/i,
+  // shell 是唯一可用的工具 / shell is the only tool allowed
+  /(唯一|只能|只允许|只许|仅限|仅允许|允许|可以用|可用|\bonly\b|\ballowed\b|\bpermitted\b)/i,
+];
+
+/** True for a clause that only prescribes or permits: see `PERMISSION`. */
+function isPermission(piece: string): boolean {
+  if (PROHIBITION.test(piece) || NEGATION.test(piece)) return false;
+  return PERMISSION.some((re) => re.test(piece.trim()));
+}
+
+/**
+ * Where a SUBSTITUTE starts inside a clause: "不要用 fs_write 改用 fs_patch", "never use fs_write
+ * but use fs_patch". What follows is what to use instead, the same as a whitelist. The CJK forms
+ * need a name after them for the same reason as `PERMISSION`: "修改用户配置" contains "改用".
+ */
+const SUBSTITUTE_START = new RegExp(
+  String.raw`(?=(?:改|换|转|而是?)用` + NAME_AHEAD + String.raw`|\binstead\s+(?:use|call|run|invoke|go)\b|\bbut\s+(?:use|call|run|invoke|go)\b)`,
+  'i',
+);
+
+/**
+ * "用 shell 跑测试并且不要用 fs_write": a prescription and a prohibition with no punctuation between
+ * them. Split at the prohibition word, but only when the head before it is itself a permission —
+ * "子代理不得用 shell" has a head ("子代理") that is not, and is left whole.
+ */
+function splitPermissionHead(piece: string): string[] {
+  const at = piece.search(PROHIBITION);
+  if (at <= 0) return [piece];
+  const head = piece.slice(0, at);
+  return isPermission(head) ? [head, piece.slice(at)] : [piece];
+}
+
+/**
+ * A constraint cut into the pieces `analyzeConstraint` classifies, one statement or half-statement
+ * each. A colon ends a piece too ("shell 为 Windows cmd：无 cat/which"): what precedes it is a
+ * heading or a description. Only a full-width colon or one followed by a space, so "D:\\x" survives.
+ */
+function constraintPieces(text: string): string[] {
+  return String(text ?? '').split(/[，,；;。!！?？\n]+|：|:\s+/)
+    .flatMap((p) => p.split(WHITELIST_START))
+    .flatMap((p) => p.split(SUBSTITUTE_START))
+    .flatMap(splitPermissionHead);
+}
+
+/**
+ * The parts of a constraint that name what to USE or what is REQUIRED/exempt: the exception,
+ * whitelist and permission clauses, and the required spans below. Exported for the error-book
+ * migration, which retires accusations whose object came from one of these parts.
+ */
+export function permittedParts(text: string): string[] {
+  const t = String(text ?? '').replace(PROVENANCE, ' ');
+  return [...analyzeConstraint(t).permitted, ...requiredSpans(t)];
+}
+
+/**
+ * The parts of a constraint read as CONTEXT rather than as what it forbids: the subject or
+ * description in front of a prohibition that names its own object ("shell 由 cmd.exe 解析，不能用
+ * POSIX 写法" — the prohibition is about POSIX syntax; `shell` is what is being described).
+ * Exported for the error-book migration, like `permittedParts`.
+ */
+export function contextParts(text: string, isTool?: (name: string) => boolean): string[] {
+  return objectAnalysis(text, isTool).context;
+}
+
+function requiredSpans(text: string): string[] {
+  const out: string[] = [];
+  for (const re of REQUIRED_SPANS) for (const m of String(text ?? '').matchAll(re)) out.push(m[0].trim());
+  return out;
+}
+
+/**
+ * Spans INSIDE a prohibition that name what is required or exempt rather than what is forbidden:
+ * "不要跳过 kb_query", "do not edit files without calling kb_query first", "除 shell 外不要用其他
+ * 工具", "never use any tool other than shell", "在调用 kb_query 之前不要写文件".
+ *
+ * Measured with the same R7 phrasings: the named tool is the most concrete token in the sentence,
+ * so it won the "longest two candidates" race and calling it — the very thing the rule demands —
+ * was reported as the violation. The span is removed before objects are picked; what remains
+ * (the thing that must not happen) is still checked.
+ */
+const NAMED = String.raw`(?:\x60[^\x60]+\x60|"[^"]+"|“[^”]+”|[A-Za-z0-9_@./\\:*-]+)`;
+const REQUIRED_SPANS: RegExp[] = [
+  new RegExp(String.raw`(?:跳过|略过|绕过|绕开|忘记|忘了|漏掉|漏了|遗漏|省略|省掉)\s*(?:先|去)?(?:调用|使用|用|跑|运行|执行)?\s*(?:${NAMED}|[\u4e00-\u9fff]{1,4})`, 'g'),
+  new RegExp(String.raw`(?:(?:未|没有?)先?(?:调用|使用|用|跑|运行|执行|查询?)|不先(?:调用|使用|用|跑|运行|执行|查询?)?)\s*${NAMED}`, 'g'),
+  new RegExp(String.raw`(?:在)?(?:先)?(?:调用|使用|用|跑|运行|执行)\s*${NAMED}\s*(?:之前|以前|前)`, 'g'),
+  // 除 inside 删除/排除/清除... is not "except": "不要用 shell 删除 packages/migrations" keeps its object.
+  new RegExp(String.raw`(?<![删排消清解去免剔废拆扣开切革摘移整破初])除了?\s*(?:${NAMED}(?:\s*(?:之外|以外|外))?|[\u4e00-\u9fff]{1,6}?(?:之外|以外|外))`, 'g'),
+  new RegExp(String.raw`${NAMED}\s*(?:之外|以外)的?`, 'g'),
+  new RegExp(String.raw`\b(?:skip(?:ping)?|bypass(?:ing)?|omit(?:ting)?|forget(?:ting)?(?:\s+to)?|without(?:\s+first)?|before(?:\s+first)?|until|unless|except(?:\s+(?:for|via|through|with))?|other\s+than|besides|apart\s+from|aside\s+from|anything\s+but|instead\s+of)\s+`
+    + String.raw`(?:(?:calling|using|running|checking|consulting|invoking|call|use|run|check|consult|invoke)\s+)?(?:the\s+)?${NAMED}(?:\s+(?:tool|tools|command))?`, 'gi'),
+];
+
+/**
+ * English glue that is never the object of a prohibition. Without it, "never call the git tool"
+ * yields `call`/`tool` (four letters beat `git`'s three), and "never read X directly" yields `read`,
+ * which then matches every `fs_read`. Object picking only; goal terms are unaffected.
+ */
+const OBJECT_STOP = new Set([
+  'any', 'all', 'other', 'than', 'tool', 'tools', 'first', 'then', 'instead', 'directly', 'only',
+  'via', 'through', 'call', 'calling', 'before', 'after', 'without', 'when', 'them', 'else',
+  'anything', 'something', 'every', 'each', 'just', 'also', 'ever', 'read', 'write', 'edit', 'touch',
+  'modify', 'change', 'delete', 'remove', 'access',
+]);
+
+/**
+ * COMMAND objects: "不要用 rm -rf", "never run git push --force", "不要 npm publish".
+ *
+ * Measured by the reviewer (round 3): an un-backticked command was cut into words and the two longest
+ * kept, so 「不要用 rm -rf」 had the objects `rm`-less `rf` and nothing that matched `rm -rf x`, while
+ * 「不要 git push --force」 had `push` and `force` matched separately, and `git push origin main` was
+ * reported as the forbidden force push. A command phrase is now one object: a command word followed by
+ * its subcommand and flags, kept whole, and matched against a call as a command (`commandMatches`).
+ *
+ * A phrase is a known command word (or any word followed directly by a flag) plus what follows it up to
+ * the first piece of English glue ("on", "via", "to"...) or the end of the ASCII run. It needs a flag,
+ * or a command whose next word is a subcommand (git push, npm publish, docker system prune): "never
+ * cat files" stays the words it was.
+ */
+const KNOWN_COMMANDS = new Set([
+  'git', 'rm', 'rmdir', 'rd', 'del', 'erase', 'mv', 'cp', 'dd', 'mkfs', 'chmod', 'chown', 'chgrp', 'sudo',
+  // portability-check:allow — 这是**命令名清单**（用来把约束原句拆成命令短语），不是调用；这里没有分支可加。
+  'kill', 'pkill', 'killall', 'taskkill', 'shutdown', 'reboot', 'format', 'npm', 'pnpm', 'yarn', 'npx', 'bun',
+  'deno', 'node', 'python', 'python3', 'py', 'pip', 'pip3', 'uv', 'poetry', 'docker', 'podman', 'kubectl',
+  'helm', 'terraform', 'curl', 'wget', 'ssh', 'scp', 'rsync', 'make', 'cargo', 'go', 'mvn', 'gradle', 'sed',
+  'awk', 'find', 'xargs', 'tar', 'unzip', 'reg', 'sc', 'net', 'netsh', 'powershell', 'pwsh', 'cmd', 'bash',
+  'sh', 'sqlite3', 'psql', 'mysql', 'robocopy', 'xcopy', 'move', 'copy', 'icacls', 'attrib', 'ls', 'cat',
+  'echo', 'touch', 'mkdir', 'truncate',
+]);
+/** Commands whose next word is a subcommand, so "git push" is a command phrase without a flag. */
+const SUBCOMMAND_COMMANDS = new Set([
+  'git', 'npm', 'pnpm', 'yarn', 'bun', 'npx', 'docker', 'podman', 'kubectl', 'helm', 'terraform', 'cargo',
+  'pip', 'pip3', 'uv', 'poetry', 'mvn', 'gradle',
+]);
+/** Words that end a command phrase in a sentence ("never run rm -rf ON the repo"). */
+const COMMAND_GLUE = new Set([
+  'on', 'in', 'into', 'to', 'at', 'for', 'the', 'a', 'an', 'and', 'or', 'with', 'without', 'when', 'unless',
+  'if', 'from', 'of', 'by', 'via', 'through', 'against', 'inside', 'under', 'as', 'instead', 'but', 'then',
+  'please', 'anything', 'anymore', 'again', 'ever', 'directly', 'while', 'any', 'it', 'this', 'that', 'these',
+  'those', 'here', 'there', 'because', 'so', 'is', 'are', 'be', 'anywhere', 'except', 'before', 'after',
+]);
+/** Verbs in front of a command ("never RUN rm -rf"): never the command word. */
+const COMMAND_VERBS = new Set(['use', 'run', 'call', 'execute', 'exec', 'invoke', 'type', 'try', 'do', 'using', 'running']);
+/** --force ~ -f, --recursive ~ -r: the two aliases that matter for the destructive commands people forbid. */
+const FLAG_ALIAS: Record<string, string> = { force: 'f', recursive: 'r' };
+
+function isFlagToken(t: string): boolean {
+  return /^--?[a-z0-9][a-z0-9-]*(?:=.*)?$/i.test(t) || /^\/[a-z?]{1,2}$/i.test(t);
+}
+function commandToken(t: string): string {
+  return String(t ?? '').toLowerCase().replace(/^[`"']+|[`"']+$/g, '').replace(/^\.\/(?=.)/, '').replace(/(?<=.)[\\/]+$/, '');
+}
+function commandBase(t: string): string {
+  return (t.split(/[\\/]/).pop() ?? t).replace(/\.(?:exe|cmd|bat)$/, '');
+}
+
+/** True when an object reads as a command line ("rm -rf", "git push --force"), quoted or not. */
+function isCommandPhrase(object: string, isTool: (name: string) => boolean = () => false): boolean {
+  const toks = String(object ?? '').trim().split(/\s+/).map(commandToken).filter(Boolean);
+  if (toks.length < 2) return false;
+  const cmd = commandBase(toks[0]);
+  if (!/^[a-z][a-z0-9_.+-]*$/.test(cmd) || isTool(cmd)) return false;
+  return toks.slice(1).some(isFlagToken) || KNOWN_COMMANDS.has(cmd);
+}
+
+/** The command phrases in a piece of prohibition text, and the text with them taken out. */
+function commandsIn(text: string, isTool: (name: string) => boolean): { commands: string[]; rest: string } {
+  const commands: string[] = [];
+  let rest = text;
+  for (const m of text.matchAll(/[A-Za-z0-9_@./\\:*=+~-]+(?:[ \t]+[A-Za-z0-9_@./\\:*=+~-]+)*/g)) {
+    const toks = m[0].split(/\s+/);
+    let i = 0;
+    while (i < toks.length) {
+      const lt = toks[i].toLowerCase();
+      const next = (toks[i + 1] ?? '').toLowerCase();
+      const start = !COMMAND_VERBS.has(lt) && !COMMAND_GLUE.has(lt) && !isTool(lt) && (KNOWN_COMMANDS.has(lt)
+        || (/^--?[a-z]/.test(next) && isFlagToken(next) && /^[a-z][a-z0-9_.-]*$/.test(lt) && !GENERIC.has(lt) && !OBJECT_STOP.has(lt)));
+      if (!start) { i++; continue; }
+      let j = i + 1;
+      while (j < toks.length && !COMMAND_GLUE.has(toks[j].toLowerCase()) && !isTool(toks[j].toLowerCase())) j++;
+      const phrase = toks.slice(i, j);
+      const valid = phrase.length >= 2 && (phrase.slice(1).some(isFlagToken)
+        || (SUBCOMMAND_COMMANDS.has(lt) && /^[a-z][a-z0-9-]*$/.test(phrase[1].toLowerCase())));
+      if (!valid) { i++; continue; }
+      commands.push(phrase.join(' '));
+      rest = rest.replace(phrase.join(' '), ' ');
+      i = j;
+    }
+  }
+  return { commands, rest };
+}
+
+/** The flags of a command line: long names and short letters, aliases folded in. */
+function flagSet(tokens: string[]): { long: Set<string>; short: Set<string> } {
+  const long = new Set<string>();
+  const short = new Set<string>();
+  for (const t of tokens) {
+    if (t.startsWith('--')) {
+      const name = t.slice(2).split('=')[0];
+      long.add(name);
+      if (FLAG_ALIAS[name]) short.add(FLAG_ALIAS[name]);
+    } else if (/^-[a-z0-9]+$/.test(t)) {
+      for (const ch of t.slice(1)) short.add(ch);
+    } else {
+      long.add(t);
+    }
+  }
+  return { long, short };
+}
+
+/**
+ * Does `text` (a call's target) run the command `phrase`? Within ONE command segment (split at `&&`,
+ * `||`, `;`, `|`, newlines and JSON string boundaries): the command word, then the phrase's other words
+ * in order (more arguments may sit between them), and every flag the phrase names, in any order and
+ * spelled as the phrase spells it or as its alias (`--force` / `-f`, `-rf` / `-r -f` / `--recursive
+ * --force`). So `git push origin main` is not `git push --force`, `git push --force-with-lease` is not
+ * either, and `git push origin --force` is.
+ */
+export function commandMatches(text: string, phrase: string): boolean {
+  const want = String(phrase ?? '').trim().split(/\s+/).map(commandToken).filter(Boolean);
+  if (want.length < 1) return false;
+  const cmd = commandBase(want[0]);
+  const words = want.slice(1).filter((t) => !isFlagToken(t));
+  const flags = flagSet(want.slice(1).filter(isFlagToken));
+  for (const seg of String(text ?? '').toLowerCase().split(/&&|\|\||[;|\n"]|\\[nr"]/)) {
+    const toks = seg.trim().split(/\s+/).map(commandToken).filter(Boolean);
+    for (let i = 0; i < toks.length; i++) {
+      if (commandBase(toks[i]) !== cmd) continue;
+      const rest = toks.slice(i + 1);
+      let k = 0;
+      for (const w of rest.filter((t) => !isFlagToken(t))) if (k < words.length && w === words[k]) k++;
+      if (k < words.length) continue;
+      const have = flagSet(rest.filter(isFlagToken));
+      const longOk = [...flags.long].every((n) => have.long.has(n) || (FLAG_ALIAS[n] !== undefined && have.short.has(FLAG_ALIAS[n])));
+      const shortOk = [...flags.short].every((c) => have.short.has(c));
+      if (longOk && shortOk) return true;
+    }
+  }
+  return false;
+}
+
+/** Is the object `o` in the call's target? A command phrase as a command, anything else as a substring. */
+function objectInTarget(text: string, o: string, isTool: (name: string) => boolean): boolean {
+  return isCommandPhrase(o, isTool) ? commandMatches(text, o) : containsAny(text, [o]) !== null;
+}
+
+/**
+ * "X 的 Y" / "X's Y" / "Y of X" with X a TOOL: the prohibition is about Y, and X is context.
+ * 「不要用 shell 的 POSIX 写法」 forbids POSIX syntax, not shell (reviewer, round 3: `shell dir` was
+ * flagged). Only for tools: "cluster.ts 的导出" is still about cluster.ts, since changing a file's exports
+ * is changing the file.
+ */
+function stripToolPossessive(text: string, isTool: (name: string) => boolean): string {
+  const drop = (whole: string, name: string) => (isTool(name.toLowerCase()) ? ' ' : whole);
+  return text
+    .replace(/[`"']?([A-Za-z][A-Za-z0-9_*]*)[`"']?\s*(?:工具)?\s*的(?=\s*\S)/g, drop)
+    .replace(/[`"']?\b([A-Za-z][A-Za-z0-9_*]*)[`"']?'s\b/g, drop)
+    .replace(/\bof\s+(?:the\s+)?[`"']?([A-Za-z][A-Za-z0-9_*]*)[`"']?(?:\s+tool)?\b/gi, drop);
+}
+
+/**
+ * A prohibition that names a tool AND what it must not be used on: "do not use fs_write on .git",
+ * 「不要用 fs_write 改 README.md」, 「不要在 .git 里用 fs_write」, 「不要用 shell 删除 X」, "never touch
+ * .git with fs_write". The tool is the instrument, not the forbidden thing: measured by the reviewer
+ * (round 3), `fs_write src/a.ts` was reported under "do not use fs_write on .git" because tool and object
+ * were matched independently. In such a statement the tool is context and only the object is matched
+ * (see `objectAnalysis`).
+ */
+const TOOLISH = String.raw`[\x60"']?[A-Za-z][A-Za-z0-9_*]*[\x60"']?`;
+const SCOPE: RegExp[] = [
+  new RegExp(String.raw`\b(?:use|call|run|invoke|using|calling)\s+(?:the\s+)?${TOOLISH}(?:\s+tool)?\s+(?:on|in|into|to|against|inside|under|within|for)\s+\S`, 'i'),
+  new RegExp(String.raw`\b(?:with|using|via)\s+(?:the\s+)?${TOOLISH}(?:\s+tool)?(?:\s|$)`, 'i'),
+  new RegExp(String.raw`(?:用|使用|调用|通过)\s*${TOOLISH}\s*(?:工具)?\s*(?:来|去)?\s*(?:对|给|往|向|在|把)?[^，,；;。]*?(?:改|写|删|修改|编辑|创建|覆盖|删除|动|碰|重写|写入|改动|操作|处理|读|打开|访问|执行|运行|跑|清理|清空|提交|推)`),
+  new RegExp(String.raw`在\s*[^，,；;。]{1,40}?(?:里|中|下|内|上)\s*(?:用|使用|调用|跑|运行|执行)\s*${TOOLISH}`),
+];
+
+/**
+ * Objects the constraint names AS A TOOL ("the git tool", "`git` 等工具", "kb_* tools"). Matched
+ * against the tool that was called, not its arguments: "never call the git tool" forbids that tool,
+ * not a `shell` call whose command line happens to start with `git`.
+ */
+function toolNamedObjects(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of String(text ?? '').matchAll(/[`"']?([A-Za-z0-9_*.-]{2,})[`"']?\s*(?:等)?\s*(?:tools?\b|工具)/gi)) {
+    out.add(m[1].toLowerCase());
+  }
+  return out;
+}
+
+/**
+ * Does a call to `tool` count as using `object`, an object that names a tool? The tool itself or its
+ * family ("shell" covers `shell_wait`, "git" covers `git_status`), or a prefix glob ("kb_*", "fs_").
+ */
+export function toolNameMatches(tool: string, object: string): boolean {
+  const t = String(tool ?? '').toLowerCase();
+  const o = String(object ?? '').toLowerCase();
+  const core = o.replace(/\*+$/, '');
+  if (core.length < 2 || !t) return false;
+  if (o.endsWith('*') || core.endsWith('_')) return t.startsWith(core);
+  return t === core || t.startsWith(`${core}_`);
+}
+
+/**
+ * Tool names the runtime registers, for when the caller does not pass its own list (the error-book
+ * migration, offline checks). `detectDrift` prefers `DriftInput.toolNames` — the agent passes its
+ * real tool table, MCP tools included — and always adds the tools the run actually called.
+ */
+const BUILTIN_TOOL_NAMES = [
+  'shell', 'shell_wait', 'shell_jobs', 'shell_kill', 'fs_read', 'fs_write', 'fs_list', 'grep',
+  'git_status', 'git_diff', 'git_log', 'lsp_definition', 'lsp_references', 'lsp_hover', 'lsp_diagnostics',
+  'kb_query', 'kb_get', 'kb_upsert', 'kb_edit', 'kb_link', 'kb_retire', 'kb_ingest_scan', 'kb_ingest_list',
+  'kb_ingest_place', 'kb_ingest_status', 'plan_create', 'plan_get', 'plan_list', 'plan_update', 'plan_add_steps',
+  'memo_add', 'memo_list', 'memo_update', 'memo_remove', 'errorbook_lookup', 'errorbook_forget',
+  'preflight_record', 'reflection_check', 'report_write', 'task_spawn', 'ask_user', 'schedule_create',
+  'schedule_list', 'schedule_cancel', 'schedule_window', 'screenshot', 'vision_describe',
+  'computer_click', 'computer_type', 'computer_key', 'computer_scroll',
+];
+/** The runtime's tool families: `fs_*`, `kb_*`, `mcp_*`… A name of this shape is a tool name. */
+const TOOL_FAMILY = /^(?:fs|kb|plan|lsp|git|shell|memo|schedule|computer|errorbook|reflection|preflight|task|report|vision|mcp|skill)_[a-z0-9_]*\*?$/;
+
+/** True when `name` is a tool name: registered (or built in), a glob over one, or of a tool family's shape. */
+export function isKnownToolName(name: string, registered?: Iterable<string>): boolean {
+  const o = String(name ?? '').toLowerCase().replace(/^[`"']|[`"']$/g, '');
+  const core = o.replace(/\*+$/, '');
+  if (core.length < 2) return false;
+  const known = registered ? [...registered].map((n) => n.toLowerCase()) : BUILTIN_TOOL_NAMES;
+  if (known.includes(core)) return true;
+  if ((o.endsWith('*') || core.endsWith('_')) && known.some((k) => k.startsWith(core))) return true;
+  return TOOL_FAMILY.test(o);
+}
+
+/**
+ * "Every OTHER tool is forbidden": 别的/其他/其它/其余（工具）, X 以外/之外的工具, other tools, any
+ * other, other than, anything else. Together with a prohibition it turns the tools the constraint
+ * names as allowed into an allow-list (see `allowListOf`).
+ */
+const OTHERS = /(别的|其他|其它|其余|另外的)|(?:以外|之外)的?(?:工具|东西)|\bother\s+tools?\b|\bany\s+other\b|\bother\s+than\b|\banything\s+(?:else|but)\b/i;
+/** "X 是唯一可用的工具", "X is the only tool": an allow-list even without a prohibition word. */
+const ONLY_TOOL = /唯一(?:可用|允许|能用|可以用|被允许|可调用)?的?工具|\bthe\s+only\s+(?:allowed\s+)?tools?\b|\bonly\s+(?:allowed\s+)?tools?\b/i;
+/** "只用 kb_query", "only use shell": a whitelist that is the WHOLE statement, names and nothing else. */
+const NAME_LIST = String.raw`[\x60"']?[A-Za-z0-9_*.-]+[\x60"']?(?:\s*(?:、|,|和|与|及|或|and|or|/)\s*[\x60"']?[A-Za-z0-9_*.-]+[\x60"']?)*`;
+const BARE_WHITELIST = new RegExp(
+  String.raw`^(?:只(?:用|能用|使用|许用|准用|调用)|仅(?:用|使用|调用)|use\s+only|only\s+use)\s*${NAME_LIST}\s*(?:这?(?:个|些|几个|两个)?工具|tools?)?\s*$`, 'i');
+
+/**
+ * Tools that are not "using a tool" for an allow-list's purpose: the agent's own bookkeeping (plan,
+ * memo, self-review, pre-flight, error book) and talking to the user (ask_user, report_write).
+ * "只用 shell" is about how the WORK is done; recording the plan or delivering the report is not a
+ * second way of doing it, and flagging those would make every allow-list fire on every turn.
+ * Read-only tools are deliberately NOT exempt: "只用 kb_query" then `fs_read` is exactly what the
+ * rule excludes.
+ */
+const ALLOWLIST_EXEMPT = /^(?:plan_|reflection_|preflight_|errorbook_|memo_|ask_user$|report_write$)/;
+
+/**
+ * The tools a constraint ALLOWS when it is an allow-list, or null when it is not one.
+ *
+ * Measured by the reviewer after R7: 「只用 shell，不要用别的工具」 had the forbidden object
+ * 「用别的工具」 — a literal string no call ever contains — so `fs_write` under it was never flagged,
+ * and 「只用 kb_query」 had no prohibition word at all. An allow-list is one of:
+ *   - a prohibition of OTHER tools (`OTHERS`): 只用 X，不要用别的工具 · 除 X 外不要用其他工具 ·
+ *     never use any tool other than X — the allowed tools are the ones in the permitted parts;
+ *   - X 是唯一可用的工具 / X is the only tool (`ONLY_TOOL`);
+ *   - a bare whitelist that is the whole rule: 只用 kb_query · only use shell.
+ * A whitelist that comes with a prohibition of its own object ("不得直读 .she/kb.sqlite，只用 kb_*
+ * 工具") is the remedy for THAT prohibition, scoped to it, and stays what it was before: not
+ * enforced globally — otherwise every `fs_read` of a source file would be a violation of a rule
+ * about the knowledge base. A scoped whitelist ("只用 shell 跑测试", "only use git via shell") is not
+ * bare either. Only names that are tool names count; "只用 utf-8" is no allow-list.
+ */
+export function allowListOf(text: string, isTool: (name: string) => boolean = (n) => isKnownToolName(n)): string[] | null {
+  const t = String(text ?? '').replace(PROVENANCE, ' ');
+  const analysis = analyzeConstraint(t);
+  let source: string[];
+  if ((PROHIBITION.test(t) && OTHERS.test(t)) || ONLY_TOOL.test(t)) {
+    source = [...analysis.permitted, ...requiredSpans(t)];
+  } else {
+    const bare = analysis.permitted.filter((p) => BARE_WHITELIST.test(p));
+    if (!bare.length || (PROHIBITION.test(t) && prohibitionObject(t, isTool).length)) return null;
+    source = bare;
+  }
+  const names = [...new Set([...source.join(' ').matchAll(/[A-Za-z][A-Za-z0-9_]*\*?/g)].map((m) => m[0].toLowerCase()))]
+    .filter((n) => isTool(n));
+  return names.length ? names : null;
+}
+
+/**
+ * Provenance notes inside a constraint: "来源：a1b2c3d4", "(source: c3d4e5f6)", "参见：…".
  *
  * They say where the rule came from, not what it forbids. Left in, the id was picked up as the
  * prohibition's OBJECT (it is the most concrete-looking token in the sentence), and the agent's
@@ -194,30 +625,39 @@ const WHITELIST_START = /(?=只(?:用|能用|使用|许用|准用|走|通过|调
 const PROVENANCE = /[（(]?\s*(?:来源|出处|参见|参考|引自|依据|source|ref|see)\s*[:：][^，,；;。!！?？\n)）]*[)）]?/gi;
 
 /**
- * The part of a constraint that can create a violation: the clauses that state a prohibition.
+ * A constraint read into the statements that can create a violation, and the parts that cannot.
  *
  * Split on sentence and clause punctuation, then drop the clauses that grant an exception. A comma
- * alone does not end a clause — "不得改动 a.ts、b.ts" is one prohibition listing two objects — but a
+ * alone does not end a clause — "不得改动 a.ts, b.ts" is one prohibition listing two objects — but a
  * comma followed by an exception marker does, which is how "…，唯一允许的是 X" is kept out of the
  * forbidden set without splitting lists apart.
  *
- * Returns '' when nothing is left, and an empty scope means NO object and therefore NO signal, the
- * same rule as a constraint with no extractable object: a check that fires on "the constraint might
- * have been broken" is one the agent learns to skip.
+ * No statement means NO object and therefore NO signal, the same rule as a constraint with no
+ * extractable object: a check that fires on "the constraint might have been broken" is one the
+ * agent learns to skip.
  */
-function prohibitionScope(text: string): string {
+interface ConstraintAnalysis {
+  /** Statements that state a prohibition, each as its pieces in order. */
+  statements: string[][];
+  /** Pieces read as permitted: exceptions, whitelists, prescriptions. */
+  permitted: string[];
+}
+
+function analyzeConstraint(text: string): ConstraintAnalysis {
   text = String(text ?? '').replace(PROVENANCE, ' ');
-  const clauses: string[] = [];
+  const statements: string[][] = [];
+  const permitted: string[] = [];
   let buffer: string[] = [];
   let afterException = false;
   const flush = () => {
-    if (buffer.length) clauses.push(buffer.join('，'));
+    if (buffer.length) statements.push(buffer);
     buffer = [];
   };
-  for (const raw of String(text ?? '').split(/[，,；;。!！?？\n]+/).flatMap((p) => p.split(WHITELIST_START))) {
+  for (const raw of constraintPieces(text)) {
     const piece = raw.trim();
     if (!piece) continue;
-    const exception = EXCEPTION.test(piece);
+    // A clause that prescribes a tool (see `PERMISSION`) is the permitted half, like an exception.
+    const exception = EXCEPTION.test(piece) || isPermission(piece);
     /*
      * An exception ends the statement it belongs to. What follows it is a new statement, read on
      * its own — "…，唯一允许的是 X，但不要动 Y" still has to catch the `Y`.
@@ -225,11 +665,132 @@ function prohibitionScope(text: string): string {
     if (exception || afterException) flush();
     afterException = exception && !PROHIBITION.test(piece);
     // An exception that states no prohibition of its own is the permitted half: kept out entirely.
-    if (afterException) continue;
+    if (afterException) {
+      permitted.push(piece);
+      continue;
+    }
     buffer.push(piece);
   }
   flush();
-  return clauses.filter((c) => PROHIBITION.test(c)).join('；');
+  return { statements: statements.filter((st) => st.some((p) => PROHIBITION.test(p))), permitted };
+}
+
+/**
+ * One prohibition inside a statement: what stands in front of the prohibition word (`head`: the
+ * subject, a description, or a topicalised object) and what follows it (`tail`, including any
+ * continuation pieces, "不要动 a.ts，b.ts").
+ */
+interface ProhibitionSegment { head: string; tail: string }
+
+function segmentsOf(statement: string[]): ProhibitionSegment[] {
+  const out: ProhibitionSegment[] = [];
+  let pending: string[] = [];
+  let cur: ProhibitionSegment | null = null;
+  for (const piece of statement) {
+    const at = piece.search(PROHIBITION);
+    if (at < 0) {
+      if (cur) cur.tail += `，${piece}`;
+      else pending.push(piece);
+      continue;
+    }
+    if (cur) out.push(cur);
+    cur = { head: [...pending, piece.slice(0, at)].join('，'), tail: piece.slice(at) };
+    pending = [];
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+const PROHIBITION_ALL = new RegExp(PROHIBITION.source, 'gi');
+/** A CJK run that only points back at something ("改它", "这个") names nothing by itself. */
+const PRONOUN = /(它|此|该|其|这|那|上述|以上|前述)/;
+/** "其他工具" / "别的" name every tool but the allowed ones; that is `allowListOf`'s job, not an object. */
+const OTHERS_RUN = /(别的|其他|其它|其余|另外的)|^工具$/;
+
+interface Candidates { quoted: string[]; commands: string[]; ascii: string[]; cjk: string[] }
+
+function candidatesIn(text: string, isTool: (name: string) => boolean = (n) => isKnownToolName(n)): Candidates {
+  let t = String(text ?? '');
+  // What the prohibition REQUIRES or exempts ("不要跳过 X", "without calling X", "除 X 外") is not its object.
+  for (const re of REQUIRED_SPANS) t = t.replace(re, ' ');
+  t = stripToolPossessive(t, isTool);
+  const quoted = [...t.matchAll(/[`"“']([^`"”']{2,})[`"”']/g)].map((m) => m[1].trim()).filter(Boolean);
+  const unquoted = t.replace(/[`"“']([^`"”']{2,})[`"”']/g, ' ').replace(PROHIBITION_ALL, ' ');
+  // A command phrase is one object ("rm -rf", "git push --force"), and its words are not candidates.
+  const { commands } = commandsIn(unquoted, isTool);
+  let rest = t.replace(PROHIBITION_ALL, ' ');
+  for (const c of commands) rest = rest.replace(c, ' ');
+  const ascii: string[] = [];
+  for (const m of rest.matchAll(/[A-Za-z0-9_@./\\:-]{3,}/g)) {
+    const bare = m[0].replace(/^[./\\:-]+|[./\\:-]+$/g, '');
+    // A dot-name keeps its dot: the object of "不要改 .git" is the directory, and as bare `git` it matched
+    // every `shell` call running a git command. Length is still judged without the dot.
+    const w = bare.length >= 3 && /^\.[A-Za-z_]/.test(m[0]) ? `.${bare}` : bare;
+    if (bare.length >= 3 && !GENERIC.has(bare.toLowerCase()) && !OBJECT_STOP.has(bare.toLowerCase())) ascii.push(w);
+  }
+  const cjk: string[] = [];
+  for (const m of rest.matchAll(/[\u4e00-\u9fff]{2,}/g)) {
+    const run = m[0];
+    if (GENERIC.has(run) || OTHERS_RUN.test(run)) continue;
+    // A CJK candidate is a whole run, not a bigram: the object of "别改 cluster.ts 的导出" is the
+    // phrase as written, and splitting it would match any message that happens to share a pair.
+    cjk.push(run);
+  }
+  return { quoted, commands, ascii, cjk };
+}
+
+function namesSomething(c: Candidates): boolean {
+  return c.quoted.length > 0 || c.commands.length > 0 || c.ascii.length > 0 || c.cjk.some((r) => !PRONOUN.test(r));
+}
+
+/**
+ * Objects, plus the heads that were read as context. A prohibition's object is what FOLLOWS the
+ * prohibition word when anything concrete does: 「shell 由 cmd.exe 解析，不能用 POSIX 写法」 forbids
+ * POSIX syntax, and the shell it describes is not the object — measured live, every `shell` call under
+ * that constraint was filed in the error book as a violation, and 「本工作区…无 package.json…不得报
+ * clean」 turned a `fs_read` of package.json into one. Only when nothing concrete follows ("a.ts 不要
+ * 改", "x.ts 是生成的，不要改它") is the head the object, as it always was.
+ */
+function objectAnalysis(
+  text: string,
+  isTool: (name: string) => boolean = (n) => isKnownToolName(n) || toolNamedObjects(text).has(n.toLowerCase()),
+): { objects: string[]; context: string[] } {
+  let quoted: string[] = [];
+  let commands: string[] = [];
+  let ascii: string[] = [];
+  let cjk: string[] = [];
+  const context: string[] = [];
+  const segments = analyzeConstraint(text).statements.flatMap(segmentsOf);
+  for (const seg of segments) {
+    const tail = candidatesIn(seg.tail, isTool);
+    const parts = [tail];
+    if (namesSomething(tail)) {
+      if (seg.head.trim()) context.push(seg.head.trim());
+    } else {
+      parts.unshift(candidatesIn(seg.head, isTool));
+    }
+    for (const p of parts) { quoted.push(...p.quoted); commands.push(...p.commands); ascii.push(...p.ascii); cjk.push(...p.cjk); }
+  }
+  /*
+   * One prohibition naming a tool AND what it must not be used on (see `SCOPE`): the tool is context,
+   * the object is what is matched. Only with a concrete (non-CJK) object to match instead; with a CJK
+   * phrase only ("不要用 fs_write 改配置文件") the tool stays the object, as before.
+   */
+  if (segments.length === 1 && SCOPE.some((re) => re.test(`${segments[0].head}${segments[0].tail}`))) {
+    const named = (o: string) => isTool(o.replace(/^[`"']|[`"']$/g, ''));
+    const tools = [...quoted, ...ascii].filter(named);
+    const concrete = [...quoted.filter((o) => !named(o)), ...commands, ...ascii.filter((o) => !named(o))];
+    if (tools.length && concrete.length) {
+      context.push(...tools);
+      quoted = quoted.filter((o) => !named(o));
+      ascii = ascii.filter((o) => !named(o));
+      cjk = [];
+    }
+  }
+  // A backticked or quoted span, or a command phrase, wins when present (see `prohibitionObject`).
+  if (quoted.length || commands.length) return { objects: [...new Set([...quoted, ...commands])].slice(0, 2), context };
+  const unique = [...new Set([...ascii, ...cjk])].sort((a, b) => b.length - a.length);
+  return { objects: unique.slice(0, 2), context };
 }
 
 /**
@@ -243,30 +804,12 @@ function prohibitionScope(text: string): string {
  * they mean; otherwise the longest concrete-looking candidates are used, capped at two so a sentence
  * full of nouns does not turn into a keyword net.
  *
- * Read from `prohibitionScope`, not from the whole text: the clauses that grant an exception are not
- * what the constraint forbids (see `EXCEPTION`).
+ * Read from the prohibition statements only (`analyzeConstraint`), not from the whole text: the
+ * clauses that grant an exception are not what the constraint forbids (see `EXCEPTION`), and the
+ * subject in front of a prohibition with its own object is context (see `objectAnalysis`).
  */
-export function prohibitionObject(text: string): string[] {
-  const scoped = prohibitionScope(text);
-  if (!scoped) return [];
-  const quoted = [...scoped.matchAll(/[`"“']([^`"”']{2,})[`"”']/g)].map((m) => m[1].trim()).filter(Boolean);
-  if (quoted.length) return quoted.slice(0, 2);
-
-  const rest = scoped.replace(PROHIBITION, ' ');
-  const candidates: string[] = [];
-  for (const m of rest.matchAll(/[A-Za-z0-9_@./\\:-]{3,}/g)) {
-    const t = m[0].replace(/^[./\\:-]+|[./\\:-]+$/g, '');
-    if (t.length >= 3 && !GENERIC.has(t.toLowerCase())) candidates.push(t);
-  }
-  for (const m of rest.matchAll(/[\u4e00-\u9fff]{2,}/g)) {
-    const run = m[0];
-    if (GENERIC.has(run)) continue;
-    // A CJK candidate is a whole run, not a bigram: the object of "别改 cluster.ts 的导出" is the
-    // phrase as written, and splitting it would match any message that happens to share a pair.
-    candidates.push(run);
-  }
-  const unique = [...new Set(candidates)].sort((a, b) => b.length - a.length);
-  return unique.slice(0, 2);
+export function prohibitionObject(text: string, isTool?: (name: string) => boolean): string[] {
+  return objectAnalysis(text, isTool).objects;
 }
 
 function normalizeActions(actions: (DriftAction | string)[]): DriftAction[] {
@@ -360,24 +903,40 @@ export function detectDrift(input: DriftInput): DriftReport {
   const contexts = actions.map(actionContext);
 
   // ── constraints ──
+  const registered = new Set([
+    ...(input.toolNames ?? BUILTIN_TOOL_NAMES).map((n) => n.toLowerCase()),
+    ...actions.map((a) => (a.tool || '').toLowerCase()).filter(Boolean),
+  ]);
   for (const c of input.constraints ?? []) {
     const spec = typeof c === 'string' ? { text: c, hardness: 'hard' as const } : c;
     const hardness = spec.hardness === 'soft' ? 'soft' : 'hard';
-    if (!PROHIBITION.test(spec.text)) continue;
-    const objects = prohibitionObject(spec.text);
-    if (!objects.length) continue;
+    const asTool = toolNamedObjects(spec.text);
+    const isTool = (name: string) => asTool.has(name.toLowerCase()) || isKnownToolName(name, registered);
+    const objects = PROHIBITION.test(spec.text) ? prohibitionObject(spec.text, isTool) : [];
+    const allowed = allowListOf(spec.text, isTool);
+    if (!objects.length && !allowed) continue;
     /*
      * Matched against what the agent did, and the matching action is named in the report.
      *
      * Naming it is not decoration: an accusation that does not say which call it came from cannot
      * be checked by the reader, and one that cannot be checked gets ignored wholesale — including
      * the true positives.
+     *
+     * An object that is a TOOL NAME is compared with the called tool only: under 「用 shell 跑测试，
+     * 不要用 fs_write」 a `shell` call reading docs/fs_write.md uses shell, not fs_write. Every other
+     * object (a path, `git push --force`, `.git`, kb.sqlite) is still read from the call's target
+     * arguments, as before; a command phrase (`rm -rf`, `git push --force`) as a command, its words in
+   * order within one command (`commandMatches`). Under an allow-list, a call to any other tool is the violation, and the
+     * object reported is that tool.
      */
     let hit: string | null = null;
     let via = '';
     for (let i = 0; i < texts.length && !hit; i++) {
-      const m = containsAny(texts[i], objects);
-      if (m) { hit = m; via = actions[i].tool || '动作'; }
+      const tool = actions[i].tool || '';
+      let m = objects.find((o) => (isTool(o) ? toolNameMatches(tool, o) : objectInTarget(texts[i], o, isTool))) ?? null;
+      if (!m && allowed && tool && !ALLOWLIST_EXEMPT.test(tool.toLowerCase())
+        && !allowed.some((n) => toolNameMatches(tool, n))) m = tool;
+      if (m) { hit = m; via = tool || '动作'; }
     }
     if (!hit) continue;
     signals.push({
@@ -1073,6 +1632,8 @@ export interface ReflectionToolDeps {
   budget: () => { used: number; limit?: number };
   /** Calibration, for the same report. */
   calibration: () => CalibrationReport;
+  /** The agent's registered tool names (see `DriftInput.toolNames`). Optional. */
+  toolNames?: () => string[];
 }
 
 export interface ReflectionToolSet {
@@ -1129,6 +1690,7 @@ export function createReflectionTools(deps: ReflectionToolDeps): ReflectionToolS
       currentStep: step,
       stepsUsed: budget.used,
       stepBudget: budget.limit,
+      toolNames: deps.toolNames?.(),
     });
 
     const parts: string[] = [

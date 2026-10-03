@@ -21,7 +21,7 @@ const kbConfig: SheConfig['kb'] = {
   pulseSeed: { initialEnergy: 1.0, decayRate: 0.3, resonanceThreshold: 0.15, maxHops: 6 },
 };
 
-const LOGICAL = 'project/she-live-test';
+const LOGICAL = 'project/demo-app';
 const PART3 = `${LOGICAL}/part-3`;
 
 describe('split-part write redirect', () => {
@@ -48,8 +48,8 @@ describe('split-part write redirect', () => {
   it('kb_upsert into a split part writes to the logical group and says so', async () => {
     const tools = createKBTools(engine);
     const out = await tools.execute('kb_upsert', { groupName: PART3, title: 'redirect me', content: 'body' });
-    assert.match(out, /^Added memory "redirect me" to group "project\/she-live-test"/);
-    assert.match(out, /redirected from split part "project\/she-live-test\/part-3"/);
+    assert.match(out, /^Added memory "redirect me" to group "project\/demo-app"/);
+    assert.match(out, /redirected from split part "project\/demo-app\/part-3"/);
     const logical = group(LOGICAL);
     const [mem] = store.getMemoriesByGroup(logical.id);
     assert.equal(mem.title, 'redirect me');

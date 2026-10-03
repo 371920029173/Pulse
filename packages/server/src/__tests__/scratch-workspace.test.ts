@@ -55,7 +55,7 @@ describe('isScratchWorkspace', () => {
 
   it('reads the Windows spelling of that same directory as scratch', () => {
     /*
-     * The real incident was `D:\AGI\_she-live-test_2` on Windows. The drive comes from the platform
+     * The real incident was `<drive>:\<projects-root>\_she-live-test_2` on Windows. The drive comes from the platform
      * rather than being written out, for the reason in this file's header.
      *
      * On POSIX a string like this is one single filename with backslashes in it, not a path — which
@@ -75,7 +75,7 @@ describe('isScratchWorkspace', () => {
      * The half that must not regress: every one of these is a real place a user works, and each is
      * plausibly confused with a fixture by a pattern that is even slightly too wide.
      */
-    assert.equal(isScratchWorkspace('/Users/Administrator/Desktop/aaa'), false);
+    assert.equal(isScratchWorkspace('/Users/me/Desktop/aaa'), false);
     assert.equal(isScratchWorkspace('/AGI3.5'), false);
     assert.equal(isScratchWorkspace('/AGI/she-agent-cloud'), false);
     // `she-` needs its leading underscore: this is a user's folder, not a fixture.

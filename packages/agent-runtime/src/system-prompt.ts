@@ -184,19 +184,74 @@ export const SUBAGENT_DENIED_TOOLS = new RegExp(
   + ')\\b',
 );
 
-function loadMarkdownFiles(files: string[]): string {
-  const parts: string[] = [];
-  for (const file of files) {
-    try {
-      const text = readFileSync(file, 'utf8').trim();
-      if (!text) continue;
-      const name = file.split(/[/\\]/).pop() || file;
-      parts.push('### ' + name + '\n' + text);
-    } catch {
-      /* ignore */
-    }
+/** One skill file, as the prompt's index and `skill_read` see it. */
+export interface SkillEntry {
+  /** File name without `.md` — what the index shows and what `skill_read` takes. */
+  name: string;
+  /** Absolute path of the file that won the de-dupe (workspace over bundled). */
+  file: string;
+  /** Where it came from, relative and machine-independent: `.she/skills/dev/x.md` or `(bundled) dev/x.md`. */
+  source: string;
+}
+
+/** Code-unit order: unlike `localeCompare`, it cannot change with the host's ICU data or locale. */
+const bySkillName = (a: SkillEntry, b: SkillEntry): number => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+
+/**
+ * Skills for a profile, from the workspace and from the app bundle.
+ *
+ * Previously only the WORKSPACE was read, so the 19 skill files shipped in the
+ * app's `.she/skills` were never loaded unless the workspace happened to be the
+ * app directory itself — the profile selector silently had no effect. Workspace
+ * files still win, so a user can override or replace any bundled skill.
+ *
+ * Returned sorted by name, so the index in the prompt is byte-identical for the same files no
+ * matter which directory a skill lives in or in what order the filesystem lists them.
+ */
+export function listSkills(workspaceRoot: string, profile: SkillProfileType): SkillEntry[] {
+  const wsRoot = join(workspaceRoot, '.she', 'skills');
+  const appRoot = bundledSkillsRoot();
+
+  const readFor = (root: string, label: (rel: string) => string): Array<{ file: string; source: string }> => {
+    if (!root || !existsSync(root)) return [];
+    const files = [
+      ...listMdFiles(join(root, '_common')),
+      ...listMdFiles(root), // legacy flat
+      ...listMdFiles(join(root, profile)),
+    ];
+    return files.map((file) => ({ file, source: label(relative(root, file).replace(/\\/g, '/')) }));
+  };
+
+  // Workspace first so its files win the de-dupe below.
+  const candidates = [
+    ...readFor(wsRoot, (rel) => `.she/skills/${rel}`),
+    ...readFor(appRoot, (rel) => `(bundled) ${rel}`),
+  ];
+
+  // de-dupe by name, preferring workspace over bundled
+  const seen = new Set<string>();
+  const out: SkillEntry[] = [];
+  for (const c of candidates) {
+    const base = c.file.split(/[/\\]/).pop() || c.file;
+    const name = base.replace(/\.md$/i, '');
+    if (seen.has(name)) continue;
+    seen.add(name);
+    out.push({ name, file: c.file, source: c.source });
   }
-  return parts.join('\n\n');
+  return out.sort(bySkillName);
+}
+
+/** Marks a skill whose full text must stay in the prompt rather than behind `skill_read`. */
+const ALWAYS_ON_MARK = /<!--\s*(?:pulse:)?always-on\s*-->/i;
+/** Longest purpose line in the index, in code points. */
+const SKILL_PURPOSE_MAX = 80;
+
+function readSkillText(file: string): string {
+  try {
+    return readFileSync(file, 'utf8').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').trim();
+  } catch {
+    return '';
+  }
 }
 
 /**
@@ -206,58 +261,120 @@ function loadMarkdownFiles(files: string[]): string {
  * The bundled `knowledge-ingest` skill is the clear case: every one of its four steps is a
  * `kb_ingest_*` call. A child reading it learns a procedure it cannot run, and the honest reading
  * of "the system told me to call this" is to call it — which is the same trap the tool list itself
- * was fixed for. Filtering by line, then dropping a section that has nothing left, keeps the
- * recipes that DO apply (`syscheck`, `repo-hygiene`, the profile's own skills) and removes the
- * ones that can only mislead. A section is dropped whole rather than left as a heading over an
- * empty recipe, because a heading still reads as an instruction to do something.
+ * was fixed for. Filtering by line, then dropping a recipe that has nothing substantive left, keeps
+ * the recipes that DO apply (`syscheck`, `repo-hygiene`, the profile's own skills) and removes the
+ * ones that can only mislead. A recipe is dropped whole rather than left as a heading over an
+ * empty body, because a heading still reads as an instruction to do something.
  */
-function filterSkillsForSubagent(skills: string): string {
-  if (!skills) return '';
-  const kept: string[] = [];
-  for (const section of skills.split(/\n{2,}(?=### )/)) {
-    if (!section.trim()) continue;
-    const lines = section.split('\n');
-    const heading = lines[0].startsWith('### ') ? lines.shift() : undefined;
-    const body = lines.filter((line) => !SUBAGENT_DENIED_TOOLS.test(line));
-    if (!body.join('\n').trim()) continue;
-    kept.push([heading, ...body].filter((l) => l !== undefined).join('\n'));
-  }
-  return kept.join('\n\n');
+function filterSkillForSubagent(text: string): string {
+  const kept = text.split('\n').filter((line) => !SUBAGENT_DENIED_TOOLS.test(line));
+  const substantive = kept.some((line) => line.trim() !== '' && !/^#{1,6}\s/.test(line.trim()));
+  return substantive ? kept.join('\n').trim() : '';
 }
 
 /**
- * Skills for a profile, from the workspace and from the app bundle.
- *
- * Previously only the WORKSPACE was read, so the 19 skill files shipped in the
- * app's `.she/skills` were never loaded unless the workspace happened to be the
- * app directory itself — the profile selector silently had no effect. Workspace
- * files still win, so a user can override or replace any bundled skill.
+ * The raw material of an index line: the `# ` title and the first line of prose (or a front-matter
+ * `description:`), the purpose cut to `SKILL_PURPOSE_MAX` code points.
  */
-function loadProjectSkills(workspaceRoot: string, profile: SkillProfileType): string {
-  const wsRoot = join(workspaceRoot, '.she', 'skills');
-  const appRoot = bundledSkillsRoot();
-
-  const readFor = (root: string): string[] => (root && existsSync(root)
-    ? [
-        ...listMdFiles(join(root, '_common')),
-        ...listMdFiles(root), // legacy flat
-        ...listMdFiles(join(root, profile)),
-      ]
-    : []);
-
-  // Workspace first so its files win the de-dupe below.
-  const files = [...readFor(wsRoot), ...readFor(appRoot)];
-
-  // de-dupe by basename, preferring workspace over bundled
-  const seen = new Set<string>();
-  const ordered: string[] = [];
-  for (const f of files) {
-    const base = f.split(/[/\\]/).pop() || f;
-    if (seen.has(base)) continue;
-    seen.add(base);
-    ordered.push(f);
+export function summarizeSkill(text: string): { title: string; purpose: string } {
+  let lines = text.split('\n');
+  let purpose = '';
+  if (lines[0]?.trim() === '---') {
+    const end = lines.findIndex((l, i) => i > 0 && l.trim() === '---');
+    if (end > 0) {
+      for (const l of lines.slice(1, end)) {
+        const m = /^description\s*:\s*(.+)$/i.exec(l.trim());
+        if (m) purpose = m[1].trim().replace(/^["']|["']$/g, '');
+      }
+      lines = lines.slice(end + 1);
+    }
   }
-  return loadMarkdownFiles(ordered);
+  let title = '';
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith('<!--')) continue;
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) {
+      if (!title && heading[1] === '#') title = heading[2].trim();
+      continue;
+    }
+    if (!purpose) purpose = line.replace(/^(?:[-*+]\s+|\d+[.)]\s+)/, '').replace(/\*\*/g, '').trim();
+    if (purpose) break;
+  }
+  const points = [...purpose];
+  if (points.length > SKILL_PURPOSE_MAX) purpose = `${points.slice(0, SKILL_PURPOSE_MAX).join('').trimEnd()}…`;
+  return { title, purpose };
+}
+
+/** A skill's text as THIS agent may read it, or '' when it holds nothing this agent can use. */
+function usableSkillText(entry: SkillEntry, subagent: boolean): string {
+  const text = readSkillText(entry.file);
+  return subagent ? filterSkillForSubagent(text) : text;
+}
+
+/**
+ * One skill by name — the body behind `skill_read`.
+ *
+ * Same resolution, same profile and same child filter as the prompt's index, so every name the
+ * index shows is readable and a child never reads a step through a tool it does not have.
+ * Accepts the name with or without `.md`; an exact match wins over a case-insensitive one.
+ */
+export function readSkill(
+  workspaceRoot: string,
+  profile: SkillProfileType,
+  name: string,
+  opts?: { subagent?: boolean },
+): { entry: SkillEntry; text: string } | null {
+  const wanted = String(name ?? '').trim().replace(/\.md$/i, '');
+  if (!wanted) return null;
+  const all = listSkills(workspaceRoot, profile);
+  const entry = all.find((s) => s.name === wanted)
+    ?? all.find((s) => s.name.toLowerCase() === wanted.toLowerCase());
+  if (!entry) return null;
+  const text = usableSkillText(entry, opts?.subagent === true);
+  return text ? { entry, text } : null;
+}
+
+/** The names `readSkill` would accept for this agent, in index order — for "no such skill" replies. */
+export function readableSkillNames(
+  workspaceRoot: string,
+  profile: SkillProfileType,
+  opts?: { subagent?: boolean },
+): string[] {
+  return listSkills(workspaceRoot, profile)
+    .filter((s) => usableSkillText(s, opts?.subagent === true) !== '')
+    .map((s) => s.name);
+}
+
+/**
+ * The skills part of the prompt: one index line per skill (name, title, one-line purpose), plus the
+ * full text of any skill explicitly marked `<!-- always-on -->`.
+ *
+ * Bodies used to be inlined — every recipe of the profile on every request, whether or not the
+ * task had anything to do with it. They are loaded on demand with `skill_read` now; the index is
+ * what tells the model there is something to load.
+ */
+function buildSkillIndex(
+  workspaceRoot: string,
+  profile: SkillProfileType,
+  subagent: boolean,
+): { lines: string[]; inline: string } {
+  const lines: string[] = [];
+  const inline: string[] = [];
+  for (const entry of listSkills(workspaceRoot, profile)) {
+    const text = usableSkillText(entry, subagent);
+    if (!text) continue;
+    if (ALWAYS_ON_MARK.test(text)) {
+      inline.push(`### ${entry.name}\n${text}`);
+      continue;
+    }
+    const { title, purpose } = summarizeSkill(text);
+    const line = `- \`${entry.name}\`${title ? ` ${title}` : ''}${purpose ? ` — ${purpose}` : ''}`;
+    // A file NAME can still spell a denied tool; the body filter cannot see it.
+    if (subagent && SUBAGENT_DENIED_TOOLS.test(line)) continue;
+    lines.push(line);
+  }
+  return { lines, inline: inline.join('\n\n') };
 }
 
 export function getSystemPrompt(
@@ -294,9 +411,8 @@ export function getSystemPrompt(
   const active = profile || readSkillProfile(workspaceRoot);
   const subagent = opts?.subagent === true;
   const conventions = loadProjectRules(workspaceRoot);
-  const skills = loadProjectSkills(workspaceRoot, active);
-  /** For a child, the recipes it can actually follow — see `filterSkillsForSubagent`. */
-  const usableSkills = subagent ? filterSkillsForSubagent(skills) : skills;
+  /** The skills index; for a child, only the recipes it can actually follow — see `filterSkillForSubagent`. */
+  const skillIndex = buildSkillIndex(workspaceRoot, active, subagent);
   /*
    * Naming the files matters. When a repository has both an `AGENTS.md` and a
    * `.cursorrules` that disagree, the model needs to know which is which in order to say
@@ -308,10 +424,17 @@ export function getSystemPrompt(
       + `\nFollow them unless the user explicitly overrides them. If two of them conflict, say so instead of picking silently.\n\n`
       + `${conventions.text}\n`
     : '';
-  const skillsBlock = usableSkills
-    ? `\n## Project Skills (profile: ${active})\nOperator recipes from .she/skills/_common + .she/skills/${active}. Apply the matching skill when the task fits; do not dump all skills into every reply.`
-      + (subagent ? '\n（个别步骤涉及你没有的工具，已从下面略去；缺了步骤的配方不要照做，按需要的能力写进交付物。）' : '')
-      + `\n\n${usableSkills}\n`
+  /*
+   * Index only: name, title and a one-line purpose per skill, in name order. The full recipe is one
+   * `skill_read` away, so a request that has nothing to do with a skill does not pay for all of them.
+   * A skill marked `<!-- always-on -->` is still inlined in full.
+   */
+  const skillsBlock = (skillIndex.lines.length || skillIndex.inline)
+    ? `\n## Project Skills (profile: ${active})\nOperator recipes from .she/skills/_common + .she/skills/${active}, listed by name with a one-line purpose. When a task fits one, load the full recipe with \`skill_read\` (pass the name) before following it; do not dump skills into replies.`
+      + (subagent ? '\n（个别步骤涉及你没有的工具，`skill_read` 返回的正文里已略去；缺了步骤的配方不要照做，按需要的能力写进交付物。）' : '')
+      + (skillIndex.lines.length ? `\n\n${skillIndex.lines.join('\n')}` : '')
+      + (skillIndex.inline ? `\n\nAlways-on skills (full text):\n\n${skillIndex.inline}` : '')
+      + '\n'
     : '';
 
   /*
@@ -397,49 +520,19 @@ ${
 }- 只有真正出错（数据库不可用）才报错；正常「查不到」不算错误，说明「KB 中没有」即可。
 `;
 
-  // The tool list has to agree with what the child actually has, for the same reason as above.
-  const kbToolLines = kbReadOnly
-    ? `- \`kb_query\`: Search the Group Memory KB via PulseSeed resonance. This is the only way in — never poke the sqlite file with \`shell\`. Lists the top 5 hits with ~200-char snippets by default; \`limit\` (max 30) lists more, \`full: true\` returns complete text.
-- \`kb_get\`: Read one node in full by id (the [Node: …] from kb_query). Read-only.
-- \`kb_upsert\` / \`kb_link\`: **disabled for this subtask** — your memory is read-only. Report durable findings in your deliverable instead.
-- \`kb_edit\` / \`kb_retire\`: disabled too.`
-    : `- \`kb_query\`: Search the Group Memory KB via PulseSeed resonance. This (and the other \`kb_*\` tools) is the only way in — never poke the sqlite file with \`shell\`. Lists the top 5 hits with ~200-char snippets by default; \`limit\` (max 30) lists more, \`full: true\` returns complete text.
-- \`kb_get\`: Read one node in full by id (the [Node: …] from kb_query).
-- \`kb_upsert\`: Store a new memory node in a named group. Same title + different content is refused unless you pass onExisting="update" (in place, old version kept) or "add".
-- \`kb_edit\`: Correct or extend an existing node in place by id; the previous version is kept in its history.
-- \`kb_retire\`: Retire a wrong or obsolete node (reason required, optional replacedBy). It leaves kb_query results unless includeRetired=true; restore=true undoes it.
-- \`kb_link\`: Create a typed edge between two nodes.`;
-
   /*
-   * The tool list, minus the tools this agent does not actually have.
-   *
-   * One line per tool (or per family), so the filter can drop a line by name instead of editing
-   * prose. The names here are the same ones `agent.ts` denies a child; a test in
-   * `conventions.test.ts` asserts that none of them survives into a subagent prompt, so the two
-   * lists cannot drift apart again without a failure.
+   * No tool listing here. Every tool's name, purpose and parameters already travel with the request
+   * as the tool definitions, so a prose copy was paid for twice on every request — and it drifted
+   * (a child was told about tools it did not have; see `SUBAGENT_DENIED_TOOLS`). What stays is the
+   * guidance a definition does not carry, filtered the same way for a child.
    */
-  const toolLines: string[] = [
-    kbToolLines,
-    '- `kb_ingest_scan` / `kb_ingest_list` / `kb_ingest_place`: absorb md/txt/json files into the knowledge tree.',
-    '- `plan_create` / `plan_update` / `plan_list` / `plan_get`: your own durable progress tracking for multi-step work. Steps can declare `depends_on` and `on_failure`. `plan_update` replies only with what changed, the progress and the next step; `plan_get` prints one plan in full.',
-    '- `preflight_record`: before non-trivial work, write down the literal request, the unstated constraints, the real goal and anything you must ask about first. Checks the request against the workspace.',
-    '- `errorbook_lookup`: what has already gone wrong in this workspace — tool failures classified as your own mistake (bad arguments, a refused action, a missing path, a failed command), loops you repeated until you gave up, and lessons from earlier self-review (goal drift, over-confidence). Pass `tool` for one tool, or `query` for "have I been here before?".',
-    '- `errorbook_forget`: retire ONE entry that is not a mistake you made — a test you ran knowing it would fail, an input that was meant to be rejected. Pass the `id` from `errorbook_lookup` and why. Retired entries stop being offered; the same failure reopening later brings them back.',
-    '- `reflection_check`: mid-task self-check against the recorded goal and constraints. Reports semantic drift, budget overrun and your own confidence bias. Read-only — it cannot edit the plan.',
-    '- `report_write`: write a shareable markdown artifact into `.she/reports/`. `kind="delivery"` hands back finished work (conclusion / evidence / assumptions / risks / open); `kind="report"` is a plain analysis document.',
-    '- `ask_user`: ask the user — ONLY when you need information you cannot obtain yourself.',
-    '- `memo_list` / `memo_add` / `memo_update`: the scratchpad shared with the user in THIS WORKSPACE (`.she/memo.json`). Every chat in this project reads and writes the same one, so a note left in an earlier conversation is still here. A different project has its own.',
-    '- `fs_read`, `fs_write`, `fs_list`, `grep`, `shell`',
-    '- `shell_wait` / `shell_kill` / `shell_jobs`: collect, stop, and list the background jobs `shell` started.',
-    '- `git_status`, `git_diff`, `git_log`: Git inspection (read-only).',
-    '- `lsp_diagnostics`: type errors and warnings for a file, from the real language server.',
-    '- `lsp_definition` / `lsp_references` / `lsp_hover`: where a symbol is declared, every place it is used, and its real type.',
-    '- `schedule_create` / `schedule_list` / `schedule_cancel`: your own future work — one-off reminders, daily jobs, polling.',
-    '- `schedule_window`: the hours during which new work may START (already-running work is never interrupted).',
+  const toolNotes: string[] = [
+    'Each tool\'s purpose and parameters are in the tool definitions sent with this request; they are not repeated here.',
+    '- The memo (`memo_list` / `memo_add` / `memo_update`) is the scratchpad shared with the user in THIS WORKSPACE (`.she/memo.json`). Every chat in this project reads and writes the same one, so a note left in an earlier conversation is still here. A different project has its own.',
   ];
   const toolList = (subagent
-    ? toolLines.filter((line) => !SUBAGENT_DENIED_TOOLS.test(line))
-    : toolLines
+    ? toolNotes.filter((line) => !SUBAGENT_DENIED_TOOLS.test(line))
+    : toolNotes
   ).join('\n');
 
   /*
@@ -623,7 +716,7 @@ ${greetingRule}
    with a raw sqlite dump.
 
 ${preflightSection}${rulesBlock}${skillsBlock}
-## Available Tools
+## Tools
 ${toolList}${subagent ? '\n（子任务的工具集比主会话小：**计划 / 预检 / 自评 / 报告 / 备忘 / 调度 / 资料入库** 这几类都没有。'
     + '需要其中任何一个才能完成的任务，请在交付物里说明，不要靠猜或者改用别的工具硬凑。）' : ''}
 

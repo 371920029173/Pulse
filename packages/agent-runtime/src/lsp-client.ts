@@ -363,8 +363,18 @@ export class LspServer {
      * diagnostic set is unchanged (clean before, clean after), so an edit that keeps a file
      * clean used to wait the full 15s and report "no answer". Reopening the document always
      * triggers a publish, which gives us a real answer for the new text.
+     *
+     * The close must be acknowledged BEFORE the reopen, and what acknowledges it is a publish
+     * of an EMPTY set: the server clears the diagnostics of the document it just dropped.
+     * That clear is shaped exactly like a real answer ("this file is clean"), so if the reopen
+     * were sent first the clear could win the race and report a file with errors as clean —
+     * measured against typescript-language-server, which publishes [] on didClose and the real
+     * set on didOpen. Waiting for the clear also costs nothing in the common case: the server
+     * emits it as soon as it processes the close, well inside 2s. If it never comes (a server
+     * that does not clear), the wait is wasted and the reopen below answers normally.
      */
     this.notify('textDocument/didClose', { textDocument: { uri } });
+    await this.waitForPublish(key, 2_000);
     this.versions.set(key, 1);
     this.notify('textDocument/didOpen', {
       textDocument: { uri, languageId: language, version: 1, text },

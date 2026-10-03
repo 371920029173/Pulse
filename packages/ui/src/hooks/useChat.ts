@@ -195,6 +195,11 @@ function normalizeHistory(raw: ServerHistoryMessage[]): ChatMessage[] {
 
     // The plan autopilot resumes a turn with a `[自动续跑]` user message; it is the system talking, not the user.
     if (m.role === 'user' && content.startsWith('[自动续跑]')) return { role: 'system', content: '计划还没做完，自动继续下一步' };
+    // The stuck-loop nudge is persisted (so the next request keeps the same prefix); it is the agent
+    // talking to itself, not the user. The prefix is a protocol marker, hence the escapes.
+    if (m.role === 'user' && content.startsWith('[\u7cfb\u7edf\u63d0\u793a]')) {
+      return { role: 'system', content: t('检测到重复调用，已提示模型换个思路再试一次') };
+    }
     const images: Array<{ path: string; mime: string; name: string; url?: string }> = [];
     for (const im of m.images ?? []) {
       const imagePath = String(im?.path ?? '');

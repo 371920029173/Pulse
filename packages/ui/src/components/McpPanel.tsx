@@ -15,7 +15,7 @@ interface McpServer {
   toolCount: number | null;
   error?: string;
   latencyMs?: number;
-  /** Tools actually registered to the agent by the server-side MCP bridge. */
+  /** Tools the agent can reach through `mcp_call` right now (live bridge session). */
   injected?: number;
   injectError?: string;
   /**
@@ -169,7 +169,7 @@ export function McpPanel() {
                 <span className={styles.spacer} />
                 {s.toolCount !== null ? <span className={styles.tools}>{s.toolCount} 工具</span> : null}
                 {s.enabled !== false ? (
-                  <span className={styles.tools} title={t('实际注册给智能体的工具数')}>{t('已注入 {n}', { n: s.injected ?? 0 })}</span>
+                  <span className={styles.tools} title={t('智能体通过 mcp_call 现在能调用的工具数')}>{t('mcp_call 可调用 {n}', { n: s.injected ?? 0 })}</span>
                 ) : null}
                 {s.latencyMs !== undefined ? <span className={styles.latency}>{s.latencyMs}ms</span> : null}
               </div>
@@ -205,9 +205,13 @@ export function McpPanel() {
 
               {s.enabled !== false && s.reachable && s.toolCount !== null && s.toolCount !== (s.injected ?? 0) ? (
                 <div className={styles.errline}>
-                  {t('⚠ 探测到 {probe} 个工具，但只有 {injected} 个注册给了智能体', { probe: s.toolCount, injected: s.injected ?? 0 })}
+                  {t('⚠ 探测到 {probe} 个工具，但 mcp_call 现在只能调用 {injected} 个', { probe: s.toolCount, injected: s.injected ?? 0 })}
                   {s.injectError ? ` \u2014 ${s.injectError}` : ''}
                 </div>
+              ) : null}
+
+              {s.source === 'cursor' ? (
+                <div className={styles.hintline}>{t('来自 Cursor 的全局配置，默认不启动。启用会把它复制进本工作区的 .she/mcp.json。')}</div>
               ) : null}
 
               <div className={styles.itemActions}>
@@ -226,13 +230,24 @@ export function McpPanel() {
                       className={styles.smallBtn}
                       onClick={() => void toggle(s.name, s.enabled === false)}
                     >
-                      {s.enabled === false ? '启用' : '停用'}
+                      {s.enabled === false ? t('启用') : t('停用')}
                     </button>
                     <button type="button" className={styles.smallBtnDanger} onClick={() => void remove(s.name)}>
                       删除
                     </button>
                   </>
-                ) : null}
+                ) : (
+                  // A Cursor-sourced server is always off here; enabling copies it into `.she/mcp.json`,
+                  // after which it is listed as a Pulse server with the normal toggle.
+                  <button
+                    type="button"
+                    className={styles.smallBtn}
+                    title={t('复制到本工作区的 .she/mcp.json 并启动')}
+                    onClick={() => void toggle(s.name, true)}
+                  >
+                    {t('启用')}
+                  </button>
+                )}
               </div>
             </div>
           );

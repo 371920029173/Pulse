@@ -6,10 +6,10 @@
  * change the signature. A language server, driven by the same compiler the user's
  * editor uses, answers exactly that.
  */
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { existsSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join, relative } from 'node:path';
+import { basename, join, relative } from 'node:path';
 import {
   KNOWN_SERVERS, LspServer, languageOf, resolveServer, servableLanguages,
   type Diagnostic, type ResolvedServer, type ServerSpec,
@@ -250,12 +250,44 @@ function formatDiagnostics(diags: Diagnostic[], root: string, limit = 40): strin
   return `共 ${diags.length} 条（${errors} 错误 / ${warnings} 警告）\n${lines.join('\n')}${extra}`;
 }
 
+/** 标在工作区外位置前面的记号。 */
+const OUTSIDE_TAG = '[工作区外]';
+
+/**
+ * 语言服务器返回的一个位置 → 给模型看的路径。
+ *
+ * 入口那一侧（`resolveInWorkspace`）只管模型**给的**路径；语言服务器**返回的**位置是另一条通道。
+ * 工作区里的文件 `import` 了一个指向区外的软链接/联接点（或直接 `../` 出去）时，
+ * definition/references 会把区外文件的位置报回来：实测得到过 `..\outside\secret.ts:3:17`（暴露区外目录结构），
+ * 跨盘时 `relative` 直接给绝对路径；经联接点的则报成 `jdir\secret.ts`，看起来在区内，模型拿去
+ * `fs_read` 只会被拒一次。
+ *
+ * 判定复用同一份围墙（`resolveWorkspacePath`，含软链接复查与 Windows 大小写折叠），不另写一份。
+ * 第二次尝试按真实形态再比：工作区根可能是 8.3 短名（`LONGUS~1`）而服务器报长名，文本上就会被判成
+ * "越界" —— 那是把区内的位置误标成区外。
+ *
+ * 区外的位置**不丢**（"定义在依赖里"本身是有用的答案，比如 TypeScript 自带的 `lib.dom.d.ts`），
+ * 只给文件名并标 `[工作区外]`：不回显区外的目录，也告诉模型不必再去打开它。
+ */
+function locationLabel(root: string, file: string): { label: string; outside: boolean } {
+  try {
+    return { label: resolveWorkspacePath(root, file).rel || file, outside: false };
+  } catch { /* 文本形态或软链接复查没过，再按真实形态比一次 */ }
+  try {
+    const realRoot = realpathSync.native(root);
+    const realFile = realpathSync.native(file);
+    return { label: resolveWorkspacePath(realRoot, realFile).rel || realFile, outside: false };
+  } catch { /* 区外（或文件已不存在，无法证明在区内） */ }
+  return { label: `${OUTSIDE_TAG} ${basename(file)}`, outside: true };
+}
+
 /** Turn an LSP location response (`Location` or `LocationLink`) into `file:line:col` lines. */
 function formatLocations(result: unknown, root: string): string {
   if (!result) return '没有结果';
   const items = Array.isArray(result) ? result : [result];
   const seen = new Set<string>();
   const out: string[] = [];
+  let anyOutside = false;
   for (const raw of items) {
     const loc = raw as {
       uri?: string; range?: { start: { line: number; character: number } };
@@ -275,12 +307,19 @@ function formatLocations(result: unknown, root: string): string {
     } catch {
       continue;
     }
-    const line = `${relative(root, file) || file}:${range.start.line + 1}:${range.start.character + 1}`;
-    if (seen.has(line)) continue;
-    seen.add(line);
-    out.push(line);
+    const pos = `:${range.start.line + 1}:${range.start.character + 1}`;
+    // 去重按完整路径：区外只显示文件名，两个同名文件不该因此合成一条。
+    const key = (process.platform === 'win32' ? file.toLowerCase() : file) + pos;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const { label, outside } = locationLabel(root, file);
+    if (outside) anyOutside = true;
+    out.push(label + pos);
   }
-  return out.length ? out.join('\n') : '没有结果';
+  if (!out.length) return '没有结果';
+  return anyOutside
+    ? `${out.join('\n')}\n（标 ${OUTSIDE_TAG} 的位置在工作区之外，只给文件名；fs_read 与 LSP 工具都不能打开它。）`
+    : out.join('\n');
 }
 
 /** Flatten an LSP hover (string | MarkupContent | MarkedString[]) into plain text. */
@@ -350,6 +389,15 @@ export function makeLspTools(workspaceRoot: string, manager: LspManager): ToolDe
       parameters: POSITION_PARAMS,
     },
     {
+      /*
+       * 没被围墙盖住的一格，写在这里免得别人自己猜：hover 停在**工作区外**声明的符号上，
+       * 照样会打出那个声明的类型签名与文档注释，字符串常量连字面值一起给。
+       *
+       * 这是语言服务器自己的行为（库类型、`lib.d.ts` 全靠它），硬拦的话所有库类型的 hover
+       * 都会变空 —— 所以选择**照答 + 在这里写明**，而不是拦掉。对照起来看：
+       * definition / references **返回的位置**是遮过的，只给 `[工作区外] <文件名>`（`locationLabel`），
+       * hover **返回的内容**没遮。第七轮复验时提出来的，收窄与否留给使用者定，默认不动。
+       */
       name: 'lsp_hover',
       description:
         '查看某个符号的类型签名与文档。想知道一个变量或函数的真实类型时用它，不要从用法推测。',

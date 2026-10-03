@@ -30,7 +30,7 @@ after(async () => {
  *
  * The file text went to `didOpen` with U+FEFF still at index 0, so the server counted it as a
  * column while the model (via `fs_read`, which strips it) did not: `lsp_definition` at 1:15 on
- * `import type { Point } ...` returned nothing and 1:16 worked (seen in _she-live-test/src/main.ts).
+ * `import type { Point } ...` returned nothing and 1:16 worked (seen in _she-scratch/src/main.ts).
  */
 describe('lsp: UTF-8 BOM does not shift columns', () => {
   it('stripBom removes only a leading BOM', () => {

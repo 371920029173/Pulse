@@ -1,7 +1,7 @@
 /**
  * One tool result is paid for on EVERY later request, so it has to be bounded once.
  *
- * The measurement this exists for (2026-10-03, `sess_8cd40d35a3cb`): a single `shell_wait` returned
+ * The measurement this exists for (2026-10-03, `sess_a1b2c3d4e5f6`): a single `shell_wait` returned
  * 732,633 characters — 76% of that session's 964,280-character transcript — inside a run that billed
  * 9,318,458 prompt tokens over 35 requests. The cache was healthy (96% hit); the context was simply
  * enormous, and it was re-sent every turn.
@@ -18,12 +18,21 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
 import {
   budgetToolResult,
+  budgetToolResultOnArrival,
   elisionRemedy,
   fitToolResultsToBudget,
+  isLogTool,
+  LOG_RESULT_HEAD_CHARS,
+  LOG_RESULT_TAIL_CHARS,
+  spillToolOutput,
   TOOL_RESULT_CONTEXT_CHARS,
 } from '../tool-output.js';
+import { classifyToolResult } from '../tool-result.js';
 
 /** A result shaped like the one that caused this: a long build log with a summary at the end. */
 function buildLog(chars: number): string {
@@ -126,7 +135,7 @@ describe('工具结果的上下文预算', () => {
 
 describe('恢复出来的旧会话：进请求的也必须是有界的', () => {
   /*
-   * 这一组针对的是**先有记录、后有规则**的那一半：`sess_8cd40d35a3cb` 里那条 732,633 字符的
+   * 这一组针对的是**先有记录、后有规则**的那一半：`sess_a1b2c3d4e5f6` 里那条 732,633 字符的
    * `shell_wait` 结果已经写进了盘上的会话记录。只在"推进 history 的那一刻"设预算，这条旧记录
    * 会在之后每一轮请求里继续全额重发 —— 也就是这一轮修的东西，对这条会话一次都没生效。
    */
@@ -181,5 +190,125 @@ describe('恢复出来的旧会话：进请求的也必须是有界的', () => {
       { role: 'assistant', content: 'y'.repeat(300_000) },
     ];
     assert.equal(fitToolResultsToBudget(history), history);
+  });
+});
+
+/**
+ * 命令输出（shell / shell_wait / shell_kill）在**产生的那一刻**收得更紧：开头 ~1k + 结尾 ~8k，
+ * 全文落盘，说明里写清省了多少、全文在哪。退出码那一行和它之后的状态行永远在结尾里。
+ */
+describe('命令输出到达时的预算（开头 1k + 结尾 8k + 全文落盘）', () => {
+  /** 一个像样的 shell 结果：编号行的 stdout，最后是退出码。 */
+  function shellResult(lines: number, exit = 0, trailer = ''): string {
+    const out = Array.from({ length: lines }, (_, i) => `line ${i + 1} ${'.'.repeat(40)}`).join('\n');
+    return `stdout:\n${out}\nexit code: ${exit}${trailer}`;
+  }
+
+  it('只有命令类工具走这条；别的工具与通用预算逐字节相同，且不落盘', () => {
+    assert.ok(isLogTool('shell') && isLogTool('shell_wait') && isLogTool('shell_kill'));
+    assert.ok(!isLogTool('shell_jobs') && !isLogTool('fs_read') && !isLogTool('kb_query'));
+    const text = 'z'.repeat(40_000);
+    let calls = 0;
+    const out = budgetToolResultOnArrival(text, 'fs_read', () => { calls++; return 'x.log'; });
+    assert.equal(out.text, budgetToolResult(text, 'fs_read').text);
+    assert.equal(out.savedTo, null);
+    assert.equal(calls, 0, '非命令类工具不该落盘');
+  });
+
+  it('不大的命令输出原样通过，也不落盘', () => {
+    const text = shellResult(150); // ~7k
+    let calls = 0;
+    const out = budgetToolResultOnArrival(text, 'shell', () => { calls++; return 'x.log'; });
+    assert.equal(out.truncated, false);
+    assert.equal(out.text, text);
+    assert.equal(calls, 0);
+  });
+
+  it('大输出：留开头和结尾原文，说明写清省了多少、全文在哪；落盘的是全文', () => {
+    const text = shellResult(5_000, 1); // ~240k
+    let saved = '';
+    const out = budgetToolResultOnArrival(text, 'shell', (full) => { saved = full; return '.she/tool-output/c1-abcd1234.log'; });
+    assert.ok(out.truncated);
+    assert.equal(saved, text, '落盘的必须是全文');
+    assert.equal(out.savedTo, '.she/tool-output/c1-abcd1234.log');
+    assert.ok(out.text.startsWith('stdout:\nline 1 '), '开头不是原文');
+    assert.ok(out.text.endsWith(text.slice(-LOG_RESULT_TAIL_CHARS + 100)), '结尾不是原文');
+    assert.ok(out.text.length <= LOG_RESULT_HEAD_CHARS + LOG_RESULT_TAIL_CHARS + 600, `进入上下文 ${out.text.length}`);
+    assert.match(out.text, new RegExp(`省略了中间 ${out.elidedChars} 字符`));
+    assert.match(out.text, new RegExp(`这次调用返回 ${text.length} 字符`));
+    assert.match(out.text, /已存到 \.she\/tool-output\/c1-abcd1234\.log/);
+    assert.match(out.text, /fs_read/);
+    assert.equal((out.text.match(/\[tool-result\]/g) ?? []).length, 1);
+    // 退出码还在，分类仍是"命令失败"——裁剪不能把失败变成成功。
+    assert.match(out.text, /exit code: 1$/);
+    assert.equal(classifyToolResult('shell', out.text).kind, 'nonzero_exit');
+  });
+
+  it('报的行号就是被省掉的那段（fs_read startLine/endLine 能直接用）', () => {
+    const text = shellResult(3_000, 0);
+    const out = budgetToolResultOnArrival(text, 'shell', () => 'f.log');
+    const m = out.text.match(/第 (\d+)–(\d+) 行/);
+    assert.ok(m, out.text.slice(0, 1_500));
+    const [first, last] = [Number(m![1]), Number(m![2])];
+    const headEnd = Number(out.text.match(/开头 (\d+) 和结尾/)![1]);
+    const elided = text.slice(headEnd, headEnd + out.elidedChars);
+    assert.equal(elided, `${text.split('\n').slice(first - 1, last).join('\n')}\n`);
+  });
+
+  it('【关键】退出码和它之后的状态行永远不被裁掉，哪怕结尾的披露很长', () => {
+    // 退出码后面跟着超过 8k 的披露 + 超时标记：结尾要往前伸到退出码那一行。
+    const trailer = `\n${'【隔离说明】这条命令没有被路径围住。'.repeat(500)}\n(timed out)`;
+    const text = shellResult(4_000, 124, trailer);
+    const out = budgetToolResultOnArrival(text, 'shell', () => 'f.log');
+    assert.ok(out.truncated);
+    assert.ok(out.text.includes('\nexit code: 124\n'), '退出码被裁掉了');
+    assert.ok(out.text.endsWith(text.slice(text.lastIndexOf('exit code:'))), '退出码之后的状态行不完整');
+    assert.equal(classifyToolResult('shell', out.text).kind, 'timeout');
+    assert.ok(out.text.length <= TOOL_RESULT_CONTEXT_CHARS, '仍要在通用预算内，fitToolResultsToBudget 才是空操作');
+  });
+
+  it('shell_wait 的任务状态行在开头，保得住', () => {
+    const view = `job_id=job_3 已结束（耗时 612.3 秒）。\n${shellResult(4_000, 0)}`;
+    const out = budgetToolResultOnArrival(view, 'shell_wait', () => 'f.log');
+    assert.ok(out.text.startsWith('job_id=job_3 已结束'));
+    assert.match(out.text, /exit code: 0$/);
+  });
+
+  it('落盘失败时如实说没存下来，并给出原来的去路', () => {
+    const text = shellResult(4_000, 0);
+    const failed = budgetToolResultOnArrival(text, 'shell', () => { throw new Error('EACCES'); });
+    assert.equal(failed.savedTo, null);
+    assert.match(failed.text, /完整输出没有存下来/);
+    assert.ok(failed.text.includes(elisionRemedy('shell')));
+    const none = budgetToolResultOnArrival(text, 'shell');
+    assert.match(none.text, /完整输出没有存下来/);
+  });
+
+  it('是纯函数，且对通用预算来说是空操作（缓存前缀靠这条活着）', () => {
+    const text = shellResult(6_000, 0);
+    const a = budgetToolResultOnArrival(text, 'shell', () => 'f.log').text;
+    assert.equal(a, budgetToolResultOnArrival(text, 'shell', () => 'f.log').text);
+    const history = [
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', function: { name: 'shell' } }] },
+      { role: 'tool', content: a, tool_call_id: 'c1' },
+    ];
+    assert.equal(fitToolResultsToBudget(history), history);
+  });
+
+  it('spillToolOutput：写进会话自己的目录，返回相对路径，fs_read 读得回全文', () => {
+    const root = mkdtempSync(join(tmpdir(), 'she-spill-'));
+    try {
+      const full = shellResult(2_000, 3);
+      const rel = spillToolOutput(root, 'sess_abc123', 'call_00_X/y', full);
+      assert.ok(!isAbsolute(rel) && !rel.includes('\\'), `应是正斜杠相对路径: ${rel}`);
+      assert.match(rel, /^\.she\/sessions\/[^/]+\/tool-output\/call_00_X_y-[0-9a-f]{8}\.log$/);
+      assert.equal(readFileSync(join(root, rel), 'utf8'), full);
+      // 没有会话时落到工作区的 .she/tool-output/。
+      assert.match(spillToolOutput(root, null, 'c1', full), /^\.she\/tool-output\/c1-[0-9a-f]{8}\.log$/);
+      // 复用的 call id（有的模型每轮都叫 call_0）不会覆盖上一份。
+      assert.notEqual(spillToolOutput(root, null, 'call_0', 'a'), spillToolOutput(root, null, 'call_0', 'b'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

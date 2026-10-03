@@ -15,6 +15,7 @@
     "dev:desktop": "pnpm --filter @she/desktop start",
     "desktop": "pnpm --filter @she/desktop start",
     "eval": "node evals/retrieval/run.mjs",
+    "eval:recall": "node evals/recall/run.mjs --check",
     "eval:agent": "node evals/agent/run.mjs",
     "check:security": "node scripts/security-check.mjs",
     "check:data": "node scripts/data-safety-check.mjs",

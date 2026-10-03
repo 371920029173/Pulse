@@ -163,12 +163,57 @@ if (available) {
       `stdout=${JSON.stringify(sub.stdout)} exit=${sub.exitCode}`);
   }
 
-  console.log('\n=== 挂载不外泄：边界里 /mnt 是空的，边界外 /mnt 完好 ===');
+  console.log('\n=== 挂载不外泄：边界里 /mnt 只剩 DNS 要用的那一项，边界外 /mnt 完好 ===');
   {
     const sh = new SandboxShell(ROOT, { ...permissive, isolation: 'wsl' });
-    const inside = await sh.exec('ls -A /mnt | wc -l');
-    check('边界内 /mnt 被遮盖（0 项）', inside.stdout.trim() === '0',
+
+    /*
+     * `ls -A /mnt | wc -l` was the old assertion and it is the wrong question now. Masking /mnt is
+     * still right, but WSL links /etc/resolv.conf into /mnt/wsl, and covering it broke every name
+     * lookup (measured 2026-10-03: the agent concluded "no network"), so the script recreates
+     * exactly that one directory with the one file inside. What matters is not the entry count but
+     * that NO WINDOWS DRIVE is reachable; the scaffold's contents are pinned too, so a later change
+     * cannot quietly park something else under /mnt and still pass.
+     */
+    const drives = "ls -A /mnt | grep -v '^wsl$' | wc -l";
+    const inside = await sh.exec(drives);
+    check('边界内 /mnt 里没有任何盘符（只剩 DNS 落点 wsl）', inside.stdout.trim() === '0',
       `stdout=${JSON.stringify(inside.stdout)} exit=${inside.exitCode}`);
+
+    const scaffold = await sh.exec("ls -A /mnt/wsl 2>/dev/null | tr '\\n' ' '");
+    check('  /mnt/wsl 里只有 resolv.conf（DNS 落点，不是别的什么）', scaffold.stdout.trim() === 'resolv.conf',
+      `stdout=${JSON.stringify(scaffold.stdout)}`);
+
+    const letters = await sh.exec("ls -A /mnt | grep -cE '^[a-z]$'");
+    check('  /mnt 下没有单字母盘符', letters.stdout.trim() === '0',
+      `stdout=${JSON.stringify(letters.stdout)}`);
+
+    // R8: a mount namespace alone leaves /proc/<outer pid>/root pointing at the host's root, where
+    // drvfs is still mounted. Every pid visible from inside must fail, not just PID 1.
+    const viaProc = await sh.exec(
+      'n=0; for p in /proc/[0-9]*; do ls "$p/root/mnt/" 2>/dev/null | grep -v "^wsl$" | grep -q . && n=$((n+1)); done; echo "$n"',
+    );
+    check('【关键】经 /proc/<pid>/root 看不到任何盘符（所有 pid）', viaProc.stdout.trim() === '0',
+      `命中 pid 数=${JSON.stringify(viaProc.stdout.trim())} exit=${viaProc.exitCode}`);
+    const pid1 = await sh.exec('ls /proc/1/root/mnt/ 2>/dev/null | grep -v "^wsl$" | wc -l');
+    check('  /proc/1/root/mnt 只有 DNS 落点，没有盘符', pid1.stdout.trim() === '0',
+      `stdout=${JSON.stringify(pid1.stdout)}`);
+
+    // Root keeps CAP_SYS_ADMIN unless it is dropped, and then `umount /mnt` lifts the mask — which
+    // would put the real drives (and the real /mnt/wsl) back in view, so the count goes UP.
+    const unmask = await sh.exec(`umount /mnt 2>/dev/null; ${drives}`);
+    check('【关键】umount /mnt 撤不掉遮盖（root 的挂载权限已去掉）', unmask.stdout.trim() === '0',
+      `umount 之后 /mnt 里的盘符数=${JSON.stringify(unmask.stdout.trim())}`);
+    const caps = await sh.exec("grep CapBnd /proc/self/status | awk '{print $2}'");
+    const bnd = BigInt('0x' + (caps.stdout.trim() || '0'));
+    check('  bounding 集里没有 CAP_SYS_ADMIN(21) 和 CAP_DAC_READ_SEARCH(2)',
+      caps.exitCode === 0 && (bnd & (1n << 21n)) === 0n && (bnd & (1n << 2n)) === 0n,
+      `CapBnd=${caps.stdout.trim()}`);
+
+    // Dropping caps must not break ordinary work in the workspace.
+    const work = await sh.exec('echo ok > .isolation-probe && cat .isolation-probe && rm .isolation-probe');
+    check('  去权限后工作区照常可写', work.exitCode === 0 && work.stdout.trim() === 'ok',
+      `exit=${work.exitCode} stderr=${JSON.stringify(work.stderr.slice(0, 200))}`);
 
     // Checked through the PRODUCT's own path (probe) rather than a hand-rolled wsl call, so this
     // cannot drift away from what the sandbox actually does.
@@ -218,6 +263,8 @@ if (available) {
     // The wrapper itself must be the thing that enters the namespace.
     check('  外层包裹确实用了 unshare -m --propagation private',
       buildWslArgv('x', inner).join(' ').includes('unshare -m --propagation private'));
+    check('  外层包裹同时隔离了 PID 命名空间（-p -f --mount-proc）',
+      buildWslArgv('x', inner).join(' ').includes('-p -f --mount-proc'));
   }
 
   console.log('\n=== 工作区在 WSL 里不可见时，说清楚原因而不是静默跑 ===');

@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync, rename
 import { homedir } from 'node:os';
 import { join, isAbsolute, resolve, sep } from 'node:path';
 import { productVersion } from './version.js';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 
 export interface McpServerConfig {
   name: string;
@@ -11,7 +11,11 @@ export interface McpServerConfig {
   env?: Record<string, string>;
   /** Where this entry came from. */
   source: 'cursor' | 'she';
-  /** Whether it was enabled from the SHE-managed file (only for source 'she'). */
+  /**
+   * Whether the bridge starts it. `.she/mcp.json` entries: on unless `disabled: true`. Entries found
+   * only in Cursor's global config: always off (opt-in) until enabled, which copies them into
+   * `.she/mcp.json` (see `setMcpServerEnabled`).
+   */
   enabled?: boolean;
   /**
    * 被收敛掉的原始允许根（空/缺省 = 没动过）。
@@ -47,9 +51,9 @@ export interface McpServerStatus extends McpServerConfig {
   toolCount: number | null;
   error?: string;
   latencyMs?: number;
-  /** Tools from this server actually registered to the agent (see mcp-bridge.ts). */
+  /** Tools from this server the agent can reach right now through `mcp_call` (see mcp-bridge.ts). */
   injected: number;
-  /** Why fewer tools were registered than the server offers. */
+  /** Why the server offers nothing right now (start failure, crash). */
   injectError?: string;
 }
 
@@ -85,8 +89,8 @@ interface RawMcpFile {
  * ─────────────────────────────────────────────────────────────────────────────
  * MCP 的允许根必须从工作区派生（评测报告 2c / 漏洞汇总 V3 / D3）
  *
- * 实测：`mcp_filesystem` 的允许目录是 `C:\Users\Administrator\Desktop` 与 `…\Desktop\chuli`，
- * 成功列出桌面 60+ 项；而 `D:\AGI\she-agent-cloud` 回 `not in allowed directories`。反差就是
+ * 实测：`mcp_filesystem` 的允许目录是 `%USERPROFILE%\Desktop` 与 `…\Desktop\<subfolder>`，
+ * 成功列出桌面 60+ 项；而 `<repo>` 回 `not in allowed directories`。反差就是
  * 问题本身：**能读你的桌面，读不到你自己的代码树**。SHE 的边界只覆盖 `fs_*` 与 `shell`，MCP
  * 是一条完整的旁路 —— 它跑在自己的进程里，用自己的一套路径检查。
  *
@@ -197,7 +201,7 @@ function confineMcpRoots(cfg: McpServerConfig, workspaceRoot: string): { args: s
  * ─────────────────────────────────────────────────────────────────────────────
  * MCP 进程的 cwd 必须钉在工作区（评测报告 9b）
  *
- * 实测：`C:\Users\Administrator\.playwright-mcp` 里躺着 340 项 —— 截图 `01-boot-zero-chats.png`、
+ * 实测：`~/.playwright-mcp` 里躺着 340 项 —— 截图 `01-boot-zero-chats.png`、
  * `console-*.log`，全是智能体自己用 playwright 通道做界面验证时留下的。同一个工作区，产物却落在
  * 用户主目录里：在工作区之外、没人清理，`.gitignore` 也管不到。
  *
@@ -320,22 +324,40 @@ export function discoverMcpServers(workspaceRoot: string): McpServerConfig[] {
     seen.add(name);
   }
 
+  /*
+   * Cursor's GLOBAL config is listed but never started by default.
+   *
+   * It is the user's editor setup for every project, not a decision about this workspace: on the
+   * measured machine it brought seven servers (52 tools, one of them a filesystem server rooted at
+   * the Desktop) into every SHE workspace without anyone choosing that. Enabling one in the panel
+   * copies it into this workspace's `.she/mcp.json`, after which the entry above wins.
+   */
+  for (const [name, cfg] of Object.entries(readCursorServers())) {
+    if (seen.has(name)) continue;
+    out.push({
+      name,
+      ...confineMcpServer({ name, command: cfg.command, args: cfg.args ?? [], source: 'cursor' }, workspaceRoot),
+      env: cfg.env,
+      source: 'cursor',
+      enabled: false,
+    });
+    seen.add(name);
+  }
+
+  return out;
+}
+
+/** Raw (unconfined) server entries from Cursor's config files, first file wins per name. */
+function readCursorServers(): Record<string, { command: string; args?: string[]; env?: Record<string, string> }> {
+  const out: Record<string, { command: string; args?: string[]; env?: Record<string, string> }> = {};
   for (const p of cursorMcpPaths()) {
     if (!existsSync(p)) continue;
     const parsed = readJson(p) as RawMcpFile | null;
     for (const [name, cfg] of Object.entries(parsed?.mcpServers ?? {})) {
-      if (!cfg?.command || seen.has(name)) continue;
-      out.push({
-        name,
-        ...confineMcpServer({ name, command: cfg.command, args: cfg.args ?? [], source: 'cursor' }, workspaceRoot),
-        env: cfg.env,
-        source: 'cursor',
-        enabled: cfg.disabled !== true,
-      });
-      seen.add(name);
+      if (!cfg?.command || out[name]) continue;
+      out[name] = { command: cfg.command, args: cfg.args, env: cfg.env };
     }
   }
-
   return out;
 }
 
@@ -369,16 +391,61 @@ export function removeMcpServer(workspaceRoot: string, name: string): boolean {
   return true;
 }
 
+/**
+ * Enable or disable a server for this workspace.
+ *
+ * A `.she/mcp.json` entry just gets its `disabled` flag. A server known only from Cursor's global
+ * config is off by default; enabling it copies its command / args / env into `.she/mcp.json` (raw,
+ * as Cursor has it: the workspace confinement is applied at discovery, every time). Disabling such
+ * a server is a no-op that succeeds, since it is already off. The env values are written to the
+ * workspace file because the server needs them; they are never logged or returned by the API.
+ */
 export function setMcpServerEnabled(workspaceRoot: string, name: string, enabled: boolean): boolean {
   const file = join(workspaceRoot, SHE_MCP_FILE);
-  const data = (existsSync(file) ? readJson(file) : null) as RawMcpFile | null;
-  if (!data?.mcpServers?.[name]) return false;
-  data.mcpServers[name] = { ...data.mcpServers[name], disabled: !enabled };
-  writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf8');
+  const data = ((existsSync(file) ? readJson(file) : null) as RawMcpFile | null) ?? { mcpServers: {} };
+  data.mcpServers = data.mcpServers ?? {};
+  if (data.mcpServers[name]) {
+    data.mcpServers[name] = { ...data.mcpServers[name], disabled: !enabled };
+  } else {
+    const cursor = readCursorServers()[name];
+    if (!cursor) return false;
+    if (!enabled) return true;
+    data.mcpServers[name] = {
+      command: cursor.command,
+      args: cursor.args ?? [],
+      ...(cursor.env ? { env: cursor.env } : {}),
+    };
+  }
+  mkdirSync(join(workspaceRoot, '.she'), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8');
+  renameSync(tmp, file);
   return true;
 }
 
 // ─── live probe ─────────────────────────────────────────────────────────────
+
+/**
+ * Stop a probe child and everything it started.
+ *
+ * On Windows the spawn goes through cmd.exe, and `child.kill()` only kills that shell: the real
+ * server (node, or node under npx) kept running with our stdin pipe open, i.e. every panel probe
+ * leaked one orphaned server process (holding the workspace as its cwd). `taskkill /T` takes the
+ * tree; closing stdin first lets a well-behaved server exit on its own. Same as the bridge's
+ * `killTree`.
+ */
+function stopProbeChild(child: ChildProcess | null): void {
+  if (!child) return;
+  try { child.stdin?.end(); } catch { /* ignore */ }
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform === 'win32' && child.pid) {
+    try {
+      spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
+      return;
+    } catch { /* fall through */ }
+  }
+  try { child.kill(); } catch { /* ignore */ }
+}
 
 /**
  * Start a stdio MCP server, perform the initialize handshake, and ask for its
@@ -398,7 +465,7 @@ function probeServer(
     const finish = (reachable: boolean, error?: string) => {
       if (settled) return;
       settled = true;
-      try { child?.kill(); } catch { /* ignore */ }
+      stopProbeChild(child);
       resolve({ reachable, toolCount, error, latencyMs: Date.now() - started });
     };
 

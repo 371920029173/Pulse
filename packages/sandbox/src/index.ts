@@ -5,7 +5,7 @@ export {
   detectShellDialectMismatch, shellDialectDisclosure,
 } from './shell.js';
 export {
-  toWslPath, workspaceRelative, buildConfinedScript, buildWslArgv, planIsolation,
+  toWslPath, workspaceRelative, buildConfinedScript, buildWslArgv, planIsolation, DROPPED_CAPS,
   isolationInEffect, resolveWslIsolation, resetIsolationProbeCache, isolationDetail,
   isolationSpawnEnv, ISOLATION_PROBE, WORKSPACE_NOT_IN_WSL_EXIT, NOT_IN_NAMESPACE_EXIT,
   describeIsolation, isolationNotice,

@@ -16,7 +16,7 @@
  * than by guessing the friendlier of the two. That is what makes the second-round finding
  * impossible to reproduce here:
  *
- *   node -e "…String.fromCharCode(68,58,92,…)…"   →   read D:\AGI\README.txt
+ *   node -e "…String.fromCharCode(68,58,92,…)…"   →   read D:\other\README.txt
  *
  * `workspaceEscapeReason` returns null for it — the path is inside a string, not a token — and
  * `detectInlineCodeExecution` says "inline program" but does not refuse. So the verdict the gate

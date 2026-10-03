@@ -3,7 +3,7 @@
 ## 职责
 - 环境、路径、依赖、权限、归档位置
 - 给出可勾选检查清单（电脑检查 / 发布前 / 导入前）
-- 标出双轨路径：she-agent-cloud vs AGI-use；外挂库 D:/AGI/she-kb/kb.sqlite
+- 标出双轨路径：she-agent-cloud vs AGI-use；外挂库 `<projects-root>/she-kb/kb.sqlite`（以 SHE_KB_PATH 为准）
 
 ## 输入
 - 领导分工

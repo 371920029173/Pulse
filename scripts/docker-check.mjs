@@ -163,7 +163,7 @@ console.log('\n=== 容器行为 ===');
     '绑定 0.0.0.0（否则容器内无法从外部访问）',
     /SHE_HOST=0\.0\.0\.0/.test(dockerfile),
   );
-  check('声明了暴露端口', /EXPOSE 4577/.test(dockerfile));
+  check('声明了暴露端口（与服务端默认 5577 一致）', /EXPOSE 5577/.test(dockerfile) && /SHE_PORT=5577/.test(dockerfile));
   check('带健康检查', /HEALTHCHECK/.test(dockerfile));
   check(
     '有 init 进程回收孤儿（服务端会派生子进程）',
@@ -176,6 +176,6 @@ console.log('\n=== 容器行为 ===');
 }
 
 console.log('\n注意：本机没有 docker，以上只是静态核对。');
-console.log('      真正的验证需要 `docker build -t she . && docker run ...`。');
+console.log('      真正的验证需要 `docker build -t pulse . && docker run ...`。');
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`);
 process.exit(failures === 0 ? 0 : 1);

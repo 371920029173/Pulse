@@ -1,4 +1,4 @@
-# SHE v2 — container image.
+# Pulse (SHE v2) — container image.
 #
 # Supports the private / self-hosted deployment case: the service runs anywhere a
 # container runs, with the workspace and its state mounted as a volume.
@@ -10,13 +10,13 @@
 # is not a substitute for `docker build && docker run`.
 #
 # Build:
-#   docker build -t she:0.3.0 .
+#   docker build -t pulse:0.3.0 .
 # Run (workspace mounted so the agent's files and history persist):
-#   docker run --rm -p 4577:4577 \
+#   docker run --rm -p 127.0.0.1:5577:5577 \
 #     -v "$PWD/workspace:/workspace" \
 #     -e OPENAI_API_KEY=sk-... \
-#     she:0.3.0
-# Then open http://127.0.0.1:4577
+#     pulse:0.3.0
+# Then open http://127.0.0.1:5577 (same port as the server default in packages/shared/src/config.ts)
 
 # ─── build ───
 FROM node:22-bookworm-slim AS build
@@ -62,7 +62,7 @@ RUN apt-get update \
 
 ENV NODE_ENV=production \
     SHE_HOST=0.0.0.0 \
-    SHE_PORT=4577 \
+    SHE_PORT=5577 \
     SHE_WORKSPACE=/workspace \
     SHE_STATE_DIR=/workspace
 
@@ -97,12 +97,12 @@ RUN mkdir -p /workspace/.she
 RUN chown -R node:node /workspace /app
 USER node
 
-EXPOSE 4577
+EXPOSE 5577
 
 # Reports unhealthy when the service stops answering, so an orchestrator can restart
 # it instead of leaving a container that is up but serving nothing.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:4577/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:5577/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 # tini as PID 1, so signals reach the server and orphans are reaped.
 ENTRYPOINT ["/usr/bin/tini", "--"]

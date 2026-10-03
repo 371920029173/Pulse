@@ -25,7 +25,7 @@ import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ErrorBook, ERRORBOOK_ROOT } from './errorbook.js';
 import type { ErrorbookEngineLike, ErrorbookStoreLike } from './errorbook.js';
-import { prohibitionObject } from './reflection.js';
+import { contextParts, isKnownToolName, permittedParts, prohibitionObject, toolNameMatches } from './reflection.js';
 import { classifyToolResult } from './tool-result.js';
 
 // ─── Evidence parsing ───────────────────────────────────────────────────────
@@ -126,6 +126,87 @@ export function isAllowListConstraintFalsePositive(constraint: string, object: s
   return allowClauses.some((c) => c.toLowerCase().includes(core));
 }
 
+/**
+ * True when a recorded constraint violation is the fixed tool-named-in-constraint false positive:
+ * the constraint named a tool in order to PRESCRIBE it ("用 shell 跑测试，不要用 fs_write",
+ * "不要用 fs_write，改用 fs_patch", "must call kb_query first, …", "不要跳过 kb_query") and the old
+ * parser read that tool as the excluded object.
+ *
+ * Same two conditions as the allow-list case: the CURRENT parser no longer forbids the object, and
+ * the object literally sits in a part of the constraint the current parser reads as permitted or
+ * required (`permittedParts`). "不要用 shell" followed by `shell` fails (1) and is kept.
+ */
+export function isToolNamedConstraintFalsePositive(constraint: string, object: string): boolean {
+  const obj = String(object ?? '').trim().toLowerCase();
+  const core = obj.replace(/\*+$/, '');
+  if (core.length < 2) return false;
+  const forbidden = prohibitionObject(constraint).map((o) => o.toLowerCase());
+  if (forbidden.some((o) => o === obj || o.includes(core) || core.includes(o))) return false;
+  return permittedParts(constraint).some((p) => p.toLowerCase().includes(core));
+}
+
+/** The object, lower-cased and glob-stripped, or null when too short to judge. */
+function objectCore(object: string): { obj: string; core: string } | null {
+  const obj = String(object ?? '').trim().toLowerCase();
+  const core = obj.replace(/\*+$/, '');
+  return core.length < 2 ? null : { obj, core };
+}
+
+function stillForbidden(constraint: string, obj: string, core: string): boolean {
+  return prohibitionObject(constraint).map((o) => o.toLowerCase())
+    .some((o) => o === obj || o.includes(core) || core.includes(o));
+}
+
+/**
+ * True when a recorded violation took its object from the DESCRIPTION in front of a prohibition:
+ * 「shell 由 cmd.exe 解析，不能用 POSIX 写法」 → `shell`, 「本工作区…无 package.json…不得报 clean」 →
+ * `package.json`. The current parser reads that head as context (`contextParts`) because the
+ * prohibition names its own object; the object must no longer be forbidden AND sit in that context.
+ */
+export function isDescriptiveConstraintFalsePositive(constraint: string, object: string): boolean {
+  const oc = objectCore(object);
+  if (!oc || stillForbidden(constraint, oc.obj, oc.core)) return false;
+  return contextParts(constraint).some((p) => p.toLowerCase().includes(oc.core));
+}
+
+/**
+ * True when a TOOL-NAME object was matched in another tool's arguments: 「用 shell 跑测试，不要用
+ * fs_write」 reported as 「fs_write」 in a `shell` call that read docs/fs_write.md. A tool-name object is
+ * now compared with the called tool only, so the fixed check cannot produce this verdict again. An
+ * allow-list verdict (object = the called tool) and a call to the tool itself are kept.
+ */
+export function isToolObjectInArgsFalsePositive(_constraint: string, object: string, via: string): boolean {
+  const oc = objectCore(object);
+  const tool = String(via ?? '').trim();
+  if (!oc || !tool || tool === '动作') return false;
+  return isKnownToolName(oc.obj) && !toolNameMatches(tool, oc.obj);
+}
+
+/** A constraint signal any fixed constraint false positive explains. */
+function fixedConstraintSignal(s: EvidenceSignal): boolean {
+  return s.kind === 'constraint' && (
+    isAllowListConstraintFalsePositive(s.constraint, s.object)
+    || isToolNamedConstraintFalsePositive(s.constraint, s.object)
+    || isDescriptiveConstraintFalsePositive(s.constraint, s.object)
+    || isToolObjectInArgsFalsePositive(s.constraint, s.object, s.via));
+}
+
+/**
+ * Matcher for the constraint false positives fixed after R7: at least one signal is `own`'s kind,
+ * and every signal is explained by some fixed false positive (a drift verdict may also carry the
+ * fixed lexical signals, as in `reflection-lexical-drift`). Anything else keeps the entry.
+ */
+function constraintFixMatcher(own: (s: EvidenceSignal & { kind: 'constraint' }) => boolean): (e: StoredErrorEntry) => boolean {
+  return (e) => {
+    if (e.kind !== 'reflection' || (e.tool !== '越过约束' && e.tool !== '目标漂移')) return false;
+    const signals = parseReflectionEvidence(e.call);
+    if (!signals) return false;
+    if (!signals.some((s) => s.kind === 'constraint' && own(s))) return false;
+    if (e.tool === '越过约束') return signals.every(fixedConstraintSignal);
+    return signals.every((s) => s.kind === 'goal_unrelated' || s.kind === 'step_off_goal' || fixedConstraintSignal(s));
+  };
+}
+
 // ─── Registry ───────────────────────────────────────────────────────────────
 
 /** What a matcher sees: the fields of one stored entry. */
@@ -153,7 +234,7 @@ export interface KnownFalsePositive {
  * Bump when a signature is added or a matcher changes, so every KB is swept once more.
  * The marker records the version it ran at; a lower one means "not yet".
  */
-export const FALSE_POSITIVE_REGISTRY_VERSION = 2;
+export const FALSE_POSITIVE_REGISTRY_VERSION = 4;
 
 export const KNOWN_FALSE_POSITIVES: KnownFalsePositive[] = [
   {
@@ -202,6 +283,30 @@ export const KNOWN_FALSE_POSITIVES: KnownFalsePositive[] = [
        */
       return classifyToolResult(e.tool, e.detail).kind === 'policy_denied';
     },
+  },
+  {
+    id: 'reflection-tool-named-constraint',
+    fixedIn: '0.4.0',
+    description: '越过约束：a constraint that named a tool in order to PRESCRIBE it ("用 shell 跑测试，不要用 fs_write", '
+      + '"不要用 fs_write，改用 fs_patch", "must call kb_query first", "不要跳过 kb_query") had that tool read as the '
+      + 'excluded object, so obeying the constraint was recorded as violating it (tester round R7).',
+    matches: constraintFixMatcher((s) => isToolNamedConstraintFalsePositive(s.constraint, s.object)),
+  },
+  {
+    id: 'reflection-descriptive-constraint',
+    fixedIn: '0.4.0',
+    // portability-check:allow — 下面这句是**误报原文的引用**（点名解释器，不是调用它）。
+    description: '越过约束：the subject or description in front of a prohibition ("shell 由 cmd.exe 解析，不能用 POSIX 写法", '
+      + '"本工作区…无 package.json…不得报 clean") was read as the excluded object, so every call to the described tool, '
+      + 'or every read of the described file, was recorded as a violation (reviewer after R7, live error book).',
+    matches: constraintFixMatcher((s) => isDescriptiveConstraintFalsePositive(s.constraint, s.object)),
+  },
+  {
+    id: 'reflection-tool-object-in-args',
+    fixedIn: '0.4.0',
+    description: '越过约束：a tool name the constraint forbids was matched inside ANOTHER tool\'s arguments '
+      + '("不要用 fs_write" broken by `shell cat docs/fs_write.md`, "不要用 shell" by `fs_read src/shell/index.ts`).',
+    matches: constraintFixMatcher((s) => isToolObjectInArgsFalsePositive(s.constraint, s.object, s.via)),
   },
 ];
 

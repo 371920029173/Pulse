@@ -13,8 +13,36 @@ import type {
   PulseHop,
   SheConfig,
 } from '@she/shared';
-import { KBStore } from './store.js';
+import { KBStore, tokenizeQuery } from './store.js';
 import type { CreateEdgeInput } from './store.js';
+import { queryTerms, groupConcepts, fallbackUnits, unitMatches, idTokens } from './retrieval-lexicon.js';
+import type { WeightedTerm } from './retrieval-lexicon.js';
+
+/**
+ * A result the primary pass could not find with confidence, found by the broader fallback pass
+ * (fragment overlap — CJK bigrams, Latin words by prefix). Kept apart from `nodes` on purpose: a caller that shows them must
+ * label them, and a caller that only reads `nodes` gets exactly the confident results it always did.
+ */
+export interface KBFallbackResult {
+  nodes: MemoryNode[];
+  traces: ActivationTrace[];
+  /** Why the fallback ran, in words a reader can act on. */
+  reason: string;
+}
+
+/** `KBQueryResult` plus the fallback pass. */
+export interface KBQueryResultWithFallback extends KBQueryResult {
+  fallback?: KBFallbackResult;
+}
+
+/** A group's derived vocabulary (see `groupConcepts`), cached per store generation. */
+interface GroupVocabulary {
+  generation: number;
+  groups: Map<string, Map<string, { weight: number; term: string; source: 'name' | 'ancestor' | 'members' }>>;
+  /** How many groups carry each concept — rarer concepts route more sharply. */
+  conceptGroups: Map<string, number>;
+}
+
 
 /**
  * Metadata key marking a memory as retired (see `retireMemory`).
@@ -1128,6 +1156,156 @@ export class GroupKBEngine {
   }
 
   /**
+   * Members of a group the query was ROUTED to by concept (see `routeGroups`) are multiplied by
+   * `1 + ROUTE_BONUS × route strength` — at most 3, under `ANCHOR_BONUS` (3.5): a group name the
+   * user typed is a stronger claim than a concept inferred from their words, so an explicit anchor
+   * still wins. Chosen by sweep on `evals/recall` (0.5–2.5; 2 was best on meaning hit@1 with no
+   * lexical regression).
+   */
+  private static readonly ROUTE_BONUS = 2;
+
+  /** Below this share of the query's own (idf-weighted) words, the best hit counts as weak. */
+  private static readonly WEAK_COVERAGE = 0.34;
+
+  /** Fallback hits must share at least this idf-weighted share of the query's fragments. */
+  private static readonly FALLBACK_MIN = 0.12;
+
+  private vocabulary: GroupVocabulary | null = null;
+
+  /** Every group's concepts, rebuilt only when the store has been written since. */
+  private groupVocabulary(): GroupVocabulary {
+    const generation = this.store.generation;
+    if (this.vocabulary && this.vocabulary.generation === generation) return this.vocabulary;
+    const all = this.store.getAllGroups();
+    const byId = new Map(all.map((g) => [g.id, g]));
+    const groups: GroupVocabulary['groups'] = new Map();
+    const conceptGroups = new Map<string, number>();
+    for (const g of all) {
+      const ancestorNames: string[] = [];
+      let cur = g.parentGroupId ? byId.get(g.parentGroupId) : undefined;
+      for (let guard = 0; cur && guard < 32; guard++) {
+        ancestorNames.push(cur.name);
+        cur = cur.parentGroupId ? byId.get(cur.parentGroupId) : undefined;
+      }
+      const concepts = groupConcepts({
+        name: g.name,
+        ancestorNames,
+        memberTitles: this.store.getMemoriesByGroup(g.id).map((m) => m.title),
+      });
+      groups.set(g.id, concepts);
+      for (const id of concepts.keys()) conceptGroups.set(id, (conceptGroups.get(id) ?? 0) + 1);
+    }
+    this.vocabulary = { generation, groups, conceptGroups };
+    return this.vocabulary;
+  }
+
+  /**
+   * Route a query to groups by the concepts it names, before any node is scored.
+   *
+   * This is the structural half of meaning-only retrieval: "如何避免重蹈覆辙" names the `mistake`
+   * concept, and `errors` (by name) and every `errors/*` group (by ancestry) are about it — so their
+   * members enter as seeds even though none of them contains the word 重蹈覆辙. Score per group is
+   * the concept weight times how rare the concept is across groups; only groups within half of the
+   * best route are kept, so a concept every group mentions routes nowhere in particular.
+   */
+  private routeGroups(concepts: { concept: { id: string }; term: string }[]): Map<string, { score: number; why: string }> {
+    const out = new Map<string, { score: number; why: string }>();
+    if (!concepts.length) return out;
+    const vocab = this.groupVocabulary();
+    const total = Math.max(1, vocab.groups.size);
+    const raw = new Map<string, { score: number; why: string[] }>();
+    for (const [gid, gc] of vocab.groups) {
+      let score = 0;
+      const why: string[] = [];
+      for (const hit of concepts) {
+        const c = gc.get(hit.concept.id);
+        if (!c) continue;
+        const rarity = Math.log(1 + total / (vocab.conceptGroups.get(hit.concept.id) ?? 1));
+        score += c.weight * rarity;
+        why.push(`${hit.term}→${hit.concept.id}${c.source === 'members' ? '（成员标题）' : ''}`);
+      }
+      if (score > 0) raw.set(gid, { score, why });
+    }
+    let best = 0;
+    for (const r of raw.values()) best = Math.max(best, r.score);
+    for (const [gid, r] of raw) {
+      if (r.score >= best * 0.5) out.set(gid, { score: r.score / best, why: r.why.join('、') });
+    }
+    return out;
+  }
+
+  /**
+   * Idf-weighted share of the query's own words that appear in a node. Measures how well the best
+   * hit actually matched — the fused score cannot, because it is normalised to the top hit and so
+   * reads ~1.0 for the best of a bad lot.
+   */
+  private coverage(own: string[], mem: MemoryNode): number {
+    if (!own.length) return 1;
+    const have = new Set(tokenizeQuery(`${mem.title}\n${mem.content}`));
+    let got = 0;
+    let all = 0;
+    for (const t of own) {
+      const w = this.store.termIdf(t);
+      all += w;
+      if (have.has(t)) got += w;
+    }
+    return all > 0 ? got / all : 0;
+  }
+
+  /**
+   * The broader second pass: fragment overlap over every node.
+   *
+   * Runs only when the primary pass found nothing confident. Coarser than tokens (CJK bigrams, Latin
+   * words by shared prefix — `fallbackUnits`) and fed with the query's concept words too, so a
+   * paraphrase that shares fragments but not whole words can still surface a candidate. Its results
+   * are returned apart from the primary ones and must be shown labelled — they are leads, not answers.
+   */
+  private fallbackPass(
+    queryText: string,
+    terms: WeightedTerm[],
+    exclude: Set<string>,
+    hidden: (mem: MemoryNode) => boolean,
+  ): { mem: MemoryNode; score: number; units: string[] }[] {
+    const qWeights = new Map<string, number>();
+    for (const u of fallbackUnits(queryText, 'query')) qWeights.set(u, 1);
+    for (const t of terms) {
+      if (!t.via) continue;
+      for (const u of fallbackUnits(t.token, 'query')) if (!qWeights.has(u)) qWeights.set(u, 0.5);
+    }
+    if (!qWeights.size) return [];
+    const docs: { mem: MemoryNode; hits: Set<string> }[] = [];
+    const seen = new Set<string>();
+    const df = new Map<string, number>();
+    for (const g of this.store.getAllGroups()) {
+      for (const mem of this.store.getMemoriesByGroup(g.id)) {
+        if (seen.has(mem.id) || exclude.has(mem.id) || hidden(mem)) continue;
+        seen.add(mem.id);
+        const units = fallbackUnits(`${mem.title}\n${mem.content}`);
+        const hits = new Set<string>();
+        for (const q of qWeights.keys()) {
+          if (!unitMatches(q, units)) continue;
+          hits.add(q);
+          df.set(q, (df.get(q) ?? 0) + 1);
+        }
+        docs.push({ mem, hits });
+      }
+    }
+    if (!docs.length) return [];
+    const idf = (u: string) => Math.log(1 + docs.length / (1 + (df.get(u) ?? 0)));
+    let denom = 0;
+    for (const [u, w] of qWeights) denom += w * idf(u);
+    const scored: { mem: MemoryNode; score: number; units: string[] }[] = [];
+    for (const d of docs) {
+      if (!d.hits.size) continue;
+      let num = 0;
+      for (const u of d.hits) num += (qWeights.get(u) ?? 0) * idf(u);
+      const score = denom > 0 ? num / denom : 0;
+      if (score >= GroupKBEngine.FALLBACK_MIN) scored.push({ mem: d.mem, score, units: [...d.hits] });
+    }
+    return scored.sort((a, b) => b.score - a.score || a.mem.createdAt - b.mem.createdAt).slice(0, 5);
+  }
+
+  /**
    * Query the KB using hybrid retrieval.
    *
    * 1. Lexical channel: BM25 over title + content (traditional IR precision).
@@ -1136,11 +1314,15 @@ export class GroupKBEngine {
    * 3. Fusion: normalized structural + lexical score, multiplied by structural
    *    signals (trust / hormone / 用进废退 / recency / dormancy).
    * 4. Every result still carries an activation trace explaining its score.
+   * 5. Meaning-only queries: the query is "understood" first (function words dropped, concept words
+   *    added at a lower weight — `retrieval-lexicon.ts`) and ROUTED to the groups whose vocabulary
+   *    names the same concepts; when the best hit is still weak, a broader fragment pass runs and its
+   *    hits come back in `fallback`, never in `nodes`.
    */
   query(
     queryText: string,
     options?: { budget?: number; includeRetired?: boolean; channels?: RetrievalChannel[] },
-  ): KBQueryResult {
+  ): KBQueryResultWithFallback {
     const startTime = performance.now();
     /*
      * Which channels get to score.
@@ -1174,9 +1356,13 @@ export class GroupKBEngine {
     const budget = options?.budget ?? this.config.activationBudget;
     const psConfig = this.config.pulseSeed;
 
-    // ── Channel A: traditional lexical ranking ──
-    const lexicalHits = this.store.bm25Search(queryText, { limit: Math.max(3, Math.min(80, budget)) })
-      .filter((h) => !hidden(h.mem));
+    // ── Channel A: lexical ranking over the UNDERSTOOD query ──
+    // Function-word bigrams dropped, concept words added at a lower weight (retrieval-lexicon.ts).
+    const understood = queryTerms(queryText, tokenizeQuery);
+    const lexicalHits = this.store.bm25Search(queryText, {
+      limit: Math.max(3, Math.min(80, budget)),
+      terms: understood.terms,
+    }).filter((h) => !hidden(h.mem));
     const lexicalById = new Map<string, number>(lexicalHits.map((h) => [h.mem.id, h.score]));
 
     // ── Channel B: structural resonance ──
@@ -1199,8 +1385,11 @@ export class GroupKBEngine {
      * seeds its own memories at anchor strength.
      */
     const groupAnchors: MemoryNode[] = [];
+    /** Groups the query names; `byPath` = the query writes the group's whole path as one word. */
+    const anchoredGroups: { id: string; path: string; byPath: boolean }[] = [];
     {
       const q = queryText.trim().toLowerCase();
+      const queryIds = idTokens(queryText);
       if (q) {
         const groupById = new Map(this.store.getAllGroups().map((g) => [g.id, g]));
         const groupPath = (id: string): string => {
@@ -1227,7 +1416,8 @@ export class GroupKBEngine {
               if (bit.length >= 3) segments.add(bit);
             }
           }
-          const qTokens = q.split(/[\s,/]+/).flatMap((t) => t.split(/[-_.]+/)).filter((t) => t.length >= 3);
+          // An ID-like token (`plan_4dda269d`) is one name: its "plan" piece must not anchor `errors/plan_list`.
+          const qTokens = q.split(/[\s,/]+/).flatMap((t) => (queryIds.has(t) ? [t] : t.split(/[-_.]+/))).filter((t) => t.length >= 3);
           const tokenHit = qTokens.some((t) => segments.has(t));
           /*
            * 查询里"提到"这个组，必须是**按词**提到，不是**包含子串**。
@@ -1247,8 +1437,46 @@ export class GroupKBEngine {
             || q.endsWith('/' + name) || path.endsWith('/' + q)
             || tokenHit;
           if (!isAnchor) continue;
-          for (const mem of this.store.getMemoriesByGroup(g.id)) groupAnchors.push(mem);
+          anchoredGroups.push({ id: g.id, path, byPath: q === path || q.split(/[\s,]+/).includes(path) });
         }
+        /*
+         * The most specific path wins. A query spelling out "project/x/env" also names "project"
+         * (as a word), and anchoring both put the parent's notes level with the group actually named
+         * — and a sibling sharing the "project" segment came along too. When the query writes a
+         * nested group's full path, only that group (and its subgroups) anchor.
+         */
+        const written = anchoredGroups.filter((b) => b.byPath && b.path.includes('/')
+          && !anchoredGroups.some((c) => c !== b && c.byPath && c.path.startsWith(b.path + '/')));
+        for (const a of anchoredGroups) {
+          const shadowed = written.length > 0
+            && !written.some((b) => a.path === b.path || a.path.startsWith(b.path + '/'));
+          if (shadowed) continue;
+          for (const mem of this.store.getMemoriesByGroup(a.id)) groupAnchors.push(mem);
+        }
+      }
+    }
+
+    // ── Concept routing: groups the query is ABOUT, in other words than their name ──
+    /*
+     * Routing is for queries whose own words found nothing that fits. When a lexical hit already
+     * covers most of what the user typed, the query was answered literally, and lifting a whole
+     * group by an inferred concept would only push that answer down ("为什么更新计划时要把整份计划都
+     * 返回" names the `plan` concept, but one note says exactly that). So routing strength scales
+     * with how much of the query the best lexical hits leave UNcovered.
+     */
+    let literalCoverage = 0;
+    for (const h of lexicalHits.slice(0, 3)) {
+      literalCoverage = Math.max(literalCoverage, this.coverage(understood.own, h.mem));
+    }
+    const routeScale = Math.max(0, 1 - literalCoverage);
+    const routes = routeScale > 0 ? this.routeGroups(understood.concepts) : new Map<string, { score: number; why: string }>();
+    const routedNodes = new Map<string, { score: number; why: string; group: string }>();
+    for (const [gid, r] of routes) {
+      const g = this.store.getGroup(gid);
+      const score = r.score * routeScale;
+      for (const mem of this.store.getMemoriesByGroup(gid)) {
+        const prev = routedNodes.get(mem.id);
+        if (!prev || prev.score < score) routedNodes.set(mem.id, { score, why: r.why, group: g ? this.buildGroupPath(g) : gid });
       }
     }
 
@@ -1272,7 +1500,10 @@ export class GroupKBEngine {
     }
     const seeds: MemoryNode[] = [];
     const seenSeed = new Set<string>();
-    for (const node of [...anchorNodes, ...groupAnchors, ...lexicalHits.map((h) => h.mem)]) {
+    const routedMems = [...routedNodes.keys()]
+      .map((id) => this.store.getMemory(id))
+      .filter((m): m is MemoryNode => Boolean(m));
+    for (const node of [...anchorNodes, ...groupAnchors, ...lexicalHits.map((h) => h.mem), ...routedMems]) {
       if (seenSeed.has(node.id) || hidden(node)) continue;
       seenSeed.add(node.id);
       seeds.push(node);
@@ -1286,9 +1517,11 @@ export class GroupKBEngine {
     const SEED_ENERGY_FLOOR = 0.12;
     const seedWeight = (nodeId: string): number => {
       if (anchorIds.has(nodeId)) return 1;
-      if (maxSeedLex <= 0) return SEED_ENERGY_FLOOR;
       const lex = lexicalById.get(nodeId) ?? 0;
-      return Math.max(SEED_ENERGY_FLOOR, Math.min(1, lex / maxSeedLex));
+      const lexW = maxSeedLex > 0 ? lex / maxSeedLex : 0;
+      // A routed node enters with at most half the energy of an exact hit: routing is inferred.
+      const routeW = (routedNodes.get(nodeId)?.score ?? 0) * 0.5;
+      return Math.max(SEED_ENERGY_FLOOR, Math.min(1, Math.max(lexW, routeW)));
     };
 
     const allPulseSeeds: PulseSeed[] = [];
@@ -1376,8 +1609,11 @@ export class GroupKBEngine {
       // name can legitimately share no tokens with its contents).
       if (base <= 0 && !anchorIds.has(nodeId)) continue;
 
-      // Anchors rank first — see ANCHOR_BONUS for the measured effect.
-      const anchorWeight = anchorIds.has(nodeId) ? GroupKBEngine.ANCHOR_BONUS : 1;
+      // Anchors rank first — see ANCHOR_BONUS for the measured effect. Routed groups come next.
+      const route = routedNodes.get(nodeId);
+      const anchorWeight = anchorIds.has(nodeId)
+        ? GroupKBEngine.ANCHOR_BONUS
+        : route ? 1 + GroupKBEngine.ROUTE_BONUS * route.score : 1;
 
       const { boost, notes } = this.computeSignalBoost(mem);
       scored.push({
@@ -1417,6 +1653,16 @@ export class GroupKBEngine {
 
     const nodes: MemoryNode[] = [];
     const traces: ActivationTrace[] = [];
+    /** Expansion words (not typed by the user) that a node contains, as "query word→concept:word". */
+    const expansionVia = (mem: MemoryNode): string[] => {
+      const hay = `${mem.title}\n${mem.content}`.toLowerCase();
+      const out: string[] = [];
+      for (const t of understood.terms) {
+        if (!t.via || out.length >= 3) continue;
+        if (hay.includes(t.token)) out.push(`${t.via}:${t.token}`);
+      }
+      return out;
+    };
 
     for (const entry of scored) {
       if (nodes.length >= MAX_RESULTS) break;
@@ -1440,6 +1686,11 @@ export class GroupKBEngine {
           : 'no structural activation',
       ];
       if (entry.lexical > 0) parts.push(`lexical BM25 ${entry.lexical.toFixed(2)}`);
+      // Why an expanded or routed match matched — the concept word that carried it.
+      const route = routedNodes.get(mem.id);
+      if (route && !anchorIds.has(mem.id)) parts.push(`concept route ${route.why} → ${route.group}`);
+      const via = expansionVia(mem);
+      if (via.length) parts.push(`via ${via.join('、')}`);
       if (entry.notes.length) parts.push(entry.notes.join(', '));
 
       traces.push({
@@ -1453,6 +1704,46 @@ export class GroupKBEngine {
         signalBoost: entry.boost,
         signalNotes: entry.notes,
       });
+    }
+
+    /*
+     * ── Fallback: a second, broader pass when the primary one is weak ──
+     *
+     * Weak means: nothing found, or the best hit is neither an anchor nor in a routed group AND
+     * covers less than a third of the query's own words (idf-weighted). Its hits are returned in
+     * `fallback`, never mixed into `nodes`, so the confident list keeps meaning what it meant.
+     */
+    let fallback: KBFallbackResult | undefined;
+    const top = scored.find((e) => e.final >= relevanceFloor);
+    const topCoverage = top ? this.coverage(understood.own, top.mem) : 0;
+    const weak = !top || (!anchorIds.has(top.mem.id) && !routedNodes.has(top.mem.id)
+      && topCoverage < GroupKBEngine.WEAK_COVERAGE);
+    if (weak) {
+      const found = this.fallbackPass(queryText, understood.terms, new Set(nodes.slice(0, 5).map((n) => n.id)), hidden);
+      if (found.length) {
+        fallback = {
+          nodes: found.map((f) => f.mem),
+          traces: found.map((f) => {
+            const memGroups = f.mem.groupIds
+              .map((gid) => this.store.getGroup(gid))
+              .filter((g): g is Group => g !== undefined);
+            return {
+              nodeId: f.mem.id,
+              groupPath: memGroups.length ? memGroups.map((g) => this.buildGroupPath(g)) : ['(ungrouped)'],
+              pulseSeeds: [],
+              activationLevel: 0,
+              reason: `fallback overlap ${f.score.toFixed(2)}: ${f.units.slice(0, 6).join(' ')}`,
+              lexicalScore: 0,
+              finalScore: f.score,
+              signalBoost: 1,
+              signalNotes: [],
+            };
+          }),
+          reason: !top
+            ? '主检索没有命中'
+            : `主检索最佳结果只覆盖查询词的 ${Math.round(topCoverage * 100)}%`,
+        };
+      }
     }
 
     return {
@@ -1472,6 +1763,7 @@ export class GroupKBEngine {
         floor: relevanceFloor,
         limit: MAX_RESULTS,
       }),
+      ...(fallback ? { fallback } : {}),
     };
   }
 

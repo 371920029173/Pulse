@@ -552,6 +552,37 @@ console.log('\n=== 迁移：旧判据写下的策略拒绝退役，环境权限�
     `before=${liveBefore} after=${book.count()} envDenied 在书里=${book.lookup({ limit: 100 }).some((e) => e.id === envDenied.id)}`);
 }
 
+// ─── 9. 约束里点名「要用」的工具被记成越界（R7）的存量 ─────────────────────────
+console.log('\n=== 迁移：把「要用的工具」记成越界的旧条目退役，真越界留着 ===');
+{
+  /*
+   * 新判据不再把「用 shell 跑测试，不要用 fs_write」里的 shell 当成被禁对象；这里是存量那一半：
+   * 旧判据已经写进书里的这类指控要退掉，同一条约束下真的调用了 fs_write 的那条要留着。
+   * 自省条目按主题去重，所以两条放在两个各自独立的真 SQLite 库里。
+   */
+  const rule = '用 shell 跑测试，不要用 fs_write';
+  const verdict = (object) => `约束「${rule}」排除的对象「${object}」出现在了 ${object} 的调用参数里`;
+  const sweep = (name, evidence) => {
+    const sub = join(dir, name);
+    mkdirSync(sub, { recursive: true });
+    const s2 = new KBStore(join(sub, 'kb.sqlite'));
+    const e2 = new GroupKBEngine(s2, { ...cfg.kb, dbPath: join(sub, 'kb.sqlite') });
+    const b2 = new ErrorBook(e2, s2);
+    const entry = b2.recordReflection({ topic: '越过约束', lesson: '示例', evidence }).entry;
+    const res = retireKnownFalsePositives(e2, s2, { workspaceRoot: dir, kbPath: join(sub, 'kb.sqlite') });
+    const reason = String(s2.getMemory(entry.id)?.metadata?.errorForgottenReason ?? '');
+    const live = b2.lookup({ limit: 100 }).some((x) => x.id === entry.id);
+    s2.close();
+    return { res, reason, live };
+  };
+  const fp = sweep('r7-fp', verdict('shell'));
+  check('旧判据把 shell（要用的工具）记成越界 → 退役，原因写明是哪条已修复的误报',
+    fp.res.status === 'ran' && !fp.live && /reflection-tool-named-constraint/.test(fp.reason), JSON.stringify(fp));
+  const real = sweep('r7-real', verdict('fs_write'));
+  check('同一条约束下真的调用了 fs_write → 留着（那是真实的越界）',
+    real.res.status === 'ran' && real.live && real.res.retired.length === 0, JSON.stringify(real));
+}
+
 store.close();
 removeTempDir(dir);
 console.log(failures ? `\n${failures} 项失败` : '\n全部通过');

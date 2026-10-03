@@ -237,19 +237,29 @@ describe('卡住的工具循环', () => {
     assert.equal(calls.length, 4, `实际 ${calls.length} 次，说明提示了不止一次`);
   });
 
-  it('提示文本不进入历史（否则用户会看到自己没说过的话）', async () => {
+  it('提示进入历史，但是独立的一条系统提示，且排在工具结果之后', async () => {
     /*
-     * The nudge is a `user` message so the model attends to it — but history is
-     * persisted AND rendered, so pushing it there would show the user a line they
-     * never wrote. It belongs in the request only.
+     * The nudge used to be kept out of history (request only), so the user would not see a line
+     * they never wrote. That made the NEXT turn's request differ from this one at the nudge, i.e.
+     * a prompt-cache miss for everything after it. It is now persisted like the autopilot nudge:
+     * one standalone `[系统提示]` message, which the UI renders as a system note (useChat.ts),
+     * placed after the tool results so the tool group stays legal.
      */
     const { tools } = makeTools(dir);
     const agent = makeAgent(new LoopingProvider('read_fixed', {}), tools);
     await agent.chat('试试');
 
-    const historyText = agent.getHistory().map((m) => String(m.content ?? '')).join('\n');
-    assert.doesNotMatch(historyText, /\[系统提示\]/, '提示文本泄漏到了历史里');
-    // The explanation to the user SHOULD be in history, though — it is the reply.
+    const history = agent.getHistory();
+    const nudges = history
+      .map((m, i) => ({ m, i }))
+      .filter(({ m }) => /\[系统提示\]/.test(String(m.content ?? '')));
+    assert.equal(nudges.length, 1, '提示只应出现一次');
+    const { m, i } = nudges[0];
+    assert.equal(m.role, 'user');
+    assert.ok(String(m.content).startsWith('[系统提示]'), '是独立的一条，没有掺进别的消息');
+    assert.equal(history[i - 1].role, 'tool', '紧跟在工具结果后面');
+    // The explanation to the user is in history too: it is the reply.
+    const historyText = history.map((x) => String(x.content ?? '')).join('\n');
     assert.match(historyText, /已停止/);
   });
 

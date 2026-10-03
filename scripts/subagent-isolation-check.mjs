@@ -639,7 +639,7 @@ console.log('\n7. 子任务知识库：私有副本、放在副本目录外、�
   check('【关键】提示词说明理由（直读不计访问计数、绕过共振排序）',
     /访问计数/.test(prompt) && /共振排序|结构共振排序/.test(prompt), null);
   check('Core Rules 里也有一条把这条路封掉', /Reach the KB only through/.test(prompt), null);
-  check('工具清单里 kb_query 自己就写明「只此一条路」', /never poke the sqlite file/.test(prompt), null);
+  check('KB 段开头就写明「只此一条路」（提示词不再逐条重复工具说明）', /The KB is only reachable through the `kb_\*` tools/.test(prompt), null);
 }
 
 const KB_SEED_TITLE = '父级已知的事实';

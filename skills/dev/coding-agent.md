@@ -14,8 +14,8 @@ Use when skill profile is **dev** or the user is building/debugging software, in
 3. Summarize findings as checklist + next action.
 
 ## Dual-track
-- Product: D:\AGI\she-agent-cloud
-- Thin stack D:\AGI\AGI-use — do not merge unless asked.
+- Product: `<projects-root>/she-agent-cloud` (this repo)
+- Thin stack `<projects-root>/AGI-use` (separate sibling checkout) — do not merge unless asked.
 - Never modify project directories other than the current workspace.
 
 相关：同目录 `syscheck.md` 做本机排查。

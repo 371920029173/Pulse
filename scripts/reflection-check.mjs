@@ -200,12 +200,13 @@ console.log('\n2. 约束：硬的是漂移，软的是提醒');
     judge('plan_update', JSON.stringify({ plan_id: 'p', step_id: 's9', status: 'done', note: 'cat/which 告警判定为误报' })) === 'none', null);
   check('【实测误报】正文解释它、路径无辜的 fs_write 不算越界',
     judge('fs_write', JSON.stringify({ path: 'qa/eng/notes.md', content: '该沙箱无 cat / which，请用 type / where。' })) === 'none', null);
+  // 被排除的对象是禁止词后面的 /dev/null（「无 cat/which」是对 shell 的描述，评审轮后不再当对象）。
   check('但 path 就是那个对象时照旧越界（正文豁免不能变成整体豁免）',
-    judge('fs_write', JSON.stringify({ path: 'cat/which', content: '随便' })) === 'drift', null);
+    judge('fs_write', JSON.stringify({ path: '/dev/null', content: '随便' })) === 'drift', null);
   check('shell 的命令行照旧查（命令本身就是动作，没有「正文」这层）',
-    judge('shell', JSON.stringify({ command: 'del /f cat/which' })) === 'drift', null);
+    judge('shell', JSON.stringify({ command: 'echo x > /dev/null' })) === 'drift', null);
   check('嵌套交接单里的 scope 不豁免（声明要改什么仍然是行动）',
-    judge('task_spawn', JSON.stringify({ tasks: [{ description: '改文件', scope: ['cat/which'], prompt: '随便' }] })) === 'drift', null);
+    judge('task_spawn', JSON.stringify({ tasks: [{ description: '改文件', scope: ['/dev/null'], prompt: '随便' }] })) === 'drift', null);
 
   check('禁止句里取的是最长的那两个具体对象',
     JSON.stringify(prohibitionObject('不要修改 packages/server 里的 cluster.ts')) ===
@@ -244,6 +245,118 @@ console.log('\n2. 约束：硬的是漂移，软的是提醒');
   check('「不得改动 a.ts、b.ts」是一个禁止句里列了两个对象，顿号不切开它',
     prohibitionObject('不要改动 a.ts、b.ts').includes('b.ts'),
     JSON.stringify(prohibitionObject('不要改动 a.ts、b.ts')));
+
+  /*
+   * 约束里点名「要用」的工具不是被禁止的对象（测试轮 R7，实测误报率 1.00）。
+   *
+   * 模型写下的约束常常一句话里既说用什么、又说别用什么：「用 shell 跑测试，不要用 fs_write」。
+   * 旧实现把不是禁止句、也不是「只用/仅通过」的那半句粘回了禁止句，于是 shell 成了被禁对象，
+   * 越听话越被指控。同样的还有「改用 X」「must call X first」「不要跳过 X」「除 X 外」。
+   */
+  const toolNamed = (constraint, tool, args) => detectDrift({
+    goal: '修好登录超时',
+    constraints: [{ text: constraint, hardness: 'hard' }],
+    actions: [{ tool, args }],
+  }).signals.some((s) => s.kind === 'constraint_violated');
+  const shCmd = (c) => JSON.stringify({ command: c });
+  for (const [rule, tool, args] of [
+    ['用 shell 跑测试，不要用 fs_write', 'shell', shCmd('pnpm test')],
+    ['不要用 fs_write，改用 fs_patch', 'fs_patch', '{"path":"a.ts"}'],
+    ['必须先调用 kb_query，不要直接改代码', 'kb_query', '{"query":"x"}'],
+    ['不要跳过 kb_query', 'kb_query', '{"query":"x"}'],
+    ['除 shell 外不要用其他工具', 'shell', shCmd('ls')],
+    ["don't use fs_write, use fs_patch instead", 'fs_patch', '{"path":"a.ts"}'],
+    ['must call kb_query first, do not read .she/kb.sqlite directly', 'kb_query', '{"query":"x"}'],
+    ['only use git via shell, never call the git tool', 'shell', shCmd('git status')],
+  ]) {
+    check(`【R7 误报】「${rule}」下调用被点名要用的 ${tool} 不算越界`, !toolNamed(rule, tool, args), JSON.stringify(prohibitionObject(rule)));
+  }
+  for (const [rule, tool, args] of [
+    ['不要用 shell', 'shell', shCmd('ls')],
+    ['never use fs_write', 'fs_write', '{"path":"a.ts"}'],
+    ['用 shell 跑测试，不要用 fs_write', 'fs_write', '{"path":"a.ts"}'],
+    ['不要用 fs_write，改用 fs_patch', 'fs_write', '{"path":"a.ts"}'],
+    ['must call kb_query first, do not read .she/kb.sqlite directly', 'shell', shCmd('sqlite3 .she/kb.sqlite .tables')],
+    ['only use git via shell, never call the git tool', 'git', '{"op":"status"}'],
+  ]) {
+    check(`真越界照旧：「${rule}」下调用 ${tool} 仍然报`, toolNamed(rule, tool, args), JSON.stringify(prohibitionObject(rule)));
+  }
+
+  /*
+   * 评审在 R7 修复之后补的几类（每类都有该报和不该报两面）：
+   *   - 口语化的禁止词（别用/勿用/千万别/不允许/can't）以前根本不算禁止句，真越界漏报；
+   *   - 「只用 X」「X 是唯一可用的工具」「除 X 外不要用其他工具」是允许清单：调用别的工具才是越界，
+   *     X 自己、X 的同族（shell_wait）和记账类工具（plan_*、report_write…）不算；带着自己禁止对象的
+   *     白名单（「不得直读 kb.sqlite，只用 kb_* 工具」）仍只管它那一句，不变成全局清单；
+   *   - 禁止对象是工具名时只和被调用的工具比，不在别的工具的参数里找子串；
+   *   - 禁止词前面的主语/描述不是对象（「shell 由 cmd.exe 解析，不能用 POSIX 写法」，实测进了错题本）。
+   */
+  for (const [rule, tool, args, expect] of [
+    ['别用 fs_write', 'fs_write', '{"path":"a.ts"}', true],
+    ['勿用 fs_write', 'fs_write', '{"path":"a.ts"}', true],
+    ['千万别碰 cluster.ts', 'fs_write', '{"path":"src/cluster.ts"}', true],
+    ['不允许用 fs_write', 'fs_write', '{"path":"a.ts"}', true],
+    ["you can't use fs_write", 'fs_write', '{"path":"a.ts"}', true],
+    ['别用 fs_write', 'fs_read', '{"path":"a.ts"}', false],
+    ['只用 kb_query', 'shell', shCmd('sqlite3 .she/kb.sqlite .tables'), true],
+    ['只用 kb_query', 'kb_query', '{"query":"x"}', false],
+    ['只用 shell，不要用别的工具', 'fs_write', '{"path":"a.ts"}', true],
+    ['只用 shell，不要用别的工具', 'shell', shCmd('ls'), false],
+    ['只用 shell，不要用别的工具', 'shell_wait', '{"id":"job_1"}', false],
+    ['只用 shell，不要用别的工具', 'plan_update', '{"plan_id":"p"}', false],
+    ['shell 是唯一可用的工具', 'fs_write', '{"path":"a.ts"}', true],
+    ['shell 是唯一可用的工具', 'shell', shCmd('ls'), false],
+    ['除 shell 外不要用其他工具', 'fs_write', '{"path":"a.ts"}', true],
+    ['除 shell 外不要用其他工具', 'shell', shCmd('ls'), false],
+    ['only use shell', 'fs_write', '{"path":"a.ts"}', true],
+    ['only use shell', 'shell', shCmd('ls'), false],
+    ['never use any tool other than shell', 'fs_write', '{"path":"a.ts"}', true],
+    ['never use any tool other than shell', 'shell', shCmd('ls'), false],
+    ['不得直读 .she/kb.sqlite，只用 kb_* 工具', 'fs_read', '{"path":"src/a.ts"}', false],
+    ['只用 shell 跑测试，不要用 fs_write', 'fs_read', '{"path":"src/a.ts"}', false],
+    ['用 shell 跑测试，不要用 fs_write', 'shell', shCmd('cat docs/fs_write.md'), false],
+    ['不要用 shell', 'fs_read', '{"path":"src/shell/index.ts"}', false],
+    ['不要用 shell', 'shell', shCmd('ls'), true],
+    ['不要用 git', 'shell', shCmd('git commit -m x'), true],
+    // portability-check:allow — 这一行是**被测数据**：约束原句点名解释器，不是调用它。
+    ['shell 由 cmd.exe 解析，不能用 POSIX 写法', 'shell', shCmd('dir'), false],
+    ['本工作区非 git 仓库、无 package.json，须如实标注不得报 clean', 'fs_read', '{"path":"package.json"}', false],
+    ['x.ts 是生成的，不要改它', 'fs_write', '{"path":"src/x.ts"}', true],
+    ['不要跳过 kb_query', 'kb_query', '{"query":"x"}', false],
+    ['不要跳过 kb_query，不要改 cluster.ts', 'fs_write', '{"path":"src/cluster.ts"}', true],
+    ['除 shell 外不要改 packages/migrations', 'shell', shCmd('ls'), false],
+    ['除 shell 外不要改 packages/migrations', 'fs_write', '{"path":"packages/migrations/1.sql"}', true],
+    ['不要用 fs_write 改用 fs_patch', 'fs_patch', '{"path":"a.ts"}', false],
+    ['不要用 fs_write 改用 fs_patch', 'fs_write', '{"path":"a.ts"}', true],
+    ['不要改 .git', 'shell', shCmd('git status'), false],
+    ['不要改 .git', 'shell', shCmd('rm -rf .git/hooks'), true],
+    /*
+     * 评审第三轮（每类都有该报和不该报两面）：对象大小写不敏感；没加反引号的命令（rm -rf、git push
+     * --force）是一个整体对象，按命令匹配（同一条命令里按顺序出现，flag 认别名 -f）；「用 X 在 Y 上」
+     * 只有 Y 是对象，X 是手段；「X 的 Y」里 X 是工具时只禁 Y。
+     */
+    ['不要改 README.md', 'fs_write', '{"path":"README.md"}', true],
+    ['不要改 README.md', 'fs_write', '{"path":"src/a.ts"}', false],
+    ['不要用 rm -rf', 'shell', shCmd('rm -rf x'), true],
+    ['never run rm -rf', 'shell', shCmd('rm -rf x'), true],
+    ['never run rm -rf', 'shell', shCmd('rm x.txt'), false],
+    ['不要 git push --force', 'shell', shCmd('git push origin main --force'), true],
+    ['不要 git push --force', 'shell', shCmd('git push -f'), true],
+    ['不要 git push --force', 'shell', shCmd('git push origin main'), false],
+    ['不要 git push --force', 'shell', shCmd('git push --force-with-lease'), false],
+    ['do not use fs_write on .git', 'fs_write', '{"path":"src/a.ts"}', false],
+    ['do not use fs_write on .git', 'fs_write', '{"path":".git/config"}', true],
+    ['不要在 .git 里用 fs_write', 'fs_write', '{"path":"src/a.ts"}', false],
+    ['不要用 fs_write 改 README.md', 'fs_write', '{"path":"README.md"}', true],
+    ['不要用 shell 的 POSIX 写法', 'shell', shCmd('dir'), false],
+    ['不要用 shell 的 POSIX 写法', 'shell', shCmd('POSIX=1 ls'), true],
+    ['不要用 shell 删除 packages/migrations', 'shell', shCmd('rm -rf packages/migrations'), true],
+    ['不要用 shell 删除 packages/migrations', 'fs_write', '{"path":"packages/migrations/1.sql"}', true],
+    ['不要用 shell 删除 packages/migrations', 'shell', shCmd('pnpm test'), false],
+  ]) {
+    check(`${expect ? '该报' : '不该报'}：「${rule}」下调用 ${tool}`, toolNamed(rule, tool, args) === expect,
+      JSON.stringify(prohibitionObject(rule)));
+  }
 }
 
 console.log('\n3. 预算与步骤');

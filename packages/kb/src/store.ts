@@ -125,7 +125,7 @@ const CJK_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=H
  * into character bigrams because they are not space-delimited, so an exact
  * whole-run match would almost never hit.
  */
-function tokenizeQuery(query: string): string[] {
+export function tokenizeQuery(query: string): string[] {
   const lowered = query.toLowerCase();
   const out = new Set<string>();
 
@@ -172,6 +172,12 @@ const BM25_TITLE_WEIGHT = 2.5;
 export interface LexicalHit {
   mem: MemoryNode;
   score: number;
+}
+
+/** A pre-tokenised, weighted query term for `bm25Search` (see `retrieval-lexicon.ts`). */
+export interface WeightedQueryTerm {
+  token: string;
+  weight: number;
 }
 
 // ─── Input types for creation ───
@@ -228,6 +234,17 @@ export class KBStore {
   private reopens = 0;
   /** Lazily built BM25 index; invalidated on any memory mutation. */
   private lexical: LexicalIndex | null = null;
+  /**
+   * Bumped on every group or memory write. Lets a caller cache something derived from the
+   * structure (the engine's group vocabulary) and know when it is stale, without the store having
+   * to know what was derived. Access-count updates do not bump it: they change no text or membership.
+   */
+  private writeGeneration = 0;
+
+  /** See `writeGeneration`. */
+  get generation(): number {
+    return this.writeGeneration;
+  }
   /**
    * Group object cache.
    *
@@ -469,6 +486,7 @@ export class KBStore {
     const stats = defaultStats();
 
     this.invalidateGroups();
+    this.writeGeneration++;
     this.db.prepare(`
       INSERT INTO groups (id, name, name_is_group_ref, parent_group_id, child_group_ids,
         memory_ids, weak_edge_ids, cross_group_edge_ids, competition_subgroup_ids,
@@ -498,6 +516,7 @@ export class KBStore {
 
     // Drop the cached copy before writing so the read-back at the end is fresh.
     this.invalidateGroups();
+    this.writeGeneration++;
     this.db.prepare(`
       UPDATE groups SET
         name = ?, name_is_group_ref = ?, parent_group_id = ?,
@@ -532,6 +551,7 @@ export class KBStore {
 
   deleteGroup(id: string): void {
     this.invalidateGroups();
+    this.writeGeneration++;
     this.db.prepare('DELETE FROM groups WHERE id = ?').run(id);
   }
 
@@ -647,6 +667,7 @@ export class KBStore {
       now,
     );
     this.lexical = null;
+    this.writeGeneration++;
     this.invalidateMemory(id);
     this.invalidateMemories();
 
@@ -678,6 +699,7 @@ export class KBStore {
       id,
     );
     this.lexical = null;
+    this.writeGeneration++;
     this.invalidateMemories();
 
     return this.getMemory(id)!;
@@ -723,6 +745,7 @@ export class KBStore {
 
     this.db.prepare('DELETE FROM memories WHERE id = ?').run(id);
     this.lexical = null;
+    this.writeGeneration++;
     this.invalidateMemory(id);
   }
 
@@ -782,9 +805,20 @@ export class KBStore {
    * by common words. It returns ranked ENTRY POINTS; the structural pulse still
    * decides what else gets pulled in via the group graph.
    */
-  bm25Search(query: string, opts?: { limit?: number }): LexicalHit[] {
+  bm25Search(query: string, opts?: { limit?: number; terms?: WeightedQueryTerm[] }): LexicalHit[] {
     const limit = Math.max(1, opts?.limit ?? 20);
-    const tokens = [...new Set(tokenizeQuery(query))];
+    /*
+     * `terms` lets the engine pass the query already understood (function words dropped, concept
+     * words added at a lower weight). Without it this is the plain BM25 it always was — which is
+     * what `evals/retrieval` uses as its honest baseline, so the default must not change.
+     */
+    const weights = new Map<string, number>();
+    if (opts?.terms?.length) {
+      for (const t of opts.terms) if (t.weight > 0) weights.set(t.token, Math.max(weights.get(t.token) ?? 0, t.weight));
+    } else {
+      for (const t of tokenizeQuery(query)) weights.set(t, 1);
+    }
+    const tokens = [...weights.keys()];
     if (!tokens.length) return [];
 
     const idx = this.getLexicalIndex();
@@ -800,7 +834,7 @@ export class KBStore {
       for (const [memId, tf] of posting) {
         const dl = idx.docLen.get(memId) ?? 1;
         const denom = tf + BM25_K1 * (1 - BM25_B + BM25_B * (dl / idx.avgDocLen));
-        const termScore = idf * ((tf * (BM25_K1 + 1)) / (denom || 1));
+        const termScore = (weights.get(token) ?? 1) * idf * ((tf * (BM25_K1 + 1)) / (denom || 1));
         scores.set(memId, (scores.get(memId) ?? 0) + termScore);
       }
     }
@@ -831,6 +865,17 @@ export class KBStore {
     }
     hits.sort((a, b) => b.score - a.score || a.mem.createdAt - b.mem.createdAt);
     return hits;
+  }
+
+  /**
+   * BM25 idf of one token over the current index. A token no document contains gets the idf it
+   * would have with a document frequency of zero — the rarest possible — because "nothing here uses
+   * this word" is exactly what makes a query weakly matched.
+   */
+  termIdf(token: string): number {
+    const idx = this.getLexicalIndex();
+    const df = idx.postings.get(token)?.size ?? 0;
+    return Math.log(1 + (idx.docCount - df + 0.5) / (df + 0.5));
   }
 
   // ─── Edge CRUD ───

@@ -30,7 +30,7 @@ after(async () => {
  *
  * typescript-language-server does not re-publish when the diagnostic set is unchanged
  * (empty before, empty after), so `didChange` alone waited the full 15s and reported
- * "no answer". Seen on qa/hard/geometry.ts in _she-live-test on 2026-09-26: lsp_hover,
+ * "no answer". Seen on qa/hard/geometry.ts in _she-scratch on 2026-09-26: lsp_hover,
  * then fs_write, then lsp_diagnostics timed out while tsc was fine.
  */
 describe('lsp: diagnostics after a clean-to-clean edit', () => {

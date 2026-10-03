@@ -13,7 +13,7 @@ import { KBStore, GroupKBEngine, mergeKnowledgeBases } from '@she/kb';
 import type { KBMemoryPatch } from '@she/kb';
 import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLink } from './kb-link.js';
 import { SandboxShell, createTools, ConfirmTicketStore, describeIsolation, isolationNotice } from '@she/sandbox';
-import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, armSubagentWrapUp, selectHarvestNotes, allocateContext, pricingConfigured, pricingNote } from '@she/agent-runtime';
+import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, resolveSubagentLlm, armSubagentWrapUp, selectHarvestNotes, allocateContext, pricingConfigured, pricingNote } from '@she/agent-runtime';
 import type { SubagentRunner, SubagentResult, SubagentKbHarvest, UsageLike } from '@she/agent-runtime';
 import {
   PlanStore,
@@ -349,7 +349,7 @@ function recoverFile(target: string, src: string, label: string): boolean {
  *
  * 2026-10-01：上面那条"不要每次切工作区都跑"是对的，但还不够 —— 它在**启动时**照样把安装根
  * 目录的会话搬进任何新工作区。实测：把 `SHE_WORKSPACE` 指到一个空的临时目录，启动日志写着
- * `Recovered chat sessions from D:\AGI\she-agent-cloud\.she\sessions.json`，于是那个全新的工作区
+ * `Recovered chat sessions from <install-root>\.she\sessions.json`，于是那个全新的工作区
  * 里凭空出现了安装根目录的对话。用户看到的"会话隔离完全无效"里，这一条是能单独复现的。
  *
  * 原因：安装根目录（以及它下面的 `packages/server`）当年是**默认工作区的 cwd**，不是"公共历史"。
@@ -465,15 +465,15 @@ const extraEngines = new Map<string, GroupKBEngine>();
  *
  * `resolve()` normalises separators and dots and nothing else, so one file reached two ways gets
  * two cache keys and — worse — two live connections inside one process. That is not hypothetical:
- * `os.tmpdir()` on Windows hands out the 8.3 short form (`C:\Users\ADMINI~1\…`) while git and
- * `realpathSync` report the long form (`C:\Users\Administrator\…`), so the same sqlite file opened
+ * `os.tmpdir()` on Windows hands out the 8.3 short form (`C:\Users\LONGUS~1\…`) while git and
+ * `realpathSync` report the long form (`C:\Users\LongUserName\…`), so the same sqlite file opened
  * from a worktree was cached under two keys. Two writers to one file in one process is lock
  * contention waiting to happen, and a handle you cannot find again is a handle you cannot close —
  * which is how a directory ends up undeletable. Comparing real paths, case-insensitively on
  * Windows because the filesystem itself is, keeps one file to one engine.
  *
  * Directories need the same treatment, for the same reason and with a sharper consequence. This
- * machine's project index held both `d:\AGI\_she-live-test` and `D:\AGI\_she-live-test` — one
+ * machine's project index held both `d:\work\_she-scratch` and `D:\Work\_she-scratch` — one
  * directory, two spellings — and keyed by spelling that is two SessionStores and two ClusterStores
  * over one `sessions.json`: two in-memory copies, each free to persist its own version and write
  * the other's conversations away.
@@ -670,7 +670,7 @@ function roomHome(roomId: string): { store: ClusterStore; root: string } | null 
  * user has not opened yet already has a cached store reading `rooms: []` from disk; if the switch
  * leaves that instance in place and builds a second one for the mounted slot, the group the user
  * then creates is written by the mounted copy and read back from the stale one. Reproduced live on
- * 2026-09-27 (build 13472): a room existed in `_she-live-test/.she/cluster/rooms.json` and the rail
+ * 2026-09-27 (build 13472): a room existed in `_she-scratch/.she/cluster/rooms.json` and the rail
  * listed no groups at all, with `GET /api/cluster/rooms/<id>` answering 404.
  */
 function mountStateDir(nextState: string): void {
@@ -897,15 +897,15 @@ const plugins = new PluginManager({
 });
 
 /**
- * MCP bridge: long-lived sessions to every enabled MCP server, whose tools are merged into each
- * agent's toolset exactly like plugin tools (synchronous cached `definitions()`, rebuilt only by
- * `mcp.refresh()`). See mcp-bridge.ts; MCP tools run outside the sandbox, so `makeAgent` routes
- * them through the confirm-ticket gate unless the workspace allows all commands.
+ * MCP bridge: long-lived sessions to every enabled MCP server, reached by the agent through two
+ * STATIC meta-tools (`mcp_list`, `mcp_call`) whose definitions never change, so connecting,
+ * failing or toggling a server never changes the cached tool table. See mcp-bridge.ts; MCP servers
+ * run outside the sandbox, so `makeAgent` routes `mcp_call` through the confirm-ticket gate unless
+ * the workspace allows all commands.
  */
 const mcp = new McpBridge({
   workspaceRoot: () => config.workspace.root,
   log: (m) => log.info(m),
-  reservedNames: () => plugins.definitions().map((d) => d.name),
 });
 
 /**
@@ -1022,7 +1022,13 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
       const spawnedAt = Date.now();
       const privateKb = subagentKbPath(childSession.id);
       const childKbPath = privateKb ?? at.kb.dbPath;
-      const childCfg = privateKb ? { ...at, kb: { ...at.kb, dbPath: privateKb } } : at;
+      /*
+       * 子任务默认低档思考、单次输出封顶 32k（见 `resolveSubagentLlm`）。主线配置不动。
+       */
+      const childLlm = { ...at.llm, ...resolveSubagentLlm(at.llm) };
+      const childCfg = privateKb
+        ? { ...at, llm: childLlm, kb: { ...at.kb, dbPath: privateKb } }
+        : { ...at, llm: childLlm };
       /*
        * Seed the child's KB before constructing it, so its first `kb_query` already sees the
        * project's memory. See `seedIsolatedKb` for why an empty one is the wrong default.
@@ -1515,11 +1521,11 @@ function makeAgent(cfg: SheConfig, sessionId?: string | null): Agent {
    * `shell` or `fs_write` (PluginManager also refuses the name collision).
    */
   /*
-   * MCP tools are appended last and never shadow a built-in or plugin name (the bridge prefixes
-   * them `mcp_<server>_` and refuses collisions; the filter below is belt and braces). Unlike
-   * built-ins they are NOT trusted: an MCP server is its own process outside the sandbox, so each
-   * call goes through the same confirm-ticket gate as a dangerous built-in (`needs_confirm` ->
-   * user approves -> re-run with the ticket), unless the workspace runs with allowAllCommands.
+   * MCP is two static tools appended last (`mcp_list`, `mcp_call`; never shadowing a built-in or
+   * plugin name). They are NOT trusted: an MCP server is its own process outside the sandbox, so
+   * every `mcp_call` goes through the same confirm-ticket gate as a dangerous built-in
+   * (`needs_confirm` -> user approves -> re-run with the ticket, bound to server + tool +
+   * arguments), unless the workspace runs with allowAllCommands. `mcp_list` is read-only.
    */
   const taken = new Set([...base.definitions, ...plugins.definitions()].map((d) => d.name));
   const merged = {
@@ -4561,8 +4567,9 @@ router.get('/api/fs/tree', (req, res) => {
 
   // ── MCP servers: discovery, live probe, enable/disable ──
   /*
-   * After any config change the bridge reconnects and live agents are rebuilt, the same way plugin
-   * changes are applied, so an open conversation gets (or loses) the server's tools without a restart.
+   * After any config change the bridge reconnects. Agents are deliberately NOT rebuilt: the MCP
+   * tool definitions are static (`mcp_list` / `mcp_call`), so the change is visible through
+   * `mcp_list` at once, and a rebuild would only throw away every open session's cached prefix.
    */
   const refreshMcp = async (): Promise<void> => {
     try {
@@ -4570,7 +4577,6 @@ router.get('/api/fs/tree', (req, res) => {
     } catch (e) {
       log.warn(`MCP refresh failed: ${(e as Error).message}`);
     }
-    rebuildAgents();
   };
   const mcpInject = (name: string) => mcp.injectStatus(name);
 
@@ -4718,7 +4724,7 @@ router.get('/api/fs/tree', (req, res) => {
        * One directory is one entry, whatever spelling it was recorded with.
        *
        * This is `pathKey`'s problem again, one layer out. The registry used to compare raw strings,
-       * so this machine's list held both `D:\AGI\_she-live-test` and `d:\AGI\_she-live-test` — and
+       * so this machine's list held both `D:\Work\_she-scratch` and `d:\work\_she-scratch` — and
        * the workspace panel renders one row per entry, so it showed the SAME folder twice, one
        * marked 当前 and one marked 1会话. Read as "the isolation is broken": two identical projects
        * sitting side by side. It is not a display artefact either — each row is a separate root the
@@ -6448,21 +6454,20 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
   }
 
   /*
-   * Connect the MCP servers BEFORE the first agent is built — the same reason as the plugins
-   * above, and the bug that made the first version of the bridge useless.
+   * Connect the MCP servers at boot, so the first `mcp_list` already sees them.
    *
-   * `mcp.definitions()` is a cache that only `refresh()` fills. Without a call here the agent
-   * snapshots an empty list and is handed NONE of the configured MCP tools, while the panel
-   * cheerfully reports "reachable, 14 tools" from the separate probe path. Nothing errors —
-   * the tools are simply absent, and the only tool that could have told the agent about them
-   * is the one it was never given.
-   *
-   * Bounded by the bridge's own connect budget (15s for all servers, started in parallel), so
-   * one hung server cannot hold boot open indefinitely.
+   * The agent's MCP tools themselves are static (`mcp_list` / `mcp_call`), so the tool table no
+   * longer depends on this having finished; what depends on it is whether the servers are
+   * running when the model first asks. Bounded by the bridge's own connect budget (15s for all
+   * servers, started in parallel), so one hung server cannot hold boot open indefinitely; a
+   * server that misses it is retried on its first `mcp_list` / `mcp_call`.
    */
   try {
-    const mcpTools = await mcp.refresh();
-    if (mcpTools.length) log.info(`Loaded ${mcpTools.length} MCP tool(s)`);
+    const mcpSummary = await mcp.refresh();
+    if (mcpSummary.running.length || mcpSummary.failed.length) {
+      log.info(`MCP: ${mcpSummary.running.length} server(s) running with ${mcpSummary.tools} tool(s) behind mcp_call`
+        + (mcpSummary.failed.length ? `; failed to start: ${mcpSummary.failed.join(', ')}` : ''));
+    }
   } catch (e) {
     log.warn(`MCP tool registration failed (server still starts): ${(e as Error).message}`);
   }
@@ -6768,8 +6773,14 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
     if (isoNotice) log.info(isoNotice);
   });
 
-  process.on('SIGINT', () => { disposeAllAgents(); tenantLedger().flush(); server.close(() => process.exit(0)); });
-  process.on('SIGTERM', () => { disposeAllAgents(); tenantLedger().flush(); server.close(() => process.exit(0)); });
+  process.on('SIGINT', () => { mcp.shutdown(); disposeAllAgents(); tenantLedger().flush(); server.close(() => process.exit(0)); });
+  process.on('SIGTERM', () => { mcp.shutdown(); disposeAllAgents(); tenantLedger().flush(); server.close(() => process.exit(0)); });
+  /*
+   * Any other orderly exit (crash handler, `process.exit` elsewhere) stops the MCP servers too: on
+   * Windows a child does not die with its parent. A HARD kill runs none of this; the bridge's PID
+   * registry (`.she/mcp-pids/`) lets the next start reap what such a kill leaves behind.
+   */
+  process.on('exit', () => { mcp.shutdown(); });
 
   // ── Crash forensics ──────────────────────────────────────────────────────
   // The server previously died with exit code -1 and an EMPTY stderr, leaving

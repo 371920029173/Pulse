@@ -7,7 +7,7 @@
  * WHY THIS EXISTS
  *
  * `mcp-bridge.test.ts` drives `McpBridge` DIRECTLY, and those tests are good: handshake,
- * framing, name sanitizing, collisions, restart-after-crash, `tools/call` routing, the
+ * framing, `mcp_list` / `mcp_call`, restart-after-crash, `tools/call` routing, the
  * confirmation ticket. What none of them can see is the chain a user actually depends on:
  *
  *     boot → discover servers → refresh() → agent's toolset → tool call → result to the model
@@ -52,7 +52,6 @@ import { createServer } from 'node:http';
 import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
-import { mcpToolName } from '../packages/server/dist/mcp-bridge.js';
 import { hermeticEnv } from './lib/hermetic.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -81,7 +80,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /**
  * 同一个目录在 Windows 上可以有短名/长名/大小写三种写法，比路径得先归一。
  *
- * 这个检查跑在临时目录里，`os.tmpdir()` 在本机给的是 `C:\Users\ADMINI~1\...`（短名），而子进程
+ * 这个检查跑在临时目录里，`os.tmpdir()` 在本机给的是 `C:\Users\LONGNA~1\...`（短名），而子进程
  * 报回来的 cwd 可能已经是长名 —— 直接比字符串会得到"看起来失败"的假红。
  */
 const samePath = (a, b) => {
@@ -171,7 +170,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
  * The real playwright MCP derives its artifact directory from the process cwd —
  * `join(cwd, '.playwright-mcp')` in `outputDir()` (`playwright-core/lib/coreBundle.js`), falling
  * back to the system temp dir only when cwd is unwritable. Observed on a real machine: 340 items
- * (screenshots, `console-*.log`) in `C:\Users\Administrator\.playwright-mcp` while the workspace
+ * (screenshots, `console-*.log`) in `~/.playwright-mcp` while the workspace
  * was elsewhere — the channel's products landed outside the boundary, where nothing cleans them
  * up and `.gitignore` cannot see them.
  *
@@ -217,6 +216,7 @@ function createStubModel() {
   let wantedArgs = {};
   let calls = 0;
   const seenTools = [];
+  const seenTables = [];
 
   const server = createServer((req, res) => {
     const chunks = [];
@@ -227,6 +227,7 @@ function createStubModel() {
       calls++;
       const offered = (body.tools ?? []).map((t) => t.function?.name).filter(Boolean);
       seenTools.push(offered);
+      seenTables.push(JSON.stringify(body.tools ?? []));
       const hasToolResult = Array.isArray(body.messages) && body.messages.some((m) => m.role === 'tool');
 
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
@@ -267,6 +268,8 @@ function createStubModel() {
     getCalls: () => calls,
     /** Tool names the agent offered on the most recent request. */
     lastOffered: () => seenTools[seenTools.length - 1] ?? [],
+    /** The full tool table (definitions, serialised) of the most recent request. */
+    lastTable: () => seenTables[seenTables.length - 1] ?? '',
   };
 }
 
@@ -317,6 +320,16 @@ const fakeHome = join(workspace, 'home');
 const fakeAppData = join(workspace, 'appdata');
 mkdirSync(fakeHome, { recursive: true });
 mkdirSync(fakeAppData, { recursive: true });
+
+/*
+ * One server in the (fake) global Cursor config. Cursor-sourced servers are opt-in per workspace:
+ * listed, not started, until enabled in the panel, which copies the entry into `.she/mcp.json`.
+ */
+const CURSOR_SERVER = 'cursor-demo';
+mkdirSync(join(fakeAppData, 'Cursor', 'User'), { recursive: true });
+writeFileSync(join(fakeAppData, 'Cursor', 'User', 'mcp.json'), JSON.stringify({
+  mcpServers: { [CURSOR_SERVER]: { command: 'node', args: [fakeMcp] } },
+}, null, 2) + '\n', 'utf8');
 
 /*
  * 用户主目录里的历史产物（旧行为的现场）。
@@ -429,108 +442,126 @@ const newSession = async (title) =>
 
 console.log('\nMCP 端到端检查（起真实服务 + 桩模型 + 真子进程 MCP server，不需要 API key）\n');
 
-const ECHO = mcpToolName(SERVER_NAME, 'echo');
+const META = new Set(['mcp_list', 'mcp_call']);
+const perToolNames = (offered) => offered.filter((n) => n.startsWith('mcp_') && !META.has(n));
+const serverInfo = async (name) => ((await api('/api/mcp/servers')).json?.servers ?? []).find((s) => s.name === name);
 
 try {
   await boot();
 
-  // ── 1. The startup wiring — the regression this script exists for ──
+  // -- 1. The startup wiring: the regression this script exists for --
   {
     const r = await api('/api/mcp/servers');
     const servers = r.json?.servers ?? [];
     const demo = servers.find((s) => s.name === SERVER_NAME);
+    const cur = servers.find((s) => s.name === CURSOR_SERVER);
 
-    check('工作区里只有我们配的那两个 MCP server（没读到本机的 Cursor 配置）',
-      servers.length === 2,
+    check('only the configured servers are listed (two workspace + one fake Cursor; host config hidden)',
+      servers.length === 3,
       `servers=${servers.map((s) => `${s.name}(source=${s.source})`).join(', ')}`);
-    check('MCP server 可达且工具数被探测到', Boolean(demo?.reachable) && demo?.toolCount === 2,
+    check('MCP server reachable and its tools probed', Boolean(demo?.reachable) && demo?.toolCount === 2,
       JSON.stringify(demo));
 
     /*
-     * THE assertion. Before the fix this was `injected: 0` on a fresh boot with 49 tools
-     * discovered — the panel said one thing, the agent got nothing, and nothing errored.
+     * THE assertion. Before the boot wiring was fixed this was `injected: 0` on a fresh boot with 49
+     * tools discovered. `injected` now means "reachable through mcp_call right now".
      */
-    check('【关键】开机时 MCP 工具真的注册给了 agent（探测数 = 注入数）',
+    check('[key] at boot the bridge is connected (probe count = callable via mcp_call)',
       Boolean(demo) && demo.injected === demo.toolCount && demo.injected > 0,
-      `探测=${demo?.toolCount} 注入=${demo?.injected} err=${demo?.injectError ?? '(无)'}`);
+      `probe=${demo?.toolCount} callable=${demo?.injected} err=${demo?.injectError ?? '(none)'}`);
+
+    check('[key] a Cursor-sourced server is listed but off by default (not started)',
+      Boolean(cur) && cur.source === 'cursor' && cur.enabled === false && (cur.injected ?? 0) === 0,
+      JSON.stringify(cur));
   }
 
-  // ── 2. The agent can see it, call it, and gets the child's real answer back ──
+  let tableBefore = '';
+  // -- 2. The agent can see mcp_call, call it, and gets the child's real answer back --
   {
-    stub.setWanted(ECHO, { text: 'hello-from-check' });
+    stub.setWanted('mcp_call', { server: SERVER_NAME, tool: 'echo', arguments: { text: 'hello-from-check' } });
     const sid = await newSession('mcp call');
-    const turn = await chat(`用 ${ECHO} 回显一句话`, sid);
+    const turn = await chat('echo something through MCP', sid);
 
     const offered = stub.lastOffered();
-    check('【关键】MCP 工具出现在智能体的工具表里（不是只在配置/面板里）',
-      offered.includes(ECHO),
-      `offered=${offered.length} 个，其中 mcp_ 开头 ${offered.filter((n) => n.startsWith('mcp_')).length} 个`);
-
-    check('同一次请求里内建工具仍在（MCP 是追加，不是替换）',
+    tableBefore = stub.lastTable();
+    check('[key] mcp_list and mcp_call are in the tool table',
+      offered.includes('mcp_list') && offered.includes('mcp_call'),
+      `offered=${offered.length}: ${offered.filter((n) => n.startsWith('mcp_')).join(', ')}`);
+    check('[key] no per-tool mcp_<server>_<tool> definitions (lazy exposure)',
+      perToolNames(offered).length === 0, perToolNames(offered).join(', '));
+    check('built-in tools still there (MCP is added, not substituted)',
       offered.includes('shell') || offered.includes('fs_read'),
       offered.slice(0, 15).join(', '));
 
-    const results = toolResults(turn.events);
-    const echoResult = results.find((e) => e.toolName === ECHO);
-    check('【关键】MCP 工具被真正调用（走了 tools/call，不是被本地兜住）',
+    const echoResult = toolResults(turn.events).find((e) => e.toolName === 'mcp_call');
+    check('[key] mcp_call really reached tools/call',
       Boolean(echoResult),
       `events=${turn.events.map((e) => e.type).join(',')} errors=${JSON.stringify(errorEvents(turn.events)).slice(0, 200)}`);
-
-    check('结果里带回的是那个子进程真的说的话',
+    check('the result is what the child process said',
       Boolean(echoResult) && String(echoResult.content ?? '').includes('MCP-ECHO:hello-from-check'),
-      String(echoResult?.content ?? '(无结果)').slice(0, 240));
-
-    check('调用没有变成一次错误',
+      String(echoResult?.content ?? '(no result)').slice(0, 240));
+    check('the call did not turn into an error',
       Boolean(echoResult) && !/^Error:/i.test(String(echoResult.content ?? '')),
       String(echoResult?.content ?? '').slice(0, 200));
   }
 
-  // ── 3. Config changes take effect without a restart ──
+  // -- 3. Config changes take effect without a restart, and never touch the tool table --
   {
     const off = await api(`/api/mcp/servers/${SERVER_NAME}/enabled`, { method: 'PUT', body: { enabled: false } });
-    check('通过接口停用该 server 成功', off.status < 300, `status=${off.status} ${off.text.slice(0, 160)}`);
+    check('disable via API succeeds', off.status < 300, `status=${off.status} ${off.text.slice(0, 160)}`);
 
-    stub.setWanted(null);
+    stub.setWanted('mcp_call', { server: SERVER_NAME, tool: 'echo', arguments: { text: 'x' } });
     const sid = await newSession('after disable');
-    await chat('在吗', sid);
-    const offeredOff = stub.lastOffered();
-    check('【关键】停用后 agent 不再拿到该工具（说明工具表被重建，不用重启）',
-      !offeredOff.includes(ECHO),
-      `仍然提供: ${offeredOff.filter((n) => n.startsWith('mcp_')).join(', ') || '(无)'}`);
+    const turn = await chat('try again', sid);
+    check('[key] tool table byte-identical after disabling a server (prompt cache unaffected)',
+      stub.lastTable() === tableBefore && tableBefore !== '',
+      `before=${tableBefore.length} chars, after=${stub.lastTable().length} chars`);
+    const res = toolResults(turn.events).find((e) => e.toolName === 'mcp_call');
+    check('[key] mcp_call on a disabled server says so (instead of the tool vanishing)',
+      Boolean(res) && /not enabled/i.test(String(res.content ?? '')),
+      String(res?.content ?? '(no result)').slice(0, 240));
 
-    const listed = await api('/api/mcp/servers');
-    const demoOff = (listed.json?.servers ?? []).find((s) => s.name === SERVER_NAME);
-    check('停用后注入数归零（面板与 agent 说的一致）',
-      demoOff?.injected === 0,
-      JSON.stringify(demoOff));
+    const demoOff = await serverInfo(SERVER_NAME);
+    check('callable count drops to 0 (panel and agent agree)', demoOff?.injected === 0, JSON.stringify(demoOff));
 
     const on = await api(`/api/mcp/servers/${SERVER_NAME}/enabled`, { method: 'PUT', body: { enabled: true } });
-    check('重新启用成功', on.status < 300, `status=${on.status} ${on.text.slice(0, 160)}`);
-
-    await waitFor(async () => {
-      const s = (await api('/api/mcp/servers')).json?.servers?.find((x) => x.name === SERVER_NAME);
-      return s?.injected === 2;
-    }, { what: '重新接上工具', timeoutMs: 20_000, stepMs: 400 }).catch(() => undefined);
-
-    const listed2 = await api('/api/mcp/servers');
-    const demoOn = (listed2.json?.servers ?? []).find((s) => s.name === SERVER_NAME);
-    check('重新启用后工具又回来了', demoOn?.injected === 2, JSON.stringify(demoOn));
+    check('re-enable succeeds', on.status < 300, `status=${on.status} ${on.text.slice(0, 160)}`);
+    await waitFor(async () => (await serverInfo(SERVER_NAME))?.injected === 2,
+      { what: 'reconnect', timeoutMs: 20_000, stepMs: 400 }).catch(() => undefined);
+    const demoOn = await serverInfo(SERVER_NAME);
+    check('tools callable again after re-enable', demoOn?.injected === 2, JSON.stringify(demoOn));
   }
 
-  // ── 4. A server that reports isError is a failed call, not a silent success ──
+  // -- 3b. Opting in to a Cursor-sourced server copies it into .she/mcp.json --
   {
-    stub.setWanted(mcpToolName(SERVER_NAME, 'boom'));
+    const on = await api(`/api/mcp/servers/${CURSOR_SERVER}/enabled`, { method: 'PUT', body: { enabled: true } });
+    check('enabling the Cursor server via API succeeds', on.status < 300 && on.json?.ok === true, on.text.slice(0, 160));
+    const file = JSON.parse(readFileSync(join(workspace, '.she', 'mcp.json'), 'utf8'));
+    check('[key] its entry was copied into .she/mcp.json',
+      file.mcpServers?.[CURSOR_SERVER]?.command === 'node', JSON.stringify(file.mcpServers?.[CURSOR_SERVER] ?? null));
+    await waitFor(async () => (await serverInfo(CURSOR_SERVER))?.injected === 2,
+      { what: 'cursor server start', timeoutMs: 20_000, stepMs: 400 }).catch(() => undefined);
+    const cur = await serverInfo(CURSOR_SERVER);
+    check('it is now a workspace server, enabled and connected',
+      cur?.source === 'she' && cur?.enabled !== false && cur?.injected === 2, JSON.stringify(cur));
+  }
+
+  // -- 4. A server that reports isError is a failed call, not a silent success --
+  {
+    stub.setWanted('mcp_call', { server: SERVER_NAME, tool: 'boom', arguments: {} });
     const sid = await newSession('mcp error');
-    const turn = await chat('调用 boom', sid);
-    const boom = toolResults(turn.events).find((e) => e.toolName === mcpToolName(SERVER_NAME, 'boom'));
-    check('MCP 的 isError 变成模型看得见的失败（不是静默成功）',
-      !boom || /^Error|isError|mcp-boom/i.test(String(boom.content ?? '')),
-      String(boom?.content ?? '(没有结果)').slice(0, 240));
+    const turn = await chat('call boom', sid);
+    const boom = toolResults(turn.events).find((e) => e.toolName === 'mcp_call');
+    check('MCP isError becomes a failure the model can see',
+      Boolean(boom) && /^Error|isError|mcp-boom/i.test(String(boom.content ?? '')),
+      String(boom?.content ?? '(no result)').slice(0, 240));
+    check('tool table still byte-identical after all the toggling', stub.lastTable() === tableBefore,
+      `before=${tableBefore.length} after=${stub.lastTable().length}`);
   }
 
   // ── 5. MCP 通道不出工作区（评测报告 9b）──
   /*
-   * 被观测到的事实：`C:\Users\Administrator\.playwright-mcp` 里 340 项 —— 截图与 console 日志，
+   * 被观测到的事实：`~/.playwright-mcp` 里 340 项 —— 截图与 console 日志，
    * 全是智能体用 playwright 通道做界面验证时留下的，而工作区在别处。SHE 的边界盖住了文件工具与
    * shell，但 MCP 跑在自己的进程里，`spawn` 没给 cwd 就继承了 SHE 的启动目录，于是产物落到边界外。
    *

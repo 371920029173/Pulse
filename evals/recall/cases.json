@@ -1,0 +1,474 @@
+{
+ "$comment": [
+  "Recall evaluation for kb_query: meaning-only paraphrases (zh/en) next to lexical controls, over the SYNTHETIC library in fixture.json.",
+  "The three 'live-*' cases are the queries a live agent sent: one meaning-only query that missed, two lexical ones that worked.",
+  "A result is a hit when its group path starts with one of expect.groups, or its title contains one of expect.titles.",
+  "Negative cases must produce no PRIMARY result; fallback hits are reported separately and never count as confident.",
+  "class 'heldout'：在调好 retrieval-lexicon 的 CONCEPTS 之后才写、未据其调参的意义型查询——衡量泛化，而非对本用例集的拟合。",
+  "floors：--check 的下限，留一格余量；改进后可上调，不许下调来掩盖回退。"
+ ],
+ "floors": {
+  "lexical.hit1": 1.0,
+  "meaning.hit1": 0.8,
+  "meaning.hit5": 0.9,
+  "heldout.hit5": 0.8
+ },
+ "cases": [
+  {
+   "id": "live-meaning-mistakes",
+   "class": "meaning",
+   "lang": "zh",
+   "query": "程序出错后如何避免重蹈覆辙 记录犯过的错",
+   "expect": {
+    "groups": [
+     "errors"
+    ]
+   }
+  },
+  {
+   "id": "live-lexical-errorbook",
+   "class": "lexical",
+   "lang": "mixed",
+   "query": "错题本 errorbook 失败记录",
+   "expect": {
+    "groups": [
+     "errors"
+    ]
+   }
+  },
+  {
+   "id": "live-lexical-lsp-timeout",
+   "class": "lexical",
+   "lang": "mixed",
+   "query": "为什么 lsp_diagnostics 一直超时",
+   "expect": {
+    "groups": [
+     "errors/lsp_diagnostics"
+    ],
+    "titles": [
+     "LSP 备注"
+    ]
+   }
+  },
+  {
+   "id": "zh-past-pitfalls",
+   "class": "meaning",
+   "lang": "zh",
+   "query": "之前踩过哪些坑",
+   "expect": {
+    "groups": [
+     "errors"
+    ]
+   }
+  },
+  {
+   "id": "zh-dont-repeat",
+   "class": "meaning",
+   "lang": "zh",
+   "query": "以前犯过什么错误，别再犯",
+   "expect": {
+    "groups": [
+     "errors"
+    ]
+   }
+  },
+  {
+   "id": "zh-tool-failure-history",
+   "class": "meaning",
+   "lang": "zh",
+   "query": "工具调用失败的历史",
+   "expect": {
+    "groups": [
+     "errors"
+    ]
+   }
+  },
+  {
+   "id": "zh-lessons-from-reflection",
+   "class": "meaning",
+   "lang": "zh",
+   "query": "自我反思得出的教训",
+   "expect": {
+    "groups": [
+     "errors/自省"
+    ]
+   }
+  },
+  {
+   "id": "en-avoid-repeat-mistakes",
+   "class": "meaning",
+   "lang": "en",
+   "query": "how do I avoid repeating past mistakes",
+   "expect": {
+    "groups": [
+     "errors"
+    ]
+   }
+  },
+  {
+   "id": "en-what-went-wrong",
+   "class": "meaning",
+   "lang": "en",
+   "query": "what went wrong last time",
+   "expect": {
+    "groups": [
+     "errors"
+    ]
+   }
+  },
+  {
+   "id": "en-lessons-learned",
+   "class": "meaning",
+   "lang": "en",
+   "query": "lessons learned from earlier failures",
+   "expect": {
+    "groups": [
+     "errors"
+    ]
+   }
+  },
+  {
+   "id": "en-self-reflection",
+   "class": "meaning",
+   "lang": "en",
+   "query": "self-reflection notes about my own habits",
+   "expect": {
+    "groups": [
+     "errors/自省"
+    ]
+   }
+  },
+  {
+   "id": "zh-file-missing",
+   "class": "meaning",
+   "lang": "zh",
+   "query": "读取的文件不存在",
+   "expect": {
+    "groups": [
+     "errors/fs_read"
+    ]
+   }
+  },
+  {
+   "id": "en-command-not-found",
+   "class": "meaning",
+   "lang": "en",
+   "query": "command is not recognized on this machine",
+   "expect": {
+    "groups": [
+     "errors/shell",
+     "project/demo-app/env"
+    ]
+   }
+  },
+  {
+   "id": "zh-access-denied",
+   "class": "meaning",
+   "lang": "zh",
+   "query": "访问工作区外面被拒绝了",
+   "expect": {
+    "groups": [
+     "errors/shell",
+     "errors/fs_write",
+     "project/demo-app/env"
+    ]
+   }
+  },
+  {
+   "id": "zh-which-shell",
+   "class": "meaning",
+   "lang": "zh",
+   "query": "这台机器的命令行是什么环境",
+   "expect": {
+    "groups": [
+     "project/demo-app/env"
+    ]
+   }
+  },
+  {
+   "id": "en-which-shell",
+   "class": "meaning",
+   "lang": "en",
+   "query": "what shell does this workspace use",
+   "expect": {
+    "groups": [
+     "project/demo-app/env"
+    ]
+   }
+  },
+  {
+   "id": "zh-garbled-text",
+   "class": "meaning",
+   "lang": "zh",
+   "query": "中文输出变成乱码怎么回事",
+   "expect": {
+    "groups": [
+     "project/demo-app/env"
+    ]
+   }
+  },
+  {
+   "id": "zh-strange-chars",
+   "class": "meaning",
+   "lang": "zh",
+   "query": "程序打印出来全是奇怪的字符",
+   "expect": {
+    "titles": [
+     "编码"
+    ]
+   }
+  },
+  {
+   "id": "zh-how-expensive",
+   "class": "meaning",
+   "lang": "zh",
+   "query": "跑一轮测试花了多少钱",
+   "expect": {
+    "titles": [
+     "成本基准"
+    ]
+   }
+  },
+  {
+   "id": "en-token-cost",
+   "class": "meaning",
+   "lang": "en",
+   "query": "how many tokens did the full test round consume",
+   "expect": {
+    "titles": [
+     "成本基准"
+    ]
+   }
+  },
+  {
+   "id": "zh-scoring-rubric",
+   "class": "meaning",
+   "lang": "zh",
+   "query": "打分的标准是怎么定的",
+   "expect": {
+    "titles": [
+     "评分口径",
+     "口径 v1"
+    ]
+   }
+  },
+  {
+   "id": "en-subagent-memory",
+   "class": "meaning",
+   "lang": "en",
+   "query": "does a sub agent get its own copy of the knowledge base",
+   "expect": {
+    "titles": [
+     "子代理的 KB"
+    ]
+   }
+  },
+  {
+   "id": "zh-plan-echo-why",
+   "class": "meaning",
+   "lang": "zh",
+   "query": "为什么更新计划时要把整份计划都返回",
+   "expect": {
+    "titles": [
+     "plan_update 全量回显"
+    ]
+   }
+  },
+  {
+   "id": "lex-counter",
+   "class": "lexical",
+   "lang": "zh",
+   "query": "迷你计数器",
+   "expect": {
+    "groups": [
+     "projects/mini-counter"
+    ]
+   }
+  },
+  {
+   "id": "lex-marker-xyz",
+   "class": "lexical",
+   "lang": "en",
+   "query": "MARKER-XYZ",
+   "expect": {
+    "titles": [
+     "MARKER-XYZ"
+    ]
+   }
+  },
+  {
+   "id": "lex-mcp-unregistered",
+   "class": "lexical",
+   "lang": "mixed",
+   "query": "MCP server 未注册到 agent",
+   "expect": {
+    "titles": [
+     "MCP server"
+    ]
+   }
+  },
+  {
+   "id": "lex-group-env",
+   "class": "lexical",
+   "lang": "en",
+   "query": "project/demo-app/env",
+   "expect": {
+    "groups": [
+     "project/demo-app/env"
+    ]
+   }
+  },
+  {
+   "id": "lex-id-hyphen",
+   "class": "lexical",
+   "lang": "mixed",
+   "query": "TKT-4821",
+   "expect": {
+    "titles": [
+     "TKT-4821"
+    ]
+   }
+  },
+  {
+   "id": "neg-unknown-id",
+   "class": "negative",
+   "lang": "mixed",
+   "query": "TKT-9999",
+   "expect": {}
+  },
+  {
+   "id": "neg-retired-id",
+   "class": "negative",
+   "lang": "mixed",
+   "query": "QX7-PROBE-DELTA",
+   "expect": {}
+  },
+  {
+   "id": "neg-quantum",
+   "class": "negative",
+   "lang": "zh",
+   "query": "薛定谔方程的数值解法",
+   "expect": {}
+  },
+  {
+   "id": "neg-recipe",
+   "class": "negative",
+   "lang": "en",
+   "query": "sourdough bread recipe hydration",
+   "expect": {}
+  },
+  {
+   "id": "heldout-zh-write-denied",
+   "class": "heldout",
+   "lang": "zh",
+   "query": "上次写文件被拒绝是怎么回事",
+   "expect": {
+    "groups": [
+     "errors/fs_write"
+    ]
+   }
+  },
+  {
+   "id": "heldout-en-repeated-shell",
+   "class": "heldout",
+   "lang": "en",
+   "query": "what did I learn from failing shell commands again and again",
+   "expect": {
+    "groups": [
+     "errors/自省",
+     "errors/shell"
+    ]
+   }
+  },
+  {
+   "id": "heldout-zh-terminal-garbled",
+   "class": "heldout",
+   "lang": "zh",
+   "query": "终端输出一堆看不懂的字符",
+   "expect": {
+    "titles": [
+     "编码"
+    ]
+   }
+  },
+  {
+   "id": "heldout-en-round-cost",
+   "class": "heldout",
+   "lang": "en",
+   "query": "how many tokens did the full test round burn",
+   "expect": {
+    "titles": [
+     "成本基准"
+    ]
+   }
+  },
+  {
+   "id": "heldout-zh-pitfalls-list",
+   "class": "heldout",
+   "lang": "zh",
+   "query": "之前都踩过哪些坑",
+   "expect": {
+    "groups": [
+     "errors"
+    ]
+   }
+  },
+  {
+   "id": "heldout-en-open-ports",
+   "class": "heldout",
+   "lang": "en",
+   "query": "which ports and tunnels does this machine expose",
+   "expect": {
+    "titles": [
+     "端口"
+    ]
+   }
+  },
+  {
+   "id": "heldout-zh-plan-update-fail",
+   "class": "heldout",
+   "lang": "zh",
+   "query": "更新计划的时候参数填错了",
+   "expect": {
+    "groups": [
+     "errors/plan_update"
+    ]
+   }
+  },
+  {
+   "id": "heldout-en-file-missing",
+   "class": "heldout",
+   "lang": "en",
+   "query": "the file I tried to open was missing",
+   "expect": {
+    "groups": [
+     "errors/fs_read"
+    ]
+   }
+  },
+  {
+   "id": "heldout-zh-child-kb",
+   "class": "heldout",
+   "lang": "zh",
+   "query": "子任务写的笔记会不会回到主库",
+   "expect": {
+    "titles": [
+     "子代理的 KB"
+    ]
+   }
+  },
+  {
+   "id": "heldout-en-grade",
+   "class": "heldout",
+   "lang": "en",
+   "query": "what grade did the last evaluation give",
+   "expect": {
+    "titles": [
+     "评分",
+     "评级",
+     "口径"
+    ]
+   }
+  }
+ ]
+}

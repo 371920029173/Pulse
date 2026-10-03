@@ -45,6 +45,7 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   'kb_ingest_status',
   'errorbook_lookup',
   'memo_list',
+  'skill_read',
   'plan_list',
   'plan_get',
   'schedule_list',

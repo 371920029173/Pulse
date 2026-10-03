@@ -26,7 +26,10 @@ import {
 } from './errorbook.js';
 import type { ErrorbookEngineLike, ErrorbookStoreLike, ErrorbookKind } from './errorbook.js';
 import { classifyToolResult, annotateToolResult, isToolFailure, type ToolResultVerdict } from './tool-result.js';
-import { budgetToolResult, fitToolResultsToBudget, TOOL_RESULT_CONTEXT_CHARS } from './tool-output.js';
+import {
+  budgetToolResultOnArrival, fitToolResultsToBudget, spillToolOutput, TOOL_RESULT_CONTEXT_CHARS,
+  type ArrivedToolResult,
+} from './tool-output.js';
 import { describeWaiting, type PendingWait } from './pending-wait.js';
 import {
   DEFAULT_BUDGET,
@@ -43,6 +46,7 @@ import { makeScheduleTools, executeScheduleTool } from './schedule-tools.js';
 import type { ScheduleBridge, WindowView } from './schedule-tools.js';
 import { createIngestTools } from './ingest-tools.js';
 import { createMemoTools } from './memo-tools.js';
+import { createSkillTools } from './skill-tools.js';
 import { createSubagentTools, type SubagentRunner } from './subagent-tools.js';
 import { repairApiMessages } from './protocol.js';
 import { RunTraceStore, type RunRecorder, type RunEvent } from './run-trace.js';
@@ -65,8 +69,10 @@ import {
   type GuardrailFinding,
   type GuardrailPolicy,
 } from './guardrail.js';
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { mkdirSync, writeFileSync, readFileSync, renameSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { sessionStateDir } from './session-state.js';
 
 /** Tool calls one plan step may take before the reflection check calls the plan over budget. */
 export const TOOL_CALLS_PER_PLAN_STEP = 8;
@@ -310,6 +316,13 @@ export class Agent {
    * slowly, and a stable prefix is worth more than a fresher sentence.
    */
   private calibrationFrozen = false;
+  /**
+   * The system message last written to this session's `system-message.json` (see
+   * `restoreFrozenSystemMessage`), so it is written when it changes and not on every request.
+   */
+  private persistedSystemMessage: string | null = null;
+  /** Memo for the `request` event's prefix hash; the inputs rarely change within an agent. */
+  private prefixHashMemo: { system: string; tools: ToolDefinition[]; count: number; hash: string } | null = null;
   /** Set once the fixed overhead has been logged for this agent. See `beginRun`. */
   private overheadNoticed = false;
   /** `provider/model`, recorded on the `start` event so a trace says which model was answering. */
@@ -511,6 +524,8 @@ export class Agent {
      */
     this.calibrationBlock = this.buildCalibrationBlock();
     this.calibrationFrozen = this.calibrationBlock !== '';
+    // An existing session keeps the exact system message it has been sending. See the method.
+    this.restoreFrozenSystemMessage();
 
     for (const def of this.sandboxTools.definitions) {
       // `shell` is where intentional failures (a test run to watch it fail) happen, so it advertises
@@ -640,6 +655,8 @@ export class Agent {
         };
       },
       calibration: () => this.confidenceMirror.report(),
+      // The real tool table, so a constraint naming a tool is matched against the tool called (read lazily).
+      toolNames: () => this.allToolDefs.map((d) => d.name),
     });
     for (const def of reflectionTools.definitions) {
       this.allToolDefs.push(def);
@@ -679,6 +696,22 @@ export class Agent {
       for (const def of memoTools.definitions) {
         this.allToolDefs.push(def);
         this.executors.set(def.name, (args) => memoTools.execute(def.name, args));
+      }
+    }
+
+    /*
+     * Skills are loaded on demand: the system prompt carries only an index (name + one-line purpose)
+     * and `skill_read` returns a recipe's full text. Same profile and same child filter as the
+     * prompt, so every name in the index is readable and a child never reads a step through a tool
+     * it does not have. Not registered when the profile has no skills at all.
+     */
+    {
+      const skillTools = createSkillTools(config.workspace.root, readSkillProfile(config.workspace.root), {
+        subagent: this.isSubagent,
+      });
+      for (const def of skillTools.definitions) {
+        this.allToolDefs.push(def);
+        this.executors.set(def.name, (args) => skillTools.execute(def.name, args));
       }
     }
 
@@ -972,6 +1005,21 @@ export class Agent {
           // One usage report per request, so this counter IS the number of model requests the run
           // made — the multiplier that turns "the prompt is big" into "the turn cost millions".
           this.runUsage.requests += 1;
+          /*
+           * One event per request, so a cache miss can be pinned to the request it happened on (the
+           * `end` totals cannot say whether the misses were the first request of a resumed session
+           * or spread over every round). `prefix` hashes what the cache key starts with.
+           */
+          this.runRecorder?.request({
+            tokens: {
+              prompt: chunk.usage.prompt_tokens || 0,
+              cache_hit: chunk.usage.cache_hit_tokens || 0,
+              cache_miss: chunk.usage.cache_miss_tokens || 0,
+              completion: chunk.usage.completion_tokens || 0,
+              ...(chunk.usage.reasoning_tokens ? { reasoning: chunk.usage.reasoning_tokens } : {}),
+            },
+            prefix: this.prefixHash(),
+          });
           turnPromptTokens += chunk.usage.prompt_tokens || 0;
           /*
            * Per-turn total, for the budget ceiling. `total_tokens` is preferred but not trusted
@@ -1134,6 +1182,8 @@ export class Agent {
         });
       }
 
+      /** The stuck-loop nudge, appended once every call of this message has its result. */
+      let stuckNudge: LLMMessage | null = null;
       for (let callIndex = 0; callIndex < response.tool_calls.length; callIndex++) {
         const tc = response.tool_calls[callIndex];
         const name = tc.function.name;
@@ -1478,7 +1528,7 @@ export class Agent {
          * conversation (see `docs/context-and-caching.md`).
          */
         const asText = typeof result === 'string' ? result : JSON.stringify(result ?? '');
-        const budgeted = budgetToolResult(asText, name);
+        const budgeted = this.budgetArrivedResult(asText, name, tc.id);
         if (budgeted.truncated) {
           /*
            * Logged, because a silent bound is indistinguishable from a bug: the reader of the log
@@ -1486,7 +1536,8 @@ export class Agent {
            */
           log.info(
             `工具结果超出上下文预算：${name} 返回 ${budgeted.fullChars} 字符，`
-            + `省略 ${budgeted.elidedChars}，进入上下文 ${budgeted.text.length}（上限 ${TOOL_RESULT_CONTEXT_CHARS}）`,
+            + `省略 ${budgeted.elidedChars}，进入上下文 ${budgeted.text.length}（上限 ${TOOL_RESULT_CONTEXT_CHARS}）`
+            + (budgeted.savedTo ? `，全文存到 ${budgeted.savedTo}` : ''),
           );
         }
 
@@ -1571,14 +1622,15 @@ export class Agent {
                       + '然后用**不同的方式**再试一次。如果确实无法继续，直接告诉用户你卡在哪、需要什么。\n'),
               };
               /*
-               * Added to the REQUEST only, never to `history`.
+               * Persisted to `history`, like the autopilot nudge, and appended after the loop.
                *
-               * History is persisted and rendered, so a message pushed there appears
-               * in the transcript — and with `role: 'user'` the user would see a line
-               * they never wrote. The nudge is meaningful only for the remaining
-               * rounds of this turn, so it belongs in the request alone.
+               * It used to go into the request only. Then the next turn's request (built from
+               * history) no longer contained it, so the cached prefix diverged at that point and
+               * everything after it was billed again. It also landed between this message's tool
+               * results whenever more calls followed, which is not a legal sequence. The UI renders
+               * `[系统提示]` lines as system notes, not as something the user wrote.
                */
-              messages.push(nudge);
+              stuckNudge = nudge;
               // Allow this call to be retried after the nudge, but remember that we
               // have already used our one chance.
               callSignatures.delete(signature);
@@ -1624,6 +1676,10 @@ export class Agent {
         } else {
           callSignatures.set(signature, { count: 1, result });
         }
+      }
+      if (stuckNudge) {
+        this.history.push(stuckNudge);
+        messages.push(stuckNudge);
       }
     }
 
@@ -1748,7 +1804,26 @@ export class Agent {
    * is sent. Appending leaves the prefix unchanged, which is what prompt
    * caching needs.
    */
+  /**
+   * Bound a tool result as it arrives — the one moment it may be cut (see `budgetToolResultOnArrival`).
+   *
+   * A command log that is elided has its full text written under this session's state directory, so
+   * the note can name a file `fs_read` reads back. A write failure is logged and the note says the
+   * output was not saved; it never fails the tool call.
+   */
+  private budgetArrivedResult(text: string, name: string, callId: string): ArrivedToolResult {
+    return budgetToolResultOnArrival(text, name, (full) => {
+      try {
+        return spillToolOutput(this.config.workspace.root, this.sessionId, callId, full);
+      } catch (err) {
+        log.warn(`工具输出全文没能存盘（${name}）：${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
+    });
+  }
+
   private messagesForRequest(): { messages: LLMMessage[] } {
+    this.persistFrozenSystemMessage();
     return {
       messages: [
         { role: 'system', content: this.systemMessageContent() },
@@ -1779,6 +1854,86 @@ export class Agent {
     return this.calibrationBlock
       ? `${this.systemPrompt}\n\n${this.calibrationBlock}`
       : this.systemPrompt;
+  }
+
+  /** Where this session's frozen system message lives, or null without a (valid) session. */
+  private frozenSystemFile(): string | null {
+    if (!this.sessionId) return null;
+    try {
+      return join(sessionStateDir(this.config.workspace.root, this.sessionId), 'system-message.json');
+    } catch {
+      return null;
+    }
+  }
+
+  /** What the prompt was built for: a record made under other settings is not reused. */
+  private frozenSystemKey(): string {
+    return JSON.stringify([resolve(this.config.workspace.root), this.config.automationMode !== false, this.kbReadOnly, this.isSubagent]);
+  }
+
+  /**
+   * Reuse the system message this session has already been sending, byte for byte.
+   *
+   * The system message is the head of the cache prefix, and an agent is rebuilt far more often than
+   * a session changes: settings saves, model switches, MCP and plugin reloads, a server restart.
+   * Each rebuild re-read the rules and skills and recomputed the calibration block, so a resumed
+   * session could send a different first message and pay for its whole history again. The first
+   * message a session sends is recorded (`persistFrozenSystemMessage`) and every later agent for the
+   * same session starts from it.
+   *
+   * A new session has no record and gets exactly what it got before. A record made under another
+   * mode (automation, read-only KB, subagent) is ignored, because there the prompt really differs.
+   * The cost: an edit to project rules or skills reaches new sessions, not existing ones. An empty
+   * recorded calibration block stays unfrozen, so the one "no evidence -> evidence" change in
+   * `beginRun` can still happen, once.
+   */
+  private restoreFrozenSystemMessage(): void {
+    const file = this.frozenSystemFile();
+    if (!file) return;
+    let rec: { v?: unknown; key?: unknown; prompt?: unknown; calibration?: unknown } | null;
+    try {
+      rec = JSON.parse(readFileSync(file, 'utf8'));
+    } catch {
+      return;
+    }
+    if (!rec || rec.v !== 1 || rec.key !== this.frozenSystemKey()) return;
+    if (typeof rec.prompt !== 'string' || !rec.prompt || typeof rec.calibration !== 'string') return;
+    this.systemPrompt = rec.prompt;
+    this.calibrationBlock = rec.calibration;
+    this.calibrationFrozen = rec.calibration !== '';
+    this.persistedSystemMessage = this.systemMessageContent();
+  }
+
+  /** Record the system message about to be sent, when it differs from the recorded one. */
+  private persistFrozenSystemMessage(): void {
+    const file = this.frozenSystemFile();
+    if (!file) return;
+    const content = this.systemMessageContent();
+    if (this.persistedSystemMessage === content) return;
+    try {
+      mkdirSync(dirname(file), { recursive: true });
+      const tmp = `${file}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify({
+        v: 1,
+        key: this.frozenSystemKey(),
+        prompt: this.systemPrompt,
+        calibration: this.calibrationBlock,
+      }), 'utf8');
+      renameSync(tmp, file);
+      this.persistedSystemMessage = content;
+    } catch (err) {
+      log.warn(`system message not recorded for this session: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** First 12 hex of sha256(system message + tool table): equal values, identical prompt head. */
+  private prefixHash(): string {
+    const system = this.systemMessageContent();
+    const m = this.prefixHashMemo;
+    if (m && m.system === system && m.tools === this.allToolDefs && m.count === this.allToolDefs.length) return m.hash;
+    const hash = createHash('sha256').update(system).update('\n').update(JSON.stringify(this.allToolDefs)).digest('hex').slice(0, 12);
+    this.prefixHashMemo = { system, tools: this.allToolDefs, count: this.allToolDefs.length, hash };
+    return hash;
   }
 
   async chat(
@@ -2090,6 +2245,7 @@ export class Agent {
         constraints: (preflight?.inferred_constraints ?? []).map((text) => ({ text, hardness: 'soft' as const })),
         actions: this.currentRunActions(),
         stepsUsed: this.runEvents.filter((e) => e.kind === 'tool').length,
+        toolNames: this.allToolDefs.map((d) => d.name),
       });
 
       const failures = this.runEvents
@@ -2203,6 +2359,7 @@ export class Agent {
         total_tokens: this.runUsage.total_tokens,
         cache_hit_tokens: this.runUsage.cache_hit_tokens,
         cache_miss_tokens: this.runUsage.cache_miss_tokens,
+        reasoning_tokens: this.runUsage.reasoning_tokens,
       },
     });
     this.runRecorder = null;
@@ -2578,7 +2735,7 @@ export class Agent {
       // Same context budget as the main loop. Confirmed commands are the ones most likely to be
       // long (a build, a full check run is exactly what a person approves), so this path needs the
       // bound at least as much as the unconfirmed one.
-      content: budgetToolResult(result, pending.name).text,
+      content: this.budgetArrivedResult(result, pending.name, pending.toolCallId).text,
       tool_call_id: pending.toolCallId,
     };
     let replaced = false;

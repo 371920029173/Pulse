@@ -326,10 +326,17 @@ registerDictionary('en', {
   '我': 'Me',
 
   // ── MCP ──
-  '已注入 {n}': 'Injected {n}',
-  '实际注册给智能体的工具数': 'Tools actually registered to the agent',
-  '⚠ 探测到 {probe} 个工具，但只有 {injected} 个注册给了智能体':
-    '⚠ Probe found {probe} tools, but only {injected} are registered to the agent',
+  'mcp_call 可调用 {n}': 'Callable via mcp_call: {n}',
+  '智能体通过 mcp_call 现在能调用的工具数': 'Tools the agent can call through mcp_call right now',
+  '⚠ 探测到 {probe} 个工具，但 mcp_call 现在只能调用 {injected} 个':
+    '⚠ Probe found {probe} tools, but mcp_call can currently reach only {injected}',
+  '来自 Cursor 的全局配置，默认不启动。启用会把它复制进本工作区的 .she/mcp.json。':
+    'From the global Cursor config; not started by default. Enabling copies it into this workspace\'s .she/mcp.json.',
+  '复制到本工作区的 .she/mcp.json 并启动': 'Copy into this workspace\'s .she/mcp.json and start it',
+  '检测到重复调用，已提示模型换个思路再试一次': 'Repeated identical calls detected; the model was told to try a different approach',
+  '请求': 'Request',
+  '输入 {prompt} · 命中 {hit} · 未命中 {miss} · 输出 {out}': 'in {prompt} · hit {hit} · miss {miss} · out {out}',
+  '推理 {n}': 'reasoning {n}',
   '允许根已收敛到当前工作区，原本指向：{roots}':
     'Allowed roots confined to the current workspace; originally: {roots}',
   '产物目录已随工作区固定：{dir}': 'Output directory pinned to the workspace: {dir}',

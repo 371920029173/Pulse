@@ -77,12 +77,28 @@ console.log('=== POSIX 文件完整性（在 Windows 上就能查）===');
       if (bytes[i] === 0x0a && bytes[i - 1] === 0x0d) { crlf.push(relative(ROOT, f).replace(/\\/g, '/')); break; }
     }
   }
+  /*
+   * The remedy depends on whether the offending file also has uncommitted CONTENT changes.
+   * `git checkout -- <file>` takes the index as the source of truth, so on a file with unstaged
+   * edits it rewrites the endings AND silently drops those edits — that is how the Dockerfile's
+   * port fix (`4577` -> `5577`, the very change this gate was reporting) was lost once, by following
+   * this hint literally. The lossless pair is `git add --renormalize -- <file>` (normalises the
+   * working copy's content into the index per .gitattributes, keeping the edits) and then
+   * `git checkout -- <file>` (worktree rewritten from that index).
+   */
+  const dirty = new Set(
+    execFileSync('git', ['diff', '--name-only'], { cwd: ROOT, encoding: 'utf8' })
+      .split('\n').map((s) => s.trim()).filter(Boolean),
+  );
+  const unsafe = crlf.filter((f) => dirty.has(f));
   check(
     `POSIX 文件在工作副本里是 LF（查了 ${posixFiles.length} 个）`,
     crlf.length === 0,
     `${crlf.join(', ')}\n        git status 看不出来（text eol=lf 会先把工作副本换算成 LF 再比较），但 POSIX shell 执行的是工作副本。`
-    + '\n        修法（确定性的，靠 .gitattributes 而不是手工改行尾）：git rm --cached 后再 checkout，'
-    + `或直接 ${crlf.length === 1 ? 'git checkout -- ' + crlf[0] : 'git checkout -- ' + crlf.join(' ')}。`
+    + '\n        修法（不丢未提交改动）：先 git add --renormalize -- <file>，再 git checkout -- <file>。'
+    + (unsafe.length
+      ? `\n        ⚠ ${unsafe.join(', ')} 还有未提交的改动：直接 git checkout -- 会连改动一起丢掉（它认的是索引，不是磁盘）。`
+      : '')
     + '\n        成因通常不是 git：是某个程序（编辑器、脚本、评测会话里的写文件调用）直接写了工作副本，'
     + '绕过了 .gitattributes —— 所以改完要找出是谁写的，否则下次还会红。',
   );

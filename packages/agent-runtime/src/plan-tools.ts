@@ -1107,14 +1107,36 @@ export function createPlanTools(
   reg(
     {
       name: 'plan_list',
-      description: 'List every plan in this workspace, including plans opened in other conversations. Check this at the start of long work so a task is not forgotten when the chat changes.',
-      parameters: { type: 'object', properties: {} },
+      description: 'List the current plan in full, plus one line naming the other open plans; pass `all: true` to print every plan.',
+      parameters: {
+        type: 'object',
+        properties: {
+          all: { type: 'boolean', description: 'Print every plan in this workspace in full (optional; default false).' },
+        },
+      },
     },
-    async () => {
+    async (a) => {
       const all = plans.list();
       if (!all.length) return 'No plans yet.';
-      // `plan_list` is the place the full notes are printed, so it takes no filter.
-      return all.map((p) => renderPlan(p)).join('\n\n');
+      // `all: true` prints every plan in full, the old default (the notes are printed in full either way).
+      if (a?.all === true || a?.all === 'true') return all.map((p) => renderPlan(p)).join('\n\n');
+      /*
+       * Default: only the CURRENT plan — the open one, or the most recently touched when none is open
+       * — plus one line about the rest. A tool result is re-sent on every later request of the
+       * session, and a workspace accumulates finished plans; printing all of them in full at the start
+       * of every piece of work was paying for history nobody asked about.
+       *
+       * The one line still NAMES every other open plan: the prompt's rule is that a plan left open by
+       * another chat must not be silently ignored, and a count alone would hide which one it is.
+       */
+      const current = plans.active() ?? all[0];
+      const others = all.filter((p) => p.id !== current.id);
+      if (!others.length) return renderPlan(current);
+      const open = others.filter((p) => p.status === 'open');
+      const openNames = open.map((p) => `${p.id}「${p.title}」${planProgress(p).replace(/^进度 /, '')}`).join('、');
+      return `${renderPlan(current)}\n\n`
+        + `（另有 ${others.length} 个计划没有展开：${open.length ? `${open.length} 个仍在进行 ${openNames}，` : ''}`
+        + `${others.length - open.length} 个已收口。plan_list all=true 列出全部，plan_get plan_id=… 看其中一个。）`;
     },
   );
 

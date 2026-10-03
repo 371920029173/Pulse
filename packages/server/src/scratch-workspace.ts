@@ -6,7 +6,7 @@ import { basename, resolve, sep } from 'node:path';
  *
  * Windows hands out the 8.3 short form (`C:\Users\ADMINI~1\…`) from `os.tmpdir()` while the same
  * directory may be spelled long elsewhere, so a raw `===` would call one directory two. Case is
- * folded for the same reason: on Windows `D:\AGI` and `d:\agi` are one directory.
+ * folded for the same reason: on Windows `D:\Work` and `d:\work` are one directory.
  */
 function pathKey(p: string): string {
   const abs = resolve(p);
@@ -20,7 +20,7 @@ function pathKey(p: string): string {
  * relaunch comes back to the project you were in. That is right for a project and wrong for a
  * scratch directory: point the app at one once — by clicking a leftover test folder in the picker,
  * or because a suite switched it — and every later launch starts there, with nothing on screen
- * saying so. Observed 2026-10-01: the app came back up mounted on `D:\AGI\_she-live-test_2` (two
+ * saying so. Observed 2026-10-01: the app came back up mounted on `<projects-root>\_she-live-test_2` (two
  * throwaway chats) while the user's own project sat on disk, its conversation intact and
  * unreachable from anywhere in the UI.
  *

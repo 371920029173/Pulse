@@ -37,6 +37,12 @@
  *     user), so it can write outside `/ws` within Linux. The threat being addressed is the user's
  *     WINDOWS data; that is what the boundary covers.
  *   - The network. Nothing here restricts egress, so a command can still fetch and exfiltrate.
+ *     DNS has to be carried over on purpose: in WSL `/etc/resolv.conf` is normally a link to
+ *     `/mnt/wsl/resolv.conf`, so covering `/mnt` left it dangling and every name lookup failed
+ *     (the agent concluded "no network", 2026-10-03). The script reads it before masking and writes
+ *     the same content back at the same path afterwards, inside the private tmpfs. That leaves
+ *     exactly one entry under `/mnt` (`wsl/`, holding only `resolv.conf`): no Windows drive is
+ *     reachable, and the gate asserts THAT rather than "the directory is empty".
  *   - Anything the command does through a Windows binary it can still reach: nothing under /mnt is
  *     visible, but WSL interop can start Windows executables from the translated PATH entries that
  *     survive masking. A Windows process started that way is subject to the host's rules, not this
@@ -64,7 +70,7 @@ export type IsolationMode = 'off' | 'auto' | 'wsl';
 export interface IsolationPlan {
   mode: 'wsl';
   distro: string;
-  /** The workspace as WSL sees it, e.g. `/mnt/d/AGI/she-agent-cloud`. */
+  /** The workspace as WSL sees it, e.g. `/mnt/d/work/my-project`. */
   workspaceLinux: string;
   /** What to say in the transcript. */
   detail: string;
@@ -126,6 +132,26 @@ export function workspaceRelative(workspaceLinux: string, targetLinux: string): 
  * run" instead of "a machine-wide mount is covered", so the next person to edit this cannot
  * reintroduce it silently.
  */
+/**
+ * Capabilities removed from the bounding AND inheritable sets before the user's command runs.
+ *
+ * The shell inside the boundary is root, and the masking is only mounts. Measured on WSL
+ * (2026-10-03): with every capability kept, `umount /mnt` simply lifted the tmpfs and the whole
+ * D: drive was back, PID namespace or not. Root without CAP_SYS_ADMIN cannot mount or unmount, so
+ * the boundary it was given is the one it keeps. The rest of the list closes the other known exits:
+ * `dac_read_search` (open_by_handle_at, the classic container escape), `sys_ptrace`, `sys_module`,
+ * `sys_rawio`, `mknod` (a raw block device for the Windows disk), `sys_chroot`, `sys_boot`.
+ *
+ * Both sets matter: for uid 0, execve grants (inheritable ∩ file-inheritable) ∪ (bounding ∩ all),
+ * so a cap left in the inheritable set would come straight back on the next exec. `--no-new-privs`
+ * stops a setuid binary from being the way back.
+ */
+export const DROPPED_CAPS = [
+  'sys_admin', 'dac_read_search', 'sys_ptrace', 'sys_module', 'sys_rawio', 'mknod', 'sys_chroot', 'sys_boot',
+] as const;
+
+const CAP_DROP_LIST = DROPPED_CAPS.map((c) => `-${c}`).join(',');
+
 export function buildConfinedScript(opts: {
   workspaceLinux: string;
   cwdRel: string;
@@ -155,11 +181,23 @@ export function buildConfinedScript(opts: {
     'mount --bind "$WS" /ws',
     // One operation hides every Windows drive. Hiding them one by one would leave a window where
     // an unlisted mount is still reachable, and would fail open if a new one appeared.
+    // Keep DNS working. `/etc/resolv.conf` usually points into `/mnt/wsl`, which the tmpfs below
+    // would hide. Read it first, put the same bytes back at the same path once /mnt is covered. The
+    // tmpfs is private to this namespace, so the write never reaches the real /mnt.
+    'RESOLV_T=$(readlink -f /etc/resolv.conf 2>/dev/null || true)',
+    'RESOLV_C=$(cat /etc/resolv.conf 2>/dev/null || true)',
     'mount -t tmpfs none /mnt',
+    'case "$RESOLV_T" in /mnt/*) if [ -n "$RESOLV_C" ]; then mkdir -p "$(dirname "$RESOLV_T")" && printf \'%s\\n\' "$RESOLV_C" > "$RESOLV_T"; fi ;; esac',
     'cd "/ws${REL}"',
+    // Without setpriv the capabilities cannot be dropped, and with them kept `umount /mnt` undoes
+    // the masking. Refuse rather than run unconfined while claiming otherwise.
+    'command -v setpriv >/dev/null 2>&1 || {',
+    `  printf '%s\\n' 'sandbox: 发行版里没有 setpriv（util-linux），无法去掉 root 的挂载权限，拒绝运行' >&2`,
+    `  exit ${NOT_IN_NAMESPACE_EXIT}`,
+    '}',
     // `exec` so the command's exit code reaches the caller unchanged; `-l` because tools resolve
     // through the login PATH (/usr/bin/node included), which the masking does not disturb.
-    'exec bash -lc "$CMD"',
+    `exec setpriv --no-new-privs --inh-caps=${CAP_DROP_LIST} --bounding-set=${CAP_DROP_LIST} -- bash -lc "$CMD"`,
   ].join('\n');
 }
 
@@ -171,7 +209,15 @@ export function buildConfinedScript(opts: {
  *   1. base64 for the inner script — so neither the command nor a path with spaces can be re-parsed
  *      by anything between here and bash;
  *   2. record the CURRENT mount namespace in `SHE_NS0`, which the inner script checks itself against;
- *   3. `unshare -m --propagation private bash`, reading the decoded script from stdin.
+ *   3. `unshare -m --propagation private -p -f --mount-proc --kill-child bash`, reading the decoded
+ *      script from stdin.
+ *
+ * The PID namespace is not optional. With a mount namespace alone, `/proc/<pid>/root` of any process
+ * OUTSIDE it (PID 1 = systemd, and every other one) is that process's root, where drvfs is still
+ * mounted: `ls /proc/1/root/mnt/d` listed the whole D: drive (R8, reproduced 2026-10-03 for all 86
+ * outer pids). `--mount-proc` gives the namespace its own /proc, in which those pids do not exist
+ * and PID 1 is the confined shell itself. `--kill-child` ties the namespace's life to the wrapper,
+ * so killing the job from Windows takes the whole tree with it.
  *
  * `--propagation private` matters: without it, mounts created inside are propagated BACK to the
  * parent, which is how a containment step would end up changing the machine it was meant to isolate.
@@ -182,7 +228,7 @@ export function buildWslArgv(distro: string, script: string): string[] {
     'set -eu',
     'SHE_NS0=$(readlink /proc/self/ns/mnt 2>/dev/null || printf unset)',
     'export SHE_NS0',
-    `printf %s '${encoded}' | base64 -d | unshare -m --propagation private bash`,
+    `printf %s '${encoded}' | base64 -d | unshare -m --propagation private -p -f --mount-proc --kill-child bash`,
   ].join('\n');
   const argv = ['-e', 'bash', '-c', outer];
   return distro ? ['-d', distro, ...argv] : argv;
@@ -227,8 +273,8 @@ export const ISOLATION_PROBE = [
  * Kept next to the mechanism so that the claim and the mechanism cannot drift apart.
  */
 export function isolationDetail(distro: string): string {
-  return `已在 WSL(${distro}) 的私有挂载命名空间里运行：工作区是唯一可见的 Windows 路径（其余盘符已被 tmpfs 遮盖）。`
-    + '不覆盖的部分：发行版内部的文件系统（Linux 侧仍是 root）、网络出站，以及经 WSL 互操作启动的 Windows 程序。';
+  return `已在 WSL(${distro}) 的私有挂载和进程命名空间里运行：在这个命名空间里，工作区是唯一可见的 Windows 路径（其余盘符已被 tmpfs 遮盖，外层进程的 /proc/<pid>/root 不可见，root 的挂载/卸载权限已去掉）。`
+    + '不覆盖的部分：发行版内部的文件系统（Linux 侧仍是 root，可以改发行版自己的文件）、网络出站，以及经 WSL 互操作启动的 Windows 程序。';
 }
 
 /**

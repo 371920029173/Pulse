@@ -35,7 +35,7 @@ after(async () => {
  * The open-time publish used to be cached against '' instead of the opened text, so
  * `diagnosticsFor` with unchanged text missed the cache and waited 15s for a re-publish that
  * typescript-language-server never sends. Three identical timeouts then tripped the stuck-loop
- * guard and ended a live turn (seen in _she-live-test on 2026-09-25).
+ * guard and ended a live turn (seen in _she-scratch on 2026-09-25).
  */
 describe('lsp: diagnostics after a structural query', () => {
   const spec = KNOWN_SERVERS.find((s) => s.id === 'typescript');

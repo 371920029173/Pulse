@@ -23,7 +23,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  toWslPath, workspaceRelative, buildConfinedScript, buildWslArgv, planIsolation,
+  toWslPath, workspaceRelative, buildConfinedScript, buildWslArgv, planIsolation, DROPPED_CAPS,
   isolationInEffect, resetIsolationProbeCache, NOT_IN_NAMESPACE_EXIT,
 } from '../isolation.js';
 
@@ -134,7 +134,53 @@ describe('沙箱脚本：先证明自己在私有命名空间里，再动挂载'
 
   it('先 cd 再 exec，退出码原样传出', () => {
     assert.match(script, /cd "\/ws\$\{REL\}"/);
-    assert.match(script, /exec bash -lc "\$CMD"/);
+    assert.match(script, /exec setpriv .* -- bash -lc "\$CMD"$/m);
+  });
+
+  it('【关键】执行命令前去掉 root 的挂载权限 —— 否则 umount /mnt 就能撤掉遮盖', () => {
+    const line = script.split('\n').find((l) => l.startsWith('exec setpriv'));
+    assert.ok(line, '必须经 setpriv 执行');
+    assert.match(line, /--no-new-privs/);
+    for (const cap of ['sys_admin', 'dac_read_search', 'sys_ptrace', 'mknod']) {
+      assert.match(line, new RegExp(`--inh-caps=[^ ]*-${cap}`), `inheritable 集要去掉 ${cap}`);
+      assert.match(line, new RegExp(`--bounding-set=[^ ]*-${cap}`), `bounding 集要去掉 ${cap}`);
+    }
+    assert.equal(new Set(DROPPED_CAPS).size, DROPPED_CAPS.length);
+    assert.ok(
+      script.indexOf('mount -t tmpfs none /mnt') < script.indexOf('exec setpriv'),
+      '遮盖必须在去权限之前做完（去掉以后就挂不了了）',
+    );
+  });
+
+  it('【关键】遮盖 /mnt 后 DNS 照常可用：先读 resolv.conf，盖住后写回原路径', () => {
+    // WSL links /etc/resolv.conf to /mnt/wsl/resolv.conf; masking /mnt without this broke every lookup.
+    const read = script.indexOf('RESOLV_C=$(cat /etc/resolv.conf');
+    const mask = script.indexOf('mount -t tmpfs none /mnt');
+    const back = script.indexOf('> "$RESOLV_T"');
+    assert.ok(read >= 0 && back >= 0, '必须保存并写回 resolv.conf');
+    assert.ok(read < mask, '必须在遮盖之前读');
+    assert.ok(mask < back, '必须在遮盖之后写回');
+    assert.ok(back < script.indexOf('exec setpriv'), '写回必须在执行命令之前');
+    // Only a target under /mnt is rewritten; a plain /etc/resolv.conf is left alone.
+    assert.match(script, /case "\$RESOLV_T" in \/mnt\/\*\)/);
+    /*
+     * Masking replaced /mnt wholesale, so the write-back has to recreate the DIRECTORY as well, and
+     * it has to carry the SAVED bytes. A stub pointing at some other resolver would silently change
+     * what the distro resolves against while still looking like the lookup "works".
+     */
+    assert.ok(
+      script.includes('mkdir -p "$(dirname "$RESOLV_T")"'),
+      '遮盖把 /mnt 换掉了，写回时必须把目录也建回来',
+    );
+    assert.ok(
+      script.includes('"$RESOLV_C" > "$RESOLV_T"'),
+      '写回的必须是遮盖前读到的内容，不能是别的解析器',
+    );
+  });
+
+  it('没有 setpriv 时拒绝运行，而不是带着全部权限照跑', () => {
+    assert.match(script, /command -v setpriv/);
+    assert.match(script, /无法去掉 root 的挂载权限，拒绝运行/);
   });
 });
 
@@ -145,6 +191,12 @@ describe('外层 argv：进入私有命名空间后才跑脚本', () => {
     const joined = argv.join(' ');
     assert.match(joined, /unshare -m/);
     assert.match(joined, /--propagation private/);
+  });
+
+  it('【关键】PID 命名空间一起隔离 —— 否则 /proc/1/root/mnt 直通宿主', () => {
+    const joined = argv.join(' ');
+    assert.match(joined, /unshare [^|]*-p -f --mount-proc/);
+    assert.match(joined, /--kill-child/);
   });
 
   it('【关键】先记录当前命名空间，再 unshare —— 供内层自检比对', () => {

@@ -3,7 +3,7 @@
  *
  * 工具层的只读开关只挡得住 `kb_upsert` / `kb_link`：错题本和收尾自评是**直接写引擎**的，
  * 不经过任何工具，所以只读开关对它们无效。实测里这就是真正的污染源 —— 一个只读子级
- * （`sess_8d64da11747c`，父级 `sess_150beeaa9993`）在父级的 kb.sqlite 里留下了三条记录：
+ * （`sess_1a2b3c4d5e6f`，父级 `sess_6f5e4d3c2b1a`）在父级的 kb.sqlite 里留下了三条记录：
  *
  *   - `plan_list · unavailable`（它照着提示词去调一个自己没有的工具）
  *   - `preflight_record · unavailable`（同上）

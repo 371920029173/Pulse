@@ -1,5 +1,5 @@
 import type { ToolDefinition, EdgeKind, KBQueryResult, MemoryNode } from '@she/shared';
-import type { GroupKBEngine, KBMemoryPatch, KBReviseResult, KBRetirement } from '@she/kb';
+import type { GroupKBEngine, KBMemoryPatch, KBReviseResult, KBRetirement, KBQueryResultWithFallback } from '@she/kb';
 import { KB_RETIRED_KEY, KB_VERSION_KEY } from '@she/kb';
 
 export interface KBToolSet {
@@ -46,6 +46,37 @@ function versionOf(node: MemoryNode): number {
 function preview(text: string): string {
   const one = text.replace(/\s+/g, ' ').trim();
   return one.length > KB_PREVIEW_CHARS ? `${one.slice(0, KB_PREVIEW_CHARS)}…` : one;
+}
+
+/**
+ * The engine's fallback pass (`result.fallback`), rendered APART from the real hits and labelled.
+ *
+ * The engine only fills it when its primary pass was weak — nothing found, or a best hit that covers
+ * little of the query — and finds it by character n-gram overlap, so these are leads, not answers.
+ * Shown after the real hits (or instead of the bare "No results"), at most three, with a shorter
+ * snippet than a real hit: the reply has to stay cheap in exactly the case where it is least sure,
+ * and has to say how to ask better, or the agent quotes a coincidence as a memory.
+ */
+const KB_FALLBACK_LIMIT = 3;
+const KB_FALLBACK_PREVIEW_CHARS = 80;
+
+function renderFallback(result: KBQueryResultWithFallback): string[] {
+  const fb = result.fallback;
+  if (!fb?.nodes.length) return [];
+  const shown = Math.min(KB_FALLBACK_LIMIT, fb.nodes.length);
+  const lines = [
+    `「兜底匹配」${fb.reason}；以下 ${shown} 条只是字面片段相近，未必相关。换更具体的词（工具名、组名、报错原文）再查会更准：`,
+  ];
+  for (let i = 0; i < shown; i++) {
+    const node = fb.nodes[i];
+    const trace = fb.traces[i];
+    lines.push(`[兜底 ${i + 1}] ${node.title} (${node.kind})`);
+    if (trace?.groupPath.length) lines.push(`    group: ${trace.groupPath.join(' | ')}`);
+    const one = node.content.replace(/\s+/g, ' ').trim();
+    lines.push(`    ${one.length > KB_FALLBACK_PREVIEW_CHARS ? `${one.slice(0, KB_FALLBACK_PREVIEW_CHARS)}…` : one}`);
+    lines.push(`    [Node: ${node.id}]`);
+  }
+  return lines;
 }
 
 /** "What changed" in one line, so an update is never reported as a bare "ok". */
@@ -149,8 +180,11 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
       // Surface the structured result so the UI trace panel can render it.
       opts?.onQueryResult?.(result);
 
+      const fallbackLines = renderFallback(result);
       if (result.nodes.length === 0) {
-        return 'No results found in Group KB.';
+        return fallbackLines.length
+          ? ['No results found in Group KB.', '', ...fallbackLines].join('\n')
+          : 'No results found in Group KB.';
       }
 
       const rawLimit = Number(args.limit);
@@ -206,6 +240,7 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
           `（${clipped} 条正文超过 ${KB_PREVIEW_CHARS} 字，上面是摘要；要原文用 kb_get(id) 或 full=true）`,
         );
       }
+      if (fallbackLines.length) lines.push('', ...fallbackLines);
       return lines.join('\n');
     },
   );

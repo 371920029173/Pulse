@@ -14,7 +14,7 @@ features, patch for fixes.
 
   Not moved: `reports/` (`report_write` deliverables, judged differently from reasoning), `kb.sqlite` (the workspace's long-term memory by design) and `audit.log`.
 
-- **MCP tools are now actually registered to the agent.** Previously MCP servers were only probed (started, tools counted, stopped), so the panel showed "reachable, N tools" while the agent had none of them. A new bridge (`packages/server/src/mcp-bridge.ts`) keeps one stdio session per enabled server and exposes its tools as `mcp_<server>_<tool>` (sorted, stable between turns, rebuilt only when the MCP config changes). MCP servers run outside the sandbox, so each call needs the same user confirmation as a dangerous built-in unless allow-all is on. The MCP panel shows how many tools were injected and warns when that differs from the probe.
+- **MCP tools are reachable by the agent, lazily, and Cursor servers are opt-in.** Previously MCP servers were only probed (started, tools counted, stopped), so the panel showed "reachable, N tools" while the agent had none of them. A bridge (`packages/server/src/mcp-bridge.ts`) now keeps one stdio session per enabled server. The agent does not get one definition per MCP tool (that was 52 tools / ~36.6k chars on every request for ~5% of calls); it gets two static tools: `mcp_list` (servers, status, one-line tool descriptions; input schemas when a server or tool is named) and `mcp_call` (server, tool, arguments). Their definitions never change, so servers starting, failing to connect or being toggled no longer change the tool table, and MCP config changes no longer rebuild agents (both used to break the prompt cache of open sessions). MCP servers run outside the sandbox, so `mcp_call` needs the same user confirmation as a dangerous built-in (ticket bound to server + tool + arguments) unless allow-all is on; `mcp_list` is read-only. Servers found in Cursor's global `mcp.json` are listed but not started; enabling one in the panel copies its entry into the workspace `.she/mcp.json`. `.she/mcp.json` servers keep their behaviour (on unless `disabled: true`). The panel's count now means "callable via mcp_call". The bridge is shut down on SIGINT/SIGTERM/exit, records spawned server PIDs under `.she/mcp-pids/` and, on the next start, reaps children of a dead server process only when their command line still matches the recorded server; the panel probe no longer leaks the real server process on Windows (it killed only the `cmd.exe` wrapper).
 
 ## 0.3.0
 
@@ -991,7 +991,7 @@ check after a fix reported errors that no longer existed. Results are now cached
 against the file content they describe.
 
 **`SHE_KB_PATH` default pointed at the author's machine.** A new install defaulted its
-knowledge base to `D:/AGI/she-kb/kb.sqlite`, which does not exist on anyone else's
+knowledge base to `<author-dir>/she-kb/kb.sqlite`, which does not exist on anyone else's
 computer. The default is now derived from the workspace.
 
 **Version drift.** The version was hardcoded in three places, so bumping
@@ -1075,7 +1075,7 @@ to cover the child case had been asserting immediately after the spawn, before a
 **A read-only subtask filled the PARENT's error book.** The `kbReadOnly` guard covered the tools —
 `kb_upsert` and `kb_link` refused — but the error book and the end-of-turn self-review write straight
 through the KB engine, so they went around the refusal. Measured on a live run: a delegated child
-(`sess_8d64da11747c`) filed three permanent entries into the parent's `kb.sqlite` — `plan_list ·
+(`sess_1a2b3c4d5e6f`) filed three permanent entries into the parent's `kb.sqlite` — `plan_list ·
 unavailable` and `preflight_record · unavailable`, which it called because the prompt listed them
 even though its tool set did not contain them, and `目标漂移 · reflection`, which it derived by
 weighing five file reads against the parent's goal. The child's system prompt is now built against

@@ -630,6 +630,45 @@ export function armSubagentWrapUp(
   return () => { for (const t of timers) clearTimeout(t); };
 }
 
+/**
+ * 子任务的思考档位和单次输出上限。
+ *
+ * 子任务原先照搬主线的设置：思考最高档、`max_tokens` 131072。实测 2026-09-25 那次 task_spawn
+ * 用了 35k completion token，步与步之间隔 40 秒左右，大部分是推理；而子任务交付的是一份
+ * 查证结果，不是需要深推的方案。默认降到 low、单次输出封顶 32k，主线不受影响。
+ *
+ * 只降不升：主线本来就设得更低（比如 none）时保持主线的设置。要调高用环境变量
+ * SHE_SUBAGENT_THINKING / SHE_SUBAGENT_MAX_TOKENS，不加到工具参数里 —— 改工具说明会改动
+ * 缓存前缀，让所有老会话全价重付一遍。子任务每次都是新会话，这里的改动不影响任何缓存。
+ */
+export type ThinkingLevel = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+const THINKING_ORDER: ThinkingLevel[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+export const DEFAULT_SUBAGENT_THINKING: ThinkingLevel = 'low';
+export const DEFAULT_SUBAGENT_MAX_TOKENS = 32_768;
+
+export function resolveSubagentLlm(
+  parent: { thinkingLevel?: string; maxTokens?: number },
+  env: Record<string, string | undefined> = process.env,
+): { thinkingLevel: ThinkingLevel; maxTokens: number } {
+  const parentLevel = (THINKING_ORDER as string[]).includes(parent.thinkingLevel ?? '')
+    ? (parent.thinkingLevel as ThinkingLevel)
+    : 'medium';
+  const envLevel = String(env.SHE_SUBAGENT_THINKING ?? '').trim().toLowerCase();
+  let thinkingLevel: ThinkingLevel;
+  if ((THINKING_ORDER as string[]).includes(envLevel)) {
+    thinkingLevel = envLevel as ThinkingLevel;
+  } else {
+    const cap = THINKING_ORDER.indexOf(DEFAULT_SUBAGENT_THINKING);
+    thinkingLevel = THINKING_ORDER[Math.min(THINKING_ORDER.indexOf(parentLevel), cap)];
+  }
+  const parentMax = Number(parent.maxTokens) > 0 ? Number(parent.maxTokens) : 131_072;
+  const envMax = Number(env.SHE_SUBAGENT_MAX_TOKENS);
+  const maxTokens = Number.isFinite(envMax) && envMax >= 1024
+    ? Math.floor(envMax)
+    : Math.min(parentMax, DEFAULT_SUBAGENT_MAX_TOKENS);
+  return { thinkingLevel, maxTokens };
+}
+
 /** Clamp a requested budget, or fall back to the default. Exported so the rule is testable. */
 export function resolveSubagentTimeoutMs(requested: unknown, fallbackSeconds = DEFAULT_SUBAGENT_TIMEOUT_SECONDS): number {  const fallback = fallbackSeconds * 1000;
   const n = Number(requested);

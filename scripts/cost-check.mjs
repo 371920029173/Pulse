@@ -24,7 +24,7 @@
  * The second half is the one that matters. If a future change makes the reply shorter by
  * deleting something, section 1/3 fail rather than the bill looking better.
  */
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -401,7 +401,7 @@ console.log('\n5. 缓存前缀：换一个工作区还能命中多少，以及�
  * ─────────────────────────────────────────────────────────────────────────────
  * 6. 一条工具结果不是付一次，是每次请求都付
  *
- * 实测（2026-10-03，真实自评会话 `sess_8cd40d35a3cb`）：一次 `shell_wait` 返回了 732,633 字符，
+ * 实测（2026-10-03，真实自评会话 `sess_a1b2c3d4e5f6`）：一次 `shell_wait` 返回了 732,633 字符，
  * 占那一整份记录 964,280 字符的 76%；那一轮 35 次请求，prompt 9,318,458 tokens。缓存命中率 96%
  * —— 命中率从来不是问题，是上下文本身就大，而且每一轮都重发一遍。
  *
@@ -491,14 +491,25 @@ console.log('\n6. 工具结果的上下文预算：一条结果每一轮都要�
     shellStored.slice(0, 60) + ' … ' + shellStored.slice(-60));
 
   check('省略量是真实的：说明里的数字能和实际长度对上',
-    /省略了 (\d+) 字符/.test(shellStored)
-    && Number(/省略了 (\d+) 字符/.exec(shellStored)[1]) > 0
-    && /返回了 2000\d\d 字符/.test(shellStored),
-    (/省略了 \d+ 字符/.exec(shellStored) ?? ['没有找到省略说明'])[0]);
+    /省略了(?:中间)? (\d+) 字符/.test(shellStored)
+    && Number(/省略了(?:中间)? (\d+) 字符/.exec(shellStored)[1]) > 0
+    && /返回了? 2000\d\d 字符/.test(shellStored),
+    (/省略了(?:中间)? \d+ 字符/.exec(shellStored) ?? ['没有找到省略说明'])[0]);
 
+  /*
+   * 命令输出的去路是"全文已存到某个文件，用 fs_read 分段读"——不是让模型重跑命令；fs_read 的去路是
+   * startLine / endLine 分段读它自己的文件。两句必须不同，且 shell 那句要点名一个真实存在的文件。
+   */
+  const spilled = (/已存到 (\S+?\.log)/.exec(shellStored) ?? [])[1] ?? '';
   check('去路按工具给，不是一句笼统的"结果太长"',
-    /startLine/.test(readStored) && !/startLine/.test(shellStored),
+    /startLine/.test(readStored) && /tool-output\//.test(spilled)
+    && (/\[tool-result\] (.+)/.exec(shellStored) ?? [])[1] !== (/\[tool-result\] (.+)/.exec(readStored) ?? [])[1],
     `shell: ${(/\[tool-result\] (.+)/.exec(shellStored) ?? [])[1]}\n        fs_read: ${(/\[tool-result\] (.+)/.exec(readStored) ?? [])[1]}`);
+
+  check('【关键】命令输出的全文真的落盘了，读回来就是工具返回的原文（裁掉的部分没有丢）',
+    spilled !== '' && existsSync(join(root, spilled))
+    && readFileSync(join(root, spilled), 'utf8').startsWith(returned.get('shell') ?? '\u0000'),
+    spilled || '说明里没有落盘路径');
 
   check('【关键】预算内的结果逐字节原样（这个预算不是见谁都裁）',
     smallStored === 'stdout:\nPASS 15/15\nexit code: 0',

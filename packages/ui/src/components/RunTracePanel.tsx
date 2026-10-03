@@ -53,7 +53,11 @@ export interface RunEvent {
     total_tokens?: number;
     cache_hit_tokens?: number;
     cache_miss_tokens?: number;
+    reasoning_tokens?: number;
   };
+  /** `request`: one model request's tokens, and a hash of the system message + tool table. */
+  tokens?: { prompt: number; cache_hit: number; cache_miss: number; completion: number; reasoning?: number };
+  prefix?: string;
   runs?: string[];
   reason?: string;
   /** `end`: the spare endpoint served this run. */
@@ -119,6 +123,7 @@ function kindLabel(kind: string): string {
     case 'apply': return t('等应用补丁');
     case 'prune': return t('清理');
     case 'error': return t('出错');
+    case 'request': return t('请求');
     case 'end': return t('结束');
     // An event kind this build does not know about is shown as-is rather than hidden: a trace from
     // a newer version must not lose rows.
@@ -442,6 +447,19 @@ export function RunTracePanel({ onClose, sessionId }: { onClose: () => void; ses
                               </div>
                             ) : null}
                             {e.text ? <div className={styles.evSub}>{e.text}</div> : null}
+                          </div>
+                        ) : null}
+
+                        {e.kind === 'request' && e.tokens ? (
+                          <div className={styles.evSub}>
+                            {t('输入 {prompt} · 命中 {hit} · 未命中 {miss} · 输出 {out}', {
+                              prompt: e.tokens.prompt,
+                              hit: e.tokens.cache_hit,
+                              miss: e.tokens.cache_miss,
+                              out: e.tokens.completion,
+                            })}
+                            {e.tokens.reasoning ? ` \u00b7 ${t('推理 {n}', { n: e.tokens.reasoning })}` : ''}
+                            {e.prefix ? ` \u00b7 #${e.prefix}` : ''}
                           </div>
                         ) : null}
 

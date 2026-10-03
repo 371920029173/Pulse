@@ -132,7 +132,7 @@ console.log('\n3. 不该抓的不抓（这半边决定这条护栏能不能活�
   const noise = [
     ['git 短 hash', '修复见 commit cafbf9e，改了 agent.ts。'],
     ['完整 git hash', 'commit 9eba9e261a08702ecfbda87874b71fc36eb14f9d 是批次 H'],
-    ['UUID', '会话 id 是 e4509b46-c615-4698-b414-13253a9a8eb3'],
+    ['UUID', '会话 id 是 3f8c2d1e-7a4b-4c9d-8e5f-1a2b3c4d5e6f'],
     ['带端口的普通 URL', '服务在 http://127.0.0.1:18281/api/health'],
     ['没有密码的 URL 用户信息', 'repo 地址是 git@github.com:org/repo.git'],
     ['像前缀的词', '我读了 sk-learn 的文档，也看过 npm run build'],

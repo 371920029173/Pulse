@@ -57,7 +57,7 @@
 `realpath`，谁就又有第二个答案。
 
 **顺手发现的老坑（四份都有，只是没人测过）**：回退逻辑原来只回退**一层**父目录去展开软链接。
-父目录**也不存在**时回退也失败，`real` 停在 `os.tmpdir()` 给的 8.3 短名（`ADMINI~1`）上，而
+父目录**也不存在**时回退也失败，`real` 停在 `os.tmpdir()` 给的 8.3 短名（`LONGUS~1`）上，而
 `realRoot` 已经是长名 —— 同一个目录被判成"逃逸"，**拒绝的是工作区里面的路径**。现在沿祖先一路
 向上找到第一个存在的目录再展开（缺失的段不可能含链接，所以这不削弱检查）。这条是收成一份之后
 补用例才暴露的。
@@ -72,6 +72,13 @@
 **变异验证**：把软链接复查的"拒绝"抽掉（不删代码 —— 删了 `realRoot`/`real` 会因未使用而
 `tsc` 先拒绝编译，第一版变异脚本把这种"没编译成功"误报成了"变异存活"）→ **两条通道同时转红**
 （`check:lsp` 4 条 + `lsp-jail.test.ts` 2 条 + `workspace-path.test.ts` 4 条）。恢复后全绿。
+
+**留着的口子（已披露，未收窄）**：`lsp_hover` 只做**输入**侧的围墙，不做**输出**侧的遮盖。光标停在
+工作区外声明的符号上时，它照样打出那个声明的类型签名与文档注释，字符串常量连字面值一起给。
+这是语言服务器本来的行为（库类型、`lib.d.ts` 全靠它），硬拦会让所有库类型的 hover 变空，所以
+**照答 + 在代码里写明**（`lsp-tools.ts` 里 `lsp_hover` 的定义旁有一段"没被围墙盖住的一格"）。
+对照：definition / references **返回的位置**是遮过的，只给 `[工作区外] <文件名>`（`locationLabel`）。
+收窄与否留给使用者定，默认不动。
 
 ### 层 2 落地明细
 
@@ -214,7 +221,7 @@
 | 审计 | 工作区单文件，记录**带** `session_id`，查询**能**过滤；默认是否过滤取决于调用方 | `packages/server/src/audit.ts:136`、`:81`、`:323` |
 | 会话 / 群存储 | 工作区级单文件；key 判定已修（见层 1） | `sessions.json`、`cluster/rooms.json` |
 | 沙箱 | 只校验**命令字符串**与**工具参数**；无进程级约束 | `packages/sandbox/src/shell.ts` `SandboxShell.exec` / `validatePath` |
-| 存储损坏 | `sessions.json.before-corrupt`（222,808B / **12 条会话**）仍在盘上；`sessions.json.unusable-…`（23B）是手写夹具，不是事故物证 | `D:\AGI\_she-live-test\.she\` |
+| 存储损坏 | `sessions.json.before-corrupt`（222,808B / **12 条会话**）仍在盘上；`sessions.json.unusable-…`（23B）是手写夹具，不是事故物证 | `<projects-root>\_she-scratch\.she\` |
 
 对照 R14 报告的修正：③ 成立且代码可证；② 成立但**只发生在同一工作区内的会话之间**（"工作区之间"是另一条轴）；"损坏时静默清空"**不成立** —— 这版的行为是原样留底，缺的是"说出来"。
 
@@ -242,7 +249,7 @@
 - **1.3** worktree 生命周期：子级结束后清理（按 D2）；目录名 ASCII（按 D6）；新增 `/api/worktrees` 列出 + 一键删（`removeWorktree` 已有，`packages/server/src/worktrees.ts:121`）。
   验收：新增门禁 —— 一个 worktree 子级跑完后，`git worktree list` 与本机目录都不新增；异常退出也清。
   风险：误删仍在使用的 worktree → 只清"本进程创建且已结束"的，且删除前把 diff 摘要写进 `.she/runs`。
-- **1.4** 清理现存残留：`D:\AGI\_she-live-test` 的注册 worktree（目录已不存在）、分支 `she/*`、索引里的 worktree 路径、归档 `sessions.json.before-corrupt`。
+- **1.4** 清理现存残留：`<projects-root>\_she-scratch` 的注册 worktree（目录已不存在）、分支 `she/*`、索引里的 worktree 路径、归档 `sessions.json.before-corrupt`。
   风险：那是"验证 worktree 隔离"那轮的现场 → 先归档再删。
 
 ### 层 2：会话层（最大的一块，分几批推）
@@ -285,7 +292,7 @@
 - **3.2** 写前校验：`validateSessions()` 不过就 abort，保留旧文件不动。
 - **3.3** 损坏：留底（已有）+ **接口/界面明确报错**（给出留底路径与丢失条数）。
   验收（门禁）：写入中途抛错 → 文件仍是旧内容；两个 store 同文件并发写不互抹；坏文件不影响启动且被点名。
-  样本：`_she-live-test/.she/sessions.json`（391,498B）与 `.before-corrupt`（222,808B / 12 条）都是天然材料。
+  样本：`_she-scratch/.she/sessions.json`（391,498B）与 `.before-corrupt`（222,808B / 12 条）都是天然材料。
 
 ### 层 3 落地明细
 
@@ -355,7 +362,7 @@
   > **原计划这一格写错了，实测更正。** 原表格把 `wsl -d <distro> -- bash -lc '<cmd>'`（工作区挂
   > `/mnt/<盘>/…`）当成 WSL2 的机制。**那本身不是隔离**：WSL 默认自动挂载整个盘，所以这条命令能读到
   > 工作区旁边的任何文件。实测：无隔离时越界文件 `outside-readable=YES`。
-  > 真正起作用的是私有挂载命名空间 + tmpfs 遮盖，实测同一文件 `outside-readable=NO`、`/mnt` 内 0 项、
+  > 真正起作用的是私有挂载命名空间 + tmpfs 遮盖，实测同一文件 `outside-readable=NO`、`/mnt` 里没有任何盘符、
   > 而 `node` 照常可用（它在 `/usr/bin/node`，不在 `/mnt` 下）。
 
   门禁必须**按平台可跳过**（CI 没 WSL 时 skip，不许假绿）。
@@ -371,7 +378,7 @@
 
 1. 外层先记下当前挂载命名空间 id，再 `unshare -m --propagation private`；
 2. 内层**自检**命名空间 id 与记下的不同，否则以 91 退出，**不许**继续盖 `/mnt`；
-3. 工作区 bind 到 `/ws`，`/mnt` 用一次 tmpfs 整体遮盖；
+3. 工作区 bind 到 `/ws`，`/mnt` 用一次 tmpfs 整体遮盖（遮盖前先把 `/etc/resolv.conf` 的内容读出来，盖住后写到 `/mnt/wsl/resolv.conf` —— WSL 把它链在 `/mnt` 下，不写回就解析不了域名，边界内 `/mnt` 也只剩这一项）；
 4. `cd /ws<相对 cwd>` 后 `exec bash -lc`，退出码原样传出。
 
 命令与路径一律 base64 传递 —— 命令是任意文本，拼进 shell 就是这一层要拦的注入。
@@ -431,12 +438,12 @@
 
 - 越界文件：无隔离**可读**、有隔离**读不到**（对照组即变异证据——拦不住它就会由"通过"变"失败"）；
 - 工作区照常：`/ws`、node 可用、相对路径可读、指定子目录 cwd 落在 `/ws/packages/sandbox`；
-- **挂载不外泄**：边界内 `/mnt` 为 0 项，边界**退出后恢复**；
+- **挂载不外泄**：边界内 `/mnt` 里没有盘符，边界**退出后恢复**；
 - **自检有效**：喂给它"没有 unshare、`SHE_NS0` 就是当前命名空间"，必须以 91 拒绝且不执行命令、不留挂载；
 - 假绿防护：探测里确实排除了 `/mnt` 下的 node、校验 `process.platform=linux`、要求 >= 20。
 
 **变异验证**：把 `mount -t tmpfs none /mnt` 注释掉重跑，`check:sandbox-isolation` 立刻两条转红、退出码 1
-（"隔离开启时读不到"与"边界内 `/mnt` 为 0 项"）；恢复后全绿。单测 30 项钉住纯函数与自检本身。
+（"隔离开启时读不到"与"边界内 `/mnt` 里没有盘符"）；恢复后全绿。单测 30 项钉住纯函数与自检本身。
 
 ### 层 4.3 落地明细（shell 方言）
 
@@ -537,19 +544,19 @@ cmd.exe 语法上不认那些写法，于是命令**跑了、退出码 0、意�
 互不相同，同一工作区再问一次复用同一进程（spawn 计数仍为 2），两个后端的会话列表无交集，
 且 `.env` 里的 `SHE_WORKSPACE` 没有把它们带走。`check:window` 把这两个事故形态都钉成了断言。
 
-**实测（第三轮，用户真机复现通过）**：用户重启后自己开了一个新窗口进 `D:\AGI\_she-live-test_2`，
+**实测（第三轮，用户真机复现通过）**：用户重启后自己开了一个新窗口进 `<projects-root>\_she-scratch_2`，
 `desktop.log` 记下 ——
 
 ```
-pool: registered existing backend for C:\Users\Administrator\Desktop\aaa at http://127.0.0.1:5777
-pool: starting backend for D:\AGI\_she-live-test_2 on 25646
-window moved to backend for D:\AGI\_she-live-test_2 (http://127.0.0.1:25646)
+pool: registered existing backend for C:\Users\<user>\Desktop\aaa at http://127.0.0.1:5777
+pool: starting backend for <projects-root>\_she-scratch_2 on 25646
+window moved to backend for <projects-root>\_she-scratch_2 (http://127.0.0.1:25646)
 ```
 
 端口 `25646` 由系统分配（不再是 5700–5739），新窗口的 `desktop-ws-25646.log` 里
-`State dir: D:\AGI\_she-live-test_2`、`Knowledge base mounted: <该工作区>\.she\kb.sqlite`、
-`Opened session sess_a80fedec28d7` —— 独立的状态目录、独立的知识库、独立的会话。
-同一时刻两个后端并存且指向不同工作区（`aaa` 与 `_she-live-test_2`），互不影响。
+`State dir: <projects-root>\_she-scratch_2`、`Knowledge base mounted: <该工作区>\.she\kb.sqlite`、
+`Opened session sess_0a1b2c3d4e5f` —— 独立的状态目录、独立的知识库、独立的会话。
+同一时刻两个后端并存且指向不同工作区（`aaa` 与 `_she-scratch_2`），互不影响。
 
 **已知代价：配置是进程内的，`.env` 是共享文件 —— 已用广播消掉。**
 
@@ -567,8 +574,8 @@ window moved to backend for D:\AGI\_she-live-test_2 (http://127.0.0.1:25646)
 - **为什么复用 PUT 而不是加一个"重载"接口**：那个 handler 已经负责同步 `process.env`、判断改动是否
   结构性到要重建 agent、工作区变动时迁移状态。另写一套重读逻辑就得把这些再实现一遍，两处必然漂移。
 - **必须剥掉工作区字段**（`SETTINGS_NOT_FORWARDED = ['workspaceRoot', 'kbDbPath']`）。实测过后果：
-  把 `workspaceRoot` 也转发出去，B 的工作区当场从 `D:\AGI\_she-live-test_2` 被搬到
-  `C:\Users\Administrator\Desktop\aaa`（HTTP 200，静默生效）—— 那正是这套池要消灭的跨窗口污染。
+  把 `workspaceRoot` 也转发出去，B 的工作区当场从 `<projects-root>\_she-scratch_2` 被搬到
+  `C:\Users\<user>\Desktop\aaa`（HTTP 200，静默生效）—— 那正是这套池要消灭的跨窗口污染。
 - **动词必须是 PUT**：`/api/settings` 没有 POST 路由，第一版写成 POST 只会拿到 404，广播静默失效
   （是端到端实测发现的，静态断言也没抓到）。
 - 广播失败只记日志：写入本身已经成功，够不到的窗口下次启动仍会读同一个文件。
@@ -587,10 +594,10 @@ window moved to backend for D:\AGI\_she-live-test_2 (http://127.0.0.1:25646)
 | 2c | 层 2.3 界面 | 真机两会话交叉手测 | **完成**（选择器 + 只读横幅；真机切会话核对过） |
 | 3 | 层 3 存储 | 三条存储门禁 | **完成**（`check:data` 第 13 段；原子写 / 写前校验 / 损坏在接口与界面里说得出来） |
 | 4.0 | 层 4.0 长命令 / 后台任务 | `check:background`（真进程 / 真等待 / 真数进程表；变异验证双向） | **完成** |
-| 4a | 层 4.1 策略 + 文档 | `check:shell` 第 6 段逐条钉住 + 单测 52 项；变异验证三向（去掉披露 / 过度识别 / 不分段）全转发红 | **完成**（策略由"弹确认票"改为"照跑 + 如实披露"，理由见 4.1 明细）。**全量 `check:offline` 退出码 0**（2026-10-01）—— 中间顺带修掉两个一直没跑到的新失败：`check:data` 的进程交接竞态（固定 sleep 换掉服务，下一段读到上一个服务）、`check:portability` 的测试夹具里混进了作者本机路径 `D:/AGI/demo` |
-| 4b | 层 4.2 真隔离 | 按平台门禁（可 skip）+ 真机试一条越界读取被拒 | **机制完成**（2026-10-01），**默认档位完成**（2026-10-03，第七轮）。机制：WSL2 私有挂载命名空间 + tmpfs 遮盖 `/mnt`，工作区 bind 到 `/ws`。门禁 `check:sandbox-isolation` 驱动真实 `SandboxShell`：越界读"无隔离可读 / 有隔离读不到"、工作区照常可用、边界内 `/mnt` 为 0 项且退出后恢复、自检在未进命名空间时以 91 拒绝且不留挂载；变异验证（注释掉 tmpfs 遮盖）两条转红。**第七轮**：默认档位 `off` → `auto`（理由与代价见「层 4.2 → 默认档位」）、门禁新增「描述与事实」一段（`shellName()` 必须点名真会解析命令的那个 shell，三格断言 + 变异验证）、15 处检查脚本钉死档位并由 `scripts/lib/host-sandbox.mjs` 的守卫看着不再长回来。详见「层 4.2 落地明细」 |
+| 4a | 层 4.1 策略 + 文档 | `check:shell` 第 6 段逐条钉住 + 单测 52 项；变异验证三向（去掉披露 / 过度识别 / 不分段）全转发红 | **完成**（策略由"弹确认票"改为"照跑 + 如实披露"，理由见 4.1 明细）。**全量 `check:offline` 退出码 0**（2026-10-01）—— 中间顺带修掉两个一直没跑到的新失败：`check:data` 的进程交接竞态（固定 sleep 换掉服务，下一段读到上一个服务）、`check:portability` 的测试夹具里混进了作者本机路径 `<author-dir>/demo` |
+| 4b | 层 4.2 真隔离 | 按平台门禁（可 skip）+ 真机试一条越界读取被拒 | **机制完成**（2026-10-01），**默认档位完成**（2026-10-03，第七轮）。机制：WSL2 私有挂载命名空间 + tmpfs 遮盖 `/mnt`，工作区 bind 到 `/ws`。门禁 `check:sandbox-isolation` 驱动真实 `SandboxShell`：越界读"无隔离可读 / 有隔离读不到"、工作区照常可用、边界内 `/mnt` 里没有盘符且退出后恢复、自检在未进命名空间时以 91 拒绝且不留挂载；变异验证（注释掉 tmpfs 遮盖）两条转红。**第七轮**：默认档位 `off` → `auto`（理由与代价见「层 4.2 → 默认档位」）、门禁新增「描述与事实」一段（`shellName()` 必须点名真会解析命令的那个 shell，三格断言 + 变异验证）、15 处检查脚本钉死档位并由 `scripts/lib/host-sandbox.mjs` 的守卫看着不再长回来。详见「层 4.2 落地明细」 |
 | 5 | 层 5 进程隔离（窗口之间） | `check:window` 全绿 + 真机起两个工作区互不干扰 | **完成**（2026-10-01）。一个工作区一个后端进程：切换工作区只影响发起的那个窗口，不再动全局工作区根（LSP 根污染是同一处病）。**第一轮真机失败**并暴露两个缺陷 —— 写死端口区间（5700–5739 被 Windows 整段保留，一个都绑不上）与失败被吞成 `null` 导致回退到共享切换（把别的窗口一起带走）；分别改为**系统分配端口**与**返回 null 只表示"没有池"、失败必须抛错**。**第二轮真机通过**：两个工作区分别拿到 24418 / 24427，各自挂载目标目录，同工作区复用同一进程。门禁 `check:window` 把两个事故形态都钉住。详见「层 5 落地明细」 |
-| 4c | MCP 通道收敛（根 + cwd，评测 9b） | `check:mcp` 第 5 段（配置层 / 行为层 / 历史层）+ `mcp-roots.test.ts` 6 项 | **完成**（2026-10-02）。真机现象：`C:\Users\Administrator\.playwright-mcp` 下 340 个文件 —— 截图与 `console-*.log`，全是智能体用 playwright 通道做界面验证时留下的；`packages/server` 里也出现过页面快照，早就逼着打包脚本加了排除项。同一个原因：`spawn` 没给 cwd，子进程继承了 SHE 的启动目录（终端里是工作区，双击是 exe 目录），而 playwright 型服务按 `<cwd>/.playwright-mcp` 算产物目录。修法是把 cwd 钉在工作区（`confineMcpServer` / `mcpSpawnSpec`，两个启动点共用），顺带把相对命令按工作区钉成绝对路径、Windows 过 shell 时给带空格的命令与参数补引号（实测 Node 不补，cmd.exe 会把它拆开）。**真机验收**（一次性探针，不进仓库）：拿真的 `@playwright/mcp`（23 个工具，就是报告里那 23 个）按桥的方式以 cwd=新工作区起进程，`browser_navigate` + `browser_take_screenshot` 后产物落在 `<工作区>/.playwright-mcp`（2 项），`%USERPROFILE%\.playwright-mcp` 仍是 340 个文件（没长）。**变异验证**：去掉 `cwd: ws` 后第 5 段 5 条转红（产物落进后端子目录），恢复后全绿 |
+| 4c | MCP 通道收敛（根 + cwd，评测 9b） | `check:mcp` 第 5 段（配置层 / 行为层 / 历史层）+ `mcp-roots.test.ts` 6 项 | **完成**（2026-10-02）。真机现象：`C:\Users\<user>\.playwright-mcp` 下 340 个文件 —— 截图与 `console-*.log`，全是智能体用 playwright 通道做界面验证时留下的；`packages/server` 里也出现过页面快照，早就逼着打包脚本加了排除项。同一个原因：`spawn` 没给 cwd，子进程继承了 SHE 的启动目录（终端里是工作区，双击是 exe 目录），而 playwright 型服务按 `<cwd>/.playwright-mcp` 算产物目录。修法是把 cwd 钉在工作区（`confineMcpServer` / `mcpSpawnSpec`，两个启动点共用），顺带把相对命令按工作区钉成绝对路径、Windows 过 shell 时给带空格的命令与参数补引号（实测 Node 不补，cmd.exe 会把它拆开）。**真机验收**（一次性探针，不进仓库）：拿真的 `@playwright/mcp`（23 个工具，就是报告里那 23 个）按桥的方式以 cwd=新工作区起进程，`browser_navigate` + `browser_take_screenshot` 后产物落在 `<工作区>/.playwright-mcp`（2 项），`%USERPROFILE%\.playwright-mcp` 仍是 340 个文件（没长）。**变异验证**：去掉 `cwd: ws` 后第 5 段 5 条转红（产物落进后端子目录），恢复后全绿 |
 
 每步交付：**改前改后实测对照 + 门禁结论**；不做"应该好了"的汇报。
 

@@ -74,6 +74,8 @@ export type RunEventKind =
   | 'prune'
   /** The turn failed: what the error was. */
   | 'error'
+  /** One model request: the tokens the provider reported for it, and a hash of the prompt head. */
+  | 'request'
   /** The turn finished. `ok` says whether it produced an answer. */
   | 'end';
 
@@ -122,7 +124,20 @@ export interface RunEvent {
     total_tokens?: number;
     cache_hit_tokens?: number;
     cache_miss_tokens?: number;
+    reasoning_tokens?: number;
   };
+  /**
+   * `request`: one model request's tokens, as the provider reported them.
+   *
+   * The `end` totals say what a run cost; these say WHERE: a resumed session whose first request
+   * is all `cache_miss` is a prefix that changed, and the request it happened on is named here.
+   */
+  tokens?: { prompt: number; cache_hit: number; cache_miss: number; completion: number; reasoning?: number };
+  /**
+   * `request`: first 12 hex of sha256(system message + serialised tool table). Two requests with the
+   * same value sent the same head bytes, so a cache miss between them is not the prompt's fault.
+   */
+  prefix?: string;
   /** `previous` / `preflight` / `prune`: the runs or records being referred to. */
   runs?: string[];
   /** `error`, or `end` on a run that stopped short: why. */
@@ -480,6 +495,11 @@ export class RunRecorder {
   /** The agent narrating what it is doing. Cheap, and often the only explanation of a step. */
   step(text: string): RunEvent | null {
     return this.write('step', this.capAll({ text: scrubSecrets(text) }));
+  }
+
+  /** One model request's usage. Numbers and a hash only, so nothing here needs redacting. */
+  request(info: { tokens: NonNullable<RunEvent['tokens']>; prefix?: string }): RunEvent | null {
+    return this.write('request', { tokens: info.tokens, ...(info.prefix ? { prefix: info.prefix } : {}) });
   }
 
   /** One finished tool call. */

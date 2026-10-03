@@ -202,9 +202,11 @@ describe('共享父级知识库时的提示词', () => {
     assert.match(p, /先 `kb_query`/, '查不到 = 失忆，那是另一个问题');
   });
 
-  it('只读的说明出现在可用工具清单里 —— 两份清单不能互相打脸', () => {
+  it('只读的说明写在知识库规则和核心规则里（工具清单已不再逐条罗列，不能靠它来说）', () => {
     const p = getSystemPrompt(root, 'general', false, { kbReadOnly: true });
-    assert.match(p, /`kb_upsert` \/ `kb_link`: \*\*disabled for this subtask\*\*/);
+    assert.match(p, /`kb_upsert` \/ `kb_edit` \/ `kb_retire` \/ `kb_link` 已停用/);
+    assert.match(p, /read-only\*\*: do NOT try to record findings with `kb_upsert`/);
+    assert.doesNotMatch(p, /## Available Tools/);
   });
 });
 
@@ -237,8 +239,10 @@ describe('子任务的提示词：不许出现它没有的工具', () => {
   it('主级提示词照旧列出这些工具 —— 否则上面的断言可以靠「全删了」通过', () => {
     // 逐条对照，而不是抽查一个：控制组必须覆盖被断言为「不该出现」的每一个名字，
     // 否则删掉一整段（比如计划）仍然能让测试变绿。
-    for (const name of ['plan_create', 'plan_update', 'plan_list', 'preflight_record',
-      'reflection_check', 'report_write', 'memo_add', 'schedule_window', 'kb_ingest_scan']) {
+    // `schedule_window` 不在其中：提示词不再逐条罗列工具，它只出现在随请求发送的工具定义里。
+    for (const name of ['plan_create', 'plan_update', 'plan_list', 'plan_get', 'preflight_record',
+      'reflection_check', 'report_write', 'memo_add', 'schedule_create', 'kb_ingest_scan',
+      'kb_ingest_list', 'kb_ingest_place']) {
       assert.match(prompt(), new RegExp(`\\b${name}\\b`), `主级提示词里少了 ${name}`);
     }
   });
@@ -253,7 +257,8 @@ describe('子任务的提示词：不许出现它没有的工具', () => {
 
   it('它真正拥有的那半边一字不能少', () => {
     const p = sub();
-    for (const keep of ['先 `kb_query`', '`fs_read`', '`shell`', '`lsp_diagnostics`', '`errorbook_lookup`']) {
+    // `errorbook_lookup` 只在已删掉的逐条工具清单里出现过；它的用法在工具定义里。
+    for (const keep of ['先 `kb_query`', '`fs_read`', '`shell`', '`lsp_diagnostics`']) {
       assert.ok(p.includes(keep), `子级提示词里少了 ${keep}`);
     }
   });

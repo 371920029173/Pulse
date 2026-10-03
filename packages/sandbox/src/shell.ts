@@ -820,7 +820,7 @@ export function shellDialectDisclosure(report: ShellDialectReport): string {
  * question unanswerable, and the honest verdict is `unknown` rather than `inside`. Every caller
  * treats `unknown` as the more dangerous of the two, which is what closes the hole the second-round
  * audit measured: `node -e` building a path with `String.fromCharCode(68,58,92,…)` read
- * `D:\AGI\README.txt` while every check in this file said yes.
+ * `D:\other\README.txt` while every check in this file said yes.
  *
  * The read-only table is an ALLOWLIST — a verb absent from it is "not proven harmless", which costs
  * a confirmation and never a wrong write. Three verbs that read or write depending on an argument
