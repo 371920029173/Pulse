@@ -148,7 +148,17 @@ for (const [needle, why] of REQUIRED) {
  *
  * Falls back to the mtime sweep when git is unavailable, so the check still does something useful
  * outside a repository.
+ *
+ * Test files are excluded from signal 1, in both branches. They are in `packages/ui` and they are
+ * dirty far more often than the components are, but they cannot reach the bundle — nothing under
+ * `src/__tests__/` is reachable from the entry point. Without this exclusion the check fires on the
+ * one kind of dirty file that provably cannot make the bundle stale (measured: a fresh
+ * `settings-isolation-notice.test.tsx` went red while `Settings.tsx`'s copy was already in the
+ * bundle), which is the same "red for reasons unrelated to the code" failure the rewrite above was
+ * meant to end.
  */
+const isBundleInput = (p) => !/(^|[\\/])__tests__[\\/]/.test(p) && !/\.(test|spec)\.tsx?$/.test(p);
+
 {
   const builtAt = statSync(join(ASSETS, jsFile)).mtimeMs;
   const UI_PATH = 'packages/ui';
@@ -174,7 +184,7 @@ for (const [needle, why] of REQUIRED) {
         if (entry.isDirectory()) {
           if (entry.name === 'node_modules' || entry.name === 'dist') continue;
           walk(p);
-        } else if (/\.(tsx?|css)$/.test(entry.name)) {
+        } else if (/\.(tsx?|css)$/.test(entry.name) && isBundleInput(p)) {
           const m = statSync(p).mtimeMs;
           if (m > newest.mtime) { newest.file = p.slice(UI.length + 1); newest.mtime = m; }
         }
@@ -189,7 +199,7 @@ for (const [needle, why] of REQUIRED) {
     for (const line of status.split(/\r?\n/)) {
       if (!line.trim()) continue;
       const p = line.slice(3).trim();
-      if (!p || p.includes(' -> ')) continue;
+      if (!p || p.includes(' -> ') || !isBundleInput(p)) continue;
       try {
         const m = statSync(join(ROOT, p)).mtimeMs;
         if (m > builtAt) problems.push(`未提交的改动比产物新: ${p}`);
