@@ -25,6 +25,7 @@ Desktop window: **done** — Electron shell in `@she/desktop`, launched by `pnpm
 | Self-review (drift / calibration / critic) | done | deterministic drift check + `.she/reflection/confidence.json` + `GET /api/reflection`; lessons land in the errorbook under `errors/自省`; an independent critic reads claims against the run trace |
 | Turn budget (opt-in) | done | `budget:` in `she.config.yaml` / `SHE_BUDGET_*`, **off by default**; checked before each model round, before a response's tools run, and between tool calls; stopping is not a failure |
 | Read-only concurrency + same-turn reuse | done | leading contiguous read-only run only (`MAX_PARALLEL_READS`, fail-closed on unknown names); per-turn cache keyed on name + canonical args, invalidated by any write |
+| Web lookup (`web_search` + `web_fetch`) | done | pluggable sources (`SHE_WEB_PROVIDER`: `auto` = key-free DuckDuckGo → Bing, or `duckduckgo` / `bing` / `tavily` / `searxng` / `off`); search hits are labelled **leads, not answers** and point at `web_fetch`; fetch follows redirects with a private-network check on **every hop**, caps page size, and reports the requested vs final address; the source that answered is named in the description of the tool *and* in every result |
 
 ## Packaging
 | Deliverable | Status |

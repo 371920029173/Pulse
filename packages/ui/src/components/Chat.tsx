@@ -145,6 +145,7 @@ function summarizeToolArgs(name: string, rawArgs: string): string {
     kb_link: () => [pick('sourceId'), pick('kind'), pick('targetId')].filter(Boolean).join(' '),
     kb_ingest_scan: () => pick('path') || pick('root'),
     web_search: () => pick('query'),
+    web_fetch: () => pick('url'),
     ask_user: () => pick('question'),
     plan_create: () => pick('title') || pick('goal'),
     report_write: () => pick('title') || pick('path'),
@@ -320,7 +321,11 @@ function ToolCallCard({
    * amount of time, and without a live indicator the transcript looked frozen.
    */
   const running = result === undefined;
-  const isSearch = name === 'kb_query' || name === 'grep' || name === 'kb_ingest_scan';
+  /**
+   * 会转圈的那一类：慢查询。`web_search` 也在里面 —— 它一次调用最坏要等一个源超时（默认 15 秒）
+   * 再换下一个，没有转圈的卡看起来就是"卡住了"。
+   */
+  const isSearch = name === 'kb_query' || name === 'grep' || name === 'kb_ingest_scan' || name === 'web_search';
 
   return (
     <div className={`${styles.toolCallCard} ${denied ? styles.toolCallCardDenied : ''} ${running ? styles.toolCallRunning : ''}`} data-surface="tool">

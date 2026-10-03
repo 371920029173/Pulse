@@ -544,10 +544,11 @@ const BUILTIN_TOOL_NAMES = [
   'memo_add', 'memo_list', 'memo_update', 'memo_remove', 'errorbook_lookup', 'errorbook_forget',
   'preflight_record', 'reflection_check', 'report_write', 'task_spawn', 'ask_user', 'schedule_create',
   'schedule_list', 'schedule_cancel', 'schedule_window', 'screenshot', 'vision_describe',
+  'web_search', 'web_fetch',
   'computer_click', 'computer_type', 'computer_key', 'computer_scroll',
 ];
 /** The runtime's tool families: `fs_*`, `kb_*`, `mcp_*`… A name of this shape is a tool name. */
-const TOOL_FAMILY = /^(?:fs|kb|plan|lsp|git|shell|memo|schedule|computer|errorbook|reflection|preflight|task|report|vision|mcp|skill)_[a-z0-9_]*\*?$/;
+const TOOL_FAMILY = /^(?:fs|kb|plan|lsp|git|shell|memo|schedule|computer|errorbook|reflection|preflight|task|report|vision|web|mcp|skill)_[a-z0-9_]*\*?$/;
 
 /** True when `name` is a tool name: registered (or built in), a glob over one, or of a tool family's shape. */
 export function isKnownToolName(name: string, registered?: Iterable<string>): boolean {

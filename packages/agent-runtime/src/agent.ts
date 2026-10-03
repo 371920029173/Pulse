@@ -47,6 +47,7 @@ import type { ScheduleBridge, WindowView } from './schedule-tools.js';
 import { createIngestTools } from './ingest-tools.js';
 import { createMemoTools } from './memo-tools.js';
 import { createSkillTools } from './skill-tools.js';
+import { createWebTools } from './web-tools.js';
 import { createSubagentTools, type SubagentRunner } from './subagent-tools.js';
 import { repairApiMessages } from './protocol.js';
 import { RunTraceStore, type RunRecorder, type RunEvent } from './run-trace.js';
@@ -532,6 +533,17 @@ export class Agent {
       // the error book's `expect_failure` switch; every tool honours it (see `recordMistake` callers).
       this.allToolDefs.push(def.name === 'shell' ? withExpectFailureParam(def) : def);
       this.executors.set(def.name, (args) => this.sandboxTools.execute(def.name, args));
+    }
+
+    /*
+     * 联网查资料。默认就有（见 config 里 `web` 的注释），`SHE_WEB_PROVIDER=off` 时**照样注册** ——
+     * 两个工具会拒绝并说清楚改哪个变量能开回来。让它们凭空消失，模型会把"有人关了它"读成"这台机器
+     * 不能联网"，然后放弃这件事而不是提出来。
+     */
+    const webTools = createWebTools(config.web);
+    for (const def of webTools.definitions) {
+      this.allToolDefs.push(def);
+      this.executors.set(def.name, (args) => webTools.execute(def.name, args));
     }
 
     const kbTools = createKBTools(kbEngine, {

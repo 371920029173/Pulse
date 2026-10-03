@@ -233,6 +233,54 @@ export interface SheConfig {
     /** WSL distro to run in. Empty uses WSL's own default. */
     wslDistro: string;
   };
+  /**
+   * 联网查资料（`web_search` / `web_fetch`）。
+   *
+   * ─────────────────────────────────────────────────────────────────────────
+   * 为什么有一个自带的搜索源，而不是只留 MCP 一条路
+   *
+   * 能力缺口是实测出来的：工具表里没有任何联网工具，机器上装的 MCP 里也没有搜索服务器（唯一的
+   * `fetch` 只暴露 `imageFetch`），所以「让 Agent 自己去查一下」这件事**没有一条路能走**。MCP 是
+   * 一条路，但它要求用户先自己找到、装好一个搜索服务器 —— 那不是"能不能查"，那是"你得先知道去哪
+   * 装"。所以这里自带免 key 的源，零配置就能用；要更稳的结果就换带 key 的（Tavily）或自建实例
+   * （SearXNG）。
+   *
+   * 默认是 `auto` 而不是钉死某一个免 key 的源，也是实测逼出来的：写下这段的机器上
+   * `duckduckgo.com` 连不上（超时，而 `example.com` 通）、`www.bing.com` 通。一个写死的默认源在
+   * 另一台机器上就可能永远是坏的，而"工具存在但每次都失败"比"功能不存在"更难自查。`auto` 用先
+   * 答上来的那个，并在结果里点名是谁答的。
+   *
+   * 代价说清楚：查一次就是把关键词发给那个第三方。所以源必须在**工具描述和每条结果里都点名**
+   * （`web-tools.ts` 从这份配置渲染，不是写死一句"本工具可联网"），用户看到的是实际在用的源。
+   * 不想要任何出境请求就设 `SHE_WEB_PROVIDER=off`，两个工具会拒绝并说明该改哪里。
+   *
+   * 免 key 的源是**网页解析**，不是官方 API：对方改一次版式就会失效。这条失效必须是响亮的
+   * （"响应认不出来"），不能落成"没搜到"—— 后者会被当成"网上没有这件事"。
+   * ─────────────────────────────────────────────────────────────────────────
+   */
+  web: {
+    /**
+     * `off` 关掉两个工具；`auto`（默认）依次试免 key 的源（DuckDuckGo → Bing），用先答上来的那个；
+     * 也可以钉死某一个。带 key（`tavily`）与自建实例（`searxng`）**只能显式选** —— 自动模式不会
+     * 替用户花钱，也不会猜一个没配的地址。
+     */
+    provider: 'off' | 'auto' | 'duckduckgo' | 'bing' | 'tavily' | 'searxng';
+    /** Tavily 的 key。免 key 的源不用。 */
+    apiKey: string;
+    /** `searxng` 必填（自建实例地址）；其余源留空即用官方地址，填了则覆盖（自建代理）。 */
+    baseUrl: string;
+    /** 一次搜索最多回几条，1–20。 */
+    maxResults: number;
+    /** 单次请求的超时（毫秒）。超时是一条可重试的失败，不是"没搜到"。 */
+    timeoutMs: number;
+    /**
+     * 单个页面最多取回多少字节（截断，不是报错）。
+     *
+     * 上限存在是为了不让一条 `web_fetch` 把上下文买走：一个 5MB 的页面按 3.47 字符/token 折算也
+     * 远超任何一轮的预算。截断了就在结果里明说截断，而不是假装那就是全文。
+     */
+    maxFetchBytes: number;
+  };
   skills: {
     /** Active skill profile — see SKILL_PROFILES for the full set. */
     profile: SkillProfile;
@@ -386,6 +434,19 @@ const DEFAULTS: SheConfig = {
       isolation: 'auto',
       wslDistro: '',
     },
+  /*
+   * 默认就有一个能用的搜索源（免 key，`auto` 依次试），否则这条能力对"没先装好 MCP"的人等于不
+   * 存在 —— 和隔离档位那次是同一个判断（机制可用但默认关着 = 谁都没有）。代价见类型注释：关键词
+   * 会出境到那个源，而这一点在工具描述与每条结果里都点名。要完全关掉：`SHE_WEB_PROVIDER=off`。
+   */
+  web: {
+    provider: 'auto',
+    apiKey: '',
+    baseUrl: '',
+    maxResults: 5,
+    timeoutMs: 15_000,
+    maxFetchBytes: 512 * 1024,
+  },
   skills: {
     profile: 'general',
   },
@@ -1053,6 +1114,32 @@ export function loadConfig(workspaceRoot?: string): SheConfig {
     if (raw === 'off' || raw === 'auto' || raw === 'wsl') config.sandbox.isolation = raw;
   }
   if (env.SHE_WSL_DISTRO !== undefined) config.sandbox.wslDistro = env.SHE_WSL_DISTRO.trim();
+
+  /*
+   * 联网搜索源。
+   *
+   * 认不出的值**忽略**（和 `SHE_SANDBOX_ISOLATION` 同一条理由）：拼错一个源名就静默变成"不能联网"
+   * 或者悄悄换一个源，两种都比留在默认值上更难查。
+   *
+   * `SHE_WEB_PROVIDER=off` 是明确的"不要联网"，不是"没配"—— 两个工具会拒绝并说明去哪改回来。
+   */
+  if (env.SHE_WEB_PROVIDER !== undefined) {
+    const raw = env.SHE_WEB_PROVIDER.trim().toLowerCase();
+    if (raw === 'off' || raw === 'auto' || raw === 'duckduckgo' || raw === 'bing' || raw === 'tavily' || raw === 'searxng') {
+      config.web.provider = raw;
+    }
+  }
+  if (env.SHE_WEB_API_KEY !== undefined) config.web.apiKey = env.SHE_WEB_API_KEY.trim();
+  if (env.SHE_WEB_BASE_URL !== undefined) config.web.baseUrl = env.SHE_WEB_BASE_URL.trim();
+  if (env.SHE_WEB_MAX_RESULTS !== undefined) {
+    const n = Number(env.SHE_WEB_MAX_RESULTS);
+    // 夹在 1–20：0 会让工具看起来"搜了但什么都没有"，那是最像"网上没有"的一种假象。
+    if (Number.isFinite(n) && n >= 1) config.web.maxResults = Math.min(Math.trunc(n), 20);
+  }
+  if (env.SHE_WEB_TIMEOUT_MS !== undefined) {
+    const n = Number(env.SHE_WEB_TIMEOUT_MS);
+    if (Number.isFinite(n) && n >= 1_000) config.web.timeoutMs = Math.min(Math.trunc(n), 120_000);
+  }
 
   config.workspace.root = (/^[a-zA-Z]:[\\/]/.test(config.workspace.root) || config.workspace.root.startsWith('/'))
     ? resolve(config.workspace.root)

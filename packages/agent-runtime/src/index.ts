@@ -217,3 +217,59 @@ export type {
 } from './subagent-tools.js';
 export { makeScheduleTools, executeScheduleTool } from './schedule-tools.js';
 export type { ScheduleBridge, ScheduledTaskView, WindowView } from './schedule-tools.js';
+/*
+ * 联网：搜索源表 + 取页，以及两个工具。
+ *
+ * `web-client.ts` 里的解析与边界全是纯函数（HTML/JSON → 结果、地址判定、内容类型判定），所以
+ * 「对方改了版式」这件事能离线测出来 —— 那是这套东西最可能静默坏掉的地方，也是"没搜到"这句假话
+ * 最容易从那里钻出来的地方。
+ */
+export {
+  WebClient,
+  WEB_DEFAULTS,
+  resolveWebConfig,
+  parseDuckDuckGoLite,
+  parseBing,
+  parseTavily,
+  parseSearxng,
+  parseSearchBody,
+  buildSearchRequest,
+  looksLikeNoResults,
+  decodeEntities,
+  cleanText,
+  htmlToText,
+  extractTitle,
+  isPrivateHost,
+  assertFetchableUrl,
+  classifyContentType,
+  readCapped,
+  SOURCE_SHORT,
+  SOURCE_LABELS,
+  ENDPOINTS,
+  AUTO_ORDER,
+  USER_AGENT,
+  SNIPPET_CHARS,
+  MAX_PAGE_CHARS,
+  MAX_REDIRECTS,
+} from './web-client.js';
+export type {
+  WebProvider,
+  WebSource,
+  WebConfig,
+  WebDeps,
+  WebHit,
+  WebMiss,
+  WebFailureKind,
+  SearchOutcome,
+  FetchOutcome,
+  UrlGuard,
+} from './web-client.js';
+export {
+  createWebTools,
+  renderSearchResult,
+  renderSearchError,
+  renderFetchResult,
+  renderFetchError,
+  WEB_SEARCH_TOOL,
+  WEB_FETCH_TOOL,
+} from './web-tools.js';

@@ -266,6 +266,15 @@ export function refusalRemedy(detail: string): string | null {
   if (/重定向（> 或 <）|重定向目标/.test(d)) {
     return '白名单模式下不要用 > / < 重定向：写文件用 fs_write，读文件用 fs_read。';
   }
+  /*
+   * `web_fetch` 的本机/内网地址边界。给的不是"别再试"，而是**换哪条路**：本机服务用 shell 读，
+   * 或者让用户把内容放进工作区 —— 这条拒绝每次都会再来一次，所以去路必须当场写清楚。
+   */
+  if (/本机\/内网地址/.test(d)) {
+    return 'web_fetch 只读公网地址：本机/内网（localhost、127.、10.、192.168.、::1 …）一律不读，'
+      + '以免网页里的跳转把这次读取带回到本机服务。要读本机的东西用 shell（curl 等），'
+      + '或让用户把内容复制进工作区。';
+  }
   if (/\$\(\) 或反引号/.test(d)) {
     return '白名单模式下不要用 $() 或反引号嵌套命令：拆成几次独立的 shell 调用，前一次的输出自己读完再用。';
   }
@@ -352,6 +361,19 @@ const RULES: Rule[] = [
     from: 'sandbox tools.ts KB_DIRECT_ACCESS_REASON (fs_* on the KB database)',
   },
   /*
+   * `web_fetch` 的本机/内网地址边界（`web-tools.ts`）。`policy_denied` 而不是 `permission`：这是边界
+   * 按设计工作，不是环境挡住了你 —— 换一个地址就行，而"这台机器上的目录写不进去"那条要记成教训。
+   *
+   * 位置在 `permission` 规则**之前**：下面那条 `permission` 的正则里有"拒绝访问/权限不足"这类词，
+   * 而这段文案很容易沾上（第一版写的"拒绝访问本机/内网地址"就被permission抢走了判定）。同一条拒绝
+   * 被记成 agent 的错题，正是第四轮 10a 修过的那个毛病。
+   */
+  {
+    kind: 'policy_denied',
+    re: /本机\/内网地址/,
+    from: 'agent-runtime web-tools.ts（web_fetch 拒绝 loopback / 私网字面地址）',
+  },
+  /*
    * ── 环境说"你不能"，而这次调用本身没写错。 ──
    *
    * 放在策略规则**之后**：两者都会说"拒绝/不允许"，而下一步动作是相反的 —— 策略边界是"别再试，
@@ -420,6 +442,15 @@ const RULES: Rule[] = [
 const EMPTY_SENTINELS = [
   /^No matches found\.?$/i, // sandbox tools.ts, grep
   /^No results found in Group KB\.?$/i, // agent-runtime kb-tools.ts, kb_query
+  /*
+   * `web_search`（`web-tools.ts`）问遍了所有源，一个结果都没有。
+   *
+   * 整段都用来匹配这一句，是因为这一句**就是全部答案** —— 它必须被判成 `empty`（"查过了，没有"）
+   * 而不是 `none`（"拿到了数据"）：后者会让模型把"没搜到"当成已知事实的反面，然后开始替搜索引擎
+   * 编内容。括号里点名问了哪几个源，是为了让"网上没有"这句结论带上它的证据（一个源没结果和三个
+   * 源都没结果，可信度不一样）。
+   */
+  /^没有找到结果（问了 [^\n]+）$/,
 ];
 
 /*

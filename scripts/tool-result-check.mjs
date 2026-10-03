@@ -321,6 +321,13 @@ console.log('\n=== 源码里的 Error: 文案全部可分类 ===');
    *   - TypeScript ANNOTATIONS (`Error: Error | null = null;`) which are not messages; they
    *     are not inside string literals, so anchoring on literals excludes them without a
    *     filter that would be guesswork.
+   *
+   * Known limit, walked into once: a message built by CONCATENATION (`'Error: foo（X）' + 'bar'`
+   * — the shape every multi-clause message in `web-tools.ts` uses) contributes only its FIRST
+   * fragment here, while the model reads the whole thing. So a rule that only matches in a later
+   * fragment passes at runtime and fails this scan. Fix the wording (put the identifying phrase in
+   * the first fragment) instead of teaching this scan to fold `+`, which would mean evaluating
+   * expressions rather than reading literals.
    */
   const seen = new Map(); // message → file
   for (const f of files) {

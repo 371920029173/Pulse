@@ -51,6 +51,20 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   'schedule_list',
   'schedule_window',
   'reflection_check',
+  /*
+   * 联网的两个（`web-client.ts`）。它们会花掉的是**对外的额度**而不是工作区的状态，所以值得单独说
+   * 一句为什么仍然放进来：
+   *
+   *   - 并行安全：两个搜索/取页互不影响，先发出的那个也不会改变后一个能拿到什么。
+   *   - 同轮复用正好是想要的：模型在同一轮把同一个 query 写两遍（很常见，它忘了刚问过），复用一次
+   *     结果就少发一次请求 —— 省的是配额，而不是把新数据当旧数据。缓存的寿命只有一轮，下一轮照常
+   *     重查，所以"网页变了"这件事最多延迟一轮。
+   *
+   * 与之相对，`vision_describe` 不在表里：它花的是**同一条模型通道**的容量，而"别把服务打爆"正是
+   * 那条上限存在的理由（见文件头的说明）。搜索源不是我们要保护的模型通道。
+   */
+  'web_search',
+  'web_fetch',
 ]);
 
 /** Fail-safe: a name nobody vetted runs serially. */

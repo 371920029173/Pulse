@@ -140,7 +140,8 @@ config, and multiple models can be registered so you are not locked to one vendo
 - **Agent loop** — tool calling with streaming reasoning, runaway-loop detection, self-verification
   before reporting success
 - **Tools** — files, shell, grep, git, knowledge base, plans, memos, reports, `ask_user`, subagents,
-  language-server code intelligence, scheduled tasks, computer use (Windows, opt-in)
+  language-server code intelligence, scheduled tasks, web search/fetch (`web_search` + `web_fetch`,
+  key-free by default; every result names which source answered), computer use (Windows, opt-in)
 - **Knowledge base** — group-structure memory with activation traces; every result explains *which
   groups and edges* produced it
 - **Sandbox** — workspace jail including symlinks, destructive-command patterns, an optional
