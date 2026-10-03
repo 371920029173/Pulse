@@ -25,7 +25,9 @@ import assert from 'node:assert/strict';
 import {
   toWslPath, workspaceRelative, buildConfinedScript, buildWslArgv, planIsolation, DROPPED_CAPS,
   isolationInEffect, resetIsolationProbeCache, NOT_IN_NAMESPACE_EXIT,
+  isMaxGrant, effectiveIsolationMode, describeIsolation, isolationNotice,
 } from '../isolation.js';
+import { SandboxShell } from '../shell.js';
 
 describe('Windows 路径翻译成 WSL 路径', () => {
   it('盘符与反斜杠都归一', () => {
@@ -263,5 +265,114 @@ describe('披露：读者要知道边界在哪，也要知道它不覆盖什么'
     const got = isolationInEffect({ mode: 'wsl', distro: 'Ubuntu', workspaceLinux: '/mnt/d/x', detail: 'detail-here' });
     assert.equal(got?.mode, 'wsl');
     assert.equal(got?.detail, 'detail-here');
+  });
+});
+
+/**
+ * 「最大授权」（勾选「允许工作区外命令」+ 档位「所有」）让开真隔离。
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 为什么这件事需要在单测里钉住，而不只是门禁
+ *
+ * 门禁（`scripts/isolation-check.mjs` 第 4b 节）测的是"真的跑一条 Windows 命令"，那需要一个真装了
+ * WSL 的机器才测得动对照格。而"让开"本身是**纯决策**：给定授权与档位，答案就定了，与这台机器装没装
+ * WSL 无关 —— 这一节把它做成与机器无关的断言，这样没有 WSL 的机器（CI）也能挡住"让开没生效"或
+ * "让开的范围太大"这两种回归。
+ *
+ * 顺带钉住一个反直觉的格子：`wsl` 档位本来是 fail-closed（用不了就拒绝执行），最大授权下它不再拒绝
+ * —— 因为用户那句话是"就在这台电脑上跑"，把它拒绝掉才是违背他的选择。
+ */
+describe('最大授权（勾选 + 所有）让开真隔离', () => {
+  const MAX = { allowAllCommands: true, outsideWorkspace: { allow: true, policy: 'all' as const } };
+  const READONLY = { allowAllCommands: false, outsideWorkspace: { allow: true, policy: 'readonly' as const } };
+
+  it('两个控件都是"是"才算：缺一个或档位不是「所有」都不让开', () => {
+    assert.equal(isMaxGrant(MAX), true);
+    // 库的调用方只传这一个字段（构造函数会补成 allow+all），结论必须一致。
+    assert.equal(isMaxGrant({ allowAllCommands: true }), true);
+    assert.equal(isMaxGrant({ allowAllCommands: true, outsideWorkspace: { allow: true, policy: 'readonly' } }), false);
+    assert.equal(isMaxGrant({ allowAllCommands: true, outsideWorkspace: { allow: true, policy: 'deny' } }), false);
+    // 没勾选就不算 —— 哪怕档位停在「所有」：这是唯一会让"边界开着、隔离也开着"的一格，
+    // 按严的那侧读（用户以为有边界却裸跑，比多撞一次报错糟得多）。
+    assert.equal(isMaxGrant({ allowAllCommands: false, outsideWorkspace: { allow: true, policy: 'all' } }), false);
+    assert.equal(isMaxGrant({ outsideWorkspace: { allow: true, policy: 'all' } }), false);
+    assert.equal(isMaxGrant(undefined), false);
+    assert.equal(isMaxGrant(null), false);
+  });
+
+  it('合成结论：最大授权把 auto / wsl 都变成 off，其余档位原样保留', () => {
+    assert.equal(effectiveIsolationMode('auto', MAX), 'off');
+    assert.equal(effectiveIsolationMode('wsl', MAX), 'off');
+    assert.equal(effectiveIsolationMode('off', MAX), 'off');
+    assert.equal(effectiveIsolationMode('wsl', READONLY), 'wsl');
+    assert.equal(effectiveIsolationMode('auto', undefined), 'auto');
+  });
+
+  it('【关键】shell 真的不再进边界：描述说主机 shell，命令照跑，结果里没有边界披露', async () => {
+    /*
+     * `isolation: 'wsl'` 是这里的关键 —— 它不是"能开才开"的 auto，而是明确的"我就是要边界"。最大授权
+     * 必须盖过它，否则用户勾了「所有」之后仍然撞上 `ver: command not found`（本机实测 exit 127）。
+     */
+    const sh = new SandboxShell(process.cwd(), { ...MAX, isolation: 'wsl' as const });
+    assert.equal(sh.effectiveIsolation(), 'off');
+    assert.equal(sh.isolationBypassedByGrant(), true);
+    assert.ok(!sh.shellName().includes('WSL'), `shellName() 不该说在 WSL 里：${sh.shellName()}`);
+    const r = await sh.exec('echo maxgrant');
+    assert.equal(r.denied, undefined);
+    assert.equal(r.exitCode, 0);
+    assert.ok(r.stdout.includes('maxgrant'));
+    assert.equal(r.isolation, undefined);
+  });
+
+  it('【关键】wsl 档位的拒绝也被让开（否则"就在这台电脑上跑"会被自己的设置拒掉）', async () => {
+    resetIsolationProbeCache();
+    // UNC 根永远映射不进 /mnt —— 也就是说纯 `wsl` 档位在这里必被拒绝。最大授权下它必须照跑。
+    const sh = new SandboxShell('\\\\nowhere\\share\\ws', { ...MAX, isolation: 'wsl' as const });
+    const r = await sh.exec('echo hi');
+    assert.notEqual(r.denied, true);
+    assert.doesNotMatch(String(r.stderr ?? ''), /真隔离|WSL/);
+  });
+
+  it('只读档不让开：同一台机器上它仍然要求边界（档位之间的差别必须还在）', () => {
+    const sh = new SandboxShell(process.cwd(), {
+      ...READONLY, isolation: 'auto' as const,
+    });
+    assert.equal(sh.effectiveIsolation(), 'auto');
+    assert.equal(sh.isolationBypassedByGrant(), false);
+  });
+
+  it('提示说清"是谁让开的"和"怎么收回去"，且与另外三格都不同', () => {
+    const base = {
+      mode: 'auto' as const, available: true, distro: 'Ubuntu', unavailable: null,
+      requestedButUnavailable: false, bypassed: true,
+    };
+    const bypassed = String(isolationNotice(base));
+    assert.match(bypassed, /直接在主机上运行/);
+    assert.match(bypassed, /所有/);
+    assert.match(bypassed, /档位/);
+    // 没有边界的两格（能用但关着 / 这台机器用不了）都不能与它撞车：撞车就等于没说。
+    assert.notEqual(bypassed, String(isolationNotice({ ...base, bypassed: false, mode: 'off' })));
+    assert.notEqual(bypassed, String(isolationNotice({ ...base, available: false, distro: null, unavailable: '没有 WSL' })));
+    /*
+     * 档位是 off 时**也**要说，而且必须点名 `SHE_SANDBOX_ISOLATION`：那一格下用户最自然的动作就是去
+     * 打开隔离，而这一档会让那个动作白做。
+     */
+    assert.match(String(isolationNotice({ ...base, mode: 'off' })), /SHE_SANDBOX_ISOLATION/);
+  });
+
+  it('让开后不再声称"命令会被拒绝"（那一格的话必须跟着让开一起变）', () => {
+    resetIsolationProbeCache();
+    const a = describeIsolation('wsl', '\\\\nowhere\\share\\ws', '', MAX);
+    assert.equal(a.bypassed, true);
+    // 之前这一格是 requestedButUnavailable=true（"命令会被拒绝"）；让开之后命令在主机上照跑，
+    // 再说"会被拒绝"就是一句会被用户当场证伪的话。
+    assert.equal(a.requestedButUnavailable, false);
+    assert.doesNotMatch(String(isolationNotice(a)), /会被\*\*拒绝\*\*执行/);
+  });
+
+  it('授权缺省时行为逐字节不变（既有调用方不因为这次改动换姿势）', () => {
+    resetIsolationProbeCache();
+    const a = describeIsolation('auto', process.cwd(), '');
+    assert.equal(a.bypassed, false);
   });
 });

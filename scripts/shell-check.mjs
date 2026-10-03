@@ -425,7 +425,8 @@ console.log('\n=== 真隔离的可用性与提示 ===');
 {
   /** 一台机器的可用性，字段全给，测哪一格就改哪一格。 */
   const avail = (patch) => ({
-    mode: 'off', available: true, distro: 'Ubuntu', unavailable: null, requestedButUnavailable: false, ...patch,
+    mode: 'off', available: true, distro: 'Ubuntu', unavailable: null, requestedButUnavailable: false,
+    bypassed: false, ...patch,
   });
   const NO_WSL = { available: false, distro: null, unavailable: '这台机器没有可用的 WSL 发行版' };
 
@@ -466,6 +467,50 @@ console.log('\n=== 真隔离的可用性与提示 ===');
     new Set([onButOff, wslBroken, autoBroken].map(String)).size === 3,
     `${String(onButOff)}\n        ${String(wslBroken)}\n        ${String(autoBroken)}`);
 
+  /*
+   * 2b. 最大授权（勾选 +「所有」）把隔离让开 —— 这一格必须说，而且要说全三件事。
+   *
+   * 理由是"说了会不会改变一个决定"在这里最成立的形态：一个用户勾了「所有」、发现 `ver` 返回 127，
+   * 他手上唯一能想到的动作是去翻 `SHE_SANDBOX_ISOLATION` —— 而那个开关在这一档下**不起作用**。所以
+   * 提示少了"是谁造成的 / 怎么收回去"这两句，就等于把一条死路指给了他。
+   */
+  const bypassedNotice = isolationNotice(avail({ mode: 'auto', bypassed: true }));
+  check('【关键】最大授权让开了隔离 → 必须说，且说清「直接在主机上运行」',
+    /直接在主机上运行/.test(String(bypassedNotice)) && /让开|不再生效/.test(String(bypassedNotice)),
+    String(bypassedNotice));
+  check('  还要说出是谁造成的（档位「所有」），否则用户会去改一个无关的开关',
+    /所有/.test(String(bypassedNotice)), String(bypassedNotice));
+  check('  以及怎么收回去（改档位），否则他只能猜',
+    /档位/.test(String(bypassedNotice)) && /只读|拒绝/.test(String(bypassedNotice)), String(bypassedNotice));
+  check('  这台机器本来能不能用隔离，两句话不同（"是你让开的" ≠ "本来就没有"）',
+    /被你这一档让开/.test(String(bypassedNotice))
+    && /用不了/.test(String(isolationNotice(avail({ ...NO_WSL, mode: 'auto', bypassed: true })))),
+    String(isolationNotice(avail({ ...NO_WSL, mode: 'auto', bypassed: true }))));
+  check('  让开的那句话与另外三格都不同（否则就是一句没信息量的通用警告）',
+    ![onButOff, wslBroken, autoBroken].some((m) => String(m) === String(bypassedNotice)));
+  /*
+   * 档位本来就是 `off` 时**也**说，而且必须说 `SHE_SANDBOX_ISOLATION` 在这一档下不起作用：那一格下
+   * 最自然的动作就是把隔离打开，而这一档会让那个动作白做 —— 不说，用户只会以为那个开关坏了。
+   */
+  const bypassedWhenOff = isolationNotice(avail({ mode: 'off', bypassed: true }));
+  check('【关键】档位本来是 off 时同样要说，且点明改 SHE_SANDBOX_ISOLATION 也没用',
+    /直接在主机上运行/.test(String(bypassedWhenOff))
+    && /SHE_SANDBOX_ISOLATION/.test(String(bypassedWhenOff))
+    && /不会改变这一档的行为/.test(String(bypassedWhenOff)), String(bypassedWhenOff));
+  check('  off 那一格不写成"这台机器本来能用、现在是关着的"（那会让人去开一个无效的开关）',
+    !/现在是关着的/.test(String(bypassedWhenOff)), String(bypassedWhenOff));
+  /*
+   * 让开也**必须**改掉那条"以为有边界其实没有"的判据：`wsl` 用不了 + 最大授权时，命令不会被拒绝
+   * （它在主机上照跑），所以 `requestedButUnavailable` 不能再为真 —— 否则界面会说"命令会被拒绝"，
+   * 而它其实跑得好好的。这是这次改动唯一一处"同格两说"的风险点。
+   */
+  const grantedNoWsl = describeIsolation('wsl', '\\\\nowhere\\share\\ws', '', {
+    allowAllCommands: true, outsideWorkspace: { allow: true, policy: 'all' },
+  });
+  check('【关键】最大授权 + wsl 用不了：不再声称"命令会被拒绝"（bypassed 之后 requestedButUnavailable=false）',
+    grantedNoWsl.bypassed === true && grantedNoWsl.requestedButUnavailable === false,
+    JSON.stringify(grantedNoWsl));
+
   // 3. 接线：静态断言。没接进接口/日志的话，上面那些纯函数断言全绿而用户仍然看不见。
   const serverSrc = readFileSync(join(ROOT, 'packages', 'server', 'src', 'index.ts'), 'utf8');
   check('server 从 @she/sandbox 引入这两个函数',
@@ -478,6 +523,19 @@ console.log('\n=== 真隔离的可用性与提示 ===');
   const sandboxIndex = readFileSync(join(ROOT, 'packages', 'sandbox', 'src', 'index.ts'), 'utf8');
   check('@she/sandbox 导出了这两个函数（不然上面两处编译不过，是接线不是导出）',
     /describeIsolation, isolationNotice,/.test(sandboxIndex) && /IsolationAvailability/.test(sandboxIndex));
+  check('@she/sandbox 导出让开判据与合成结论（服务端与评测读的是同一对函数，不是各自推一遍）',
+    /isMaxGrant, effectiveIsolationMode,/.test(sandboxIndex) && /PermissionGrant/.test(sandboxIndex));
+  /*
+   * 界面这一环单独钉。前面这条链（`isolationNotice` → `/api/settings` → 启动日志）在第五轮之前
+   * 就已经是绿的了，而用户在设置页里仍然一个字都看不到 —— 因为返回的 `isolation.notice` 没有任何
+   * 组件读它。"接口里有"和"用户看得见"是两件事，这条断言盯的是后者。
+   */
+  const settingsTsx = readFileSync(join(ROOT, 'packages', 'ui', 'src', 'components', 'Settings.tsx'), 'utf8');
+  check('【关键】设置页真的读了 isolation.notice 并渲染出来（否则"用户看不见"照旧）',
+    /d\.isolation\?\.notice/.test(settingsTsx) && /\{isolationNotice && \(/.test(settingsTsx)
+    && /\{isolationNotice\}/.test(settingsTsx));
+  check('  界面上那句"实际规则"也说明了「所有」档直接在主机上跑（与 isolationNotice 同一件事）',
+    /一切命令直接放行、不再询问，且直接在主机上运行/.test(settingsTsx));
 }
 
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`);

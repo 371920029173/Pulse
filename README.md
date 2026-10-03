@@ -131,7 +131,9 @@ working windows). Both are optional — every value has a default. `SHE_CONFIG_F
 config, and multiple models can be registered so you are not locked to one vendor.
 
 > **Permissions:** by default the agent asks before running dangerous commands.
-> `SHE_ALLOW_ALL_COMMANDS=true` lifts that entirely — read `.env.example` before enabling it.
+> `SHE_ALLOW_ALL_COMMANDS=true` lifts that entirely — and, because that statement means "run it on
+> this machine", it also steps real isolation aside (the settings page's 勾选 +「所有」tier is the
+> same thing). Read `.env.example` before enabling it.
 > The local API has **no authentication**, so binding address is the security boundary; see
 > [Deployment](#deployment) before exposing it beyond this machine.
 

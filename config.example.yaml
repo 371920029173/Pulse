@@ -84,7 +84,22 @@ sandbox:
   denyDestructiveByDefault: true
   # Lifts the confirm step entirely. Off by default on purpose: it means the agent
   # can run anything without asking.
+  #
+  # It ALSO steps real isolation aside (see `outsideWorkspace` / `.env.example`'s
+  # SHE_SANDBOX_ISOLATION note): the settings page writes this same statement as "allow commands
+  # outside the workspace" + the「所有」tier, and that tier means "run it on this machine", so a
+  # WSL boundary would contradict the user's own choice. Every notice says which tier did it and
+  # how to put it back.
   allowAllCommands: false
+  # 「允许工作区外命令」+ 档位。只有 allow + policy: all 才是"什么都不问"的那一档，也只有
+  # 这一档会让真隔离（sandbox.isolation）让开。
+  outsideWorkspace:
+    allow: true
+    policy: readonly # all | readonly | deny
+  # wsl | auto | off. `auto` (the product default) uses a WSL2 mount namespace when one is
+  # available and stays on the host otherwise. Overridden by the「所有」tier above.
+  # isolation: auto
+  # wslDistro: ''
   # Command allowlist — the fail-closed control. Empty means not enforced.
   #
   # The denylist above is fail-open by construction; this refuses everything not named.

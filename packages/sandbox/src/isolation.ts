@@ -238,6 +238,73 @@ export const WORKSPACE_NOT_IN_WSL_EXIT = 90;
 /** Distinct from `WORKSPACE_NOT_IN_WSL_EXIT`: the boundary could not be entered at all. */
 export const NOT_IN_NAMESPACE_EXIT = 91;
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * 「最大授权」把真隔离让开
+ *
+ * 用户在设置页上有两个控件：勾选「允许工作区外命令」+ 档位（只读 / 所有 / 拒绝）。选到
+ * **「所有」** 时那句话是「什么都不问，包括工作区外。仅限你完全信任的本地环境」—— 它描述的是一台
+ * **被信任的电脑**上的直连运行，而不是"在一个 Linux 命名空间里什么都问不到"。
+ *
+ * 这一档之前只放开了审批与工作区边界，隔离照旧生效，于是出现一个和那句话矛盾的事实（本机实测，
+ * 2026-10-03）：
+ *
+ *   allowAllCommands=true / outsideWorkspace={allow:true,policy:'all'} / isolation=auto
+ *   exec('ver')  -> exit 127  "bash: line 1: ver: command not found"
+ *   （正确的后果是 `ver` 在 cmd.exe 里正常打印 Windows 版本）
+ *
+ * 也就是说：越是"我完全信任这台机器"的用户，越会撞上"连 `ver` 都跑不了"—— 而且失败信息看起来像
+ * 命令写错了，不像"你被关在边界里"。
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 为什么是"让开"而不是"拒绝"
+ *
+ * 隔离的另外两档都 fail-closed（`wsl` 用不了就拒绝执行，理由是"悄悄没有边界比拒绝更糟"）。这一档
+ * 的方向相反，因为这里**不是**在拿一个没记录的缺口换一个有记录的缺口：用户要的就是"在这台电脑上
+ * 直接跑"，直连主机正是他要的那件事，`isolationNotice` 与 `shellName()` 会把这件事说出来（见
+ * 下面 `IsolationAvailability.bypassed`）。让开车厢却不说话才是这个仓库一直在修的那个毛病。
+ *
+ * 让开的**只有隔离**。命令白名单（`allowedCommands`）不在此列：那是用户单独打开的一个 fail-closed
+ * 开关，"没列出的命令一律拒绝"，与"允许所有命令"不是同一句话（本文件不读它，见 `shell.ts`）。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/** 「能用哪里」那两个控件的最小形状。传 `config.sandbox` 的对应字段即可。 */
+export interface PermissionGrant {
+  allowAllCommands?: boolean;
+  outsideWorkspace?: { allow?: boolean; policy?: 'all' | 'readonly' | 'deny' };
+}
+
+/**
+ * 用户是不是明确说了「我不在乎边界」——**两个控件都说了「是」**：勾选「允许工作区外命令」，
+ * 并且档位选到「所有」。
+ *
+ * 为什么两个都要（而不是"任一就够"）：这两个控件在产品路径上是同一句话的两种写法
+ * （`PUT /api/settings` 里 `open = allow && policy === 'all'` 之后回写 `allowAllCommands`），
+ * 所以正常运行时它们永远一致。不一致只可能来自库的调用方或手写的 `.env`，而那种输入该按**更严**的
+ * 那侧读 —— 这是全仓的规矩（判不准就按危险那侧走）。这里的"危险那侧"就是**保留隔离**：以为放开了
+ * 其实没有，只是多撞一次 `ver: command not found`；反过来则是用户以为有边界、其实命令在裸机上跑。
+ *
+ * `outsideWorkspace` 整个缺省时按勾选走：只传 `{ allowAllCommands: true }` 的调用方（测试、脚本、
+ * 子 agent 的历史写法）在 `SandboxShell` 的构造函数里会被推导成 `{allow:true, policy:'all'}`，
+ * 两条路得到同一个结论。
+ */
+export function isMaxGrant(grant: PermissionGrant | undefined | null): boolean {
+  if (!grant || grant.allowAllCommands !== true) return false;
+  const ow = grant.outsideWorkspace;
+  if (!ow) return true;
+  return ow.allow === true && (ow.policy === undefined || ow.policy === 'all');
+}
+
+/**
+ * 这一次真的会怎么跑 —— 把「档位」与「最大授权」合成一个答案，只此一处。
+ *
+ * 单独抽出来是因为这个结论有三个读者（`admit()` 决定怎么 spawn、`shellName()` / `dialect()` 描述
+ * 成什么、`describeIsolation()` 报给界面），而它们**必须**读同一个数：第七轮那个 bug 就是
+ * "描述说 bash、实际是 cmd.exe" —— 描述与事实各算一遍，就一定会有一次算得不一样。
+ */
+export function effectiveIsolationMode(mode: IsolationMode, grant: PermissionGrant | undefined | null): IsolationMode {
+  return isMaxGrant(grant) ? 'off' : mode;
+}
+
 /**
  * The probe run inside WSL to decide whether isolation is possible.
  *
@@ -299,13 +366,23 @@ export interface IsolationAvailability {
   /** 不可用时：为什么 —— 与拒绝执行时同一句话，不另写一份。 */
   unavailable: string | null;
   requestedButUnavailable: boolean;
+  /**
+   * 「最大授权」（勾选 + 档位「所有」）把这一档让开了 —— 于是命令**直接在主机上跑**，
+   * 与 `available` 无关（能开也不开）。
+   *
+   * 单独一个布尔而不是把 `mode` 改成 `off`，是为了让界面能说出"你本来能开、是你这一档让它让开的"
+   * —— 这两种"没有边界"完全不同：一个可以随手打开，另一个是用户自己选的。
+   */
+  bypassed: boolean;
 }
 
 export function describeIsolation(
   mode: IsolationMode,
   workspaceRoot: string,
   distro = '',
+  grant?: PermissionGrant | null,
 ): IsolationAvailability {
+  const bypassed = isMaxGrant(grant);
   const resolved = resolveWslIsolation(workspaceRoot, distro);
   if ('unavailable' in resolved) {
     return {
@@ -313,7 +390,8 @@ export function describeIsolation(
       available: false,
       distro: null,
       unavailable: resolved.unavailable,
-      requestedButUnavailable: mode !== 'off',
+      requestedButUnavailable: mode !== 'off' && !bypassed,
+      bypassed,
     };
   }
   return {
@@ -322,6 +400,7 @@ export function describeIsolation(
     distro: resolved.plan.distro,
     unavailable: null,
     requestedButUnavailable: false,
+    bypassed,
   };
 }
 
@@ -329,6 +408,8 @@ export function describeIsolation(
  * 该对用户说的那句话，或者 null（没什么可说的）。
  *
  * 判据是「说了会不会改变一个决定」：
+ *   - 最大授权（勾选 + 「所有」）→ 说，且要说在最前面：命令直接在这台电脑上跑，隔离没生效，
+ *     并点明"去打开 `SHE_SANDBOX_ISOLATION` 也没用"（这一档盖过它）;
  *   - 能用而关着 → 说，并给出打开它的开关（否则这个能力等于不存在）；
  *   - 能用且开着 → 不说（每条命令的结果自己带着 `isolationInEffect` 的披露，够了）；
  *   - 不能用且关着 → 不说（没有边界是这台机器上的唯一选项，天天提醒就等于没有提醒）；
@@ -340,6 +421,27 @@ export function describeIsolation(
 export function isolationNotice(a: IsolationAvailability): string | null {
   const switchHint = '打开它：`SHE_SANDBOX_ISOLATION=auto`（用不上时自动退回主机）'
     + '或 `SHE_SANDBOX_ISOLATION=wsl`（用不上时拒绝执行，而不是悄悄降级）。';
+
+  /*
+   * 最大授权排在最前面，因为它是唯一一种"用户本来就有边界、是他自己这一档让它让开的"情况 ——
+   * 也正因为如此，这里要同时说出三件事：现在的后果、是谁造成的、怎么收回去。少了第三件，
+   * 一个看到"命令没在隔离里跑"的人只会去翻 `SHE_SANDBOX_ISOLATION`，而那个开关在这一档下不起作用。
+   *
+   * `mode` 为 `off` 时**也说**（与其他格相反）：那一格下最自然的动作就是把隔离打开，而这一档会让
+   * 那个动作白做 —— 不说，用户就会以为开关坏了。
+   */
+  if (a.bypassed) {
+    const machine = a.available
+      ? `这台机器本来可以用真隔离（WSL：${a.distro || '默认发行版'}），现在只是被你这一档让开了。`
+      : `顺带一提：就算不让开，这台机器也用不了真隔离（${a.unavailable}）。`;
+    return `「允许工作区外命令」选了「所有」：命令直接在主机上运行，真隔离这一档不再生效`
+      + `${a.mode === 'off' ? '' : `（当前档位 ${a.mode}）`}`
+      + '—— 这一档的含义就是"什么都不问、就在这台电脑上跑"，它也盖过 `SHE_SANDBOX_ISOLATION=wsl`，'
+      + '所以把那个开关打开、或改成 `auto`，都不会改变这一档的行为。'
+      + '要重新走边界，把档位调回「只读」或「拒绝」（这两档会恢复隔离，工作区外的命令改为问你或直接拒）。'
+      + machine;
+  }
+
   if (a.available) {
     if (a.mode !== 'off') return null;
     return `这台机器可以用真隔离（WSL：${a.distro || '默认发行版'}），现在是关着的：`

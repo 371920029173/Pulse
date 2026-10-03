@@ -62,6 +62,8 @@ const note = (label, detail) => {
 const {
   SandboxShell, resolveWslIsolation, resetIsolationProbeCache, planIsolation, describeIsolation,
   buildConfinedScript, buildWslArgv, NOT_IN_NAMESPACE_EXIT, WORKSPACE_NOT_IN_WSL_EXIT,
+  // 让开判据与合成结论：这一节要断言的就是"服务端/评测读的那一对函数"，不是本地再推一遍。
+  isMaxGrant, effectiveIsolationMode,
 } = await import('../packages/sandbox/dist/index.js');
 
 console.log('\n真隔离门禁（层 4.2）\n');
@@ -113,7 +115,23 @@ if (available) {
   // arrived as `C:UsersADMINI~1AppDataLocalTemp...` with every separator eaten).
   const readOutsideHost = readWith(join(outsideDir, outsideName).replace(/\\/g, '/'));
   const readOutsideGuest = readWith(outsideWsl);
-  const permissive = { allowAllCommands: true, denyDestructiveByDefault: false };
+  /*
+   * 这个档位专门给"要真的进边界"的用例用：`denyDestructiveByDefault: false` 让命令不必先拿票，
+   * `outsideWorkspace` 停在「只读」—— 也就是**没有**勾到「所有」。
+   *
+   * 为什么不能再用 `allowAllCommands: true`：勾选 + 「所有」这一档现在会让开真隔离（见
+   * `isMaxGrant`）—— 那正是产品要的行为，但用它来做"边界还在不在"的对照，测的就是一档明确说了
+   * "不要在隔离里跑"的配置，结论必然自相矛盾。这里改用最大授权之外的那一档，同样不必拿票。
+   */
+  const permissive = { denyDestructiveByDefault: false, outsideWorkspace: { allow: true, policy: 'readonly' } };
+  /*
+   * 这一节的探测器故意会读工作区外的路径（`/mnt`、`/proc`），而档位停在「只读」：那些命令在边界层
+   * 看来是"要出去"，需要一个人批准。批准它们的是写这个文件的人，所以显式带上 `boundaryApproved`。
+   *
+   * 不走"把档位调成「所有」"这条更省事的路，是因为那样最大授权会让隔离让开（见 4b），这一节就没得测了
+   * —— 用一档明确说了"不要在隔离里跑"的配置去测边界，结论必然自相矛盾。
+   */
+  const approved = { boundaryApproved: true };
 
   console.log('\n=== 边界：工作区外的文件，隔离前后 ===');
   {
@@ -176,15 +194,15 @@ if (available) {
      * cannot quietly park something else under /mnt and still pass.
      */
     const drives = "ls -A /mnt | grep -v '^wsl$' | wc -l";
-    const inside = await sh.exec(drives);
+    const inside = await sh.exec(drives, approved);
     check('边界内 /mnt 里没有任何盘符（只剩 DNS 落点 wsl）', inside.stdout.trim() === '0',
       `stdout=${JSON.stringify(inside.stdout)} exit=${inside.exitCode}`);
 
-    const scaffold = await sh.exec("ls -A /mnt/wsl 2>/dev/null | tr '\\n' ' '");
+    const scaffold = await sh.exec("ls -A /mnt/wsl 2>/dev/null | tr '\\n' ' '", approved);
     check('  /mnt/wsl 里只有 resolv.conf（DNS 落点，不是别的什么）', scaffold.stdout.trim() === 'resolv.conf',
       `stdout=${JSON.stringify(scaffold.stdout)}`);
 
-    const letters = await sh.exec("ls -A /mnt | grep -cE '^[a-z]$'");
+    const letters = await sh.exec("ls -A /mnt | grep -cE '^[a-z]$'", approved);
     check('  /mnt 下没有单字母盘符', letters.stdout.trim() === '0',
       `stdout=${JSON.stringify(letters.stdout)}`);
 
@@ -192,19 +210,20 @@ if (available) {
     // drvfs is still mounted. Every pid visible from inside must fail, not just PID 1.
     const viaProc = await sh.exec(
       'n=0; for p in /proc/[0-9]*; do ls "$p/root/mnt/" 2>/dev/null | grep -v "^wsl$" | grep -q . && n=$((n+1)); done; echo "$n"',
+      approved,
     );
     check('【关键】经 /proc/<pid>/root 看不到任何盘符（所有 pid）', viaProc.stdout.trim() === '0',
       `命中 pid 数=${JSON.stringify(viaProc.stdout.trim())} exit=${viaProc.exitCode}`);
-    const pid1 = await sh.exec('ls /proc/1/root/mnt/ 2>/dev/null | grep -v "^wsl$" | wc -l');
+    const pid1 = await sh.exec('ls /proc/1/root/mnt/ 2>/dev/null | grep -v "^wsl$" | wc -l', approved);
     check('  /proc/1/root/mnt 只有 DNS 落点，没有盘符', pid1.stdout.trim() === '0',
       `stdout=${JSON.stringify(pid1.stdout)}`);
 
     // Root keeps CAP_SYS_ADMIN unless it is dropped, and then `umount /mnt` lifts the mask — which
     // would put the real drives (and the real /mnt/wsl) back in view, so the count goes UP.
-    const unmask = await sh.exec(`umount /mnt 2>/dev/null; ${drives}`);
+    const unmask = await sh.exec(`umount /mnt 2>/dev/null; ${drives}`, approved);
     check('【关键】umount /mnt 撤不掉遮盖（root 的挂载权限已去掉）', unmask.stdout.trim() === '0',
       `umount 之后 /mnt 里的盘符数=${JSON.stringify(unmask.stdout.trim())}`);
-    const caps = await sh.exec("grep CapBnd /proc/self/status | awk '{print $2}'");
+    const caps = await sh.exec("grep CapBnd /proc/self/status | awk '{print $2}'", approved);
     const bnd = BigInt('0x' + (caps.stdout.trim() || '0'));
     check('  bounding 集里没有 CAP_SYS_ADMIN(21) 和 CAP_DAC_READ_SEARCH(2)',
       caps.exitCode === 0 && (bnd & (1n << 21n)) === 0n && (bnd & (1n << 2n)) === 0n,
@@ -300,7 +319,11 @@ if (available) {
  */
 console.log('\n=== 描述与事实：工具描述点名的 shell，必须是真正解析这条命令的那个 ===');
 {
-  const permissive = { allowAllCommands: true, denyDestructiveByDefault: false };
+  /*
+   * 这一节用「只读」档（不是最大授权）：它测的是**档位 → 描述**这条链，与"最大授权让开隔离"是
+   * 两件事，混在一起会让任一条变了就同时红两处。最大授权那一格在下一节单独钉。
+   */
+  const permissive = { denyDestructiveByDefault: false, outsideWorkspace: { allow: true, policy: 'readonly' } };
   // A UNC root has no drive letter, so it cannot be mapped into /mnt — `isolation.ts` says so
   // explicitly. Used here because it is the one root that is unmappable ON EVERY MACHINE, WSL or
   // not, which keeps this section's verdict machine-independent.
@@ -375,6 +398,108 @@ console.log('\n=== 描述与事实：工具描述点名的 shell，必须是真�
   check('auto 用不了时：available=false 且 requestedButUnavailable=true，不与"已生效"混淆',
     degraded.available === false && degraded.requestedButUnavailable === true,
     JSON.stringify(degraded));
+}
+
+// ─── 4b. 最大授权（勾选 +「所有」）让开真隔离：描述、事实、回执三处都要对上 ───
+/*
+ * 用户的原话是"勾了『允许所有命令』、档位选『所有』，就该直接在电脑上跑，不走沙箱"。这一档此前
+ * 只放开了审批与工作区边界，命令仍然进 WSL 命名空间 —— 于是**越信任这台机器的人，越会撞上
+ * "连 ver 都跑不了"**（本机实测：最大授权 + auto 下 `exec('ver')` → exit 127
+ * `bash: line 1: ver: command not found`），而且那句报错看起来像命令写错了，不像"你被关在边界里"。
+ *
+ * 这一节钉三件事，缺一件这条改动就等于没做：
+ *   1. 判据（`isMaxGrant`）：勾选 +「所有」才算，别的三档一律不算（否则"只读"档会静默失去边界）；
+ *   2. 事实：真跑一条 Windows 命令，最大授权下必须成功、结果里**不能**有 `isolation` 字段；
+ *      同一台机器上把档位调回「只读」，它必须重新进边界（否则测的只是"这台机器没有 WSL"）；
+ *   3. 描述：`shellName()` 必须说主机 shell 而不是"bash -lc（WSL 隔离内）"—— 上一节那条
+ *      "描述说在哪跑 == 实际在哪跑"在这一档下也要成立。
+ *
+ * 机器无关性：第 2 条的后半句（只读档仍进边界）在**没有 WSL 的机器上不成立** —— 那时 `auto` 按约定
+ * 退回主机。所以它按 `available` 分叉断言：能开的机器上必须真的进边界，不能开的机器上必须留在主机
+ * 且描述照实说。这样任何一台机器上跑，结论都是确定的。
+ *
+ * 变异（两个方向，各由一条断言盯住）：
+ *   - 删掉 `effectiveIsolation()` 的让开（退回读 `config.isolation`）→ 「最大授权 + auto：ver 跑起来了」
+ *     转红（`ver` 会变回 `bash: ver: command not found`）；
+ *   - 把让开的范围放宽（任何档位都让开）→ 上面那格仍然绿，但对照格「只读档下边界必须回来」转红。
+ */
+console.log('\n=== 最大授权（勾选 +「所有」）：命令直接在主机上跑 ===');
+{
+  const MAX = { allowAllCommands: true, outsideWorkspace: { allow: true, policy: 'all' } };
+  const READONLY = { allowAllCommands: false, outsideWorkspace: { allow: true, policy: 'readonly' } };
+
+  // 1. 判据本身。四档 + 两种写法，逐格钉死 —— 这一格红了就说明"让开"的范围超出了用户勾的那一档。
+  const grantCells = [
+    ['勾选 + 所有（= 最大授权）', { ...MAX }, true],
+    ['只传 allowAllCommands 的库调用方（构造函数会补成 all）', { allowAllCommands: true }, true],
+    ['只传 allowAllCommands，且档位显式是 all', { allowAllCommands: true, outsideWorkspace: { allow: true, policy: 'all' } }, true],
+    /*
+     * 下面三格是"两个控件没同时说是"的全部情况 —— 一律不让开。它们在生产路径上不该出现
+     * （服务端把两者同步），但库的调用方可以构造出来，而这正是最需要按严的一侧读的地方：
+     * 误判成"让开"会让命令在没有边界的主机上裸跑。
+     */
+    ['勾选 + 只读（自相矛盾输入 → 保留隔离）', { ...READONLY, allowAllCommands: true }, false],
+    ['勾选 + 拒绝', { allowAllCommands: true, outsideWorkspace: { allow: true, policy: 'deny' } }, false],
+    ['未勾选 + 所有（边界开着但没勾选 → 保留隔离）', { allowAllCommands: false, outsideWorkspace: { allow: true, policy: 'all' } }, false],
+    ['只传档位 all（没勾选）', { outsideWorkspace: { allow: true, policy: 'all' } }, false],
+    ['什么都没传（旧调用方）', undefined, false],
+  ];
+  for (const [label, grant, expected] of grantCells) {
+    check(`isMaxGrant(${label}) === ${expected}`, isMaxGrant(grant) === expected, JSON.stringify(grant));
+  }
+  check('  effectiveIsolationMode：最大授权下 auto/wsl 都变成 off',
+    effectiveIsolationMode('auto', MAX) === 'off' && effectiveIsolationMode('wsl', MAX) === 'off');
+  check('  非最大授权时档位原样保留（不偷偷关掉别人的边界）',
+    effectiveIsolationMode('wsl', READONLY) === 'wsl' && effectiveIsolationMode('auto', undefined) === 'auto'
+    && effectiveIsolationMode('off', MAX) === 'off');
+
+  /*
+   * 2. 事实。`ver` 是 cmd.exe 的内建命令，WSL 里根本没有 —— 拿它当判据比"看有没有 isolation 字段"
+   * 更硬：字段可能因为别的原因消失，而 `ver` 能成功只能说明这条命令**真的在 Windows 上跑了**。
+   * 它在任何 Windows 机器上都存在，所以这条不依赖装没装 WSL。
+   */
+  {
+    const sh = new SandboxShell(ROOT, { ...MAX, isolation: 'auto' });
+    const r = await sh.exec('ver');
+    const onHost = r.exitCode === 0 && /Version/i.test(r.stdout);
+    check('【关键】最大授权 + auto：`ver` 在这台电脑上真的跑起来了（不是"bash: ver: command not found"）',
+      onHost, `exit=${r.exitCode} stdout=${JSON.stringify(r.stdout.slice(0, 120))} stderr=${JSON.stringify(r.stderr.slice(0, 200))}`);
+    check('  结果里没有 isolation 披露（它没在边界里跑，就不能声称在）',
+      r.isolation === undefined || r.isolation === null, JSON.stringify(r.isolation));
+    check('  描述也说主机 shell，不说"WSL 隔离内"',
+      !sh.shellName().includes('WSL'), `shellName()=${JSON.stringify(sh.shellName())} dialect()=${JSON.stringify(sh.dialect())}`);
+    check('  公开的让开判据与之一致（界面/评测问的就是它，不该各算一遍）',
+      sh.isolationBypassedByGrant() === true && sh.effectiveIsolation() === 'off',
+      `bypassed=${sh.isolationBypassedByGrant()} effective=${sh.effectiveIsolation()}`);
+    check('  wsl 档位也被这一档盖过（用户选了"就在这台电脑上跑"）', await (async () => {
+      const w = new SandboxShell(ROOT, { ...MAX, isolation: 'wsl' });
+      const wr = await w.exec('ver');
+      return wr.exitCode === 0 && /Version/i.test(wr.stdout) && !wr.isolation;
+    })());
+  }
+
+  /*
+   * 3. 对照：同一台机器、同一个档位，把档位换成「只读」—— 边界必须回来。没有这一条，上面全绿也可能
+   * 只是"这台机器上隔离从来没生效过"，那样这条改动就把 4.2 整层悄悄拆掉了而没人知道。
+   */
+  {
+    const sh = new SandboxShell(ROOT, { ...READONLY, isolation: 'auto' });
+    const r = await sh.exec('echo hi');
+    check(
+      `【关键】对照：同一台机器、同一档位，只读档下边界${available ? '必须回来' : '（本机没有可用 WSL，按 auto 的约定留在主机）'}`,
+      available ? Boolean(r.isolation) && sh.shellName().includes('WSL') : !r.isolation,
+      `available=${available} exit=${r.exitCode} isolation=${JSON.stringify(r.isolation)} shellName()=${JSON.stringify(sh.shellName())}`,
+    );
+    /*
+     * 同一条 `ver` 在两个档位下的可达性必须相反 —— 这是"边界真的回来了"最硬的判据：字段可能因为
+     * 别的原因消失或出现，而"cmd 的内建命令能不能跑"只由"在不在 Windows 上"决定。
+     */
+    const v = await sh.exec('ver');
+    const reachedHost = v.exitCode === 0 && /Version/i.test(v.stdout);
+    check('  同一条 `ver` 在只读档下进不了主机（隔离里没有 ver）',
+      available ? !reachedHost : true,
+      `available=${available} exit=${v.exitCode} stdout=${JSON.stringify(v.stdout.slice(0, 80))} stderr=${JSON.stringify(v.stderr.slice(0, 120))}`);
+  }
 }
 
 // ─── 5. Mutation: would this gate notice if the boundary stopped working? ───

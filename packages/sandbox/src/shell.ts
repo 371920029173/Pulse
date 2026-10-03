@@ -10,6 +10,7 @@ import type {
 import { jailWorkspacePath } from '@she/shared';
 import {
   buildConfinedScript, buildWslArgv, planIsolation, isolationInEffect, isolationSpawnEnv,
+  effectiveIsolationMode, isMaxGrant,
 } from './isolation.js';
 import type { IsolationPlan, IsolationMode } from './isolation.js';
 
@@ -1742,7 +1743,7 @@ export class SandboxShell {
      * an error only for the `wsl` mode, where silently running on the host would contradict what the
      * result is about to claim.
      */
-    const iso = planIsolation(this.config.isolation, this.workspaceRoot, cwd, this.config.wslDistro);
+    const iso = planIsolation(this.effectiveIsolation(), this.workspaceRoot, cwd, this.config.wslDistro);
     if (iso && 'error' in iso) return deny(iso.error);
 
     /*
@@ -2717,10 +2718,12 @@ export class SandboxShell {
   /**
    * Whether a command in this workspace **really** goes through the boundary.
    *
-   * Documented as "does the requested mode resolve to a plan", and it is deliberately NOT
+   * This answers "does the requested mode resolve to a plan", and it is deliberately NOT
    * `this.config.isolation !== 'off'`. That test answers "what did the user ask for"; the question
-   * here is "what will happen", and the two differ in exactly one cell — `auto` on a machine where
-   * WSL is unusable. Measured (probe, `auto` + unmappable workspace root):
+   * here is "what will happen", and the two differ in exactly two cells.
+   *
+   * Cell one — `auto` on a machine where WSL is unusable. Measured (probe, `auto` + unmappable
+   * workspace root):
    *
    *   planIsolation('auto', …) -> null         命令在主机上跑
    *   shellName()              -> bash -lc（WSL 隔离内）     ← 假的
@@ -2732,13 +2735,52 @@ export class SandboxShell {
    * without WSL would. Trading a recorded capability gap for an UNRECORDED dialect gap is the wrong
    * direction.
    *
+   * Cell two — 最大授权（勾选「允许工作区外命令」+ 档位「所有」）on a machine where WSL *is* usable:
+   * that tier asked for "就在这台电脑上跑", so `effectiveIsolation()` answers `off` and the honest
+   * description is the host shell. Reporting `bash -lc（WSL 隔离内）` here was worse than cell one
+   * because it was ALSO what made `ver` come back as `bash: ver: command not found` — a failure that
+   * reads like a typo rather than like being inside a boundary.
+   *
+   * Both cells therefore read `effectiveIsolation()` rather than the raw mode.
+   *
    * The probe result is memoised in `isolation.ts`, so this costs one `wsl.exe` per process — and the
    * server already probes at boot for the posture notice, so it is usually free by the time a
    * description is built.
    */
   private isolationApplies(): boolean {
-    const r = planIsolation(this.config.isolation, this.workspaceRoot, this.workspaceRoot, this.config.wslDistro);
+    const r = planIsolation(this.effectiveIsolation(), this.workspaceRoot, this.workspaceRoot, this.config.wslDistro);
     return r !== null && !('error' in r);
+  }
+
+  /**
+   * 这一档真的会用的隔离模式 —— 「最大授权」在这里让开。
+   *
+   * 为什么要有这个方法，而不是在三处各写一遍 `this.config.isolation`：`admit()` 决定怎么 spawn，
+   * `isolationApplies()` 决定 `shellName()` / `dialect()` 怎么描述，`describeIsolation()` 报给界面。
+   * 上一个同类 bug（第七轮：描述说 bash、其实 cmd.exe 在解析）就是这么来的 —— 描述与事实各算一遍，
+   * 迟早有一次算得不一样。这里只留一个来源，其余都读它。
+   *
+   * 让开的**只有隔离**：审批、破坏性命令、工作区边界由 `outsideWorkspace` / `allowAllCommands` 管
+   * （「所有」档早就放开了它们），命令白名单由 `allowedCommands` 管且不受影响 —— 那是用户单独打开的
+   * 另一个 fail-closed 开关（见 `isCommandAllowed`）。
+   */
+  effectiveIsolation(): IsolationMode {
+    return effectiveIsolationMode(this.config.isolation, {
+      allowAllCommands: this.config.allowAllCommands,
+      outsideWorkspace: this.config.outsideWorkspace,
+    });
+  }
+
+  /**
+   * 「最大授权」（勾选「允许工作区外命令」+ 档位「所有」）是不是正把隔离让开。
+   *
+   * 公开出去是为了让界面/评测能问"这条命令为什么没在隔离里跑"，而不是去猜 `config.isolation`。
+   */
+  isolationBypassedByGrant(): boolean {
+    return isMaxGrant({
+      allowAllCommands: this.config.allowAllCommands,
+      outsideWorkspace: this.config.outsideWorkspace,
+    });
   }
 
   /**

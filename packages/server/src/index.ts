@@ -3462,9 +3462,17 @@ router.put('/api/settings', async (req, res) => {
        *
        * 探测惰性 + 进程内记忆（`resolveWslIsolation` 自己缓存）：首次读设置会起一次短命的 wsl.exe
        * （约 1 秒），之后不再付钱；启动本身不为它变慢。
+       *
+       * 第四个参数是**当前授权**：档位选到「所有」（勾选 + 所有）时真隔离被让开，这一档下
+       * `available` 是"这台机器本可以隔离"，而实际跑的是主机 —— `bypassed` 就是这件事的字段，
+       * `notice` 会把它说出来。曾经这里只传前三个参数，于是设置页会告诉用户"真隔离开着"，
+       * 而命令其实在主机上跑（本机实测 `ver` 在最大授权下仍然 127）。
        */
       isolation: (() => {
-        const a = describeIsolation(config.sandbox.isolation, config.workspace.root, config.sandbox.wslDistro);
+        const a = describeIsolation(config.sandbox.isolation, config.workspace.root, config.sandbox.wslDistro, {
+          allowAllCommands: config.sandbox.allowAllCommands,
+          outsideWorkspace: config.sandbox.outsideWorkspace,
+        });
         return { ...a, notice: isolationNotice(a) };
       })(),
     });
@@ -6781,7 +6789,11 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
      * 部署也能在日志里看到，第一次会付约 1 秒的 wsl.exe 探测；`off` 且不可用时 `isolationNotice`
      * 返回 null，启动日志不为一句没信息量的话变长。
      */
-    const isoNotice = isolationNotice(describeIsolation(config.sandbox.isolation, config.workspace.root, config.sandbox.wslDistro));
+    const isoNotice = isolationNotice(describeIsolation(
+      config.sandbox.isolation, config.workspace.root, config.sandbox.wslDistro,
+      // 同一份授权，理由同 `/api/settings`：最大授权下真隔离被让开，日志不该还说"隔离开着"。
+      { allowAllCommands: config.sandbox.allowAllCommands, outsideWorkspace: config.sandbox.outsideWorkspace },
+    ));
     if (isoNotice) log.info(isoNotice);
 
     /*

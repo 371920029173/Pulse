@@ -35,6 +35,18 @@ interface SettingsData {
      */
     notice?: string | null;
   };
+  /**
+   * 真隔离那一格。`notice` 与 `sandbox.notice` 同源同理：由服务端决定要不要说，界面只显示。
+   *
+   * `bypassed` ＝ 勾选 + 「所有」这一档把隔离让开了（命令直接在主机上跑）。老服务端没有这个字段，
+   * 于是 `undefined` —— 不能当 `false` 用来说"隔离生效中"，这里只读 `notice`，不自己下结论。
+   */
+  isolation?: {
+    mode?: 'off' | 'auto' | 'wsl';
+    available?: boolean;
+    bypassed?: boolean;
+    notice?: string | null;
+  };
 }
 
 interface Props {
@@ -203,6 +215,14 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
    * 会不一致。第四轮评测 2a 的另一半就是这条 —— 姿态以前被静默改掉，现在改成"不改，但说出来"。
    */
   const [postureNotice, setPostureNotice] = useState<string | null>(null);
+  /**
+   * 真隔离那一格的情况（服务端算好回传的 `isolation`）。
+   *
+   * 界面原来只读 `sandbox.notice`，把这一个字段漏掉了，于是"隔离开着没有 / 命令在哪跑"在设置页里
+   * 完全看不见 —— 用户唯一的线索是命令莫名其妙地失败（最大授权下 `ver` 返回 127 就是个例子）。
+   * 判据（哪个档位让开了隔离）仍然只有服务端一份，这里只负责显示它给的那句话。
+   */
+  const [isolationNotice, setIsolationNotice] = useState<string | null>(null);
   const [kbDbPath, setKbDbPath] = useState('');
   const [kbMode, setKbMode] = useState<'env' | 'shared' | 'local' | ''>('');
   const [sharePath, setSharePath] = useState('');
@@ -248,6 +268,9 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
             : (d.sandbox?.allowAllCommands ? 'all' : 'readonly'),
         );
         setPostureNotice(typeof d.sandbox?.notice === 'string' && d.sandbox.notice ? d.sandbox.notice : null);
+        setIsolationNotice(
+          typeof d.isolation?.notice === 'string' && d.isolation.notice ? d.isolation.notice : null,
+        );
         void refreshKbLink();
       })
       .catch((e) => setMsg(String(e.message || e)));
@@ -409,6 +432,9 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
       setAllowAllCommands(Boolean(d.sandbox?.allowAllCommands));
       setAutomationMode(d.automationMode !== false);
       setPostureNotice(typeof d.sandbox?.notice === 'string' && d.sandbox.notice ? d.sandbox.notice : null);
+      setIsolationNotice(
+        typeof d.isolation?.notice === 'string' && d.isolation.notice ? d.isolation.notice : null,
+      );
       setKbDbPath(d.kb?.dbPath || '');
       setWorkspaceRoot(d.workspace.root);
     } catch (e: any) {
@@ -418,14 +444,23 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
     }
   }
 
-  /** 当前四档落在哪一档，用来画"此刻的实际规则"。 */
-  const effectiveRule = outsideAllow === false
-    ? t('除阅读类命令外，一律需要你点确认')
-    : outsidePolicy === 'all'
-      ? t('一切命令直接放行，不再询问')
-      : outsidePolicy === 'deny'
-        ? t('工作区内自由执行；工作区外的写操作直接拒绝')
-        : t('工作区内自由执行；工作区外的写操作需要你点确认');
+  /**
+   * 当前四档落在哪一档，用来画"此刻的实际规则"。
+   *
+   * 「所有」这一档现在是**两件事**：不问人，而且不在隔离里跑（命令直接在主机上）。第二句必须写出来
+   * —— 用户在这一档下撞到的第一个意外就是"Windows 命令跑不了"（最大授权 + auto 时 `ver` 返回 127），
+   * 而界面在此之前一个字都没说。措辞与 `isolationNotice` 同源，不另写一套说法。
+   */
+  let effectiveRule: string;
+  if (outsideAllow === false) {
+    effectiveRule = t('除阅读类命令外，一律需要你点确认');
+  } else if (outsidePolicy === 'all') {
+    effectiveRule = t('一切命令直接放行、不再询问，且直接在主机上运行（不在真隔离里，也不是 WSL）');
+  } else if (outsidePolicy === 'deny') {
+    effectiveRule = t('工作区内自由执行；工作区外的写操作直接拒绝');
+  } else {
+    effectiveRule = t('工作区内自由执行；工作区外的写操作需要你点确认');
+  }
 
   function renderSection() {
     if (!data) return null;
@@ -603,6 +638,15 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
           {postureNotice && (
             <p className={styles.warn} role="status">{postureNotice}</p>
           )}
+          {/*
+            真隔离那一格。与上面那条同源：由服务端决定要不要说。
+            它最常见的两个理由是「这台机器能用真隔离但现在是关的」和「你选了『所有』，隔离被这一档让开
+            了」—— 后者是这一节最该被看见的一句话，因为它在界面上曾经完全不可见（用户的第一手线索是
+            命令莫名其妙地失败）。
+          */}
+          {isolationNotice && (
+            <p className={styles.warn} role="status">{isolationNotice}</p>
+          )}
           <label className={styles.checkRow}>
             <input
               type="checkbox"
@@ -648,7 +692,7 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
               {
                 id: 'all' as const,
                 title: t('所有'),
-                desc: t('什么都不问，包括工作区外。仅限你完全信任的本地环境。'),
+                desc: t('什么都不问，包括工作区外；命令直接在主机上运行（真隔离让开）。仅限你完全信任的本地环境。'),
               },
               {
                 id: 'deny' as const,

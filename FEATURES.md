@@ -41,9 +41,12 @@ Desktop window: **done** — Electron shell in `@she/desktop`, launched by `pnpm
 - Light + dark themes (`data-theme`, StatusBar / Ctrl+K)
 - **User stylesheet** — `~/.she-app/theme.css`, editable by hand or from Settings; validated before
   save, scoped preview, and two escape hatches that work when the UI is invisible
-- Settings toggle **允许所有命令** → `sandbox.allowAllCommands` (skips confirm tickets + destructive
-  deny; persists `SHE_ALLOW_ALL_COMMANDS`). An explicit value in the same request wins, in both
-  directions.
+- Settings sandbox tiers **允许工作区外命令 + 只读 / 所有 / 拒绝** → `sandbox.outsideWorkspace`
+  (+ the derived `sandbox.allowAllCommands` / `SHE_ALLOW_ALL_COMMANDS`): 勾选 + 「所有」 skips confirm
+  tickets, destructive-pattern denial and the workspace boundary — and also **steps real isolation
+  aside** (`isMaxGrant()`), so commands run directly on this machine instead of inside the WSL
+  namespace; every notice says which tier did it and how to put it back. An explicit value in the
+  same request wins, in both directions.
 
 ## Capability notes
 - AGI-3.5-v2 is **not** an LLM — it is a scaffolding project. The adapter that once read

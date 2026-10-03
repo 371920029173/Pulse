@@ -445,6 +445,40 @@
 **变异验证**：把 `mount -t tmpfs none /mnt` 注释掉重跑，`check:sandbox-isolation` 立刻两条转红、退出码 1
 （"隔离开启时读不到"与"边界内 `/mnt` 里没有盘符"）；恢复后全绿。单测 30 项钉住纯函数与自检本身。
 
+### 层 4.2 的后续修正：最大授权（勾选 +「所有」）让开真隔离
+
+上面那句"要 Windows 工具的工作流写 `SHE_SANDBOX_ISOLATION=off`"不是唯一的答案，也**不该**是唯一答案：
+设置页上「允许工作区外命令」勾选 + 档位「所有」的原文是"什么都不问，包括工作区外。仅限你完全信任的
+本地环境"—— 那是一句关于**这台电脑**的话，而当时的实现只放开了审批与工作区边界，命令仍然进 WSL 命名
+空间。于是越信任这台机器的用户越会撞上同一件事（本机实测 2026-10-03）：
+
+```
+allowAllCommands=true / outsideWorkspace={allow:true,policy:'all'} / isolation=auto
+exec('ver')  ->  exit 127   bash: line 1: ver: command not found
+```
+
+`ver` 是 cmd.exe 的内建命令，这条报错看起来像命令写错了，而不像"你被关在边界里"。现在的判据
+`isMaxGrant()` 承认这件事：**勾选 +「所有」就是"就在这台电脑上跑"**，因此 `effectiveIsolationMode()`
+把档位合成 `off`（`wsl` 也一起让开 —— 用户已经明确说了要在这台机器上跑，把它拒绝掉才是违背他的选择）。
+
+三处一起改，少一处这条改动就等于没做：`admit()` 决定怎么 spawn、`isolationApplies()` 决定
+`shellName()` / `dialect()` 怎么描述（描述必须说主机 shell，`ver` 不能在被说成隔离的同时跑起来）、
+`describeIsolation()` / `isolationNotice()` 决定界面与启动日志里怎么说。让开的**只有隔离**：审批、
+破坏性命令、工作区边界本来就由这一档放开，命令白名单（`allowedCommands`）是用户单独打开的另一个
+fail-closed 开关，不受影响。
+
+说出来的部分与动作一样重要：提示同时给出**后果**（命令直接在主机上运行）、**是谁造成的**（档位
+「所有」）、**怎么收回去**（调回「只读」/「拒绝」），并点明"去打开 `SHE_SANDBOX_ISOLATION` 没用"——
+那一格最自然的动作就是去开那个开关，而这一档会盖过它。设置页那一节、启动日志、以及每条命令的回执
+（让开时不带 `isolation` 字段）三处一致。
+
+**门禁**：`check:sandbox-isolation` 新增第 4b 节 —— 判据表（8 格：两个控件缺一不可、`wsl` 与 `auto`
+都被盖过、其余档位原样保留）、事实（最大授权下真跑 `ver` 必须成功、结果里没有 `isolation`、描述不说
+"WSL 隔离内"）、对照（同一台机器、同一档位改成「只读」，边界必须回来且 `ver` 必须再跑不到）。
+`check:shell` 侧新增提示文案五格与"设置页真的渲染了 `isolation.notice`"的静态断言。单测（
+`isolation.test.ts`）把纯决策钉成与机器无关的断言，这样没装 WSL 的 CI 也能挡住两个方向的回归。
+变异：删掉 `effectiveIsolation()` 的让开 → 事实那条转红；把让开放宽到任何档位 → 对照那条转红。
+
 ### 层 4.3 落地明细（shell 方言）
 
 **问题（第四轮 3a / 3b）**：沙箱在 Windows 上把命令交给 `cmd.exe`（`spawnCommand`），而模型按习惯写 POSIX。

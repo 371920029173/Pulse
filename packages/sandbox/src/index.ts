@@ -9,8 +9,13 @@ export {
   isolationInEffect, resolveWslIsolation, resetIsolationProbeCache, isolationDetail,
   isolationSpawnEnv, ISOLATION_PROBE, WORKSPACE_NOT_IN_WSL_EXIT, NOT_IN_NAMESPACE_EXIT,
   describeIsolation, isolationNotice,
+  // 「最大授权」让开真隔离：判据（`isMaxGrant`）与合成结论（`effectiveIsolationMode`）各只有一个来源，
+  // 服务端算界面提示时读的是同一对函数，不是自己再推一遍。
+  isMaxGrant, effectiveIsolationMode,
 } from './isolation.js';
-export type { IsolationMode, IsolationPlan, IsolationResolution, IsolationAvailability } from './isolation.js';
+export type {
+  IsolationMode, IsolationPlan, IsolationResolution, IsolationAvailability, PermissionGrant,
+} from './isolation.js';
 export { createTools } from './tools.js';
 export type { ToolSet } from './tools.js';
 export { ConfirmTicketStore } from './tickets.js';

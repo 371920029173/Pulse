@@ -154,7 +154,7 @@ export interface SheConfig {
     timeout: number;
     maxOutputBytes: number;
     denyDestructiveByDefault: boolean;
-    /** When true: skip confirm tickets + allow destructive shell. */
+    /** When true: skip confirm tickets + allow destructive shell, and step real isolation aside. */
     allowAllCommands: boolean;
     /**
      * 工作区边界策略 —— 「允许工作区外命令」那一组控件背后的东西。
@@ -175,7 +175,9 @@ export interface SheConfig {
      * 于是策略拆成两问，和用户看到的两个控件一一对应：
      *
      *   allow=false                     —— 「允许工作区外命令」没勾：除阅读类外一律要人同意。
-     *   allow=true, policy='all'        —— 勾了 + 「所有」：什么都不问。
+     *   allow=true, policy='all'        —— 勾了 + 「所有」：什么都不问。**这一档还会让真隔离让开**
+     *                                      （见 `isolation`）：它的原话是"仅限你完全信任的本地环境"，
+     *                                      也就是"就在这台电脑上跑"。
      *   allow=true, policy='readonly'   —— 勾了 + 「只读」（默认）：工作区内免问，工作区外的写要问。
      *   allow=true, policy='deny'       —— 勾了 + 「拒绝」：工作区内免问，工作区外一律直接拒绝。
      *
@@ -211,6 +213,12 @@ export interface SheConfig {
      * worse than no request — the transcript would say "isolated" about a command that was not.
      *
      * `off`: never. Commands run on the host, under the path jail.
+     *
+     * Overridden by the max grant: 勾选「允许工作区外命令」+ 档位「所有」（= `allowAllCommands`）把这一档
+     * 合成 `off`（`isMaxGrant()` / `effectiveIsolationMode()`），包括显式的 `wsl` —— 那一档的原话是
+     * "仅限你完全信任的本地环境"，也就是"就在这台电脑上跑"，此时把它关进命名空间与用户的明确选择
+     * 相反。让开是三处一起的（spawn / 描述 / 界面与日志的提示），且提示会点名是哪个档位造成的、
+     * 怎么收回去。
      *
      * Why `auto` and not `off`. Layer 4.2 was built, verified with a real boundary and left off by
      * default, and the result was a capability that did not exist as far as any user was concerned:
