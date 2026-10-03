@@ -33,6 +33,7 @@ import { KBStore, GroupKBEngine } from '../../packages/kb/dist/index.js';
 import { SandboxShell, createTools } from '../../packages/sandbox/dist/index.js';
 import { Agent } from '../../packages/agent-runtime/dist/index.js';
 import { summarize, formatReport } from '../lib/variance.mjs';
+import { pinHostSandbox } from '../../scripts/lib/host-sandbox.mjs';
 import { loadTasks, validateTasks, checksOf, turnCount, AGENT_CHECKS } from '../lib/tasks.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -292,7 +293,7 @@ async function runTask(task) {
     const group = engine.createGroup(m.groupName);
     engine.addMemory(group.id, m.kind ?? 'fact', m.title, m.content);
   }
-  const shell = new SandboxShell(dir, cfg.sandbox);
+  const shell = new SandboxShell(dir, pinHostSandbox(cfg.sandbox));
   // Same wiring as the server, so the eval cannot pass while production refuses or vice versa.
   const tools = createTools(shell, dir, { allowAllCommands: true, kbDbPath: join(kbDir, 'kb.sqlite') });
   /** Child agents started by `task_spawn`, disposed with the parent before the workspace is deleted. */
@@ -312,7 +313,7 @@ async function runTask(task) {
    */
   const subagentRunner = {
     async run(req) {
-      const childTools = createTools(new SandboxShell(dir, cfg.sandbox), dir, {
+      const childTools = createTools(new SandboxShell(dir, pinHostSandbox(cfg.sandbox)), dir, {
         allowAllCommands: true,
         kbDbPath: join(dir, '.she', 'kb.sqlite'),
       });

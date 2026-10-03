@@ -27,6 +27,7 @@ import { KBStore, GroupKBEngine } from '../../packages/kb/dist/index.js';
 import { SandboxShell, createTools } from '../../packages/sandbox/dist/index.js';
 import { Agent } from '../../packages/agent-runtime/dist/index.js';
 import { summarize, formatReport } from '../lib/variance.mjs';
+import { pinHostSandbox } from '../../scripts/lib/host-sandbox.mjs';
 import { loadTasks, validateTasks, VERIFY_CHECKS } from '../lib/tasks.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -85,7 +86,7 @@ async function runTask(task) {
 
   const store = new KBStore(join(dir, '.she', 'kb.sqlite'));
   const engine = new GroupKBEngine(store, { ...cfg.kb, dbPath: join(dir, '.she', 'kb.sqlite') });
-  const shell = new SandboxShell(dir, cfg.sandbox);
+  const shell = new SandboxShell(dir, pinHostSandbox(cfg.sandbox));
   const tools = createTools(shell, dir, { allowAllCommands: true });
   const agent = new Agent(cfg, engine, tools, null);
 

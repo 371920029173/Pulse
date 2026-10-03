@@ -19,6 +19,7 @@ import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { removeTempDir } from './lib/temp.mjs';
+import { pinHostSandbox } from './lib/host-sandbox.mjs';
 
 const dir = mkdtempSync(join(tmpdir(), 'she-subagent-'));
 // Derive the project root from this file's location — never a literal path, so
@@ -29,7 +30,7 @@ cfg.workspace.root = dir;
 
 const store = new KBStore(join(dir, 'kb.sqlite'));
 const engine = new GroupKBEngine(store, { ...cfg.kb, dbPath: join(dir, 'kb.sqlite') });
-const shell = new SandboxShell(dir, cfg.sandbox);
+const shell = new SandboxShell(dir, pinHostSandbox(cfg.sandbox));
 const tools = createTools(shell, dir, { allowAllCommands: true });
 
 // Agent exposes its tool list through the request payload it would send; reach

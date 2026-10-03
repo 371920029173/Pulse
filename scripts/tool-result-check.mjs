@@ -32,6 +32,7 @@ import {
   isWorthRemembering,
 } from '../packages/agent-runtime/dist/index.js';
 import { removeTempDir } from './lib/temp.mjs';
+import { pinHostSandbox } from './lib/host-sandbox.mjs';
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const IS_WINDOWS = process.platform === 'win32';
@@ -53,7 +54,7 @@ cfg.workspace.root = dir;
 
 const store = new KBStore(join(dir, 'kb.sqlite'));
 const engine = new GroupKBEngine(store, { ...cfg.kb, dbPath: join(dir, 'kb.sqlite') });
-const shell = new SandboxShell(dir, cfg.sandbox);
+const shell = new SandboxShell(dir, pinHostSandbox(cfg.sandbox));
 const sandboxTools = createTools(shell, dir, { allowAllCommands: true });
 const planTools = createPlanTools(dir, 'sess-toolresult');
 const kbTools = createKBTools(engine);
@@ -64,7 +65,7 @@ const kbTools = createKBTools(engine);
  * permissive config, and cmd.exe answered `'rm' is not recognized`, so nothing was refused
  * and the assertion silently measured the wrong thing.
  */
-const strictShell = new SandboxShell(dir, { ...cfg.sandbox, denyDestructiveByDefault: true, allowAllCommands: false });
+const strictShell = new SandboxShell(dir, pinHostSandbox({ ...cfg.sandbox, denyDestructiveByDefault: true, allowAllCommands: false }));
 const strictTools = createTools(strictShell, dir, { allowAllCommands: false });
 
 /** Run one real tool and return the string the agent would classify. */
@@ -132,7 +133,7 @@ console.log('\n=== 真实工具产出的结果 ===');
    * default, and the command is one that cannot finish inside it. On Windows `ping` is the
    * portable sleep; on POSIX it is `sleep`.
    */
-  const impatient = new SandboxShell(dir, { ...cfg.sandbox, timeout: 600, allowAllCommands: true });
+  const impatient = new SandboxShell(dir, pinHostSandbox({ ...cfg.sandbox, timeout: 600, allowAllCommands: true }));
   const slow = createTools(impatient, dir, { allowAllCommands: true });
   const slowCommand = IS_WINDOWS ? 'ping -n 6 127.0.0.1' : 'sleep 5';
   const timedOut = await run(slow, 'shell', { command: slowCommand });
@@ -200,7 +201,7 @@ console.log('\n=== 真实工具产出的结果 ===');
    * A deny-list refusal that is NOT a destructive command, which is the other way a `DENIED`
    * reaches the model: an unlisted command under an allow-list sandbox.
    */
-  const allowListed = new SandboxShell(dir, { ...cfg.sandbox, allowAllCommands: true, allowedCommands: ['echo'] });
+  const allowListed = new SandboxShell(dir, pinHostSandbox({ ...cfg.sandbox, allowAllCommands: true, allowedCommands: ['echo'] }));
   // Any command the allow-list does not name; spelled per platform for the same reason as above.
   const notListed = await allowListed.exec(IS_WINDOWS ? 'cmd /c dir' : 'ls');
   check('白名单外的命令被拒绝', notListed.denied === true, JSON.stringify(notListed).slice(0, 200));

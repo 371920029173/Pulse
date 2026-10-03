@@ -23,6 +23,7 @@ import { loadConfig } from '../packages/shared/dist/index.js';
 import { KBStore, GroupKBEngine } from '../packages/kb/dist/index.js';
 import { SandboxShell, createTools } from '../packages/sandbox/dist/index.js';
 import { removeTempDir } from './lib/temp.mjs';
+import { pinHostSandbox } from './lib/host-sandbox.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -211,7 +212,7 @@ console.log('\n=== Agent 集成 ===');
   cfg.workspace.root = dir;
   const store = new KBStore(join(dir, '.she', 'kb.sqlite'));
   const engine = new GroupKBEngine(store, { ...cfg.kb, dbPath: join(dir, '.she', 'kb.sqlite') });
-  const shell = new SandboxShell(dir, cfg.sandbox);
+  const shell = new SandboxShell(dir, pinHostSandbox(cfg.sandbox));
   const tools = createTools(shell, dir, { allowAllCommands: true });
 
   const f = fakeBridge();

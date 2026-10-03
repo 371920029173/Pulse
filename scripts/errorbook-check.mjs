@@ -39,6 +39,7 @@ import {
   retireKnownFalsePositives,
 } from '../packages/agent-runtime/dist/index.js';
 import { removeTempDir } from './lib/temp.mjs';
+import { pinHostSandbox } from './lib/host-sandbox.mjs';
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const IS_WINDOWS = process.platform === 'win32';
@@ -60,7 +61,7 @@ cfg.workspace.root = dir;
 
 const store = new KBStore(join(dir, 'kb.sqlite'));
 const engine = new GroupKBEngine(store, { ...cfg.kb, dbPath: join(dir, 'kb.sqlite') });
-const shell = new SandboxShell(dir, cfg.sandbox);
+const shell = new SandboxShell(dir, pinHostSandbox(cfg.sandbox));
 const sandboxTools = createTools(shell, dir, { allowAllCommands: true });
 
 /*

@@ -40,6 +40,7 @@ import {
   renderBudgetStop,
 } from '../packages/agent-runtime/dist/index.js';
 import { removeTempDir } from './lib/temp.mjs';
+import { pinHostSandbox } from './lib/host-sandbox.mjs';
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -81,7 +82,7 @@ function makeEngine(ws) {
  * show: overlapping in time, and returning a specific failure string.
  */
 function makeTools(ws, defs, impl, sandbox = {}) {
-  const shell = new SandboxShell(ws, { ...cfg.sandbox, allowAllCommands: true, ...sandbox });
+  const shell = new SandboxShell(ws, pinHostSandbox({ ...cfg.sandbox, allowAllCommands: true, ...sandbox }));
   const base = createTools(shell, ws, { allowAllCommands: true });
   const calls = [];
   return {

@@ -28,6 +28,7 @@ import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { hermeticEnv } from './lib/hermetic.mjs';
 import { removeTempDir } from './lib/temp.mjs';
+import { pinHostSandbox } from './lib/host-sandbox.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -462,7 +463,7 @@ console.log('\n8. 固定开销（系统提示词 + 工具表）不许无声长�
     mkdirSync(join(dir, '.she'), { recursive: true });
     const store = new KBStore(join(dir, '.she', 'kb.sqlite'));
     const engine = new GroupKBEngine(store, { ...cfg.kb, dbPath: join(dir, '.she', 'kb.sqlite') });
-    const tools = createTools(new SandboxShell(dir, cfg.sandbox), dir, {
+    const tools = createTools(new SandboxShell(dir, pinHostSandbox(cfg.sandbox)), dir, {
       allowAllCommands: true,
       kbDbPath: join(dir, '.she', 'kb.sqlite'),
     });

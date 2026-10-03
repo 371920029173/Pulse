@@ -36,6 +36,7 @@ import {
   createKBTools,
 } from '../packages/agent-runtime/dist/index.js';
 import { removeTempDir } from './lib/temp.mjs';
+import { pinHostSandbox } from './lib/host-sandbox.mjs';
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const dir = mkdtempSync(join(tmpdir(), 'she-cost-'));
@@ -269,7 +270,7 @@ console.log('\n5. 缓存前缀：换一个工作区还能命中多少，以及�
     c.sandbox.allowAllCommands = true;
     const s = new KBStore(join(root, '.she', 'kb.sqlite'));
     const e = new GroupKBEngine(s, { ...c.kb, dbPath: join(root, '.she', 'kb.sqlite') });
-    const t = createTools(new SandboxShell(root, c.sandbox), root, {
+    const t = createTools(new SandboxShell(root, pinHostSandbox(c.sandbox)), root, {
       allowAllCommands: true,
       kbDbPath: join(root, '.she', 'kb.sqlite'),
     });

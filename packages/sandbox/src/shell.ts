@@ -1451,7 +1451,17 @@ export class SandboxShell {
       // Empty means "no allowlist": the denylist is then the only command control, which
       // is the previous behaviour and stays the default.
       allowedCommands: config?.allowedCommands ?? [],
-      // Layer 4.2. `off` keeps the host path byte-for-byte as it was.
+      /*
+       * Layer 4.2. `off` here, deliberately, and NOT because `off` is the product default — the
+       * product default is `auto` (`packages/shared/src/config.ts`). This is the library's default
+       * for a caller that passed a partial config, and it follows the same rule as the two fields
+       * above: a caller that only wants a sandbox gets the old semantics.
+       *
+       * `auto` here would make ~30 unit tests depend on whether the MACHINE has WSL: `new
+       * SandboxShell(tempDir)` would start running `node -e` inside a Linux namespace, and the same
+       * suite would pass on one laptop and fail on another. Hermetic tests matter more than a
+       * default that the product path never uses — the server always passes the full `config.sandbox`.
+       */
       isolation: config?.isolation ?? 'off',
       wslDistro: config?.wslDistro ?? '',
     };
@@ -2705,6 +2715,33 @@ export class SandboxShell {
   }
 
   /**
+   * Whether a command in this workspace **really** goes through the boundary.
+   *
+   * Documented as "does the requested mode resolve to a plan", and it is deliberately NOT
+   * `this.config.isolation !== 'off'`. That test answers "what did the user ask for"; the question
+   * here is "what will happen", and the two differ in exactly one cell — `auto` on a machine where
+   * WSL is unusable. Measured (probe, `auto` + unmappable workspace root):
+   *
+   *   planIsolation('auto', …) -> null         命令在主机上跑
+   *   shellName()              -> bash -lc（WSL 隔离内）     ← 假的
+   *   dialect()                -> posix        于是 cmd 的方言差异一条都不报
+   *
+   * So the description told the model "bash parses this" while `cmd.exe` parsed it, and switched off
+   * the dialect disclosure that layer 4.3 exists to provide. With `off` as the default only a user
+   * who explicitly asked for `auto` could reach that cell; with `auto` as the default every machine
+   * without WSL would. Trading a recorded capability gap for an UNRECORDED dialect gap is the wrong
+   * direction.
+   *
+   * The probe result is memoised in `isolation.ts`, so this costs one `wsl.exe` per process — and the
+   * server already probes at boot for the posture notice, so it is usually free by the time a
+   * description is built.
+   */
+  private isolationApplies(): boolean {
+    const r = planIsolation(this.config.isolation, this.workspaceRoot, this.workspaceRoot, this.config.wslDistro);
+    return r !== null && !('error' in r);
+  }
+
+  /**
    * The shell a command will actually be parsed by — public because the `shell` tool's own
    * DESCRIPTION has to name it (评测 3b: 描述未标 shell 类型).
    *
@@ -2712,16 +2749,23 @@ export class SandboxShell {
    * class of failure `detectShellDialectMismatch` exists to report after the fact. Telling it before
    * the call is the cheaper half of the same fix.
    *
-   * Reports the isolation shell when isolation is on, because that is what runs: `bash -lc` inside
-   * the namespace (see `buildConfinedScript`), where POSIX is the correct dialect rather than a gap.
+   * Reports the isolation shell when the boundary **really applies**, because that is what runs:
+   * `bash -lc` inside the namespace (see `buildConfinedScript`), where POSIX is the correct dialect
+   * rather than a gap. When it does not apply it names the host shell — which is what actually parses
+   * the command, including the `auto`-degraded case (see `isolationApplies`).
+   *
+   * The `wsl`-requested-but-unusable cell reports the host shell too, and that is not a dodge: no
+   * command runs there (they are refused, see `planIsolation`), so the only true statement about
+   * "what parses a command here" is the host shell. That the boundary could not be honoured is said
+   * by `isolationNotice` and by the refusal itself, in their own channels.
    */
   shellName(): string {
-    return this.config.isolation !== 'off' ? 'bash -lc（WSL 隔离内）' : this.resolveShell();
+    return this.isolationApplies() ? 'bash -lc（WSL 隔离内）' : this.resolveShell();
   }
 
   /** The language {shellName} speaks. `cmd` is the one with the gap table above. */
   dialect(): ShellDialect {
-    if (this.config.isolation !== 'off') return 'posix';
+    if (this.isolationApplies()) return 'posix';
     // Strip the extension instead of naming it: `resolveShell()` may return a bare `cmd`, a
     // `cmd.exe`, or a full path to it, and all three speak the same dialect.
     const shell = this.resolveShell().toLowerCase().replace(/\.exe$/, '');

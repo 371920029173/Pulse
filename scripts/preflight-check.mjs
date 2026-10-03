@@ -37,6 +37,7 @@ import {
 } from '../packages/agent-runtime/dist/index.js';
 import { removeTempDir } from './lib/temp.mjs';
 import { hermeticEnv } from './lib/hermetic.mjs';
+import { pinHostSandbox } from './lib/host-sandbox.mjs';
 
 let failures = 0;
 const check = (label, cond, detail) => {
@@ -238,7 +239,7 @@ console.log('\n=== 接入真实 Agent ===');
   cfg.workspace.root = dir;
   const store = new KBStore(join(dir, 'kb.sqlite'));
   const engine = new GroupKBEngine(store, { ...cfg.kb, dbPath: join(dir, 'kb.sqlite') });
-  const shell = new SandboxShell(dir, cfg.sandbox);
+  const shell = new SandboxShell(dir, pinHostSandbox(cfg.sandbox));
   const sandboxTools = createTools(shell, dir, { allowAllCommands: true });
   const names = (a) => (a.allToolDefs ?? []).map((d) => d.name);
 
@@ -325,19 +326,33 @@ console.log('\n=== 接入真实 Agent ===');
  * 一次请求都收不到（agent 去连了真服务）。修法是统一走 `lib/hermetic.mjs`，这里钉住不再长回来。
  *
  * 判据和「哪些脚本可以例外」都在 hermetic.mjs 里，这里只负责让它变成门禁的一条。
+ *
+ * 下面第二条是同一件事的另一个面：那边是「跑门禁的**环境**不该决定结论」，这边是「跑门禁的
+ * **机器**不该决定结论」。产品默认档位从 `off` 变成 `auto` 之后，检查脚本里 `new SandboxShell(
+ * dir, cfg.sandbox)` 这种写法会让命令在有 WSL 的机器上进命名空间、在没有的机器上留在主机 ——
+ * 同一条断言量到两件事。`check:toolresult` 的「`cmd /c echo hi` 成功」当时就是这么红的
+ * （`cmd: command not found`，退出码 127）。判据和用法在 `lib/host-sandbox.mjs` 里。
  */
 console.log('\n=== 门禁脚本的环境卫生 ===');
 {
-  const r = spawnSync(process.execPath, [join(PROJECT_ROOT, 'scripts', 'lib', 'hermetic.mjs')], {
+  const selfTest = (name) => spawnSync(process.execPath, [join(PROJECT_ROOT, 'scripts', 'lib', name)], {
     cwd: PROJECT_ROOT, encoding: 'utf8', timeout: 60_000, windowsHide: true,
     // 自测本身要一个干净环境：它断言的是「现在仓库里没有违规」，别被测的东西影响。
     env: hermeticEnv(),
   });
+  const r = selfTest('hermetic.mjs');
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
   check('密闭性自测通过（丢什么/留什么、前缀覆盖得住配置键、守卫判得出违规）',
     r.status === 0, out.slice(-600));
   check('【关键】检查脚本里没有整体继承外层环境的残留',
     /仓库里现在没有违规/.test(out) && /PASS/.test(out), out.slice(-300));
+
+  const r2 = selfTest('host-sandbox.mjs');
+  const out2 = `${r2.stdout ?? ''}${r2.stderr ?? ''}`;
+  check('沙箱档位自测通过（pin 盖得住调用方后展开的档位、守卫判得出违规）',
+    r2.status === 0, out2.slice(-600));
+  check('【关键】检查脚本里的沙箱都钉了档位（不然结论随机器有没有 WSL 变）',
+    /检查脚本里的沙箱都钉了档位/.test(out2) && /PASS/.test(out2), out2.slice(-300));
 }
 
 removeTempDir(dir);

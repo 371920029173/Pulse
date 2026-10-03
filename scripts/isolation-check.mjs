@@ -17,6 +17,7 @@
  *   - the workspace is still readable and `node` still runs inside   (it did not just break things)
  *   - `/mnt` is masked INSIDE the boundary and intact OUTSIDE it      (no leaked mount)
  *   - the tripwire fires when the namespace was not entered           (the bug that was actually made)
+ *   - the shell named in the tool description is the one that RUNS     (claims == reality, 3 cells)
  *
  * The third and fourth are not extras. The first working version of this feature masked `/mnt`
  * without entering a namespace, in the SHARED one — the drive was covered for the whole distro, and
@@ -59,7 +60,7 @@ const note = (label, detail) => {
 };
 
 const {
-  SandboxShell, resolveWslIsolation, resetIsolationProbeCache,
+  SandboxShell, resolveWslIsolation, resetIsolationProbeCache, planIsolation, describeIsolation,
   buildConfinedScript, buildWslArgv, NOT_IN_NAMESPACE_EXIT, WORKSPACE_NOT_IN_WSL_EXIT,
 } = await import('../packages/sandbox/dist/index.js');
 
@@ -234,7 +235,102 @@ if (available) {
   rmSync(outsideDir, { recursive: true, force: true });
 }
 
-// ─── 4. Mutation: would this gate notice if the boundary stopped working? ───
+// ─── 4. Does the DESCRIPTION name the shell that will really parse the command? ───
+/*
+ * 评测 3b 的修法是让工具描述点名 shell（`shellName()`），3b 的另一半是执行后报出方言差异
+ * （`detectShellDialectMismatch`，层 4.3）。两者都是披露，而披露的前提是**说得对**。
+ *
+ * `shellName()` 曾经读 `config.isolation !== 'off'` —— 那是"用户要的是什么"，不是"会发生什么"。
+ * 两者只在一格上分叉，而那一格正是本层盯着的那个：`auto` + 这台机器用不了（无法映射的工作区根，
+ * 或干脆没有 WSL）。此时 `planIsolation` 返回 null、命令在主机上由 `cmd.exe` 解析，描述却说
+ * "bash -lc（WSL 隔离内）"，`dialect()` 随之返回 `posix`，于是 cmd 的方言差异一条都不报。
+ *
+ * 这个方向是错的：`auto` 会**降级掉一个已记录的能力缺口**（`isolationNotice` 明说命令在主机上
+ * 跑），却**新增一个未记录的方言缺口**。所以这里不比较"描述好不好听"，而是比较两个布尔：
+ * 声称在哪跑 vs 实际在哪跑，并要求三格全部一致。
+ *
+ * 三格都要一致 —— 第 2 格是变异判据：把 `shellName()` 改回读 config，它就会 FAIL。
+ */
+console.log('\n=== 描述与事实：工具描述点名的 shell，必须是真正解析这条命令的那个 ===');
+{
+  const permissive = { allowAllCommands: true, denyDestructiveByDefault: false };
+  // A UNC root has no drive letter, so it cannot be mapped into /mnt — `isolation.ts` says so
+  // explicitly. Used here because it is the one root that is unmappable ON EVERY MACHINE, WSL or
+  // not, which keeps this section's verdict machine-independent.
+  const unmappable = '\\\\nowhere\\share\\ws';
+
+  /** 描述里声称走边界 */
+  const claimsIsolated = (sh) => sh.shellName().includes('WSL');
+  /** 实际会走边界：同一条命令、同一个 cwd，`exec()` 里用的就是这条判定 */
+  const reallyIsolated = (mode, root) => {
+    const p = planIsolation(mode, root, root, '');
+    return p !== null && !('error' in p);
+  };
+
+  const cells = [
+    // mode,  root,        可执行（wsl 档位用不了时命令被拒绝，所以"在哪跑"这问题本身不适用）
+    ['off',   ROOT,       true],
+    ['auto',  ROOT,       true],
+    ['auto',  unmappable, true],
+    ['wsl',   unmappable, false],
+  ];
+  for (const [mode, root, runnable] of cells) {
+    const sh = new SandboxShell(root, { ...permissive, isolation: mode });
+    const claims = claimsIsolated(sh);
+    const real = reallyIsolated(mode, root);
+    const label = `${mode}${root === ROOT ? '' : ' + 无法映射的工作区根'}`;
+    check(
+      `【关键】${label}：描述说在哪跑 == 实际在哪跑（声称隔离=${claims} 实际隔离=${real}）`,
+      claims === real,
+      `shellName()=${JSON.stringify(sh.shellName())} dialect()=${JSON.stringify(sh.dialect())} `
+      + `planIsolation -> ${real ? 'plan' : '主机/拒绝'}`,
+    );
+    if (!runnable) continue;
+    /*
+     * The second half of the same disclosure: whatever `shellName()` ended up saying, `dialect()`
+     * has to agree with it. Independent of the fix above — it catches "shellName 改了、dialect 忘改",
+     * which is how this pair got inconsistent the first time. Falsifiable on Windows: force
+     * `dialect()` to return 'posix' and this FAILs.
+     */
+    const name = sh.shellName().toLowerCase().replace(/\.exe$/, '');
+    const expected = name.includes('wsl') ? 'posix'
+      : name.includes('powershell') || name.includes('pwsh') ? 'powershell'
+        : name.includes('cmd') ? 'cmd' : 'posix';
+    check(
+      `  ${label}：dialect() 与 shellName() 说的是同一种 shell`,
+      sh.dialect() === expected,
+      `shellName()=${JSON.stringify(sh.shellName())} dialect()=${JSON.stringify(sh.dialect())} 期望=${expected}`,
+    );
+  }
+
+  /*
+   * 默认档位是不是**真的**生效 —— 这是这次改动的全部主张，所以它自己要有判据，而且不能只是
+   * 纯函数之间的等价：真的跑一条命令，看结果里有没有 `isolation` 字段。
+   *
+   * `auto` 的约定是"能开才开"：这台机器能开时，真实工作区上的 `auto` 必须真的进边界（否则
+   * "默认档位已开启"就是句空话）；不能开时必须退回主机并让描述照实说（上面那一格已断言描述部分）。
+   * 变异：让 `planIsolation` 对 `auto` 一律返回 null → 这台机器上立刻转红。
+   */
+  {
+    const r = await new SandboxShell(ROOT, { ...permissive, isolation: 'auto' }).exec('echo hi');
+    check(
+      `【关键】auto 的约定：这台机器${available ? '能' : '不能'}开，命令就${available ? '必须进边界' : '必须留在主机'}`,
+      Boolean(r.isolation) === available,
+      `available=${available} exit=${r.exitCode} isolation=${JSON.stringify(r.isolation)}`,
+    );
+    check('  这条命令本身跑成了（否则上面那条是在量一个坏掉的命令）',
+      r.exitCode === 0 && r.stdout.includes('hi'),
+      `exit=${r.exitCode} stdout=${JSON.stringify(r.stdout.slice(0, 120))} stderr=${JSON.stringify(r.stderr.slice(0, 200))}`);
+  }
+
+  // 「说得对」的另外半句：降级这件事本身必须明说，且必须说成降级，不能说成"有边界"。
+  const degraded = describeIsolation('auto', unmappable, '');
+  check('auto 用不了时：available=false 且 requestedButUnavailable=true，不与"已生效"混淆',
+    degraded.available === false && degraded.requestedButUnavailable === true,
+    JSON.stringify(degraded));
+}
+
+// ─── 5. Mutation: would this gate notice if the boundary stopped working? ───
 console.log('\n=== 变异验证：把边界拿掉，这一项必须由"通过"变"失败" ===');
 {
   /*
@@ -257,7 +353,7 @@ console.log('\n=== 变异验证：把边界拿掉，这一项必须由"通过"�
   }
 }
 
-// ─── 5. WSL 侧 node 探测不能把 Windows 的 node 当成 Linux 的 ───
+// ─── 6. WSL 侧 node 探测不能把 Windows 的 node 当成 Linux 的 ───
 console.log('\n=== 假绿：Windows 的 node 通过 /mnt 出现在 WSL 的 PATH 里时，不能算数 ===');
 {
   /*

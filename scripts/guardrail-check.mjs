@@ -32,6 +32,7 @@ import { pickSafePort } from './safe-port.mjs';
 import { removeTempDir } from './lib/temp.mjs';
 import { killTree } from './lib/kill-tree.mjs';
 import { hermeticEnv } from './lib/hermetic.mjs';
+import { pinHostSandbox } from './lib/host-sandbox.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -211,7 +212,7 @@ const cfg = loadConfig(ROOT);
 function makeAgent(ws, answer) {
   const store = new KBStore(join(ws, 'kb.sqlite'));
   const engine = new GroupKBEngine(store, { ...cfg.kb, dbPath: join(ws, 'kb.sqlite') });
-  const shell = new SandboxShell(ws, { ...cfg.sandbox, allowAllCommands: true });
+  const shell = new SandboxShell(ws, pinHostSandbox({ ...cfg.sandbox, allowAllCommands: true }));
   const base = createTools(shell, ws, { allowAllCommands: true });
   const config = loadConfig(ROOT);
   config.workspace.root = ws;
