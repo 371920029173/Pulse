@@ -31,6 +31,7 @@ import {
 import { RunTraceStore, ConfidenceMirror, REFLECTION_DIR } from '@she/agent-runtime';
 import type { RunSummary } from '@she/agent-runtime';
 import { retireKnownFalsePositives } from '@she/agent-runtime';
+import { WebClient } from '@she/agent-runtime';
 import { classifyLlmFailure, failureLabel } from '@she/agent-runtime';
 import type { StepStatus } from '@she/agent-runtime';
 import { metrics } from './metrics.js';
@@ -3097,6 +3098,17 @@ function registerRoutes(router: Router): void {
         linkPath: resolveWorkspaceKbPath(config.workspace.root).link?.dbPath ?? null,
       },
       skills: { profile: readSkillProfile(config.workspace.root) },
+      /*
+       * 联网能力现在的档位（只读披露，改它还是改 `.env`）。
+       *
+       * 和 `sandbox.isolation` 同一个理由：一次调用会把关键词/地址发给第三方，那么"现在到底会不会
+       * 发出去"就必须能被读到，而不是只写在文档里 —— 用户不该靠猜。`describe` 是同一个渲染函数
+       * （`WebClient.describe()`），所以设置接口、工具描述、启动日志三处说的是一句话。
+       */
+      web: {
+        provider: config.web.provider,
+        describe: new WebClient(config.web).describe(),
+      },
       automationMode: config.automationMode !== false,
       sandbox: config.sandbox,
       server: config.server,
@@ -6771,6 +6783,13 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
      */
     const isoNotice = isolationNotice(describeIsolation(config.sandbox.isolation, config.workspace.root, config.sandbox.wslDistro));
     if (isoNotice) log.info(isoNotice);
+
+    /*
+     * 联网档位也写进启动日志。与上面两条同样的理由：这是"出网"这件事唯一的开关，而它默认是开的
+     * （`auto`）—— 部署的人应当在日志里看到自己的机器会把查询发出去、发给谁。不探测、不发请求，
+     * 只是把配置渲染成人话（`off` 时说的是"已关闭"）。
+     */
+    log.info(`联网：${new WebClient(config.web).describe()}`);
   });
 
   process.on('SIGINT', () => { mcp.shutdown(); disposeAllAgents(); tenantLedger().flush(); server.close(() => process.exit(0)); });
