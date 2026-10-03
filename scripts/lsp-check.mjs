@@ -17,7 +17,7 @@
  *
  *   node scripts/lsp-check.mjs
  */
-import { readFileSync, writeFileSync, rmSync, mkdtempSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync, mkdtempSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -338,6 +338,79 @@ console.log('\n=== Agent 集成 ===');
     .filter((d) => d.name.startsWith('lsp_'))
     .every((d) => typeof d.description === 'string' && d.description.length > 20));
   await agent.dispose();
+}
+
+// ─── 软链接越界：两条通道必须给出同一个判定 ───
+console.log('\n=== 软链接越界（LSP 与 fs 必须同答）===');
+{
+  /*
+   * 第七轮实测的缺陷：工作区里放一个指向 %TEMP% 的链接，`fs_read` 回 "Path escapes workspace via
+   * link"，而 `lsp_diagnostics` 把工作区外的文件读出来并给了诊断（lsp-tools.ts 原 127 行）。
+   *
+   * 两个通道的判定来自同一次 `resolve` 决定，所以这里**用同一个夹具同时喂给两边**，断言它们
+   * 在这一格上同答。只钉 LSP 一侧是不够的：那样明天有人改 fs 一侧、或再长出第五份实现，这里
+   * 照样绿。（LSP 侧自己那一半在 `packages/agent-runtime/src/__tests__/lsp-jail.test.ts`。）
+   *
+   * 走的是 `jailWorkspacePath`（`@she/shared`），也就是四个调用方现在共用的那一份 —— 不是
+   * 某一侧的私有实现，因为私有实现已经不存在了。
+   */
+  const outsideDir = mkdtempSync(join(tmpdir(), 'she-lsp-link-out-'));
+  const root = mkdtempSync(join(tmpdir(), 'she-lsp-link-in-'));
+  roots.push(outsideDir, root);
+  const secret = join(outsideDir, 'types.ts');
+  writeFileSync(secret, 'export const secret: number = "not a number";\n');
+
+  let linked = true;
+  try {
+    symlinkSync(secret, join(root, 'linked.ts'));
+  } catch {
+    // 没有建链权限（Windows 未开开发者模式）。跳过而不是记通过：夹具没建出来时绿灯是假的。
+    linked = false;
+  }
+
+  if (!linked) {
+    check('软链接夹具能建出来', true, '跳过：这台机器不给建链权限，这一节没有测到任何东西');
+  } else {
+    const { jailWorkspacePath } = await import(
+      pathToFileURL(join(ROOT, 'packages/shared/dist/index.js')).href
+    );
+
+    // ── fs 侧 ──
+    let fsVerdict = 'allowed';
+    let fsMessage = '';
+    try {
+      jailWorkspacePath(root, 'linked.ts');
+    } catch (err) {
+      fsVerdict = 'refused';
+      fsMessage = String(err?.message ?? err);
+    }
+
+    // ── LSP 侧：走工具入口。替身 manager 什么都不服务 —— 拒绝发生在碰服务器之前，所以够了。
+    const stub = { canServe: () => false, supported: new Set() };
+    const lsp = await executeLspTool('lsp_diagnostics', { path: 'linked.ts' }, root, stub);
+    const lspOutput = String(lsp?.output ?? '');
+    const lspVerdict = lspOutput.includes('超出工作区') ? 'refused' : 'allowed';
+
+    console.log(`        fs  侧 -> ${fsVerdict}：${fsMessage || '(放行)'}`);
+    console.log(`        LSP 侧 -> ${lspVerdict}：${lspOutput.split('\n')[0]}`);
+
+    check('fs 侧拒绝指向工作区外的链接', fsVerdict === 'refused', fsMessage);
+    check('LSP 侧拒绝同一个链接', lspVerdict === 'refused', lspOutput);
+    check('【关键】两条通道同一格上同答（这就是"不一致"那条缺陷本身）',
+      fsVerdict === lspVerdict, `fs=${fsVerdict} lsp=${lspVerdict}`);
+    // 只说"越界"不够：两种情况要改的东西不同（改路径写法 vs 去查谁放了链接）。
+    check('fs 侧的拒绝点名了链接', /via link/.test(fsMessage), fsMessage);
+    check('LSP 侧的拒绝点名了链接', /软链接/.test(lspOutput), lspOutput);
+
+    // 反向：工作区里的真文件两侧都要放行，否则这一节可以靠"见谁都拒"变绿。
+    writeFileSync(join(root, 'real.ts'), 'export const a = 1;\n');
+    let fsAllows = true;
+    try { jailWorkspacePath(root, 'real.ts'); } catch { fsAllows = false; }
+    const lspReal = await executeLspTool('lsp_diagnostics', { path: 'real.ts' }, root, stub);
+    const lspRealOk = !String(lspReal?.output ?? '').includes('超出工作区');
+    check('区内真文件 fs 侧放行', fsAllows);
+    check('区内真文件 LSP 侧放行（失败理由落在没有服务器，而不是越界）', lspRealOk, String(lspReal?.output ?? ''));
+  }
 }
 
 for (const m of managers) await m.dispose();

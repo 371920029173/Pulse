@@ -138,6 +138,59 @@ describe(`识别：POSIX 写法在 ${CMD} 里不是那个意思`, () => {
   });
 
   /*
+   * 第七轮实测的那两条误报：`wsl … bash -lc "… $(…) … '…' …"` 的回执里报了两处方言警告，
+   * 而两处都落在 bash 的程序文本里 —— cmd 根本没解析过那里。
+   *
+   * 关键在于"别的地盘"这一层要认得**包装程序**：`sh -c "…"` 上面那条已经覆盖了，但前面多一个
+   * `wsl` / `docker exec` 时，第一个 token 就不是解释器而是包装程序，于是整段被当成 cmd 的文本。
+   */
+  it('【关键】包装程序（wsl / docker exec）后面的程序文本也不报', () => {
+    assert.deepEqual(
+      detectShellDialectMismatch('wsl -d Ubuntu -- bash -lc "echo $(date) > /tmp/\'f\'"'),
+      [],
+      'wsl 里的 bash 程序文本不是 cmd 的文本',
+    );
+    assert.deepEqual(
+      detectShellDialectMismatch("wsl -- bash -lc 'cat $HOME/x /dev/null'"),
+      [],
+    );
+    assert.deepEqual(
+      detectShellDialectMismatch('docker exec -it box bash -lc "echo $HOME ~/x"'),
+      [],
+    );
+    assert.deepEqual(
+      detectShellDialectMismatch('podman run --rm img sh -c "echo ${A}"'),
+      [],
+    );
+  });
+
+  it('包装程序只吞掉它自己那一段，别的段照常检查（不能因为看见 wsl 就整体闭嘴）', () => {
+    const gaps = detectShellDialectMismatch('wsl -d Ubuntu -- bash -lc "echo $HOME" && echo ${A}');
+    assert.ok(
+      gaps.some((g) => g.construct === '${VAR} / $VAR'),
+      'wsl 段之后的 cmd 段仍然要报',
+    );
+  });
+
+  it('不是见到 docker 就闭嘴：只有 exec/run 且点了 shell 名才算交出', () => {
+    /*
+     * 这三条一起钉住"窄"这个性质。第一条是**不该**吞的：docker 直接 exec `echo`，`$HOME` 原样
+     * 过去，"cmd 不展开 `$VAR`"这条提示是对的。后两条才真的把文本交给了容器里的 shell。
+     */
+    assert.ok(
+      detectShellDialectMismatch('docker run --rm img echo $HOME').some((g) => g.construct === '${VAR} / $VAR'),
+      'docker 直接 exec 时 text 仍是 cmd 的',
+    );
+    assert.deepEqual(detectShellDialectMismatch('docker run --rm img sh -c "echo $HOME /dev/null"'), []);
+    assert.deepEqual(detectShellDialectMismatch('docker exec -it box bash -lc "echo ${A} ~/x"'), []);
+    // `docker ps` 那一段里没有别的 shell，照旧检查。
+    assert.ok(
+      detectShellDialectMismatch('docker ps && echo ${A}').some((g) => g.construct === '${VAR} / $VAR'),
+      'docker ps 不是包装程序',
+    );
+  });
+
+  /*
    * 例外：`cmd /c "…"` 里面的程序**仍然是 cmd.exe 的文本**，不属于"别的语言"。
    * 这里放手不报，就等于"套一层 cmd /c"成了让提示消失的办法。
    */

@@ -1,8 +1,7 @@
-import { readdirSync, statSync, readFileSync, existsSync, realpathSync } from 'node:fs';
-import { join, relative, resolve, sep, normalize, extname, dirname, basename, isAbsolute } from 'node:path';
-import { platform } from 'node:os';
+import { readdirSync, statSync, readFileSync, existsSync } from 'node:fs';
+import { join, relative, extname } from 'node:path';
+import { jailWorkspacePath } from '@she/shared';
 
-const IS_WINDOWS = platform() === 'win32';
 const SKIP = new Set(['node_modules', '.git', 'dist', '.she', '.next', 'coverage']);
 
 export interface FsNode {
@@ -16,53 +15,20 @@ export interface FsNode {
 /**
  * Confine a requested path to `root`, following symlinks.
  *
- * Exported so every subsystem that touches user-supplied paths shares one
- * implementation (fs routes, plugin file access, KB import). A second copy of
- * this logic is how a jail quietly develops a hole in one place only.
+ * Now a thin alias over `@she/shared`'s `resolveWorkspacePath` — the one implementation. It used to
+ * be a local copy, and the comment here already said why that was a bad idea:
+ *
+ *   "Exported so every subsystem that touches user-supplied paths shares one implementation (fs
+ *    routes, plugin file access, KB import). A second copy of this logic is how a jail quietly
+ *    develops a hole in one place only."
+ *
+ * The hole did appear — in the fourth copy that nobody counted (`lsp-tools.ts`, whose `resolveInWorkspace`
+ * skipped the symlink re-check, so the same fixture was refused by `fs_read` and allowed by
+ * `lsp_diagnostics`). Three copies of a jail is not two answers; it is three, and the fourth one
+ * drifted. The alias stays because callers and checks refer to it by name.
  */
 export function jailPath(root: string, requested: string): string {
-  const abs = resolve(root, requested || '.');
-  let rel = relative(root, abs);
-  if (IS_WINDOWS) rel = rel.replace(/\//g, '\\');
-  if (rel.startsWith('..') || /^[a-zA-Z]:/.test(rel)) {
-    throw new Error(`Path escapes workspace: ${requested}`);
-  }
-  const nr = normalize(root);
-  const na = normalize(abs);
-  const cr = IS_WINDOWS ? nr.toLowerCase() : nr;
-  const ca = IS_WINDOWS ? na.toLowerCase() : na;
-  if (ca !== cr && !ca.startsWith(cr.endsWith(sep) ? cr : cr + sep)) {
-    throw new Error(`Path escapes workspace: ${requested}`);
-  }
-
-  // The checks above are purely textual, so a symlink placed INSIDE the
-  // workspace but pointing outside it would pass. Resolve the real target and
-  // re-check before handing the path back.
-  const contains = (base: string, cand: string): boolean => {
-    const b = IS_WINDOWS ? base.toLowerCase() : base;
-    const c = IS_WINDOWS ? cand.toLowerCase() : cand;
-    if (b === c) return true;
-    const r = relative(b, c);
-    return Boolean(r) && !r.startsWith('..') && !isAbsolute(r);
-  };
-
-  let realRoot = nr;
-  try { realRoot = realpathSync.native(nr); } catch { /* keep */ }
-
-  let realAbs = na;
-  try {
-    realAbs = realpathSync.native(na);
-  } catch {
-    // Not created yet: resolve the existing parent instead.
-    try {
-      realAbs = join(realpathSync.native(dirname(na)), basename(na));
-    } catch { /* keep */ }
-  }
-
-  if (!contains(realRoot, realAbs)) {
-    throw new Error(`Path escapes workspace via link: ${requested}`);
-  }
-  return abs;
+  return jailWorkspacePath(root, requested);
 }
 
 export function listTree(workspaceRoot: string, relPath = '.', depth = 2): FsNode[] {

@@ -9,12 +9,12 @@
 import { readFileSync, statSync } from 'node:fs';
 import { existsSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { isAbsolute, join, relative } from 'node:path';
+import { join, relative } from 'node:path';
 import {
   KNOWN_SERVERS, LspServer, languageOf, resolveServer, servableLanguages,
   type Diagnostic, type ResolvedServer, type ServerSpec,
 } from './lsp-client.js';
-import { createLogger } from '@she/shared';
+import { createLogger, resolveWorkspacePath } from '@she/shared';
 import type { ToolDefinition } from '@she/shared';
 
 const log = createLogger('lsp');
@@ -123,14 +123,34 @@ export class LspManager {
 
 // ─── Argument handling ───
 
-/** Resolve a model-supplied path against the workspace and refuse escapes. */
+/**
+ * 把模型给的路径解析到工作区内，越界就拒绝。
+ *
+ * 判定本身**不在这里**：它和 `fs_*`、`shell`、HTTP 三条通道共用一份实现
+ * （`@she/shared` 的 `resolveWorkspacePath`）。这里只把"拒绝"翻译成本工具的返回形状，
+ * 并说明是哪一条规则拒的 —— 前者请改路径写法，后者请去看工作区里谁放了链接。
+ *
+ * 这条注释记着一件具体的事：这一份原来是**第五份**独立实现，只做 `join`/`relative` 的文本
+ * 判定，漏了软链接复查。于是同一个夹具在两处得到相反结论 —— 工作区里放一个指向 `%TEMP%` 的
+ * 链接，`fs_read` 回 "Path escapes workspace via link"，而 `lsp_diagnostics` 照常把工作区外的
+ * 文件读出来给了诊断（第七轮实测，本文件原第 127 行）。修法不是"在这一份里补一句 realpath"，
+ * 而是把四份收成一份，否则第五份还会长出来。
+ *
+ * 文案是中文，因为这个工具其余的报错都是中文。
+ */
 function resolveInWorkspace(root: string, p: string): { ok: true; abs: string } | { ok: false; error: string } {
-  const abs = isAbsolute(p) ? p : join(root, p);
-  const rel = relative(root, abs);
-  if (rel.startsWith('..') || isAbsolute(rel)) {
-    return { ok: false, error: `路径超出工作区: ${p}` };
+  try {
+    return { ok: true, abs: resolveWorkspacePath(root, p).abs };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // 两个分支分开，是因为"为什么被拒"决定下一步：改路径写法 vs 去查工作区里的链接。
+    return {
+      ok: false,
+      error: msg.includes('via link')
+        ? `路径超出工作区（软链接指向工作区外）: ${p}`
+        : `路径超出工作区: ${p}`,
+    };
   }
-  return { ok: true, abs };
 }
 
 /**

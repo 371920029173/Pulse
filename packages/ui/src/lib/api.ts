@@ -65,15 +65,32 @@ function requestHeaders(json: boolean): Record<string, string> {
 /**
  * Turn a 401 into an instruction.
  *
- * The server's own body is just "Unauthorized", which reads as a bug rather than a setting. When
- * the API is token-gated and this client has no token, the only useful thing to say is where the
- * token comes from — otherwise the symptom is an empty session list and no reason for it.
+ * There are TWO 401s in this server and the remedy differs, and the server already says which one it
+ * is in the response body:
+ *
+ *   - **Tenant auth** (`SHE_AUTH_TOKEN(S)`) answers "who is this request". On, it gates everything.
+ *   - **The control credential** answers "may this request change how this machine runs". It covers
+ *     settings / workspaces / config rollback only.
+ *
+ * This function used to answer both with the same sentence, and that sentence named the TENANT
+ * switch. So opening 5577 directly in a browser — a control-plane 401 — produced advice to set
+ * `SHE_AUTH_TOKEN`, a switch that is not on at all in that setup, plus "enter the same token on this
+ * machine" when the UI has no place to enter a credential anywhere. (Measured in the seventh
+ * self-evaluation round.) Pointing at the wrong switch is worse than saying nothing: the reader
+ * changes something unrelated and the symptom does not move.
+ *
+ * The rule is therefore: **if the server said something specific, use the server's words.** The local
+ * sentence is a fallback for the one case where the body is indistinguishable — a plain `Unauthorized`
+ * (or no body), which is what `sendError(res, 'Unauthorized')` produces.
  */
 function authHint(status: number, fallback: string): Error {
-  if (status === 401) {
-    return new Error(t('本地服务要求访问令牌，但客户端没有提供。请设置 SHE_AUTH_TOKEN 重启服务，并在本机填入同一个令牌。'));
-  }
-  return new Error(fallback);
+  if (status !== 401) return new Error(fallback);
+  // `HTTP 401` is the shape `fetchJSON` builds itself when the body is not JSON — equally uninformative.
+  const body = fallback.trim();
+  const generic = !body || /^(unauthorized|http 401)$/i.test(body);
+  return new Error(generic
+    ? t('本地服务要求访问令牌，但这次请求没带上。令牌来自 SHE_AUTH_TOKEN（多个用 SHE_AUTH_TOKENS）启动服务；桌面端开窗时会自动带上。浏览器标签页没有填令牌的入口 —— 它读的是 localStorage 里的 she.authToken，在控制台里 localStorage.setItem("she.authToken", "<令牌>") 后刷新。')
+    : fallback);
 }
 
 /**

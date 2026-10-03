@@ -302,8 +302,8 @@ registerDictionary('en', {
   '工作区': 'Workspace',
 
   // ── 本地鉴权 / local auth ──
-  '本地服务要求访问令牌，但客户端没有提供。请设置 SHE_AUTH_TOKEN 重启服务，并在本机填入同一个令牌。':
-    'The local service requires an access token and this client did not send one. Set SHE_AUTH_TOKEN and restart the server, then enter the same token on this machine.',
+  '本地服务要求访问令牌，但这次请求没带上。令牌来自 SHE_AUTH_TOKEN（多个用 SHE_AUTH_TOKENS）启动服务；桌面端开窗时会自动带上。浏览器标签页没有填令牌的入口 —— 它读的是 localStorage 里的 she.authToken，在控制台里 localStorage.setItem("she.authToken", "<令牌>") 后刷新。':
+    'The local service requires an access token and this request did not carry one. The token comes from SHE_AUTH_TOKEN (or SHE_AUTH_TOKENS for several) at server start; the desktop shell passes it automatically. A browser tab has no token field — it reads `she.authToken` from localStorage, so run localStorage.setItem("she.authToken", "<token>") in the console and reload.',
 
   // ── 备忘录 / memo scratchpad ──
   '备忘录': 'Memo',

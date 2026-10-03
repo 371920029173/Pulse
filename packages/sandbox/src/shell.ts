@@ -1,12 +1,13 @@
 import { resolve, normalize, relative, sep, dirname, basename, join, isAbsolute } from 'node:path';
-import { realpathSync } from 'node:fs';
 import { platform } from 'node:os';
+import { realpathSync } from 'node:fs';
 import { spawn, execFile } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import type {
   SheConfig, SandboxResult, SandboxOptions, SandboxJobView, SandboxJobStatus, SandboxJobKillReason,
   CodeExecutionOnCommandLine, IsolationInEffect, ShellDialect, ShellDialectGap, ShellDialectReport,
 } from '@she/shared';
+import { jailWorkspacePath } from '@she/shared';
 import {
   buildConfinedScript, buildWslArgv, planIsolation, isolationInEffect, isolationSpawnEnv,
 } from './isolation.js';
@@ -560,6 +561,45 @@ const INLINE_CODE_INTERPRETERS: ReadonlyArray<{ interpreter: string; flags: read
 ];
 
 /**
+ * 这些程序把命令行**其余部分**交给另一个系统执行，所以那一段不是 cmd.exe 的文本。
+ *
+ *   wsl -d Ubuntu -- bash -lc "echo $(date)"     ← WSL 发行版里执行
+ *   docker exec -it box bash -lc 'echo $HOME'    ← 容器里执行
+ *
+ * 不在方言检查里跳过的代价实测过（第七轮）：`wsl … bash -lc "… $(…) … '…' …"` 的**回执里报了两处
+ * 方言警告，两条都是误报** —— `$VAR` 与 `'单引号'` 都落在 bash 的程序文本里，cmd 没有解析过那里。
+ * 误报不只是噪音：读的人会因此不再相信这条提示，而它的全部价值就是解释"命令跑了，但跑的不是你
+ * 写的那条"。
+ *
+ * ## 为什么容器那一条要额外要求"点了一个 shell 名"
+ *
+ * `docker run img echo $HOME` 与 `docker run img sh -c "echo $HOME"` 不是一回事：前者由 docker 直接
+ * exec `echo`，`$HOME` 原样过去 —— 此时"cmd 不展开 `$VAR`"这条提示**是对的**，不该吞掉；后者才
+ * 真的把文本交给了容器里的 shell。所以只有参数里出现 shell 名时才算交出。
+ *
+ * `wsl` 没有这一层判断：它的命令行整体在发行版里执行，不是 cmd 解析的。
+ */
+const CONTAINER_SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'ash']);
+
+/**
+ * 这一段交给别处执行了吗？是的话返回那个程序名（供解释用），不是则 `null`。
+ *
+ * 认不出来时返回 `null`，也就是照旧检查 —— 这个方向的错判只是多一条提示，反过来才会把真差异
+ * 吞掉（`detectShellDialectMismatch` 的职责就是"宁可多说，不可漏说"，而假提示的代价正好相反）。
+ */
+function handsOffToForeignShell(segment: string): string | null {
+  const program = firstCommandToken(segment);
+  if (!program) return null;
+  const args = segment.trim().split(/\s+/).slice(1).map((t) => unquoteToken(t).toLowerCase());
+
+  if (program === 'wsl') return 'wsl';
+  if (program !== 'docker' && program !== 'podman') return null;
+  if (!args.includes('exec') && !args.includes('run')) return null;
+  const shell = args.find((t) => CONTAINER_SHELLS.has(t.replace(/\.exe$/, '')));
+  return shell ? `${program} ${shell}` : null;
+}
+
+/**
  * The flag that makes this one segment inline code, or null.
  *
  * Deliberately per-segment: `echo ok && node -e "…"` has to be seen, and `echo "node -e x"` has to
@@ -725,6 +765,13 @@ export function detectShellDialectMismatch(command: string): ShellDialectGap[] {
   const gaps: ShellDialectGap[] = [];
   for (const segment of splitCmdSegments(command)) {
     if (!segment.trim()) continue;
+    /*
+     * 交给别的机器上的 shell 的段直接跳过 —— 见 `HANDS_OFF_PROGRAMS`。
+     *
+     * 跳过的是**整段**，不是只去掉引号：`wsl -d Ubuntu -- echo $HOME` 里的 `$HOME` 是故意留给
+     * bash 展开的，cmd 不展开它正是想要的行为，不是"写错了"。
+     */
+    if (handsOffToForeignShell(segment)) continue;
     const hit = inlineCodeInSegment(segment);
     // A foreign interpreter's inline program is its own language; a nested cmd's program is not.
     const text = hit && hit.interpreter !== 'cmd' ? stripQuotedText(segment) : segment;
@@ -1042,51 +1089,17 @@ function hasOutputRedirect(command: string): boolean {
   return false;
 }
 
+/**
+ * 把命令里出现的路径关进工作区。
+ *
+ * 判定本身在 `@she/shared` 的 `resolveWorkspacePath` —— 这份原来是**四份拷贝之一**，四份各自
+ * 跟着软链接复查。第七轮实测发现第五份（`lsp-tools.ts`）漏了那一步，于是同一个夹具在两处得到
+ * 相反结论。修法是把四份收成一份：谁自己再实现一遍，谁就又有机会只在一个方向上有洞。
+ *
+ * 返回**文本形态**的绝对路径（不是展开软链接之后的目标）：调用方要原样回显用户给的路径。
+ */
 export function resolveInsideWorkspace(workspaceRoot: string, requestedPath: string): string {
-  const root = resolve(workspaceRoot);
-  const resolvedPath = resolve(root, requestedPath);
-
-  let rel = relative(root, resolvedPath);
-  if (IS_WINDOWS) rel = rel.replace(/\//g, '\\');
-  if (rel.startsWith('..') || rel === '..' || (rel && (rel.startsWith(`..${sep}`) || /^[a-zA-Z]:/.test(rel)))) {
-    throw new Error(`Path escapes workspace: ${requestedPath}`);
-  }
-
-  // Absolute paths that resolved outside via unusual prefixes.
-  const normalizedResolved = normalize(resolvedPath);
-  const normalizedRoot = normalize(root);
-  const cmpResolved = IS_WINDOWS ? normalizedResolved.toLowerCase() : normalizedResolved;
-  const cmpRoot = IS_WINDOWS ? normalizedRoot.toLowerCase() : normalizedRoot;
-  if (cmpResolved !== cmpRoot && !cmpResolved.startsWith(cmpRoot.endsWith(sep) ? cmpRoot : cmpRoot + sep)) {
-    throw new Error(`Path escapes workspace: ${requestedPath}`);
-  }
-
-  // Follow symlinks: a link INSIDE the jail can point outside it.
-  try {
-    const realRoot = realpathSync.native ? realpathSync.native(root) : realpathSync(root);
-    let realTarget: string;
-    try {
-      realTarget = realpathSync.native ? realpathSync.native(resolvedPath) : realpathSync(resolvedPath);
-    } catch {
-      // Not created yet — resolve its existing parent instead.
-      const parent = realpathSync.native
-        ? realpathSync.native(dirname(resolvedPath))
-        : realpathSync(dirname(resolvedPath));
-      realTarget = join(parent, basename(resolvedPath));
-    }
-    const rr = IS_WINDOWS ? realRoot.toLowerCase() : realRoot;
-    const rt = IS_WINDOWS ? realTarget.toLowerCase() : realTarget;
-    if (rt !== rr && !rt.startsWith(rr.endsWith(sep) ? rr : rr + sep)) {
-      throw new Error(`Path escapes workspace via link: ${requestedPath}`);
-    }
-  } catch (err) {
-    // Re-throw our own containment errors; ignore realpath failures (e.g. a drive that cannot be
-    // resolved) rather than crashing the call.
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('escapes workspace')) throw err;
-  }
-
-  return resolvedPath;
+  return jailWorkspacePath(workspaceRoot, requestedPath);
 }
 
 /**

@@ -28,9 +28,48 @@
 | 层 | 状态 | 落点 / 证据 |
 |---|---|---|
 | 层 1 工作区 | **已落地** | `pathKey`（真实路径 + Windows 不分大小写）、`mountStateDir()`（切换工作区时寄存离开的存储并接管缓存实例）、跨项目群存储迁移；`check:data` 第 10–12 段（第 12 段照抄真机顺序：先轮询轨道再切换，双向变异验证）；真机验收：切项目后群仍在轨道 / 能打开 / 消息落在本项目 / 知识库可用 |
+| 层 1 工作区围墙 | **已收成一份**（第七轮） | 见下「工作区围墙：四份实现收成一份」 |
 | 层 2 会话 | **已落地** | 见下「层 2 落地明细」 |
 | 层 3 存储 | **已落地** | 见下「层 3 落地明细」；`check:data` 第 13 段（健康项目不谎报 / 损坏时接口报出真实备份 / 服务自己写的形状能原样读回） |
 | 层 4 沙箱 | **已落地**（4.0 长命令 / 后台任务 + 4.1 任意代码执行的披露 + 4.2 真隔离 + 4.3 shell 方言） | 见下「层 4.0 落地明细」「层 4.1 落地明细」「层 4.2 落地明细」「层 4.3 落地明细」 |
+
+### 工作区围墙：四份实现收成一份（第七轮）
+
+**问题（第七轮实测）**：工作区越界判定原来有**四份**拷贝（`sandbox/shell.ts` 的
+`resolveInsideWorkspace`、`server/index.ts` 的 `jailToWorkspace`、`server/files.ts` 的 `jailPath`、
+`agent-runtime/lsp-tools.ts` 的 `resolveInWorkspace`），前三份各自跟着软链接复查，**第四份只做了
+文本判定**（`join` + `relative`）。于是同一个夹具在两处得到相反结论：
+
+```
+工作区里放一个指向 %TEMP% 的链接
+  fs_read          → Path escapes workspace via link
+  lsp_diagnostics  → 把工作区外那 64 行读出来，给了诊断（1:14 [2322]）
+```
+
+这不是"某一处写错了"，是同一件事有四个答案 —— `files.ts` 里原本就写着这句话：
+"A second copy of this logic is how a jail quietly develops a hole in one place only."
+
+**做法**：判定收进 `@she/shared` 的 `workspace-path.ts` 一份（`resolveWorkspacePath` + `isInsideDir`），
+四个调用方都改为调用它。两处出口是刻意的：`jailWorkspacePath` 给**文本**形态（调用方要原样回显
+用户写的路径），`realPathInWorkspace` 给**真实**形态（要打开文件时用）。谁自己再算一遍
+`realpath`，谁就又有第二个答案。
+
+**顺手发现的老坑（四份都有，只是没人测过）**：回退逻辑原来只回退**一层**父目录去展开软链接。
+父目录**也不存在**时回退也失败，`real` 停在 `os.tmpdir()` 给的 8.3 短名（`ADMINI~1`）上，而
+`realRoot` 已经是长名 —— 同一个目录被判成"逃逸"，**拒绝的是工作区里面的路径**。现在沿祖先一路
+向上找到第一个存在的目录再展开（缺失的段不可能含链接，所以这不削弱检查）。这条是收成一份之后
+补用例才暴露的。
+
+**门禁**：`check:lsp` 末段「软链接越界（LSP 与 fs 必须同答）」把**同一个夹具同时喂给两条通道**，
+断言判定相同、且两侧的拒绝都点名"链接"（两种情况要改的东西不一样）；反向断言区内真文件两侧都
+放行，免得这一节靠"见谁都拒"变绿。
+单测：`packages/shared/src/workspace-path.test.ts`（12 项，那一份实现自己）、
+`packages/agent-runtime/src/__tests__/lsp-jail.test.ts`（5 项，走 `executeLspTool` 工具入口，
+证明拒绝发生在**读文件之前**）。
+
+**变异验证**：把软链接复查的"拒绝"抽掉（不删代码 —— 删了 `realRoot`/`real` 会因未使用而
+`tsc` 先拒绝编译，第一版变异脚本把这种"没编译成功"误报成了"变异存活"）→ **两条通道同时转红**
+（`check:lsp` 4 条 + `lsp-jail.test.ts` 2 条 + `workspace-path.test.ts` 4 条）。恢复后全绿。
 
 ### 层 2 落地明细
 
@@ -396,6 +435,14 @@ cmd.exe 语法上不认那些写法，于是命令**跑了、退出码 0、意�
 - **不越权**：交给别的解释器的程序文本不扫（`node -e "a${b}c"` 里是 JS 模板字符串，
   `powershell -Command "$(Get-Date)"` 是 PowerShell 自己的替换）。**例外**是 `cmd /c "…"` ——
   那里的程序仍然由 cmd 解析，照报（否则"套一层 cmd /c"就成了让提示消失的办法）。
+  **包装程序也算"别处"**（第七轮补）：`wsl … bash -lc "…"` 与 `docker exec … bash -lc "…"` 里的
+  程序由发行版 / 容器里的 shell 解析，第一个 token 却是 `wsl` / `docker` —— 于是整段被当成 cmd 的
+  文本。实测那次回执里**报了两处方言警告，两条都是误报**（`$VAR` 与 `'单引号'` 都落在 bash 的程序
+  文本里）。现在 `handsOffToForeignShell()` 把这类段整段跳过。刻意**跳整段**而不是只去引号：
+  `wsl … echo $HOME` 里的 `$HOME` 是故意留给 bash 展开的，cmd 不展开它正是想要的行为。
+  这一条也刻意**窄**：`docker` 只在 `exec` / `run` **且参数里点了 shell 名**时才算交出 ——
+  `docker run img echo $HOME` 由 docker 直接 exec `echo`，`$HOME` 原样过去，此时"cmd 不展开
+  `$VAR`"这条提示是**对的**，吞掉反而是漏报。
 - **隔离开着时不报**：那时命令在 WSL 里由 `bash -lc` 解析（`buildConfinedScript`），POSIX 才是对的，
   报差异反而是假警报。
 - **没有差异就不附**：报告只在命中时出现，`echo %USERPROFILE%` 与 `node -v` 的回执里没有这段。
@@ -405,11 +452,12 @@ cmd.exe 语法上不认那些写法，于是命令**跑了、退出码 0、意�
 断言两半都在：描述里点名 shell 且 cmd 档位下列出差异；`echo $HOME` **退出码 0 且输出是字面 `$HOME`**
 （这条断言就是把"静默"钉成事实）；结果里点名差异、回执里有说明、且**不含 `DENIED`**；
 `node -e "…${a}…"` 不误报、`cmd /c "…${HOME}…"` 照报；POSIX 档位反向断言（描述里不出现 `%VAR%`）。
-单测 31 项（`packages/sandbox/src/__tests__/shell-dialect.test.ts`）覆盖同一批规则，
-含"每类只报一次 / 最多三条"与"没差异不附报告"。
+单测 35 项（`packages/sandbox/src/__tests__/shell-dialect.test.ts`）覆盖同一批规则，
+含"每类只报一次 / 最多三条"、"没差异不附报告"与"包装程序只吞自己那一段"。
 
 **变异验证**：撤掉描述那一行（3b）→ 描述相关的 7 条转红；把 `gaps` 强制成空（3a）→
-"结果里点名了这处差异"与"回执里有这段说明"转红。恢复后全绿。
+"结果里点名了这处差异"与"回执里有这段说明"转红；把 `handsOffToForeignShell` 的跳过关掉 →
+"包装程序后面的程序文本也不报"与"不是见到 docker 就闭嘴"转红。恢复后全绿。
 
 ### 层 5 落地明细（窗口之间）
 

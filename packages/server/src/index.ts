@@ -5,7 +5,7 @@ import { join, extname, resolve, dirname, basename, relative, isAbsolute, sep } 
 import { realpathSync, createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { createLogger, loadConfig, resolveEnvFile, mergeMissingEnvFile, updateEnvFile, THINKING_LEVELS, getConfigRecovery, getConfigFileInUse, lastGoodConfigPath, lastGoodConfigMetaPath, sandboxPostureNotice } from '@she/shared';
+import { createLogger, loadConfig, resolveEnvFile, mergeMissingEnvFile, updateEnvFile, THINKING_LEVELS, getConfigRecovery, getConfigFileInUse, lastGoodConfigPath, lastGoodConfigMetaPath, sandboxPostureNotice, isInsideDir as sharedIsInsideDir, realPathInWorkspace } from '@she/shared';
 import { type ControlAuth, presentsControlToken, resolveControlAuth } from './control-token.js';
 import { isScratchWorkspace } from './scratch-workspace.js';
 import type { SheConfig, StreamChunk, EdgeKind, SkillProfile, ThinkingLevel } from '@she/shared';
@@ -200,10 +200,11 @@ function isLoopbackHost(host: string): boolean {
 }
 
 /**
- * Confine a user-supplied path to the workspace.
- *
-/**
  * Whether `candidate` sits inside `base`.
+ *
+ * Now an alias over `@she/shared`'s `isInsideDir` — the containment rule is one thing, and this file
+ * used to hold its own copy of it. The paragraph below is kept because it records the bug that made
+ * the relative-segment form necessary in the first place.
  *
  * Uses a path RELATIVE check rather than `startsWith`, which was the bug in four skills routes:
  * `"<ws>/.she/skills-backup/x.md".startsWith("<ws>/.she/skills")` is true, so a sibling directory
@@ -214,52 +215,25 @@ function isLoopbackHost(host: string): boolean {
  * profile directory): the container itself is not a valid target.
  */
 function isInsideDir(base: string, candidate: string, allowEqual = false): boolean {
-  const fold = (p: string) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  const b = fold(resolve(base));
-  const c = fold(resolve(candidate));
-  if (c === b) return allowEqual;
-  const rel = relative(b, c);
-  return Boolean(rel) && !rel.startsWith('..') && !isAbsolute(rel);
+  return sharedIsInsideDir(base, candidate, allowEqual);
 }
 
 /**
- * Two bypasses this must defeat:
+ * The workspace jail, for the routes served out of this file.
+ *
+ * An alias over `@she/shared`'s `realPathInWorkspace` — it returns the REAL path (symlink unfolded),
+ * which is what these routes hand to the filesystem. It used to be a local copy; the hole that
+ * motivated the consolidation is documented in `workspace-path.ts` (the fifth copy, in
+ * `lsp-tools.ts`, skipped the symlink re-check and disagreed with this one on the same fixture).
+ *
+ * Two bypasses it defeats:
  *  1. An absolute path (`C:\Windows\System32\...`): `resolve(root, raw)` returns
  *     the absolute path, silently escaping the root.
  *  2. A symlink inside the workspace pointing outside it: the textual path looks
  *     contained, so the real target must be resolved before checking.
- *
- * Returns the absolute path when contained; throws otherwise.
  */
 function jailToWorkspace(workspaceRoot: string, requested: string): string {
-  const root = resolve(workspaceRoot);
-  const contained = (base: string, candidate: string): boolean => isInsideDir(base, candidate, true);
-
-  const abs = resolve(root, requested);
-  if (!contained(root, abs)) {
-    throw new Error(`Path escapes workspace: ${requested}`);
-  }
-
-  // Follow symlinks so a link inside the jail cannot point outside it.
-  let realRoot = root;
-  try { realRoot = realpathSync.native ? realpathSync.native(root) : realpathSync(root); } catch { /* keep root */ }
-
-  let realAbs = abs;
-  try {
-    realAbs = realpathSync.native ? realpathSync.native(abs) : realpathSync(abs);
-  } catch {
-    // Target does not exist yet: fall back to resolving its existing parent.
-    const parent = dirname(abs);
-    try {
-      const realParent = realpathSync.native ? realpathSync.native(parent) : realpathSync(parent);
-      realAbs = join(realParent, basename(abs));
-    } catch { /* keep abs */ }
-  }
-
-  if (!contained(realRoot, realAbs)) {
-    throw new Error(`Path escapes workspace via link: ${requested}`);
-  }
-  return realAbs;
+  return realPathInWorkspace(workspaceRoot, requested);
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -6657,7 +6631,23 @@ export async function startServer(overrideConfig?: SheConfig): Promise<ReturnTyp
         note: auth.reason,
       });
       log.warn(`Refused (auth): ${method} ${url} (${auth.reason})`);
-      sendError(res, 'Unauthorized', 401);
+      /*
+       * The body says WHICH gate refused and where the token comes from.
+       *
+       * It used to be the bare word `Unauthorized`, and that is not a neutral choice: the UI then had
+       * nothing to work with and substituted its own sentence, which named the *control* credential
+       * for a tenant refusal (or the reverse — see `authHint` in the UI). A 401 whose body does not say
+       * what to fix pushes every client to guess, and each client guesses differently.
+       *
+       * Same shape as the control-plane body below, so a reader can tell the two apart at a glance.
+       */
+      sendError(
+        res,
+        'Unauthorized：本地服务开了访问令牌（SHE_AUTH_TOKEN / SHE_AUTH_TOKENS），这次请求没带上。'
+        + '桌面端开窗时会自动带上；命令行可用 x-she-token 头或 Authorization: Bearer；'
+        + '浏览器标签页读的是 localStorage 的 she.authToken。',
+        401,
+      );
       return;
     }
 
