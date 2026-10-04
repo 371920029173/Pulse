@@ -1907,7 +1907,12 @@ export class SandboxShell {
      * a second call to discover that the job it just started is already dead.
      */
     await new Promise((r) => setTimeout(r, JOB_FIRST_OUTPUT_MS));
-    return { ok: true, job: this.readJob(id, true)! };
+    /*
+     * The job's output is PREVIEWED here, not consumed — see the `peek` branch in `viewOf`. Reading
+     * it away here is what made a fast job's output arrive only in this answer and never in
+     * `shell_wait`, and only on POSIX (see that comment for the platform split).
+     */
+    return { ok: true, job: this.readJob(id, true, true)! };
   }
 
   /**
@@ -2578,13 +2583,13 @@ export class SandboxShell {
    *
    * `consuming: false` is the status-only view (`listJobs`), which must not eat the log.
    */
-  private readJob(id: string, consuming: boolean): SandboxJobView | null {
+  private readJob(id: string, consuming: boolean, peek = false): SandboxJobView | null {
     const proc = this.jobs.get(id);
     if (!proc) return null;
-    return this.viewOf(proc, { consuming });
+    return this.viewOf(proc, { consuming, peek });
   }
 
-  private viewOf(proc: Proc, opts: { consuming: boolean }): SandboxJobView {
+  private viewOf(proc: Proc, opts: { consuming: boolean; peek?: boolean }): SandboxJobView {
     const view: SandboxJobView = {
       found: true,
       id: proc.id,
@@ -2612,6 +2617,36 @@ export class SandboxShell {
      */
     const iso = isolationInEffect(proc.isolation ?? null);
     if (iso) view.isolation = iso;
+
+    /*
+     * Preview: decode what is buffered for display WITHOUT taking it.
+     *
+     * `startJob` waits briefly before answering so that a job which is already dead — a typo'd
+     * command, a refused port — says so in the START answer instead of costing a second call to
+     * discover. That answer shows the output it saw, and the ONLY question here is whether showing
+     * it also consumes it.
+     *
+     * It used to. That made a fast job's whole output arrive in the start result and left
+     * `shell_wait` answering `exit code: 0` with an empty body — but only on POSIX, where the
+     * process prints inside the window. On Windows the wrapper chain (`powershell.exe` →
+     * `cmd.exe` → the program) is slow enough that nothing had arrived when the window closed, so
+     * the output was still pending and the wait delivered it. One code path, two contracts,
+     * separated by how fast the host starts a process.
+     *
+     * So the preview does not consume: the bytes stay pending and the first `shell_wait` is the
+     * delivery point on both platforms. The cost is that an immediately-chatty job shows its first
+     * ~300ms in the start answer and again in the first wait; the alternative is losing the log
+     * entirely, which is what this fixes.
+     */
+    if (opts.peek) {
+      // Display only, so the incomplete-trailing-byte holdback is not applied to the buffer.
+      const [safeOut] = splitCompleteUtf8(Buffer.concat(proc.out));
+      const [safeErr] = splitCompleteUtf8(Buffer.concat(proc.err));
+      view.stdout = decodeConsoleOutput(safeOut);
+      view.stderr = decodeConsoleOutput(safeErr);
+      return view;
+    }
+
     if (!opts.consuming) return view;
 
     /*
