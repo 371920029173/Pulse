@@ -23,8 +23,14 @@
 .label { color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.4px; font-size: 10px; }
 .value { font-family: var(--font-mono); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 360px; }
 .sep { color: var(--text-tertiary); }
-.ok { color: #3fb950; }
-.warn { color: #d29922; }
+/*
+ * `.ok` / `.warn` used to be the literals `#3fb950` and `#d29922`, which are exactly the dark
+ * theme's `--success` / `--warning`. Hardcoding them meant the status bar's "everything is fine"
+ * dot kept the dark green in light mode, where it measures well below the contrast floor — so the
+ * one indicator whose whole job is to be noticed was the least visible thing in the bar.
+ */
+.ok { color: var(--success); }
+.warn { color: var(--warning); }
 /*
  * Status-bar controls.
  *

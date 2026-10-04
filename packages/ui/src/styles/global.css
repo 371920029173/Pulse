@@ -25,14 +25,36 @@
   --z-command: 400;      /* command palette: invoked from anywhere, above panels */
   --z-toast: 500;        /* never hidden */
 
-  --bg-primary: #0d1117;
-  --bg-secondary: #161b22;
-  --bg-tertiary: #21262d;
+  /*
+   * Surfaces.
+   *
+   * These used to be declared twice — once here, once again in an appended "art polish" block at
+   * the bottom of this file — and the later declaration silently won. So the values below are the
+   * ones that have actually been rendering all along; the duplicate is gone and this is now the
+   * only place a dark surface is defined.
+   *
+   * `--border` is a translucent cool grey rather than the opaque `#30363d` it replaced: a solid
+   * hairline on every panel is a large part of why the whole window read as boxed-in, and letting
+   * a little of what is behind show through is what makes the surface below it read as a surface
+   * instead of a sticker.
+   */
+  --bg-primary: #0b0d12;
+  --bg-secondary: #11151e;
+  --bg-tertiary: #171c28;
   --bg-hover: #30363d;
-  --bg-active: #388bfd26;
+  --bg-active: color-mix(in srgb, var(--accent) 15%, transparent);
 
-  --border: #30363d;
-  --border-focus: #58a6ff;
+  /*
+   * Code surfaces.
+   *
+   * A code block wants to read as recessed — set into the page rather than pasted on it — which is
+   * why it is darker than `--bg-primary` rather than equal to `--bg-tertiary`. It is a token and not
+   * a literal because the `--syntax-*` roles are redefined per theme: a hardcoded dark slab would
+   * carry light-theme syntax colours in light mode.
+   */
+  --code-bg: #0b0f14;
+
+  --border: rgba(130, 150, 190, 0.18);
 
   /*
    * Text ramp.
@@ -51,10 +73,38 @@
   --text-primary: #e6edf3;
   --text-secondary: #9ba7b4;
   --text-tertiary: #7d8590;
-  --text-link: #58a6ff;
 
-  --accent: #58a6ff;
-  --accent-muted: #388bfd40;
+  /*
+   * One accent, and everything that points at it.
+   *
+   * This is the main fix for the palette reading as busy. The dark theme used to carry five
+   * different blues for the single idea of "the accent":
+   *
+   *   --accent        #58a6ff   declared here, then overridden further down by #7c9cff
+   *   --border-focus  #58a6ff   never overridden -> focus rings stayed on the old hue
+   *   --text-link     #58a6ff   never overridden -> links did not match the accent
+   *   --accent-muted  #388bfd40 tinted for #388bfd, a third blue, used for the focus halo and
+   *                             text selection
+   *   --she-accent    #5b8cff   a fourth, in a palette that was otherwise unreferenced
+   *
+   * A primary button, a focus ring and a link were therefore three different blues on one screen.
+   * No amount of nudging the hue fixes "it looks muddy" while that is true; the theme has to have
+   * one accent, and this is it.
+   *
+   * `#7c9cff` rather than the `#58a6ff` at the top of the file because that is what the appended
+   * block had already been rendering — the change here is coherence, not a new look. The light
+   * theme below was already coherent (accent = link = info = #0969da), so the drift was dark-only.
+   *
+   * Every consumer now derives from `--accent`, so changing the accent is a one-line change.
+   * Measured against this theme's surfaces: 7.46:1 on bg-primary, 7.01:1 on bg-secondary, 6.53:1 on
+   * bg-tertiary, all above the 4.5:1 / 3.0:1 floors `scripts/a11y-check.mjs` enforces.
+   */
+  --accent: #7c9cff;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --accent-muted: color-mix(in srgb, var(--accent) 26%, transparent);
+  --text-link: var(--accent);
+  --border-focus: var(--accent);
+
   --success: #3fb950;
   --warning: #d29922;
   --danger: #f85149;
@@ -430,46 +480,17 @@ input, textarea {
 .animate-slideIn { animation: slideIn 200ms ease-out; }
 
 
-/* SHE polish */
+/*
+ * Syntax colours, tuned for the dark surface.
+ *
+ * Deliberately desaturated relative to a typical editor theme: code appears
+ * inside a chat transcript next to prose, and full-saturation hues there read
+ * as noise. Contrast against --bg-secondary stays above 4.5:1 for every role.
+ *
+ * These stay a block of their own because they are genuinely a second palette; every
+ * other dark token is now defined exactly once, in `:root` above.
+ */
 :root {
-  --she-bg: #0b0d12;
-  --she-panel: #12141a;
-  --she-border: #2a2f3a;
-  --she-accent: #5b8cff;
-  --she-accent-2: #22c55e;
-  --she-text: #e8eaed;
-  --she-muted: #9aa0a6;
-  --she-radius: 12px;
-  --she-shadow: 0 18px 50px rgba(0,0,0,.4);
-}
-body {
-  background:
-    radial-gradient(1200px 600px at 10% -10%, rgba(91,140,255,.12), transparent 55%),
-    radial-gradient(900px 500px at 100% 0%, rgba(34,197,94,.08), transparent 50%),
-    var(--she-bg) !important;
-  letter-spacing: 0.01em;
-}
-::selection {
-  background: rgba(91,140,255,.35);
-}
-
-
-/* she-art-polish */
-:root {
-  --bg-primary: #0b0d12;
-  --bg-secondary: #11151e;
-  --bg-tertiary: #171c28;
-  --border: rgba(130, 150, 190, 0.18);
-  --accent: #7c9cff;
-  --accent-soft: rgba(124, 156, 255, 0.14);
-
-  /*
-   * Syntax colours, tuned for the dark surface.
-   *
-   * Deliberately desaturated relative to a typical editor theme: code appears
-   * inside a chat transcript next to prose, and full-saturation hues there read
-   * as noise. Contrast against --bg-secondary stays above 4.5:1 for every role.
-   */
   --syntax-keyword: #c295f0;
   --syntax-string: #7fd88f;
   --syntax-number: #e5b567;
@@ -477,13 +498,41 @@ body {
   --syntax-type: #6fd0d8;
   --syntax-attr: #e6a3c7;
 }
+
+/*
+ * One ambient wash, not three.
+ *
+ * Three `body` background blocks had piled up here — a `--she-*` one, an "art polish" one, and the
+ * plain `var(--bg-primary)` in the base `body` rule. Only the last ever rendered; the other two were
+ * dead weight that made the file look like the theme had three authors, and the `--she-*` palette
+ * they were built on was otherwise referenced exactly once (as a fallback in the command palette).
+ *
+ * This is the surviving one and it is deliberately weak — at 0.16 / 0.10 alpha it warms the two top
+ * corners without competing with the accent for attention. A stronger wash was what made the
+ * background read as "coloured" rather than "dark".
+ */
 body {
   background:
-    radial-gradient(1200px 600px at 10% -10%, rgba(90,120,255,0.16), transparent 55%),
-    radial-gradient(900px 500px at 100% 0%, rgba(160,90,255,0.10), transparent 50%),
+    radial-gradient(1200px 600px at 10% -10%, rgba(124, 156, 255, 0.16), transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, rgba(160, 90, 255, 0.10), transparent 50%),
     var(--bg-primary);
+  letter-spacing: 0.01em;
 }
-::selection { background: var(--accent-soft); color: #e8eeff; }
+
+/*
+ * Selection: theme-correct, which it was not.
+ *
+ * The old rule here was `background: var(--accent-soft); color: #e8eeff`. Both halves are
+ * dark-theme literals, but the rule itself matched both themes — and `--accent-soft` was only ever
+ * defined in the dark palette. So in light mode selected text rendered as #e8eeff on #e5ebfb:
+ * measured at 1.03:1, i.e. selecting a line of text made it disappear.
+ *
+ * Two changes fix it: stop overriding `color` (selected text keeps its own colour, which is already
+ * contrast-checked against these surfaces), and give the tint a per-theme token.
+ */
+::selection {
+  background: var(--accent-soft);
+}
 
 
 /* Light theme */
@@ -494,8 +543,14 @@ body {
   --bg-hover: #e6ebf1;
   --bg-active: #ddf4ff;
 
+  /* Slightly recessed against the white `--bg-secondary` a message body sits on. See `--code-bg`
+     in `:root` for why this is a token rather than a literal. */
+  --code-bg: #f6f8fa;
+
   --border: #d0d7de;
   --border-focus: #0969da;
+  /* Kept equal to `--accent` below by derivation, so the two cannot drift apart the way the dark
+     theme's did (see the note on `--accent` in `:root`). */
 
   /*
    * Control fills, light mode.
@@ -530,10 +585,16 @@ body {
   --text-primary: #1f2328;
   --text-secondary: #5b636d;
   --text-tertiary: #666e77;
-  --text-link: #0969da;
+  --text-link: var(--accent);
 
   --accent: #0969da;
   --accent-muted: #54aeff66;
+  /*
+   * Selection tint. The dark palette's `--accent-soft` is a light blue; over white it would wash out
+   * to nearly nothing and leave the text on the bare page (the old shared rule measured 1.03:1).
+   * Same 14%-tint idea, but with the alpha raised because the same value reads far weaker on white.
+   */
+  --accent-soft: color-mix(in srgb, var(--accent) 20%, transparent);
   --success: #1a7f37;
   --warning: #9a6700;
   --danger: #cf222e;

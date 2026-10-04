@@ -32,7 +32,16 @@
   margin: 0.55em 0 0.85em;
   border: 1px solid var(--border, rgba(255,255,255,0.08));
   border-radius: 10px;
-  background: #0b0f14;
+  /*
+   * Themed, which this was not.
+   *
+   * `background: #0b0f14` is a dark-theme literal, and the `--syntax-*` roles are not: they are
+   * redefined for the light theme (`--syntax-string: #1a7f37` and so on, all tuned to sit on white).
+   * So in light mode every code block was a near-black slab carrying light-mode syntax colours —
+   * `#1a7f37` green on `#0b0f14` measures about 2.5:1, i.e. the colours were picked for the wrong
+   * surface. `--code-bg` exists so the two agree in both themes.
+   */
+  background: var(--code-bg);
   overflow: hidden;
 }
 .codeHead {
@@ -58,7 +67,7 @@
 }
 .codeCopy:hover {
   color: var(--text-primary, #e8eef7);
-  background: rgba(255,255,255,0.06);
+  background: var(--fill-control);
 }
 .codeBlock pre {
   margin: 0;
@@ -67,7 +76,7 @@
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: 12.5px;
   line-height: 1.5;
-  color: #d7dee8;
+  color: var(--text-primary);
 }
 .link {
   color: var(--text-link, #7aa2ff);

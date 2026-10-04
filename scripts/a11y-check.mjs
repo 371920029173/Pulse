@@ -230,8 +230,25 @@ console.log('\n=== 颜色对比度（按 token 实测，不是肉眼判断）===
 {
   const globalCss = readFileSync(join(STYLES, 'global.css'), 'utf8');
 
-  const toRgb = (value) => {
-    const m = /^#([0-9a-f]{6})$/i.exec(String(value).trim());
+  /*
+   * `var(--x)` is followed before measuring.
+   *
+   * This used to require a literal `#rrggbb`, which turned an indirection into a gate failure: the
+   * change that stops a link and a focus ring from drifting away from the accent (`--text-link:
+   * var(--accent)`) was rejected by the check rather than measured by it. A token pointing at
+   * another token is exactly the shape that stays coherent, so the check follows the pointer — one
+   * level, which is all the theme uses, and a reference that does not resolve is reported instead of
+   * being silently skipped.
+   */
+  const resolve = (value, tokens) => {
+    const m = /^var\(\s*(--[\w-]+)\s*(?:,\s*([\s\S]+))?\)$/.exec(String(value).trim());
+    if (!m) return value;
+    const target = tokens[m[1]];
+    if (target === undefined) return m[2] ?? value;
+    return target;
+  };
+  const toRgb = (value, tokens = {}) => {
+    const m = /^#([0-9a-f]{6})$/i.exec(String(resolve(value, tokens)).trim());
     if (!m) return null;
     return [0, 2, 4].map((i) => Number.parseInt(m[1].slice(i, i + 2), 16));
   };
@@ -272,14 +289,14 @@ console.log('\n=== 颜色对比度（按 token 实测，不是肉眼判断）===
   const problems = [];
   for (const [themeName, tokens] of Object.entries(themes)) {
     for (const textToken of TEXT_TOKENS) {
-      const fg = toRgb(tokens[textToken]);
+      const fg = toRgb(tokens[textToken], tokens);
       if (!fg) {
         problems.push(`${themeName}: ${textToken} 不是可解析的 #rrggbb（实际 "${tokens[textToken]}"）`);
         continue;
       }
       for (const [surfaces, threshold] of [[READING_SURFACES, 4.5], [TINTED_SURFACES, 3.0]]) {
         for (const surfaceToken of surfaces) {
-          const bg = toRgb(tokens[surfaceToken]);
+          const bg = toRgb(tokens[surfaceToken], tokens);
           if (!bg) {
             problems.push(`${themeName}: ${surfaceToken} 不是可解析的 #rrggbb（实际 "${tokens[surfaceToken]}"）`);
             continue;
@@ -374,8 +391,8 @@ console.log('\n=== 颜色对比度（按 token 实测，不是肉眼判断）===
   for (const [themeName, tokens] of Object.entries(themes)) {
     for (const token of SATURATED) {
       const onToken = `--on-${token.slice(2)}`;
-      const fg = toRgb(tokens[onToken]);
-      const bg = toRgb(tokens[token]);
+      const fg = toRgb(tokens[onToken], tokens);
+      const bg = toRgb(tokens[token], tokens);
       if (!fg || !bg) {
         onProblems.push(`${themeName}: ${onToken} 或 ${token} 缺失/不是 #rrggbb`);
         continue;
@@ -387,6 +404,45 @@ console.log('\n=== 颜色对比度（按 token 实测，不是肉眼判断）===
     }
   }
   check(`--on-* 在自己的填充色上达标（${Object.keys(themes).length} 个主题 × ${SATURATED.length} 个填充）`, onProblems.length === 0, onProblems.join('\n        '));
+
+  /*
+   * Syntax colours are measured against the surface code is actually painted on.
+   *
+   * The doc comment on `--syntax-*` says "contrast against --bg-secondary stays above 4.5:1", and
+   * that was the wrong surface: a code block renders on `--code-bg`, which is darker than
+   * `--bg-secondary` in the dark theme and lighter in the light one. The gap hid a real bug — the
+   * block carried a hardcoded dark background, so in the light theme the light-tuned syntax colours
+   * (`--syntax-string: #1a7f37`) were painted on a near-black slab at about 2.5:1. Nothing measured
+   * that, because nothing measured the surface the colours were on.
+   *
+   * Measuring the real surface is what makes the pair (`--code-bg`, `--syntax-*`) a single thing
+   * that has to agree, in every theme, from here on.
+   */
+  const SYNTAX = ['--syntax-keyword', '--syntax-string', '--syntax-number', '--syntax-function', '--syntax-type', '--syntax-attr'];
+  const syntaxProblems = [];
+  for (const [themeName, tokens] of Object.entries(themes)) {
+    const bg = toRgb(tokens['--code-bg'], tokens);
+    if (!bg) {
+      syntaxProblems.push(`${themeName}: --code-bg 缺失或不是可解析的颜色（实际 "${tokens['--code-bg']}"）`);
+      continue;
+    }
+    for (const role of SYNTAX) {
+      const fg = toRgb(tokens[role], tokens);
+      if (!fg) {
+        syntaxProblems.push(`${themeName}: ${role} 缺失或不是可解析的颜色（实际 "${tokens[role]}"）`);
+        continue;
+      }
+      const ratio = contrast(fg, bg);
+      if (ratio + 1e-9 < 4.5) {
+        syntaxProblems.push(`${themeName}: ${role} 在 --code-bg 上只有 ${ratio.toFixed(2)}:1（要求 4.5）`);
+      }
+    }
+  }
+  check(
+    `语法色在代码块自己的表面上达标（${Object.keys(themes).length} 个主题 × ${SYNTAX.length} 个角色）`,
+    syntaxProblems.length === 0,
+    syntaxProblems.join('\n        '),
+  );
 }
 
 // ─── 6. Keyboard: focus order and a visible focus ring ───

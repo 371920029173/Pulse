@@ -13,10 +13,22 @@
 }
 .panel {
   width: min(560px, 92vw);
-  background: linear-gradient(180deg, #161922 0%, #12141a 100%);
-  border: 1px solid var(--border, #2a2f3a);
+  /*
+   * Themed, which this file was not.
+   *
+   * Every colour in `.panel` and its children used to be a literal — `#161922`, `#12141a`, `#e8eaed`,
+   * `#9aa0a6`, `#2a2f3a`, `#0b0d12`, plus `rgba(91,140,255,…)` twice. Those are the values of a
+   * palette that has since been removed from `global.css`, and because they were literals rather
+   * than tokens, the command palette simply ignored the theme: in light mode Ctrl+K still opened a
+   * dark panel with light text, sitting on a light app.
+   *
+   * The gradient is kept — it is what stops the panel reading as a flat cutout — but it now runs
+   * between two tokens, so both themes get it.
+   */
+  background: linear-gradient(180deg, var(--bg-tertiary) 0%, var(--bg-secondary) 100%);
+  border: 1px solid var(--border);
   border-radius: 14px;
-  box-shadow: 0 24px 80px rgba(0,0,0,.55), 0 0 0 1px rgba(91,140,255,.08);
+  box-shadow: var(--shadow-lg), 0 0 0 1px var(--accent-soft);
   overflow: hidden;
   animation: shePop 360ms var(--ease-sheet) both;
 }
@@ -26,10 +38,10 @@
   border: none;
   outline: none;
   background: transparent;
-  color: var(--she-text, #e8eaed);
+  color: var(--text-primary);
   font-size: 15px;
   padding: 16px 18px;
-  border-bottom: 1px solid var(--border, #2a2f3a);
+  border-bottom: 1px solid var(--border);
 }
 .list {
   max-height: 360px;
@@ -51,37 +63,37 @@
   cursor: pointer;
 }
 .itemActive {
-  background: rgba(91,140,255,.16);
+  background: var(--accent-muted);
 }
 .itemTitle {
   font-size: 13px;
-  color: #e8eaed;
+  color: var(--text-primary);
 }
 .itemMeta {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #9aa0a6;
+  color: var(--text-tertiary);
   font-size: 11px;
 }
 .itemMeta kbd {
   font-family: var(--font-mono, ui-monospace, monospace);
-  border: 1px solid #2a2f3a;
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 1px 6px;
-  background: #0b0d12;
+  background: var(--bg-primary);
 }
 .empty {
   padding: 18px 12px;
-  color: #9aa0a6;
+  color: var(--text-tertiary);
   font-size: 13px;
 }
 .footer {
   display: flex;
   gap: 14px;
   padding: 8px 14px 10px;
-  border-top: 1px solid #1f2430;
-  color: #6b7280;
+  border-top: 1px solid var(--border);
+  color: var(--text-tertiary);
   font-size: 11px;
 }
 @keyframes fade {
