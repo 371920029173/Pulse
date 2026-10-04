@@ -111,6 +111,18 @@
   --info: #79c0ff;
 
   /*
+   * Ink for a diff line.
+   *
+   * The added/removed rows tint their background with `--success` / `--danger`, but the text cannot
+   * BE `--success`: in the dark theme that green is the tint, and light-on-its-own-tint is invisible.
+   * These are the readable counterparts — brighter in the dark theme, darker in the light one — so
+   * the pair (tint, ink) is chosen once per theme instead of being restated as an override in the
+   * component.
+   */
+  --diff-add-fg: #7ee787;
+  --diff-del-fg: #ffa198;
+
+  /*
    * Text colour for content sitting ON a filled control.
    *
    * The accent is a light blue in this theme, so white text on it measured 2.61:1 —
@@ -599,6 +611,10 @@ body {
   --warning: #9a6700;
   --danger: #cf222e;
   --info: #0969da;
+
+  /* See `--diff-add-fg` in `:root`: the readable ink for a diff line, chosen against its own tint. */
+  --diff-add-fg: #116329;
+  --diff-del-fg: #a40e26;
 
   /* Filled controls are dark here, so their text is white — the opposite of the
      dark theme. See the note on `--on-accent` above. */

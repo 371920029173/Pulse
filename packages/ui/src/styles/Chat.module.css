@@ -952,14 +952,26 @@
   user-select: none;
 }
 
+/*
+ * Added / removed lines in a diff.
+ *
+ * These used to carry their own six-value palette: `#3fb950` / `#7ee787` for an added line,
+ * `#f85149` / `#ffa198` for a removed one, and then two more rules further down restating the text
+ * colour for the light theme (`#116329` / `#a40e26`). That is a second theme system living inside one
+ * component — it had to be kept in sync by hand, and nothing measured it: the tint, the ink and the
+ * light-mode overrides were four places to change for one visual decision.
+ *
+ * `--success` / `--danger` supply the tint in both themes, and `--diff-add-fg` / `--diff-del-fg`
+ * supply the ink, so the light-theme overrides are gone rather than restated.
+ */
 .diffAdd {
-  background: color-mix(in srgb, #3fb950 18%, transparent);
-  color: #7ee787;
+  background: color-mix(in srgb, var(--success) 18%, transparent);
+  color: var(--diff-add-fg);
 }
 
 .diffDel {
-  background: color-mix(in srgb, #f85149 16%, transparent);
-  color: #ffa198;
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+  color: var(--diff-del-fg);
 }
 
 .diffHunk {
@@ -968,10 +980,6 @@
 }
 
 .diffCtx { color: var(--text-tertiary); }
-
-/* Light theme needs darker ink on those tints. */
-:global(html[data-theme="light"]) .diffAdd { color: #116329; }
-:global(html[data-theme="light"]) .diffDel { color: #a40e26; }
 
 /* ── Collapsible knowledge-base hit list ── */
 .kbResult {
