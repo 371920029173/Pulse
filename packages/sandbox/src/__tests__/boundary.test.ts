@@ -152,11 +152,37 @@ describe('无法判定：报告 2a 的原始逃逸', () => {
       'type ${env:USERPROFILE}\\x',
       'cat $(mktemp)',
       'cat `mktemp`',
+      // 默认方言（posix）下的家目录展开 —— 和 $VAR 同属"文本里写着、位置要等展开"。
+      'cat ~/.ssh/id_rsa',
+      'cd ~ && echo x > y.txt',
     ]) {
       const v = verdict(c);
       assert.equal(v.where, 'unknown', `${c} 位置被判成 ${v.where}`);
       assert.equal(v.readOnly, false, `${c} 被判成只读`);
     }
+  });
+
+  it('~ 只在会展开它的方言里算不可知；cmd 方言上不算', () => {
+    // 上游 `detectShellDialectMismatch` 已经把 `~/x` 当作 POSIX-only 构造，这里的分档和它一致：
+    // sh / PowerShell 会展开 ~，cmd 方言不会 —— 在 cmd 上把 `~\notes.txt` 判成 unknown 就是误报。
+    for (const c of ['cat ~/.ssh/id_rsa', 'cd ~ && echo x > y.txt', 'cat ~other/x', 'ls "~/notes"']) {
+      assert.equal(classifyCommand(c, ROOT, 'posix').where, 'unknown', `${c} 在 posix 下被判成 ${classifyCommand(c, ROOT, 'posix').where}`);
+      assert.equal(classifyCommand(c, ROOT, 'powershell').where, 'unknown', `${c} 在 powershell 下被判成 ${classifyCommand(c, ROOT, 'powershell').where}`);
+    }
+    assert.notEqual(classifyCommand('dir ~\\notes.txt', ROOT, 'cmd').where, 'unknown', 'cmd 里 ~ 只是普通文件名字符');
+  });
+
+  it('只认词首的 ~：出现在词中间的是普通文件名', () => {
+    assert.equal(classifyCommand('cat a~b.txt', ROOT, 'posix').where, 'inside');
+    assert.equal(classifyCommand('cat notes~', ROOT, 'posix').where, 'inside');
+  });
+
+  it('回归：V14 原文在 POSIX 下不再被判成 inside', () => {
+    // 曾经的失败方式不是"没认出 ~"，而是认成了**相反**的答案：`cdEscapeInSegment` 把 `~` 交给
+    // `staysInWorkspace`，后者 `resolve(root, '~')` 把它当成一个字面相对目录，于是 `cd ~` 被
+    // 证明成"没出去"。修的是这一条，所以断言钉在 inside→unknown 这个方向上。
+    assert.equal(classifyCommand('cd ~ && echo x > y.txt', ROOT, 'posix').where, 'unknown');
+    assert.equal(classifyCommand('cd ~', ROOT, 'posix').where, 'unknown');
   });
 
   it('引号未闭合时两个答案都不可给', () => {

@@ -1040,7 +1040,7 @@ function boundaryDecision(name: string, args: Record<string, unknown>): Boundary
 
   if (name === 'shell') {
     const command = String(args.command ?? '');
-    const cls = classifyCommand(command, root);
+    const cls = classifyCommand(command, root, shell.dialect());
 
     if (cls.readOnly) return { kind: 'allow' };
 

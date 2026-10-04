@@ -928,8 +928,17 @@ export interface CommandBoundary {
   inline: CodeExecutionOnCommandLine | null;
 }
 
-export function classifyCommand(command: string, workspaceRoot: string): CommandBoundary {
-  const opaqueReason = opacityReason(command);
+/**
+ * `dialect` decides which expansions the text can be assumed to go through — see the `~` case in
+ * `opacityReason`. The default is the conservative one (assume `~` is expanded): a caller that does
+ * not know its shell gets the answer that asks rather than the one that runs.
+ */
+export function classifyCommand(
+  command: string,
+  workspaceRoot: string,
+  dialect: ShellDialect = 'posix',
+): CommandBoundary {
+  const opaqueReason = opacityReason(command, dialect);
   const escape = workspaceEscapeReason(command, workspaceRoot);
   const cdEscape = cdEscapeReason(command, workspaceRoot);
 
@@ -974,7 +983,7 @@ export function classifyCommand(command: string, workspaceRoot: string): Command
  * contains also has a `$` in it, and the disclosure the caller shows should name the interpreter
  * rather than the variable.
  */
-function opacityReason(command: string): string {
+function opacityReason(command: string, dialect: ShellDialect): string {
   const inline = detectInlineCodeExecution(command);
   if (inline) {
     return `程序写在命令行里（${inline.interpreter} ${inline.flag}），`
@@ -997,6 +1006,21 @@ function opacityReason(command: string): string {
   }
   if (/\$[A-Za-z_][A-Za-z0-9_]*/.test(command)) {
     return '命令包含 $VAR 变量，实际路径要等 shell 展开才知道';
+  }
+  /*
+   * `~` —— 家目录。和 `$VAR` 是同一类：命令文本里写着它，但真实位置要等 shell 展开才知道。
+   *
+   * 这个缺口曾经让 V14 这条在 POSIX 上整条放行。值得注意的是失败的方式：不是"没认出 `~`"，
+   * 而是认成了**相反**的答案 —— `cdEscapeInSegment` 把目标 token 交给 `staysInWorkspace`，后者用
+   * `resolve(workspaceRoot, '~')` 解析，于是 `~` 变成一个名叫 `~` 的字面相对目录，解析结果落在工作区
+   * **内**，`cd ~` 于是被认证为"没出去"。Windows 那条分支用的 `%USERPROFILE%` 会被上面的 `%VAR%`
+   * 接住，所以这一格只在 POSIX / PowerShell 上漏 —— 而 `cmd.exe` 不展开 `~`，在那里把它当"判不出"
+   * 才是误报（本仓库对误报另有判据），所以按方言分开。
+   *
+   * 只认**词首**的 `~`：tilde 展开只发生在词的第一个字符上，`a~b` 就是一个普通文件名。
+   */
+  if (dialect !== 'cmd' && /(?:^|[\s"'=(|&;,])~(?=[\w/\\\s]|$)/.test(command)) {
+    return '命令包含 ~ 家目录展开，实际路径要等 shell 展开才知道';
   }
   /*
    * `for /f "..." %i in (文件) do @type "%i"` —— 路径来自**数据**，不在命令文本里。
@@ -1718,7 +1742,7 @@ export class SandboxShell {
        * 拒绝档例外：它是真的不许，不提供"批准后放行"这条路。
        */
       const policy = this.config.outsideWorkspace;
-      const readOnlyProven = classifyCommand(command, this.workspaceRoot).readOnly;
+      const readOnlyProven = classifyCommand(command, this.workspaceRoot, this.dialect()).readOnly;
       const hardDeny = policy.policy === 'deny';
       if (!readOnlyProven && policy.policy !== 'all' && (hardDeny || !options?.boundaryApproved)) {
         return deny(escape);
