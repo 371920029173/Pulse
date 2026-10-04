@@ -1,0 +1,49 @@
+# Dependabot version updates.
+#
+# Why this file exists. Without it this repository had only GitHub's default advisory *alerts*
+# and no update pull requests, so 104 advisories sat open on the default branch until someone
+# audited them by hand (2026-10-04). An alert tells you after the fact; these PRs are what keeps
+# the tree from rotting in the first place.
+#
+# The two halves are deliberate. This file keeps dependencies moving forward; the alert side is
+# paired with `pnpm check:deps` (scripts/deps-check.mjs), which ratchets the advisory count so
+# it cannot rise again even if an update PR goes unreviewed.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+    groups:
+      # Minor and patch bumps arrive as ONE pull request.
+      #
+      # Every PR here runs the full 53-step offline gate, so a dozen individual bumps is a dozen
+      # full gate runs and a queue nobody reads. Majors stay ungrouped on purpose: they are the
+      # ones that need their own gate run and their own review.
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # Electron 42 stopped downloading its own binary from a postinstall script, and
+      # `build.electronDist` in packages/desktop/package.json points at exactly the directory
+      # that download produces (node_modules/electron/dist). An unqualified major bump therefore
+      # packages an empty runtime, or fails outright — so it is blocked here rather than
+      # discovered in a broken release. Revisit once electron-builder handles the new channel.
+      - dependency-name: electron
+        versions:
+          - ">= 42.0.0"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: ci

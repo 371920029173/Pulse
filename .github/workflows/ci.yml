@@ -52,3 +52,16 @@ jobs:
       # failure here is the first real signal that a platform branch is wrong.
       - name: Offline gate (build, tests, all offline checks)
         run: pnpm check:offline
+
+      # Dependency advisories, as a ratchet: the count may fall, never rise.
+      #
+      # Deliberately a separate step. `check:offline` is offline by contract — no step in it
+      # reaches the network — and `pnpm audit` queries the advisory database, so it cannot live
+      # there without breaking the property that makes that gate's answer the same on CI and on a
+      # developer's machine. (Folding it in would also silently invalidate the step count quoted
+      # in docs/testing.md, which `check:docs` asserts.)
+      #
+      # This is the half that was missing when 104 advisories accumulated on the default branch:
+      # Dependabot alerts tell you after the fact, and nothing was watching before it.
+      - name: Dependency advisories (ratchet)
+        run: pnpm check:deps

@@ -18,6 +18,7 @@
     "eval:recall": "node evals/recall/run.mjs --check",
     "eval:agent": "node evals/agent/run.mjs",
     "check:security": "node scripts/security-check.mjs",
+    "check:deps": "node scripts/deps-check.mjs",
     "check:data": "node scripts/data-safety-check.mjs",
     "check:subagent": "node scripts/check-subagent.mjs",
     "check:lsp": "node scripts/lsp-check.mjs",
