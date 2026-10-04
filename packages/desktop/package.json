@@ -13,8 +13,8 @@
     "stage": "node ../../scripts/stage-desktop-runtime.mjs"
   },
   "devDependencies": {
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8"
+    "electron": "^41.10.6",
+    "electron-builder": "^26.15.0"
   },
   "productName": "Pulse",
   "author": "Pulse",
@@ -27,8 +27,7 @@
       "buildResources": "assets"
     },
     "files": [
-      "main.cjs",
-      "preload.cjs",
+      "*.cjs",
       "assets/**/*",
       "package.json"
     ],
@@ -75,6 +74,6 @@
       "artifactName": "Pulse-Portable-${version}.${ext}"
     },
     "electronDist": "node_modules/electron/dist",
-    "electronVersion": "33.4.11"
+    "electronVersion": "41.10.7"
   }
 }
