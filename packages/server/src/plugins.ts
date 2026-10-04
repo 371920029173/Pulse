@@ -134,6 +134,17 @@ export class PluginManager {
   /** name -> loaded module, memoised so a turn does not re-import per call. */
   private modules = new Map<string, LoadedModule | null>();
   /**
+   * Bumped on every dynamic import so each one gets a distinct URL.
+   *
+   * This was `Date.now()`, and the reason it cannot be a clock is worth keeping: Node keys its
+   * module cache on the **full URL**, so the query string is the only thing separating a re-import
+   * from a cache hit. Two loads inside the same millisecond produce the same URL, and the second
+   * one gets the FIRST module back — an edited plugin keeps running its old code, with no error
+   * anywhere. A counter cannot collide, so "an edit is picked up on the next refresh" holds by
+   * construction rather than by timing.
+   */
+  private loadSeq = 0;
+  /**
    * The loaded tool set. Rebuilt only by `refresh()`.
    *
    * Held as a field (rather than computed on demand) because the agent needs the
@@ -518,8 +529,9 @@ tools[0].run = async (args, ctx) => {
     }
     try {
       // Cache-bust so an edited plugin picks up on the next turn instead of
-      // serving a stale module for the life of the process.
-      const url = `${pathToFileURL(modulePath).href}?v=${Date.now()}`;
+      // serving a stale module for the life of the process. The counter (not a
+      // clock) is what makes the URL distinct — see `loadSeq`.
+      const url = `${pathToFileURL(modulePath).href}?v=${++this.loadSeq}`;
       const mod = (await import(url)) as LoadedModule;
       this.modules.set(name, mod);
       return mod;
