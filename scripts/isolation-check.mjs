@@ -31,6 +31,11 @@
  * the same stance as `wsl-check.mjs`. `--require-isolation` turns that into a failure for a machine
  * that is supposed to have it.
  *
+ * One subsection blocks that way for a different reason: 4b's fact-check runs `ver`, a cmd builtin,
+ * so "did the command land on the host?" is only observable on Windows. Real isolation is a
+ * Windows + WSL2 feature, so on any other host there is no second side to compare against — that
+ * assertion is reported as 阻塞 rather than quietly asserted against a `bash: ver: not found`.
+ *
  *   node scripts/isolation-check.mjs
  *   node scripts/isolation-check.mjs --require-isolation
  */
@@ -43,6 +48,8 @@ import { tmpdir } from 'node:os';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
 const REQUIRE_ISOLATION = process.argv.includes('--require-isolation');
+/** `ver` — the fact-check in 4b — is a cmd builtin, so that assertion is only observable here. */
+const HOST_IS_WINDOWS = process.platform === 'win32';
 
 let failures = 0;
 let blocked = 0;
@@ -457,13 +464,22 @@ console.log('\n=== 最大授权（勾选 +「所有」）：命令直接在主�
    * 2. 事实。`ver` 是 cmd.exe 的内建命令，WSL 里根本没有 —— 拿它当判据比"看有没有 isolation 字段"
    * 更硬：字段可能因为别的原因消失，而 `ver` 能成功只能说明这条命令**真的在 Windows 上跑了**。
    * 它在任何 Windows 机器上都存在，所以这条不依赖装没装 WSL。
+   *
+   * 反过来，`ver` 在非 Windows 主机上根本不存在 —— 真隔离是 Windows + WSL2 的功能，那里没有"隔离里"
+   * 可对照的另一侧，"命令落在主机上"就无从观测。按本脚本的立场（测不了就报阻塞，不写成通过），
+   * 这一格在别的平台上让位给 `note`：它红了不代表让开判据坏了，只代表这台机器测不了它。
    */
   {
     const sh = new SandboxShell(ROOT, { ...MAX, isolation: 'auto' });
     const r = await sh.exec('ver');
-    const onHost = r.exitCode === 0 && /Version/i.test(r.stdout);
-    check('【关键】最大授权 + auto：`ver` 在这台电脑上真的跑起来了（不是"bash: ver: command not found"）',
-      onHost, `exit=${r.exitCode} stdout=${JSON.stringify(r.stdout.slice(0, 120))} stderr=${JSON.stringify(r.stderr.slice(0, 200))}`);
+    if (HOST_IS_WINDOWS) {
+      const onHost = r.exitCode === 0 && /Version/i.test(r.stdout);
+      check('【关键】最大授权 + auto：`ver` 在这台电脑上真的跑起来了（不是"bash: ver: command not found"）',
+        onHost, `exit=${r.exitCode} stdout=${JSON.stringify(r.stdout.slice(0, 120))} stderr=${JSON.stringify(r.stderr.slice(0, 200))}`);
+    } else {
+      note('最大授权 + auto：`ver` 真的落在主机上',
+        `\`ver\` 是 cmd 内建命令，${process.platform} 上没有它；真隔离只在 Windows + WSL2 上实现，这一格在本平台无从对照`);
+    }
     check('  结果里没有 isolation 披露（它没在边界里跑，就不能声称在）',
       r.isolation === undefined || r.isolation === null, JSON.stringify(r.isolation));
     check('  描述也说主机 shell，不说"WSL 隔离内"',
@@ -471,11 +487,13 @@ console.log('\n=== 最大授权（勾选 +「所有」）：命令直接在主�
     check('  公开的让开判据与之一致（界面/评测问的就是它，不该各算一遍）',
       sh.isolationBypassedByGrant() === true && sh.effectiveIsolation() === 'off',
       `bypassed=${sh.isolationBypassedByGrant()} effective=${sh.effectiveIsolation()}`);
-    check('  wsl 档位也被这一档盖过（用户选了"就在这台电脑上跑"）', await (async () => {
-      const w = new SandboxShell(ROOT, { ...MAX, isolation: 'wsl' });
-      const wr = await w.exec('ver');
-      return wr.exitCode === 0 && /Version/i.test(wr.stdout) && !wr.isolation;
-    })());
+    if (HOST_IS_WINDOWS) {
+      check('  wsl 档位也被这一档盖过（用户选了"就在这台电脑上跑"）', await (async () => {
+        const w = new SandboxShell(ROOT, { ...MAX, isolation: 'wsl' });
+        const wr = await w.exec('ver');
+        return wr.exitCode === 0 && /Version/i.test(wr.stdout) && !wr.isolation;
+      })());
+    }
   }
 
   /*
