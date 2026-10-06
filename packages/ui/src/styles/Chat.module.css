@@ -1376,9 +1376,27 @@
 
 .reasoningChevron { opacity: 0.7; font-size: 11px; }
 
-.reasoningLabel { font-weight: 600; }
+/*
+ * 这两个标签在 flex 行里，必须自己不被压缩、也不许换行。
+ *
+ * 原来只有 font-weight —— 同一行的 .toolCallVerb/.toolCallName/.toolResultLabel/
+ * .toolResultMeta 都写了 flex-shrink: 0，只有这两条没写。窗口被拖窄（侧栏 + 轨迹
+ * 面板同时打开时聊天列可以只剩几百 px）时，flex 会把这行里的文字压到一字宽，
+ * "思维链"就竖着排成 思/维/链 —— 用户看到的正是这个。
+ */
+.reasoningLabel {
+  font-weight: 600;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 
-.reasoningMeta { margin-left: auto; opacity: 0.55; font-variant-numeric: tabular-nums; }
+.reasoningMeta {
+  margin-left: auto;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 
 /* Collapsed preview so a long chain is obviously present, not missing. */
 .reasoningPreview {

@@ -6,6 +6,12 @@ features, patch for fixes.
 
 ## Unreleased
 
+### Fixed
+
+- **工具卡片不再把原始 JSON 当摘要显示，"思维链"也不会被压成竖排。** 两处都是"用久了有些部件渲染出问题"的成因，各自留了一条判据。
+  - `summarizeToolArgs()` 只给 15 个工具手写了摘要，其余（`errorbook_*` / `memo_*` / `plan_update` / `schedule_*` / `skill_read` / `lsp_*` / `mcp_call` …）**回退成 `JSON.stringify(args)`** —— 记录里于是出现 `errorbook_forget {"id":"…","reason":"…"}` 这样的行，整条记录看起来像调试日志。现在补齐了 24 个自有工具，并给未知工具（含 MCP 与插件的）加了一层"按目标键取名"（`query` / `command` / `path` / `text` / `name` / `id` / `step_id` / `server` …），**一个都取不到才退回 JSON** —— 那时 JSON 仍是唯一能说明问题的东西，调试信息不丢。判据：`packages/ui/src/__tests__/tool-summary.test.tsx`。
+  - `.reasoningLabel` 与 `.reasoningMeta` 是那一行 flex 里**唯一**没有 `nowrap` / 不收缩保护的两个标签（同行的 `.toolCallVerb`、`.toolCallName`、`.toolResultLabel`、`.toolResultMeta` 都写了 `flex-shrink: 0`）：窗口被拖窄（侧栏 + 轨迹面板同时打开时聊天列只剩几百 px）时 flex 会把它们压到一字宽，"思维链"就竖着排成 思/维/链。判据：`check:ui` 新增的一节（已反向测过 —— 去掉 `nowrap` 会报红）。jsdom 没有布局引擎，所以这件事只能靠静态判据钉，不能靠单元测试。
+  - 取证结论一并记下：截图里出现的 `跳到此处` 与 `[工具结果]` **在本工作区的源码、构建产物、桌面 runtime、会话记录里一处都没有**（同一次扫描里 `回到最新` / `轨迹` / `思维链` 都能找到，对照组有效），所以那个页面不是这份代码构建的。
 ### Added
 
 - **"压缩会不会丢事实"有了量具：先测，再决定要不要加保护。** `scripts/context-survival-probe.mjs`（真端点，故意不进 `check:offline`）把"前面埋事实、后面全是填充"的历史直接塞进去，用一个小窗口逼出一次压缩，然后报三个数：真压过没有、事实在摘要里逐字保住了几条、事实在答复里活下来几条。**最后一次干净读数是 8/8 全活**（摘要里 6/8 逐字，模型读懂了那个模式）—— 在这份夹具上压缩没有丢事实，"事实会被抹平"的判断是坏量具造出来的假象。量具自己踩过的五个坑（评测任务那条路走不通、探针复用了陈摘要、探针的预算掐掉了回合、种下的历史差一点、种子只种了 4 条却说 8 条）记在 `docs/context-and-caching.md` 那一节里；配一个默认关着的 `SHE_DIGEST_APPENDIX`（摘要 + 用户原话摘录）备用。另留下：`contextCompacted` 判据类型（把"这次真的压过"变成断言）、生成式夹具 `{ lines, prefix }`、以及压缩失败/到阈值时的日志。

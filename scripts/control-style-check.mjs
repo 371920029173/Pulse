@@ -465,5 +465,34 @@ console.log('\n=== 靠 padding 撑高度的控件（棘轮）===');
   );
 }
 
+console.log('\n=== flex 行里的文字标签不被压成竖排 ===');
+{
+  /*
+   * 这一条是实测出来的：.reasoningLabel 与 .reasoningMeta 是那一行 flex 里唯一没有
+   * 保护的两个标签（同一行的 .toolCallVerb / .toolCallName / .toolResultLabel /
+   * .toolResultMeta 都写了 flex-shrink: 0）。窗口被拖窄时，flex 会把它们压到一字宽，
+   * "思维链"就竖着排成 思/维/链 —— 用户报的渲染问题之一。
+   *
+   * 只查这两个：列表是"确证过会出问题的"，以后每发现一条加一条，不要写宽泛规则
+   * （"所有 Label 类都必须 nowrap"会误伤大量正常换行的正文标签）。
+   */
+  const WATCH = [
+    ['Chat.module.css', '.reasoningLabel'],
+    ['Chat.module.css', '.reasoningMeta'],
+  ];
+  const offenders = [];
+  for (const [file, cls] of WATCH) {
+    const css = all.get(file) ?? '';
+    const m = css.match(new RegExp('\\' + cls + '\\s*\\{([^}]*)\\}'));
+    if (!m) { offenders.push(`${file} ${cls} 找不到规则（改名或删了？）`); continue; }
+    const body = m[1];
+    const ok = /white-space:\s*nowrap/.test(body) || /flex:\s*0\s+0\s+auto/.test(body) || /flex-shrink:\s*0/.test(body);
+    if (!ok) offenders.push(`${file} ${cls} 没有 nowrap / 不收缩保护`);
+  }
+  console.log('  检查：' + WATCH.map(([, c]) => c).join(' '));
+  check('flex 行里的文字标签都有不换行保护', offenders.length === 0,
+    offenders.length ? offenders.join('；') : '0 处缺失');
+}
+
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`);
 process.exit(failures === 0 ? 0 : 1);

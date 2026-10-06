@@ -149,9 +149,42 @@ function summarizeToolArgs(name: string, rawArgs: string): string {
     ask_user: () => pick('question'),
     plan_create: () => pick('title') || pick('goal'),
     report_write: () => pick('title') || pick('path'),
+    plan_update: () => [pick('plan_id'), pick('step_id'), pick('status')].filter(Boolean).join(' '),
+    plan_add_steps: () => pick('plan_id') || pick('title'),
+    kb_edit: () => pick('nodeId') || pick('id'),
+    kb_retire: () => pick('nodeId') || pick('id'),
+    kb_ingest_place: () => [pick('item_id'), pick('groupName')].filter(Boolean).join(' → '),
+    memo_add: () => pick('text'),
+    memo_update: () => pick('id') || pick('text'),
+    memo_remove: () => pick('id'),
+    errorbook_lookup: () => pick('query') || pick('tool'),
+    errorbook_forget: () => pick('id'),
+    schedule_create: () => [pick('name'), pick('at')].filter(Boolean).join(' @ '),
+    schedule_cancel: () => pick('id'),
+    skill_read: () => pick('name'),
+    shell_wait: () => pick('id'),
+    shell_kill: () => pick('id'),
+    fs_patch: () => pick('path'),
+    apply_patch: () => pick('path'),
+    lsp_diagnostics: () => pick('path'),
+    lsp_hover: () => pick('path'),
+    lsp_definition: () => pick('path'),
+    lsp_references: () => pick('path'),
+    mcp_call: () => [pick('server'), pick('tool')].filter(Boolean).join(' / '),
   };
   const out = byName[name]?.();
   if (out) return out;
+
+  /*
+   * 表里没有的工具（新加的、MCP 的、插件的）**不再直接吐 JSON**。
+   *
+   * 直接输出整个 args 的 JSON，让记录看起来像调试日志：用户报的"渲染出问题"里就有一半
+   * 是这个 —— 屏幕上出现 errorbook_forget {"id":"…","reason":"…"} 这样的行。这里先按一组
+   * "通常就是目标"的键取名（与上面的表同一条原则：挑那个真正说明这次干了什么的参数），
+   * 一个都取不到才退回 JSON —— 那时 JSON 至少还是唯一能说明问题的东西。
+   */
+  const generic = pick('query', 'command', 'path', 'url', 'text', 'name', 'title', 'id', 'nodeId', 'step_id', 'server', 'reason', 'tool');
+  if (generic) return generic.slice(0, 80);
 
   const json = JSON.stringify(args);
   return json === '{}' ? '' : json.slice(0, 80);
