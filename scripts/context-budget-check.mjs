@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 动态上下文 / 成本面板的服务端契约。
  *
  * 用户要的是「填 token 定价 → 据此分配最优压缩逻辑 → 取到最小消耗」。这个门禁钉的不是算术
@@ -25,6 +25,10 @@
  * 第 12 节是本仓库自己的那两处：换算比用真实用量**自校准**（不再靠写死的常量 + 人工重测），以及
  * 摘要抬头里的**取回锚点**（文件 / 命令 / 报错串 / 知识库组路径）。桩模型按 3.2 报 token 数，所以
  * "它到底学没学到"在这一节是可断言的。
+ *
+ * 第 13 节是四个"可测量"的读数：压缩经济学（省 = 差值 × 轮数，付 = provider 报的未命中）、取回率
+ * （有没有人真去读被压掉的原文）、锚点数、以及这一刻的工具结果预算。前三个都是**事后查得到**的数，
+ * 而不是设计时的猜测。
  *
  *   node scripts/context-budget-check.mjs
  */
@@ -353,7 +357,11 @@ console.log('\n10. 真压一次：跑的是用户实际会跑的那份 dist（�
           choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
           // 报一个**可信**的 prompt tokens（按字符数算出来的）：固定报 100 会让"换算比自校准"
           // 收到量级不对的样本（那一条护栏会把它丢掉），于是第 12 节就测不到东西。
-          usage: { prompt_tokens: promptTokens, completion_tokens: 5, total_tokens: promptTokens + 5 },
+          usage: {
+          prompt_tokens: promptTokens, completion_tokens: 5, total_tokens: promptTokens + 5,
+          // 全算未命中：这样"压缩之后实际付了多少"有一个确定的数，判据能断言它（见第 13 节）。
+          prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: promptTokens,
+        },
         }));
       };
       if (isDigest) {
@@ -530,7 +538,11 @@ console.log('\n12. 自校准与取回锚点');
       res.end(JSON.stringify({
         id: 'stub-cal', object: 'chat.completion', model: 'stub',
         choices: [{ index: 0, message: { role: 'assistant', content: 'stub ok' }, finish_reason: 'stop' }],
-        usage: { prompt_tokens: promptTokens, completion_tokens: 5, total_tokens: promptTokens + 5 },
+        usage: {
+          prompt_tokens: promptTokens, completion_tokens: 5, total_tokens: promptTokens + 5,
+          // 全算未命中：这样"压缩之后实际付了多少"有一个确定的数，判据能断言它（见第 13 节）。
+          prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: promptTokens,
+        },
       }));
     });
   });
@@ -571,6 +583,39 @@ console.log('\n12. 自校准与取回锚点');
     const digest = c.compaction ?? null;
     check('没压过 / 抽不出锚点时都不印空表', digest === null || typeof digest.sourcePath === 'string',
       JSON.stringify(digest ?? null).slice(0, 200));
+
+    // ── 13. 四个读数：经济学 / 取回率 / 锚点 / 预算（同一条桩，但换一条会话真压一次）──
+    console.log('\n13. 四个读数：经济学 / 取回率 / 锚点 / 预算');
+    await send('PUT', '/api/settings', { contextWindow: 40000 });
+    const c2r = await (await send('POST', '/api/sessions', { title: 'ctx-econ' })).json();
+    const sid2 = c2r.id ?? c2r.session?.id;
+    const big = [];
+    for (let i = 0; i < 12; i++) {
+      big.push({ role: 'user', content: `block ${i} ` + 'x'.repeat(10_000) });
+      big.push({ role: 'assistant', content: `ack ${i}` });
+    }
+    await send('PUT', '/api/chat/history', { session_id: sid2, messages: big });
+    for (const q of ['一', '二', '三']) {
+      const r = await send('POST', '/api/chat', { session_id: sid2, message: q, stream: false });
+      check(`第 ${q} 轮答上了（否则账算不出来）`, r.ok, String(r.status));
+    }
+
+    const c2 = (await get(`/api/context/plan?session_id=${sid2}`)).context;
+    check('压过至少一次', c2.memory.compactions >= 1 && c2.memory.foldedMessages > 0,
+      JSON.stringify(c2.memory));
+    const ec = c2.economics;
+    check('给出这次压缩的账', Boolean(e) && typeof ec.savedTokens === 'number', JSON.stringify(e ?? null));
+    check('省下的 = (前 − 后) × 轮数',
+      ec.savedTokens === Math.max(0, c2.compaction.beforeTokens - c2.compaction.afterTokens) * ec.rounds,
+      `省 ${ec.savedTokens} · 轮数 ${ec.rounds}`);
+    check('付掉的是 provider 报的未命中（不是我们估的）', ec.paidTokens > 0 && ec.settled === true,
+      `付 ${ec.paidTokens}`);
+    check('净额 = 省 − 付', ec.netTokens === ec.savedTokens - ec.paidTokens, `净 ${ec.netTokens}`);
+    check('这一刻的预算是个数、且落在 [800, 16000]', typeof c2.budgetChars === 'number'
+      && c2.budgetChars >= 800 && c2.budgetChars <= 16_000, String(c2.budgetChars));
+    check('取回率是个数（本轮没人读过 compacted/，所以是 0）', c2.memory.retrievals === 0,
+      String(c2.memory.retrievals));
+    check('锚点数是个数（纯文本历史抽不出锚点 → 0）', c2.memory.anchors === 0, String(c2.memory.anchors));
   } finally {
     await new Promise((r) => tin.close(() => r()));
   }

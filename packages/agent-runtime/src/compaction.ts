@@ -86,6 +86,16 @@ export interface CompactionState {
   /** 压缩前后估算的提示词 token，用来对账"这次救援省了多少"。 */
   beforeTokens: number;
   afterTokens: number;
+  /**
+   * 压缩之后那一**次**请求实际付掉的未命中（缓存未命中）token 数。
+   *
+   * 这是这次压缩真正的代价：摘要改了前缀，从改的那一点起，整段前缀要按未命中价重算一次。数字来自
+   * provider 报回来的 usage（`cache_miss_tokens`），不是我们估的 —— 估出来的代价没有说服力。
+   * `null` = 还没量到（provider 不报缓存拆分，或者还没发出压缩后的第一个请求）。
+   */
+  paidTokens?: number | null;
+  /** 压缩之后到下一次压缩之间，一共发了几次请求（省下的量按"每次请求都省"累计）。 */
+  rounds?: number;
 }
 
 export interface TokenEstimate {
@@ -316,7 +326,11 @@ export function digestMessage(
    * 锚点只在**抽到了**的时候才印。空表被印成"可以用这些找：（）"是在暗示有线索，而实际什么都没有；
    * 一条列得出来的锚点则是一条真的能干的事（grep 它、fs_read 它、kb_query 它）。
    */
-  const anchors = state.anchors?.length
+  /*
+   * 锚点**只在原文真的落了盘**时才印：它们的存在意义是"按这个串去那个文件里找"，没有那个文件，
+   * 一串串锚点就只是装饰（而装饰会被读成线索）。落盘失败时抬头退回上一句"原文不在摘要里"。
+   */
+  const anchors = state.sourcePath && state.anchors?.length
     ? `\n要找细节时，这些串在原文里真的出现过：${state.anchors.map((a) => `\`${a}\``).join('、')}`
       + (state.anchors.some((a) => a.includes('/')) ? '（带路径的可以直接 kb_query 按组查）。' : '。')
     : '';
@@ -433,6 +447,39 @@ export function retrievalAnchors(head: readonly LLMMessage[], max = 10): string[
     .slice(0, max)
     .map(([s]) => s);
 }
+
+/**
+ * 只留下**在原文里真的找得到**的锚点。
+ *
+ * 锚点表印在摘要抬头里，而那句话是在说"这些串在原文里出现过" —— 那就得真的是这样。核对一遍的
+ * 成本是内存里一次 `includes`，收益是这张表不会被读成"线索"却指不到任何东西：索引不许撒谎。
+ *
+ * 落盘失败时调用方根本不会调它（没有原文可核对，抬头也就不印锚点表）。
+ */
+export function anchorsIn(text: string, anchors: readonly string[]): string[] {
+  if (!text || !anchors.length) return [];
+  return anchors.filter((a) => a.length >= 3 && text.includes(a));
+}
+
+/**
+ * 一条工具结果这一刻允许带进上下文多少字符 —— 按**还剩多少余量**算，不是固定值。
+ *
+ * 固定 16k 的问题在天花板附近才显出来：一个 16k 字符的结果（≈4.6k token）在 40k 窗口下是九分之一，
+ * 在"还剩两千 token"时它就是压死骆驼的那一根 —— 而它到达的那一刻正好是**唯一**能裁它的时刻（裁在
+ * 更晚就等于改前缀，见 tool-output.ts）。
+ *
+ * 规则一句话：**一条结果最多吃掉剩余余量的八分之一**，上限是原来的 16k 字符，下限 800 字符
+ * （比这更小的话，命令日志连退出码行都放不下）。所以离天花板远时行为与以前完全一样（16k），近了才收紧。
+ */
+export function toolResultBudgetChars(usedTokens: number, windowTokens: number, charsPerToken = CHARS_PER_TOKEN): number {
+  if (!Number.isFinite(windowTokens) || windowTokens <= 0) return TOOL_RESULT_CAP_CHARS;
+  const remainingTokens = Math.max(0, windowTokens - Math.max(0, usedTokens));
+  const remainingChars = remainingTokens * (Number.isFinite(charsPerToken) && charsPerToken > 0 ? charsPerToken : CHARS_PER_TOKEN);
+  return Math.max(800, Math.min(TOOL_RESULT_CAP_CHARS, Math.floor(remainingChars / 8)));
+}
+
+/** 工具结果预算的上限（与 `tool-output.ts` 的 `TOOL_RESULT_CONTEXT_CHARS` 同一个数）。 */
+export const TOOL_RESULT_CAP_CHARS = 16_000;
 
 /**
  * 从"太长"的报文里把它自己说的上限读出来。

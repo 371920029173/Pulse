@@ -273,25 +273,37 @@ export function budgetToolResultOnArrival(
   raw: string,
   toolName: string,
   save?: (fullText: string) => string | null,
+  /**
+   * 这一刻的上下文预算（字符）。离天花板越近它越小（见 `compaction.ts` 的
+   * `toolResultBudgetChars`）：一条命令日志在窗口快满时不该还带走一万字符 —— 而**到达的这一刻是
+   * 唯一能裁它的时刻**（晚一步就等于改缓存前缀，见文件头那段）。
+   *
+   * 默认值就是老行为：命令日志有自己更紧的一套切法（开头 1000 + 结尾 8000），取两者之小，所以
+   * `limit` 不收紧时结果与以前**逐字节相同**。
+   */
+  limit = TOOL_RESULT_CONTEXT_CHARS,
 ): ArrivedToolResult {
   const text = typeof raw === 'string' ? raw : String(raw ?? '');
   const fullChars = text.length;
-  if (!isLogTool(toolName) || fullChars <= LOG_RESULT_HEAD_CHARS + LOG_RESULT_TAIL_CHARS + LOG_RESULT_SLACK_CHARS) {
-    return { ...budgetToolResult(text, toolName), savedTo: null };
+  const logCap = Math.min(LOG_RESULT_HEAD_CHARS + LOG_RESULT_TAIL_CHARS, limit);
+  const headCap = Math.min(LOG_RESULT_HEAD_CHARS, Math.max(200, Math.floor(logCap * 0.15)));
+  const tailCap = Math.min(LOG_RESULT_TAIL_CHARS, Math.max(headCap, logCap - headCap));
+  if (!isLogTool(toolName) || fullChars <= headCap + tailCap + LOG_RESULT_SLACK_CHARS) {
+    return { ...budgetToolResult(text, toolName, limit), savedTo: null };
   }
 
   // Head: end on a line boundary when one is reasonably close, so the head is whole lines.
-  let headEnd = LOG_RESULT_HEAD_CHARS;
+  let headEnd = headCap;
   const headNl = text.lastIndexOf('\n', headEnd - 1);
   if (headNl >= headEnd / 2) headEnd = headNl + 1;
 
   // Tail: start on a line boundary, then reach back far enough to keep the status trailer whole.
-  let tailStart = fullChars - LOG_RESULT_TAIL_CHARS;
+  let tailStart = fullChars - tailCap;
   const tailNl = text.indexOf('\n', tailStart);
-  if (tailNl !== -1 && tailNl - tailStart <= LOG_RESULT_TAIL_CHARS / 8) tailStart = tailNl + 1;
+  if (tailNl !== -1 && tailNl - tailStart <= tailCap / 8) tailStart = tailNl + 1;
   const exitAt = lastExitCodeAt(text);
   if (exitAt !== -1 && exitAt < tailStart && fullChars - exitAt <= LOG_RESULT_TAIL_MAX_CHARS) tailStart = exitAt;
-  if (tailStart <= headEnd) return { ...budgetToolResult(text, toolName), savedTo: null };
+  if (tailStart <= headEnd) return { ...budgetToolResult(text, toolName, limit), savedTo: null };
 
   const elidedChars = tailStart - headEnd;
   const firstLine = countNewlines(text, headEnd) + 1;

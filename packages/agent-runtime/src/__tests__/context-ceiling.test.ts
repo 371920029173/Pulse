@@ -22,20 +22,24 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Agent } from '../agent.js';
 import {
+  anchorsIn,
   breakdownRequest,
   calibrateCharsPerToken,
   chooseCutIndex,
   compactionCut,
+  digestMessage,
   DIGEST_MARK,
   estimateRequest,
   fingerprint,
   isContextOverflowError,
   keepTokensFor,
   retrievalAnchors,
+  toolResultBudgetChars,
   windowFromOverflowError,
   MIN_KEEP_TOKENS,
   type CompactionState,
 } from '../compaction.js';
+import { budgetToolResultOnArrival } from '../tool-output.js';
 import { resolveContextWindow, DEFAULT_CONTEXT_WINDOW } from '@she/shared';
 import type { LLMMessage, StreamChunk, ToolDefinition, LLMProvider } from '@she/shared';
 
@@ -53,6 +57,10 @@ class StubProvider implements LLMProvider {
   overflowText = OVERFLOW_TEXT;
   /** 摘要调用返回什么。默认一份够长的摘要。 */
   digestReply = `摘要：${'z'.repeat(80)}`;
+  /** 报不报缓存拆分（经济学要它才知道"付了多少"）。 */
+  reportCacheMiss = false;
+  /** 下一轮要发的工具调用（用来驱动"取回"）。 */
+  nextToolCall: { name: string; arguments: string } | null = null;
   /**
    * 桩把"提示词有多少 token"报成什么数。
    * 0 = 老行为（固定报 100）。设成别的值就模拟"这个端点用的是另一套分词器"。
@@ -75,10 +83,27 @@ class StubProvider implements LLMProvider {
     const promptTokens = this.reportCharsPerToken > 0
       ? Math.max(1, Math.ceil(chars / this.reportCharsPerToken))
       : 10;
-    onChunk?.({ type: 'usage', usage: { prompt_tokens: promptTokens, completion_tokens: 1, total_tokens: promptTokens + 1 } });
+    onChunk?.({
+      type: 'usage',
+      usage: {
+        prompt_tokens: promptTokens,
+        completion_tokens: 1,
+        total_tokens: promptTokens + 1,
+        ...(this.reportCacheMiss ? { cache_hit_tokens: 0, cache_miss_tokens: promptTokens } : {}),
+      },
+    });
     if (this.overflowLeft > 0) {
       this.overflowLeft -= 1;
       throw new Error(this.overflowText);
+    }
+    if (this.nextToolCall) {
+      const call = this.nextToolCall;
+      this.nextToolCall = null;
+      return {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'call-retrieve-1', type: 'function', function: { name: call.name, arguments: call.arguments } }],
+      } as LLMMessage;
     }
     return { role: 'assistant', content: 'ok' };
   }
@@ -691,6 +716,117 @@ describe('取回锚点：压过的内容怎么找回来', () => {
     const digest = p.sent.at(-1)?.find((m) => m.content.startsWith(DIGEST_MARK))?.content ?? '';
     assert.ok(digest.length > 0);
     assert.doesNotMatch(digest, /这些串在原文里真的出现过/, '一个空的锚点表等于在暗示有线索');
+  });
+});
+
+describe('锚点自校验：索引不许撒谎', () => {
+  it('核对不过的锚点被丢掉；没有原文就一条都不留', () => {
+    const blob = 'head packages/a/b.ts 有事 Error: 结尾';
+    assert.deepEqual(anchorsIn(blob, ['packages/a/b.ts', 'Error:', '从来没出现过.ts']),
+      ['packages/a/b.ts', 'Error:']);
+    assert.deepEqual(anchorsIn('', ['packages/a/b.ts']), [], '没有原文时不留任何锚点');
+  });
+
+  it('落盘失败（没有原文路径）时抬头一个字都不印锚点', () => {
+    const digest = 'x'.repeat(60);
+    const noPath = digestMessage({ digest, covered: 5, source: 'model', at: 't', sourcePath: null, anchors: ['packages/a/b.ts'] });
+    assert.doesNotMatch(noPath.content, /这些串在原文里真的出现过/, '没有原文时锚点只是装饰');
+    const withPath = digestMessage({ digest, covered: 5, source: 'model', at: 't', sourcePath: '.she/sessions/s/compacted/x.jsonl', anchors: ['packages/a/b.ts'] });
+    assert.match(withPath.content, /这些串在原文里真的出现过/);
+  });
+});
+
+describe('取回率：这条路到底有没有人走', () => {
+  it('去读 compacted/ 的调用被数出来，别的调用不算', async () => {
+    const p = new StubProvider();
+    const a = new Agent(
+      makeConfig(),
+      {} as never,
+      { definitions: [{ name: 'fs_read', description: '读文件', parameters: { type: 'object', properties: {} } } as ToolDefinition], execute: async () => '读到了一段原文' } as never,
+      'sess-retrieval',
+    );
+    (a as unknown as { provider: LLMProvider }).provider = p;
+    fillBulk(a, 12);
+    await a.chat('压一次');
+    const path = a.getContextStatus().compaction?.sourcePath;
+    assert.ok(path, '先得压过一次');
+
+    p.nextToolCall = { name: 'fs_read', arguments: JSON.stringify({ path, startLine: 1, endLine: 40 }) };
+    await a.chat('把那段原文读回来');
+    assert.equal(a.getContextStatus().memory.retrievals, 1, '读了 compacted/ 就算一次');
+
+    p.nextToolCall = { name: 'fs_read', arguments: JSON.stringify({ path: 'packages/agent-runtime/src/agent.ts' }) };
+    await a.chat('读个普通文件');
+    assert.equal(a.getContextStatus().memory.retrievals, 1, '不相关的读取不该计数');
+  });
+});
+
+describe('压缩经济学：省下的按轮数累计，付出的是真实未命中', () => {
+  it('provider 不报缓存拆分时，如实说"还没量到"（不拿估计冒充实测）', async () => {
+    const p = new StubProvider();
+    // 刻意**不开** reportCacheMiss：这类端点（不报缓存拆分的）就是这条分支要覆盖的。
+    const a = makeAgent(p, 'sess-econ');
+    fillBulk(a, 12);
+
+    await a.chat('一');
+    await a.chat('二');
+    await a.chat('三');
+
+    const e = a.getContextStatus().economics;
+    assert.ok(e, '压过之后要有账');
+    assert.ok(e.rounds >= 3, `轮数 ${e.rounds}`);
+    assert.equal(e.paidTokens, null, '没量到就是没量到');
+    assert.equal(e.settled, false, '账没结清就不能说"划算"');
+    assert.ok(e.netTokens === e.savedTokens, '没量到付出时，净额只由省下的一侧算出来');
+  });
+
+  it('provider 报了缓存拆分时，付出与净值都对得上', async () => {
+    const p = new StubProvider();
+    p.reportCacheMiss = true;
+    const a = makeAgent(p, 'sess-econ2');
+    fillBulk(a, 12);
+    await a.chat('一');
+    await a.chat('二');
+
+    const e = a.getContextStatus().economics;
+    const s = a.getContextStatus().compaction;
+    assert.ok(e && s);
+    const paid = e.paidTokens;
+    assert.ok(paid !== null && paid > 0, `付掉的未命中 ${paid}`);
+    assert.equal(e.savedTokens, Math.max(0, s.beforeTokens - s.afterTokens) * e.rounds);
+    assert.equal(e.netTokens, e.savedTokens - paid);
+    assert.equal(e.settled, true);
+  });
+});
+
+describe('预算租借：离天花板越近，一条结果能带进来的越少', () => {
+  it('余量充足就是原来的上限，近了按余量收紧，并有一个下限', () => {
+    assert.equal(toolResultBudgetChars(0, 40_000), 16_000);
+    const mid = toolResultBudgetChars(35_000, 40_000);
+    assert.ok(mid < 16_000 && mid > 800, `收紧到 ${mid}`);
+    assert.equal(toolResultBudgetChars(39_999, 40_000), 800, '下限是 800 字符');
+    assert.ok(toolResultBudgetChars(35_000, 40_000) > toolResultBudgetChars(38_000, 40_000), '越满越紧');
+    assert.equal(toolResultBudgetChars(0, 0), 16_000, '窗口未知时不收紧');
+  });
+
+  it('收紧之后命令日志仍然落盘、退出码行还在', () => {
+    const log = Array.from({ length: 400 }, (_, i) => `第 ${i} 行输出`).join('\n') + '\nexit code: 3\n';
+    let saved = '';
+    const tight = budgetToolResultOnArrival(log, 'shell', (full) => { saved = full; return '.she/sessions/s/tool-output/x.log'; }, 2_800);
+    assert.ok(tight.text.length < 6_000, `收紧后长度 ${tight.text.length}`);
+    assert.match(tight.text, /exit code: 3/, '退出码行不能丢');
+    assert.equal(saved, log, '全文仍然落盘');
+    assert.match(tight.text, /已存到/, '注解要给出取回路径');
+  });
+
+  it('状态里给出这一刻的预算', async () => {
+    const p = new StubProvider();
+    const a = makeAgent(p);
+    fillBulk(a, 12);
+    await a.chat('一');
+    const b = a.getContextStatus().budgetChars;
+    assert.equal(typeof b, 'number');
+    assert.ok(b >= 800 && b <= 16_000);
   });
 });
 

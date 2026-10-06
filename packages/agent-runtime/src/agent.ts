@@ -76,6 +76,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { sessionStateDir, workspaceStateFile } from './session-state.js';
 import {
+  anchorsIn,
   appliedMessages,
   breakdownRequest,
   calibrateCharsPerToken,
@@ -88,6 +89,7 @@ import {
   keepTokensFor,
   retrievalAnchors,
   summarizeExtractively,
+  toolResultBudgetChars,
   windowFromOverflowError,
   DIGEST_MAX_CHARS,
   DIGEST_SOURCE_MAX_CHARS,
@@ -393,6 +395,19 @@ export class Agent {
    * 发出去的正是改过的那一份。
    */
   private pendingRequestChars = 0;
+  /** 最近一次请求的估算 token（工具结果预算按"还剩多少余量"收紧时要用它）。 */
+  private lastRequestTokens = 0;
+  /** 这条会话压过几次。 */
+  private compactions = 0;
+  /** 压缩之后真的去读过被压掉的那份原文几次（衡量"取回"这条路有没有人走）。 */
+  private retrievals = 0;
+  /**
+   * 等着量"压缩之后第一次请求实际付掉的未命中 token"。
+   *
+   * 这是这次压缩真正的代价，而它只能在紧接着的那一次请求里量到 —— 摘要一改，前缀从改的那一点起全部
+   * 按未命中重算，provider 会把那个数报回来（`cache_miss_tokens`）。
+   */
+  private awaitingMissSample = false;
   /** Aborts the in-flight turn (LLM request + tool loop). */
   private aborter: AbortController | null = null;
   /**
@@ -1126,6 +1141,23 @@ export class Agent {
           if (this.pendingRequestChars > 0 && (chunk.usage.prompt_tokens || 0) > 0) {
             this.observeCharsPerToken(this.pendingRequestChars, chunk.usage.prompt_tokens || 0);
           }
+          /*
+           * 压缩的账：付了多少、之后过了几轮。
+           *
+           * 两个数都来自**真实请求**：`rounds` 是压缩之后发出去的请求数（省下的量按"每次请求都省
+           * 一份差值"累计），`paidTokens` 是紧接着那一次实际付掉的未命中（摘要一改前缀就重算一次）。
+           * 它刻意不做任何外推：问的就是"这一次压缩，到目前为止划算吗"。
+           *
+           * `this.compacting` 期间不算 —— 那是生成摘要的那次调用，它属于压缩本身，不是"之后的一轮"。
+           */
+          if (!this.compacting && this.compactionState) {
+            this.compactionState.rounds = (this.compactionState.rounds ?? 0) + 1;
+            if (this.awaitingMissSample) {
+              this.compactionState.paidTokens = chunk.usage.cache_miss_tokens ?? null;
+              this.awaitingMissSample = false;
+              this.persistCompaction();
+            }
+          }
           turnPromptTokens += chunk.usage.prompt_tokens || 0;
           /*
            * Per-turn total, for the budget ceiling. `total_tokens` is preferred but not trusted
@@ -1157,7 +1189,9 @@ export class Agent {
        */
       await this.maybeCompact(messages, onChunk, track);
 
-      this.pendingRequestChars = estimateRequest(messages, this.overheadChars(), this.charsPerToken).chars;
+      const requestEstimate = estimateRequest(messages, this.overheadChars(), this.charsPerToken);
+      this.pendingRequestChars = requestEstimate.chars;
+      this.lastRequestTokens = requestEstimate.tokens;
 
       let response: LLMMessage;
       try {
@@ -1469,6 +1503,16 @@ export class Agent {
              * `early` cannot be stale relative to a write in this message: `readsToPrefetch` only
              * starts the leading run of reads, so no mutation precedes any prefetched call.
              */
+            /*
+             * 取回率：这次调用是不是去读被压掉的那份原文。
+             *
+             * 只看参数里有没有 `compacted/` —— 那个路径是摘要抬头给出的，模型照着读就会命中。
+             * 计数进轨迹（`step`），这样"这条路到底有没有人走"是一个事后查得到的读数，而不是猜想。
+             */
+            if (String(tc.function.arguments ?? '').includes('compacted/')) {
+              this.retrievals += 1;
+              this.runRecorder?.step(`取回被压掉的原文（第 ${this.retrievals} 次）`);
+            }
             reuseKey = isReadOnlyTool(name) ? queryKey(name, tc.function.arguments) : null;
             const remembered = reuseKey ? readCache.get(reuseKey) : undefined;
             const early = prefetched.get(callIndex);
@@ -1992,6 +2036,11 @@ export class Agent {
    * output was not saved; it never fails the tool call.
    */
   private budgetArrivedResult(text: string, name: string, callId: string): ArrivedToolResult {
+    /*
+     * 预算按**还剩多少余量**收紧（见 `toolResultBudgetChars`）：离天花板远时就是原来的 16k 字符，
+     * 近了才一刀刀收紧。用的是最近一次请求的估算 —— 它就是我们此刻站在哪儿。
+     */
+    const limit = toolResultBudgetChars(this.lastRequestTokens, this.contextWindow.tokens, this.charsPerToken);
     return budgetToolResultOnArrival(text, name, (full) => {
       try {
         return spillToolOutput(this.config.workspace.root, this.sessionId, callId, full);
@@ -1999,7 +2048,7 @@ export class Agent {
         log.warn(`工具输出全文没能存盘（${name}）：${err instanceof Error ? err.message : String(err)}`);
         return null;
       }
-    });
+    }, limit);
   }
 
   private messagesForRequest(): { messages: LLMMessage[] } {
@@ -3088,7 +3137,24 @@ export class Agent {
     compaction: {
       covered: number; source: string; at: string; reason: string;
       beforeTokens: number; afterTokens: number; sourcePath: string | null;
+      anchors: number;
     } | null;
+    /** 压缩这条路的三个读数：压过几次、真的取回过几次、以及"取回"这件事有没有发生。 */
+    memory: { compactions: number; foldedMessages: number; anchors: number; retrievals: number };
+    /**
+     * 这次压缩到目前为止划不划算：省下的 = (前 − 后) × 之后的请求轮数；付出的 = 紧接着那次请求
+     * 实际付掉的未命中 token（provider 报的，不是估的）。两个数同一把尺子（都是输入 token）。
+     */
+    economics: {
+      rounds: number;
+      savedTokens: number;
+      paidTokens: number | null;
+      netTokens: number;
+      /** 还没量到付出的那一半时为 false（provider 不报缓存拆分，或压缩后的第一个请求还没发出）。 */
+      settled: boolean;
+    } | null;
+    /** 这一刻一条工具结果允许带进来的字符数（离天花板越近越小）。 */
+    budgetChars: number;
   } {
     const s = this.compactionState;
     /*
@@ -3108,8 +3174,30 @@ export class Agent {
         ? {
           covered: s.covered, source: s.source, at: s.at, reason: s.reason,
           beforeTokens: s.beforeTokens, afterTokens: s.afterTokens, sourcePath: s.sourcePath ?? null,
+          anchors: s.anchors?.length ?? 0,
         }
         : null,
+      memory: {
+        compactions: this.compactions,
+        foldedMessages: s?.covered ?? 0,
+        anchors: s?.anchors?.length ?? 0,
+        retrievals: this.retrievals,
+      },
+      economics: s
+        ? (() => {
+          const rounds = s.rounds ?? 0;
+          const savedTokens = Math.max(0, s.beforeTokens - s.afterTokens) * rounds;
+          const paidTokens = s.paidTokens ?? null;
+          return {
+            rounds,
+            savedTokens,
+            paidTokens,
+            netTokens: savedTokens - (paidTokens ?? 0),
+            settled: paidTokens !== null && rounds > 0,
+          };
+        })()
+        : null,
+      budgetChars: toolResultBudgetChars(this.lastRequestTokens, this.contextWindow.tokens, this.charsPerToken),
     };
   }
 
@@ -3263,20 +3351,22 @@ export class Agent {
    *
    * 返回工作区相对路径（工具认这个），失败或不在工作区内则返回 null。
    */
-  private spillCompacted(head: readonly LLMMessage[], at: string): string | null {
-    if (!this.sessionId) return null;
+  private spillCompacted(head: readonly LLMMessage[], at: string): { path: string | null; blob: string } {
+    // 落盘的内容就是这一串；核对锚点用的也是它（同一个字符串，不必再读一次文件）。
+    const blob = head.map((m) => JSON.stringify(m)).join('\n');
+    if (!this.sessionId) return { path: null, blob };
     try {
       const dir = join(sessionStateDir(this.config.workspace.root, this.sessionId), 'compacted');
       mkdirSync(dir, { recursive: true });
       const name = `${at.replace(/[:.]/g, '-')}-${head.length}.jsonl`;
       const file = join(dir, name);
-      writeFileSync(file, head.map((m) => JSON.stringify(m)).join('\n'), 'utf8');
+      writeFileSync(file, blob, 'utf8');
       const rel = relative(resolve(this.config.workspace.root), file).split('\\').join('/');
-      if (!rel || rel.startsWith('..')) return null;
-      return rel;
+      if (!rel || rel.startsWith('..')) return { path: null, blob };
+      return { path: rel, blob };
     } catch (err) {
       log.warn(`被折叠的原文没能落盘（摘要照常）：${err instanceof Error ? err.message : String(err)}`);
-      return null;
+      return { path: null, blob };
     }
   }
 
@@ -3477,7 +3567,8 @@ export class Agent {
        * 见 `digestMessage`）。落盘失败不影响压缩 —— 抬头会退回"原文不在摘要里"的说法，而不是给
        * 一个读不到的路径。
        */
-      const sourcePath = this.spillCompacted(head, at);
+      const spilled = this.spillCompacted(head, at);
+      const sourcePath = spilled.path;
       const digest = await this.writeDigest(head, opts.track);
       const state: CompactionState = {
         v: 1,
@@ -3488,8 +3579,15 @@ export class Agent {
         at,
         reason,
         sourcePath,
-        // 锚点算一次就进 state：它和摘要一样要冻结，否则每压一次抬头就变一次。
-        anchors: retrievalAnchors(head),
+        paidTokens: null,
+        rounds: 0,
+        /*
+         * 锚点算一次就进 state：它和摘要一样要冻结，否则每压一次抬头就变一次。
+         *
+         * 只在原文真的落了盘、并且**逐条核对过**时才留：抬头那句话是在说"这些串在原文里出现过"，
+         * 那就得真的是这样（见 `anchorsIn`）。落盘失败时给个空表 —— 没有原文，锚点就是装饰。
+         */
+        anchors: spilled.path ? anchorsIn(spilled.blob, retrievalAnchors(head)) : [],
         beforeTokens: before,
         afterTokens: 0,
       };
@@ -3508,7 +3606,10 @@ export class Agent {
       }
       state.afterTokens = after;
       this.compactionState = state;
+      this.compactions += 1;
       this.persistCompaction();
+      // 紧接着那一次请求会付掉前缀重算的钱，等 usage 回来量它。
+      this.awaitingMissSample = true;
       const how = state.source === 'model' ? '模型总结' : '机械提取';
       const why = reason === 'overflow' ? '模型端拒绝了超长提示词' : reason === 'threshold' ? '接近窗口上限' : '手动';
       opts.onChunk?.({
