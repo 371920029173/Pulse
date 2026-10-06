@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, readdirSy
 import { join, extname, resolve, dirname, basename, relative, isAbsolute, sep } from 'node:path';
 import { realpathSync, createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 import { createLogger, loadConfig, resolveEnvFile, mergeMissingEnvFile, updateEnvFile, THINKING_LEVELS, getConfigRecovery, getConfigFileInUse, lastGoodConfigPath, lastGoodConfigMetaPath, sandboxPostureNotice, isInsideDir as sharedIsInsideDir, realPathInWorkspace } from '@she/shared';
 import { type ControlAuth, presentsControlToken, resolveControlAuth } from './control-token.js';
@@ -13,7 +14,7 @@ import { KBStore, GroupKBEngine, mergeKnowledgeBases } from '@she/kb';
 import type { KBMemoryPatch } from '@she/kb';
 import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLink } from './kb-link.js';
 import { SandboxShell, createTools, ConfirmTicketStore, describeIsolation, isolationNotice } from '@she/sandbox';
-import { Agent, TurnInProgressError, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, resolveSubagentLlm, armSubagentWrapUp, selectHarvestNotes, allocateContext, pricingConfigured, pricingNote } from '@she/agent-runtime';
+import { Agent, TurnInProgressError, isSafeSessionId, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, resolveSubagentLlm, armSubagentWrapUp, selectHarvestNotes, allocateContext, pricingConfigured, pricingNote } from '@she/agent-runtime';
 import type { SubagentRunner, SubagentResult, SubagentKbHarvest, UsageLike } from '@she/agent-runtime';
 import {
   PlanStore,
@@ -2806,6 +2807,212 @@ function registerRoutes(router: Router): void {
         persistHistory(sid);
         throw err;
       }
+    }
+  });
+
+  /* ───────────────────────── OpenAI 兼容面 ─────────────────────────
+   *
+   * 这个仓库自己的 `POST /api/chat` 是**为界面写的**：chunk 是本项目的形状、会话是显式参数、状态行
+   * 说中文。对外要的是另一件东西 —— 一个**约定俗成的形状**：`POST /v1/chat/completions`，任何
+   * OpenAI 客户端（官方 SDK、别的编辑器、一段脚本）都能接。有了它，"这个 Agent"才从"能用界面聊的
+   * 东西"变成"能被程序调用的东西"。
+   *
+   * 三件必须说清的事（`docs/openai-api.md` 与 `scripts/openai-api-check.mjs` 是同一条规则的三处表达）：
+   *
+   * 1. **会话**。OpenAI 的协议是**无状态**的（每次把整段对话再发一遍），而这个 Agent 是有状态的
+   *    （计划、知识库、按会话隔离的状态）。映射规则一句话：客户端给的消息**比现有历史长**就认它
+   *    （客户端是权威），**更短**就把最后一条当新输入接在现有历史上。用哪个会话 id 在
+   *    `X-She-Session` 头里回给客户端；客户端下次带上 `X-Session-Id` 就是显式的（也就不再有歧义）。
+   * 2. **工具**。工具是这个 Agent 自己跑的 —— 客户端**不会**收到 tool_calls，收到的是一段跑完的答复。
+   *    客户端发来的 `tool` / `function` 消息不丢：折成一条带标记的 user 消息。它们是别家 agent 的
+   *    回显，丢掉会让上下文出现空洞，而这里是唯一能保住它们的地方。
+   * 3. **额外读数**（会话 id、上下文分类账、压缩经济学）放在 `x_she` 命名空间下。标准字段照旧，
+   *    客户端忽略它也不影响解析。
+   */
+
+  /** OpenAI 形状的错误体：客户端按这个形状显示错误，而不是去解析我们自己的 `{ error: string }`。 */
+  const openaiError = (res: import('node:http').ServerResponse, status: number, message: string): void => {
+    sendJSON(res, {
+      error: { message, type: status >= 500 ? 'server_error' : 'invalid_request_error', code: null },
+    }, status);
+  };
+
+  /**
+   * 一条客户端消息 → 本 Agent 的消息。
+   *
+   * `system` / `user` / `assistant` 直接映射；其余角色（tool / function / developer）折成一条带标记的
+   * user 消息。多段内容（OpenAI 的 vision 形状）只取文本段 —— 图片在这里拿不到字节（那需要它的
+   * 上传通道，超出这一层的能力），所以不假装收到了图。
+   */
+  const toAgentMessage = (m: { role?: unknown; content?: unknown }): import('@she/shared').LLMMessage | null => {
+    const role = String(m?.role ?? '');
+    const raw = m?.content;
+    const content = typeof raw === 'string'
+      ? raw
+      : Array.isArray(raw)
+        ? raw.map((p) => (p && typeof p === 'object' && typeof (p as { text?: unknown }).text === 'string'
+          ? String((p as { text: string }).text)
+          : '')).join('')
+        : '';
+    if (role === 'system' || role === 'user' || role === 'assistant') return { role, content };
+    if (!content.trim()) return null;
+    return { role: 'user', content: `[客户端提供了 ${role || '未知角色'} 的内容]\n${content}` };
+  };
+
+  /**
+   * 这个端点后面站着哪个模型。
+   *
+   * 不是我们最大的特色，但客户端启动时几乎都会问一次；答不上来会被当成"服务不可用"。
+   */
+  router.get('/v1/models', (_req, res) => {
+    sendJSON(res, {
+      object: 'list',
+      data: [{
+        id: config.llm.model || 'she-agent',
+        object: 'model',
+        created: 0,
+        owned_by: config.llm.provider || 'she',
+      }],
+    });
+  });
+
+  router.post('/v1/chat/completions', async (req, res) => {
+    let body: { messages?: Array<{ role?: unknown; content?: unknown }>; stream?: unknown; user?: unknown };
+    try {
+      body = await parseBody(req);
+    } catch (err) {
+      return openaiError(res, 400, `请求体不是合法 JSON：${(err as Error).message}`);
+    }
+    const list = Array.isArray(body?.messages) ? body.messages : [];
+    if (!list.length) return openaiError(res, 400, 'messages 必须是至少一条消息的数组');
+
+    const mapped = list.map(toAgentMessage).filter((m): m is import('@she/shared').LLMMessage => m !== null);
+    const inputAt = mapped.map((m) => m.role).lastIndexOf('user');
+    if (inputAt < 0) return openaiError(res, 400, 'messages 里至少要有一条非空的 user 消息');
+    const input = mapped[inputAt].content;
+
+    /*
+     * 会话：显式头 > `user` 字段 > 由"第一条消息 + 这次输入"算出的稳定指纹。
+     *
+     * 指纹那条是无状态客户端的默认路径：它每次把整段对话重发一遍，于是同一段对话永远落到同一个
+     * 会话上（计划、知识库、会话级状态都跟着它走）。
+     */
+    const explicit = String(req.headers['x-session-id'] ?? '').trim();
+    const userKey = typeof body.user === 'string' ? body.user.trim() : '';
+    /*
+     * 指纹只用**这段对话的开场消息**，不能带这次输入 —— 无状态客户端每轮都把整段对话重发一遍，
+     * 输入每轮都不同，带上它就等于每轮开一条新会话（第一次写的时候正是这么错的，判据当场抓住）。
+     */
+    const seed = explicit || userKey || (mapped[0]?.content ?? input);
+    const sid = explicit || `sess_api_${createHash('sha256').update(seed).digest('hex').slice(0, 12)}`;
+    if (!isSafeSessionId(sid)) {
+      return openaiError(res, 400, 'X-Session-Id 不合法（不能含路径分隔符或控制字符，长度 ≤200）');
+    }
+
+    const agent = agentFor(req, { session_id: sid });
+    /*
+     * adopt / append：见文件头上第 1 条。
+     *
+     * 用**条数**而不是内容比较：客户端常常只改最后一条（重试、编辑），内容比较会得出"完全一样"
+     * 却仍然要覆盖的结论；条数够用，而且客户端能预测。两个决定都回在 `X-She-History` 头里。
+     */
+    /*
+     * 比的是**客户端看得见的那部分历史**。
+     *
+     * 工具行、以及带 tool_calls 的助手行是我们自己产生的，客户端从来没看见过它们。拿总条数比较的
+     * 后果是：无状态客户端重发整段对话时，它那段**永远比我们的小**（我们多了工具行），于是每一轮都
+     * 被判成 append —— 客户端的编辑与截断全部被无声忽略。投影到同一把尺子上才是可预测的。
+     */
+    const clientVisible = agent.getHistory()
+      .filter((m) => m.role === 'user' || m.role === 'system' || (m.role === 'assistant' && !m.tool_calls?.length));
+    const adopted = mapped.length > clientVisible.length;
+    if (adopted) agent.setHistory(mapped.slice(0, inputAt));
+
+    const started = Date.now();
+    const usageBefore = agent.getTokenUsage();
+    const created = Math.floor(started / 1000);
+    const model = config.llm.model || 'she-agent';
+    const id = `chatcmpl-${started.toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const withStatus = String(req.headers['x-she-status'] ?? '') === '1';
+    /** 这一轮的用量：`getTokenUsage()` 是累计值，只有调用方知道哪一段是新的。 */
+    const turnUsage = () => {
+      const now = agent.getTokenUsage();
+      const pick = (k: 'prompt_tokens' | 'completion_tokens' | 'total_tokens') =>
+        Math.max(0, (now[k] ?? 0) - (usageBefore[k] ?? 0));
+      return { prompt_tokens: pick('prompt_tokens'), completion_tokens: pick('completion_tokens'), total_tokens: pick('total_tokens') };
+    };
+
+    res.setHeader('X-She-Session', sid);
+    res.setHeader('X-She-History', adopted ? 'adopted' : 'appended');
+
+    if (body.stream === true) {
+      startSSE(res);
+      const chunk = (delta: Record<string, unknown>, finish: string | null) => sendSSEEvent(res, {
+        id, object: 'chat.completion.chunk', created, model,
+        choices: [{ index: 0, delta, finish_reason: finish }],
+      });
+      try {
+        let streamed = 0;
+        const reply = await agent.chat(input, (c) => {
+          if (c.type === 'text' && c.content) {
+            streamed += c.content.length;
+            chunk({ content: c.content }, null);
+          } else if (withStatus && c.type === 'status' && c.content) {
+            // 非标准事件，只在客户端明确要（X-She-Status: 1）时才发：标准客户端看不见它。
+            sendSSEEvent(res, { id, object: 'she.status', created, model, content: c.content });
+          }
+        });
+        /*
+         * 一个分片都没有时补上整段答复。
+         *
+         * 上游把流式关掉（SHE_LLM_STREAM=off）或某个端点干脆不支持流式时，正文是随返回值一次性
+         * 到达的 —— 那种情况下**不能**给客户端一个空流（它会显示"模型什么都没说"）。整段作为一个
+         * 分片发出去仍然是合法的 SSE 形状。
+         */
+        if (streamed === 0 && reply.content) chunk({ content: reply.content }, null);
+        recordTurnMetrics(agent, started, usageBefore, true);
+        persistHistory(sid);
+        chunk({}, 'stop');
+        endSSE(res);
+      } catch (err) {
+        recordTurnMetrics(agent, started, usageBefore, false);
+        persistHistory(sid);
+        /*
+         * 流已经开始（headers 发出去了），所以这里**不能**再回 HTTP 错误码 —— 只能把错误作为
+         * 一个事件发出去，然后照常收尾。客户端看到的是"流里带了一条错误"，而不是"连接断了"。
+         */
+        sendSSEEvent(res, {
+          id, object: 'she.error', created, model,
+          error: { message: (err as Error).message, type: err instanceof TurnInProgressError ? 'conflict' : 'server_error' },
+        });
+        endSSE(res);
+      }
+      return;
+    }
+
+    try {
+      const reply = await agent.chat(input);
+      recordTurnMetrics(agent, started, usageBefore, true);
+      persistHistory(sid);
+      auditGuardrail(agent, sid, '对话');
+      sendJSON(res, {
+        id,
+        object: 'chat.completion',
+        created,
+        model,
+        choices: [{ index: 0, message: { role: 'assistant', content: reply.content }, finish_reason: 'stop' }],
+        usage: turnUsage(),
+        x_she: {
+          session_id: sid,
+          history: adopted ? 'adopted' : 'appended',
+          context: agent.getContextStatus(),
+        },
+      });
+    } catch (err) {
+      recordTurnMetrics(agent, started, usageBefore, false);
+      persistHistory(sid);
+      const busy = err instanceof TurnInProgressError;
+      openaiError(res, busy ? 409 : 500, (err as Error).message);
     }
   });
 

@@ -8,6 +8,10 @@ features, patch for fixes.
 
 ### Added
 
+- **这个 Agent 现在有一个任何 OpenAI 客户端都能调的 API。** 仓库自己的 `/api/chat` 是**为界面写的**（分片是本项目的形状、会话是显式参数、状态行说中文）；对外要的是约定俗成的形状，所以补了 `GET /v1/models` 与 `POST /v1/chat/completions`（非流式 + SSE）。三件事写进了 `docs/openai-api.md` 并被 `check:openai` 钉住：**会话**（无状态协议 ↔ 有状态 agent 的映射：客户端消息比它看得见的历史多就 adopt，否则 append；用哪条会话回在 `X-She-Session` 头里，显式控制用 `X-Session-Id`）；**工具**（它是 agent，不是回声 —— 客户端收到的是已经跑完工具的答复；客户端发来的 tool/function 消息折成带标记的 user 消息而不是丢掉）；**我们自己的读数**放在 `x_she` 命名空间下（分类账、窗口来源、压缩经济学），标准客户端忽略它也不影响解析。
+
+  判据 `scripts/openai-api-check.mjs`（`pnpm check:openai`，已接进 `check:offline`）起真 server + 本地桩模型，其中一条断言是「桩只被喂过"要工具"，而答复里那句只可能来自工具执行之后的第二次请求」—— 证明走的是完整 agent 循环，不是把消息转发出去的代理。
+
 - **压缩划不划算，现在有账可算；索引也不再能撒谎。** 四个读数都从已有记录里长出来，并且都能事后对账：
 
   - **压缩经济学**：省下的 = (压缩前 − 压缩后) × 之后的请求轮数；付出的 = 压缩后**第一次请求实际报的未命中**（`prompt_cache_miss_tokens`，不是估的）。端点不报缓存拆分时如实给 `settled: false`，不拿估计冒充实测。这两个数同一把尺子（都是输入 token），所以"这次压缩到此为止划算吗"是一道可对账的算术题，而不是感觉。
