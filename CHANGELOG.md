@@ -8,6 +8,8 @@ features, patch for fixes.
 
 ### Added
 
+- **"压缩会不会丢事实"有了量具：先测，再决定要不要加保护。** `scripts/context-survival-probe.mjs`（真端点，故意不进 `check:offline`）把"前面埋事实、后面全是填充"的历史直接塞进去，用一个小窗口逼出一次压缩，然后报三个数：真压过没有、事实在摘要里逐字保住了几条、事实在答复里活下来几条。**最后一次干净读数是 8/8 全活**（摘要里 6/8 逐字，模型读懂了那个模式）—— 在这份夹具上压缩没有丢事实，"事实会被抹平"的判断是坏量具造出来的假象。量具自己踩过的五个坑（评测任务那条路走不通、探针复用了陈摘要、探针的预算掐掉了回合、种下的历史差一点、种子只种了 4 条却说 8 条）记在 `docs/context-and-caching.md` 那一节里；配一个默认关着的 `SHE_DIGEST_APPENDIX`（摘要 + 用户原话摘录）备用。另留下：`contextCompacted` 判据类型（把"这次真的压过"变成断言）、生成式夹具 `{ lines, prefix }`、以及压缩失败/到阈值时的日志。
+
 - **这个 Agent 现在有一个任何 OpenAI 客户端都能调的 API。** 仓库自己的 `/api/chat` 是**为界面写的**（分片是本项目的形状、会话是显式参数、状态行说中文）；对外要的是约定俗成的形状，所以补了 `GET /v1/models` 与 `POST /v1/chat/completions`（非流式 + SSE）。三件事写进了 `docs/openai-api.md` 并被 `check:openai` 钉住：**会话**（无状态协议 ↔ 有状态 agent 的映射：客户端消息比它看得见的历史多就 adopt，否则 append；用哪条会话回在 `X-She-Session` 头里，显式控制用 `X-Session-Id`）；**工具**（它是 agent，不是回声 —— 客户端收到的是已经跑完工具的答复；客户端发来的 tool/function 消息折成带标记的 user 消息而不是丢掉）；**我们自己的读数**放在 `x_she` 命名空间下（分类账、窗口来源、压缩经济学），标准客户端忽略它也不影响解析。
 
   判据 `scripts/openai-api-check.mjs`（`pnpm check:openai`，已接进 `check:offline`）起真 server + 本地桩模型，其中一条断言是「桩只被喂过"要工具"，而答复里那句只可能来自工具执行之后的第二次请求」—— 证明走的是完整 agent 循环，不是把消息转发出去的代理。

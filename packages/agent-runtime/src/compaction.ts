@@ -309,6 +309,42 @@ export function summarizeExtractively(head: readonly LLMMessage[], maxChars = DI
   return out.join('\n');
 }
 
+/**
+ * 机械摘录：**用户说过的每一句各留一段原文**。
+ *
+ * 摘要（模型写的）是叙事性的，具体的事实 —— 编号、暗号、路径、数字 —— 会在改写里被抹平。这不是猜的，
+ * 是量出来的：8 条"记住这一条：KEY-n 是 ALPHA-nnnn"分散埋在填充里，压过一次之后**模型摘要里一条都没
+ * 保住**（0/8），答复里只活下来平均 2/8（`scripts/context-survival-probe.mjs`，deepseek-flash）。
+ *
+ * 所以这里不猜"哪一条重要"，只用一条**结构性**的规则：用户说过的话是这个会话里唯一不可再生的东西
+ * （助手与工具的输出都能重跑、能再读，用户的要求不能）。每人留一段开头，就有机会把事实留下。
+ *
+ * 有界：最多 `maxRows` 条、每条 `perRow` 字符 —— 摘要是新前缀的一部分，它自己不能长成新的问题。
+ */
+export function userLinesExcerpt(head: readonly LLMMessage[], perRow = 120, maxChars = 2400): string {
+  const users = head.filter((m) => m.role === 'user' && typeof m.content === 'string' && m.content.trim());
+  if (!users.length) return '';
+  /*
+   * **每人留一小段，不做取样。**
+   *
+   * 第一版是按"每 N 条挑一条"来控体积，实测直接失效：事实与长填充在真实序列里交错、还有重复，隔一条
+   * 挑一条挑到的全是填充 —— 摘要里只带进了 4 条事实里的 1 条。而这一段的全部意义就是"用户说过的每句话
+   * 都别丢"，所以宁可每人只留 120 字符，也不漏人；真的还是超了就在末尾说清漏了几条（不装作完整）。
+   */
+  const out: string[] = [];
+  let used = 0;
+  let included = 0;
+  for (const m of users) {
+    const line = `- ${String(m.content).replace(/\s+/g, ' ').trim().slice(0, perRow)}`;
+    if (used + line.length + 1 > maxChars) break;
+    out.push(line);
+    used += line.length + 1;
+    included += 1;
+  }
+  if (included < users.length) out.push(`…（另有 ${users.length - included} 条用户消息未列入）`);
+  return out.join('\n');
+}
+
 /** 粘进请求的那条摘要消息。**角色是 user**：见 `chooseCutIndex()` 里关于交替的说明。 */
 export function digestMessage(
   state: Pick<CompactionState, 'digest' | 'covered' | 'source' | 'at' | 'sourcePath' | 'anchors'>,

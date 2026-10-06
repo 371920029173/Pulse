@@ -162,7 +162,12 @@ console.log('\n4. 任务定义校验（负例必须真的被判出来）');
   check('一次报出所有问题，而不是修一个跑一次', problems.length >= 4, String(problems.length));
 
   const fixtureObj = validateTasks([{ id: 'f', prompt: 'x', fixtures: { a: { b: 1 } }, check: { type: 'fileAbsent', path: 'a' } }], {});
-  check('夹具不是字符串 → 报出来（否则会被静默写成 [object Object]）', /夹具 a 不是字符串/.test(fixtureObj.join('\n')), fixtureObj.join('\n'));
+  check('夹具形状不对 → 报出来（否则会被静默写成 [object Object]）',
+    /夹具 a 既不是字符串，也不是 \{ lines, prefix \} 形状/.test(fixtureObj.join('\n')), fixtureObj.join('\n'));
+  const fixtureBadGen = validateTasks([{ id: 'f', prompt: 'x', fixtures: { a: { lines: 'x' } }, check: { type: 'fileAbsent', path: 'a' } }], {});
+  check('生成式夹具的 lines 不是整数 → 同样报出来', /夹具 a 既不是字符串/.test(fixtureBadGen.join('\n')), fixtureBadGen.join('\n'));
+  const fixtureGen = validateTasks([{ id: 'f', prompt: 'x', fixtures: { a: { lines: 10, prefix: 'L' } }, check: { type: 'fileAbsent', path: 'a' } }], {});
+  check('合法的生成式夹具被接受（大文件不必写进 tasks.json）', fixtureGen.length === 0, fixtureGen.join('\n'));
 
   const emptyTurns = validateTasks([{ id: 'e', turns: [], check: { type: 'fileAbsent', path: 'a' } }], {});
   check('turns 是空数组 → 报出来', /turns 是空数组/.test(emptyTurns.join('\n')), emptyTurns.join('\n'));
@@ -406,7 +411,7 @@ console.log('\n7. README 不许与 tasks.json 漂移');
   const agentIds = loadTasks(AGENT_TASKS).map((t) => t.id);
   const verifyIds = loadTasks(VERIFY_TASKS).map((t) => t.id);
   const missing = [...agentIds, ...verifyIds].filter((id) => !readme.includes(id));
-  check(`【关键】15 个 agent 任务每个都在 README 的任务表里（缺: ${missing.length}）`,
+  check(`【关键】${agentIds.length} 个 agent 任务每个都在 README 的任务表里（缺: ${missing.length}）`,
     missing.length === 0, `没写进 README 的: ${missing.join(', ')}`);
 
   const longIds = agentIds.filter((id) => id.startsWith('long-horizon-'));

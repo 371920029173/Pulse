@@ -117,7 +117,7 @@ function toolSummary(toolsUsed) {
  * kind of failure that an outcome-only check cannot see.
  */
 function gradeOne(check, ctx) {
-  const { workspaceRoot, reply, usage, turnPrompt = [], toolsUsed = [], overheadChars = 0 } = ctx;
+  const { workspaceRoot, reply, usage, turnPrompt = [], toolsUsed = [], overheadChars = 0, context } = ctx;
   try {
     if (check.type === 'fileContains') {
       const p = join(workspaceRoot, check.path);
@@ -136,6 +136,16 @@ function gradeOne(check, ctx) {
       return out.includes(check.expect)
         ? { pass: true, detail: '' }
         : { pass: false, detail: `输出不含 "${check.expect}"，实际: ${out.trim().slice(0, 80)}` };
+    }
+    if (check.type === 'contextCompacted') {
+      const compactions = context?.memory?.compactions ?? 0;
+      return context?.compacted === true && compactions >= 1
+        ? { pass: true, detail: `压过 ${compactions} 次，覆盖 ${context?.memory?.foldedMessages ?? 0} 条` }
+        : {
+          pass: false,
+          detail: `这一轮一次都没压过（compactions=${compactions}）—— 这条判据问的是"压过一次之后早期事实还在不在"，`
+            + '没压过它什么都没测（把窗口调小一点再跑）',
+        };
     }
     if (check.type === 'replyContains') {
       return reply.includes(check.expect)
@@ -264,7 +274,18 @@ async function runTask(task) {
   const dir = join(tmpdir(), `she-eval-${task.id}-${Date.now()}`);
   mkdirSync(dir, { recursive: true });
   for (const [name, content] of Object.entries(task.fixtures ?? {})) {
-    writeFileSync(join(dir, name), content, 'utf8');
+    /*
+     * 夹具可以是字符串，也可以是 `{ lines, prefix }` —— 后者交给这里生成。
+     *
+     * 为什么需要：有的判据要的是**一大块内容**（例如"读一个很大的文件，把上下文推过阈值"），而把
+     * 几万字符的正文原样写进 tasks.json 会让那个文件变得不能读、也不能改。生成式夹具让"大"只需要
+     * 两个数字，且每次跑出来的字节完全一样（确定性）。
+     */
+    const body = content && typeof content === 'object' && Number.isFinite(Number(content.lines))
+      ? Array.from({ length: Math.max(0, Math.trunc(Number(content.lines))) },
+        (_, i) => `${String(content.prefix ?? 'line')} ${i + 1}`).join('\n')
+      : content;
+    writeFileSync(join(dir, name), String(body), 'utf8');
   }
 
   const cfg = loadConfig(ROOT);
@@ -399,7 +420,7 @@ async function runTask(task) {
 
   const g = timedOut
     ? { pass: false, detail: `超时 ${TASK_TIMEOUT_MS}ms（完成 ${turnsDone}/${turns.length} 轮）` }
-    : grade(task.check, { workspaceRoot: dir, reply, usage, turnPrompt, toolsUsed, overheadChars });
+    : grade(task.check, { workspaceRoot: dir, reply, usage, turnPrompt, toolsUsed, overheadChars, context: agent.getContextStatus() });
 
   /*
    * Shut the language servers down before deleting the workspace.

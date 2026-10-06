@@ -35,6 +35,7 @@ import {
   keepTokensFor,
   retrievalAnchors,
   toolResultBudgetChars,
+  userLinesExcerpt,
   windowFromOverflowError,
   MIN_KEEP_TOKENS,
   type CompactionState,
@@ -827,6 +828,31 @@ describe('预算租借：离天花板越近，一条结果能带进来的越少'
     const b = a.getContextStatus().budgetChars;
     assert.equal(typeof b, 'number');
     assert.ok(b >= 800 && b <= 16_000);
+  });
+});
+
+describe('机械摘录：用户说过的每一句都别丢', () => {
+  it('事实与长填充交错、还有重复时，每一条事实都进摘录', () => {
+    const head: LLMMessage[] = [];
+    for (let i = 0; i < 8; i++) {
+      head.push({ role: 'user', content: `记住这一条：KEY-${i + 1} 是 ALPHA-${1111 * (i + 1)}。只回复 ok。` });
+      head.push({ role: 'assistant', content: 'ok' });
+      head.push({ role: 'user', content: '填充内容。'.repeat(600) });
+      head.push({ role: 'assistant', content: '收到。' });
+    }
+    const excerpt = userLinesExcerpt(head);
+    for (let i = 0; i < 8; i++) {
+      assert.ok(excerpt.includes(`ALPHA-${1111 * (i + 1)}`), `第 ${i + 1} 条事实没进摘录`);
+    }
+    assert.ok(excerpt.length <= 2400 + 40, `摘录要有界，实际 ${excerpt.length}`);
+    assert.ok(!excerpt.includes('未列入'), '没超上限就不该说"漏了"');
+  });
+
+  it('超上限时如实说漏了几条（不装作完整）', () => {
+    const many = Array.from({ length: 60 }, (_, i) => ({ role: 'user' as const, content: `第 ${i} 条要求：` + 'x'.repeat(300) }));
+    const excerpt = userLinesExcerpt(many);
+    assert.match(excerpt, /另有 \d+ 条用户消息未列入/);
+    assert.ok(excerpt.length <= 2500, `要有界，实际 ${excerpt.length}`);
   });
 });
 

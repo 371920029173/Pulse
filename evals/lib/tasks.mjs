@@ -56,6 +56,15 @@ export const AGENT_CHECKS = new Set([
    * and two that must not — and a bare call count cannot say which of them ran.
    */
   'toolCallsExclude',
+  /*
+   * 「这次运行**真的压过一次**」—— 自证前提的那条。
+   *
+   * 压缩相关的判据最容易变成"什么都没测却一直绿"：对话没到阈值就压根没压过，而回复里恰好带着
+   * 那个事实（因为它还在最近的上下文里）。于是任务绿着，而它名字里那件事一次都没发生。
+   * 这条判据把前提本身变成断言：没压过就判红，并在 detail 里说清"该把窗口调小"。
+   * 读的是 agent 自己的上下文状态（`getContextStatus()`），不是从日志里猜的。
+   */
+  'contextCompacted',
 ]);
 
 /** Assertion types the verification harness can grade (see evals/verification/run.mjs). */
@@ -115,10 +124,20 @@ export function validateTasks(list, opts = {}) {
     }
 
     for (const [name, body] of Object.entries(t.fixtures ?? {})) {
-      // Fixtures are written to disk as text before the run. A non-string would be silently
-      // stringified into "[object Object]", and the task would then fail for reasons that have
-      // nothing to do with the model.
-      if (typeof body !== 'string') problems.push(`${t.id}: 夹具 ${name} 不是字符串`);
+      /*
+       * 夹具写到盘上是文本。非字符串会被静默 stringify 成 "[object Object]"，任务随后会因为与模型
+       * 无关的原因失败 —— 所以形状要在**花掉一次 API 调用之前**判掉。
+       *
+       * 唯一的例外是**生成式夹具** `{ lines, prefix }`：有的判据要的就是一大块内容（"读一个很大的
+       * 文件把上下文推过阈值"），而把几万字符的正文原样写进 tasks.json 会让那个文件不能读也不能改。
+       * 生成"大"只需要两个数字，且每次跑出来的字节完全一样。形状写坏了照样判掉。
+       */
+      const generated = body && typeof body === 'object' && !Array.isArray(body)
+        && Number.isInteger(body.lines) && body.lines >= 0
+        && (body.prefix === undefined || typeof body.prefix === 'string');
+      if (typeof body !== 'string' && !generated) {
+        problems.push(`${t.id}: 夹具 ${name} 既不是字符串，也不是 { lines, prefix } 形状`);
+      }
     }
 
     /*

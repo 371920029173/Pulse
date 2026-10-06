@@ -89,6 +89,7 @@ import {
   keepTokensFor,
   retrievalAnchors,
   summarizeExtractively,
+  userLinesExcerpt,
   toolResultBudgetChars,
   windowFromOverflowError,
   DIGEST_MAX_CHARS,
@@ -3554,7 +3555,10 @@ export class Agent {
     const history = this.history;
     const cut = chooseCutIndex(history, keepTokensFor(this.contextWindow.tokens, opts.keepScale ?? 1));
     if (cut <= 0) {
-      this.runRecorder?.step(`上下文压缩：没有可用的切点（历史 ${history.length} 条），不压`);
+      // 静默的拒绝最难查：轨迹里有一条，日志里什么都没有。两边都要有，理由见下一条。
+      const why = `上下文压缩没有做成：找不到可用的切点（历史 ${history.length} 条，保留目标 ${keepTokensFor(this.contextWindow.tokens, opts.keepScale ?? 1)} tokens）`;
+      log.warn(why);
+      this.runRecorder?.step(why);
       return false;
     }
     const before = estimateRequest(this.messagesForRequest().messages, this.overheadChars(), this.charsPerToken).tokens;
@@ -3570,6 +3574,23 @@ export class Agent {
       const spilled = this.spillCompacted(head, at);
       const sourcePath = spilled.path;
       const digest = await this.writeDigest(head, opts.track);
+      /*
+       * 可选：摘要之外再附一段**机械摘录**（原文要点，有界）。
+       *
+       * 模型写的摘要是叙事性的，具体的事实（编号、暗号、路径、数字）可能在改写里被抹平；机械摘录是
+       * 逐条的原文采样，它保住那些具体的东西。代价是摘要变大（上限 1500 字符 ≈ 0.5k token），
+       * 收益是"压缩之后早期的事实还在不在"。
+       *
+       * 现在由环境变量开关，因为这是一次 **A/B 实验**：先量它到底救不救得了东西，再决定要不要默认开。
+       * 量它的判据是 scripts/context-survival-probe.mjs。
+       */
+      const appendix = process.env.SHE_DIGEST_APPENDIX === '1'
+        ? (() => {
+          const lines = userLinesExcerpt(head);
+          return lines ? `\n\n用户原话摘录（逐条，各留开头；事实/编号/暗号看这里）：\n${lines}` : '';
+        })()
+        : '';
+      if (appendix) digest.text = `${digest.text}${appendix}`;
       const state: CompactionState = {
         v: 1,
         covered: cut,
@@ -3601,7 +3622,9 @@ export class Agent {
         this.charsPerToken,
       ).tokens;
       if (after >= before) {
-        this.runRecorder?.step(`上下文压缩：压完没有变小（${before} → ${after} tokens），不改`);
+        const why = `上下文压缩没有做成：压完没有变小（${before} → ${after} tokens，窗口 ${this.contextWindow.tokens}，覆盖 ${cut} 条），不改`;
+        log.warn(why);
+        this.runRecorder?.step(why);
         return false;
       }
       state.afterTokens = after;
@@ -3637,7 +3660,13 @@ export class Agent {
   ): Promise<void> {
     if (!this.autoCompactEnabled()) return;
     const estimate = estimateRequest(messages, this.overheadChars(), this.charsPerToken);
-    if (estimate.tokens < Math.round(this.contextWindow.tokens * this.compactAtShare())) return;
+    const limit = Math.round(this.contextWindow.tokens * this.compactAtShare());
+    /*
+     * 到线之前**不打日志**（每一轮都打会淹掉别的），到线才说 —— 而"离线多远"由状态接口回答。
+     * 这一行是给"它到底压没压、按什么判断"用的：出问题时它就是第一个该看的数字。
+     */
+    if (estimate.tokens < limit) return;
+    log.info(`到上下文阈值：${estimate.tokens} ≥ ${limit} tokens（窗口 ${this.contextWindow.tokens}），开始压缩`);
     const done = await this.compactNow('threshold', { onChunk, track });
     if (!done) return;
     // 压成功了才动这个数组：没压的时候它必须逐字节等于压之前 —— 见 messagesForRequest 的注释。
