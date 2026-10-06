@@ -3084,6 +3084,8 @@ function registerRoutes(router: Router): void {
         maxTokens: config.llm.maxTokens,
         temperature: config.llm.temperature,
         thinkingLevel: config.llm.thinkingLevel || 'medium',
+        // 0 = 按模型名自动识别。界面要能显示"这个数字是猜的"，所以原样回传。
+        contextWindow: config.llm.contextWindow,
         fallback: {
           provider: config.llm.fallback?.provider || 'openai',
           model: config.llm.fallback?.model || '',
@@ -3121,6 +3123,8 @@ function registerRoutes(router: Router): void {
       context: {
         compression: config.context.compression,
         allowHistoryReduction: config.context.allowHistoryReduction,
+        autoCompact: config.context.autoCompact,
+        compactAtShare: config.context.compactAtShare,
         pricing: { ...config.context.pricing },
       },
     });
@@ -3173,6 +3177,12 @@ router.put('/api/settings', async (req, res) => {
       allowHistoryReduction?: boolean;
       /** 每 100 万 token 的单价。 */
       pricing?: { inputPerMillion?: number; outputPerMillion?: number; cachedInputPerMillion?: number };
+      /** 一次的提示词上限（token）。0 = 按模型名自动识别。填错了就在这里改回来。 */
+      contextWindow?: number;
+      /** 接近窗口上限时自动压缩（天花板救援）。默认开着。 */
+      autoCompact?: boolean;
+      /** 从窗口的百分之多少开始压。0.1 ~ 1 之间。 */
+      compactAtShare?: number;
     }>(req);
 
     const prevWorkspaceRoot = config.workspace.root;
@@ -3345,6 +3355,34 @@ router.put('/api/settings', async (req, res) => {
       config.context.allowHistoryReduction = body.allowHistoryReduction;
       setEnv('SHE_ALLOW_HISTORY_REDUCTION', body.allowHistoryReduction ? 'true' : 'false');
     }
+    /*
+     * 上下文窗口与天花板救援。
+     *
+     * 窗口这一格是这套机制里**最可能填错、也最需要能改**的一项：它是按模型名猜的，而猜大了的后果是
+     * "该压的时候不压"（那时靠模型端拒绝兜底）。所以它必须能从设置里改，改完必须落盘 —— 否则用户
+     * 遇到的就是"我知道要填 32k，但填完重启就没了"。
+     *
+     * `0` 是合法值（回到自动识别），所以这里判断的是范围而不是真值：`if (body.contextWindow)` 会把 0
+     * 当成"没传"，那样这一格就永远关不掉自动识别。
+     */
+    if (typeof body.contextWindow === 'number' && Number.isFinite(body.contextWindow)
+      && (body.contextWindow === 0 || body.contextWindow >= 1024)) {
+      config.llm.contextWindow = Math.trunc(body.contextWindow);
+      setEnv('SHE_CONTEXT_WINDOW', String(config.llm.contextWindow));
+    }
+    if (typeof body.autoCompact === 'boolean') {
+      config.context.autoCompact = body.autoCompact;
+      setEnv('SHE_CONTEXT_AUTO_COMPACT', body.autoCompact ? 'true' : 'false');
+    }
+    /*
+     * 阈值只收 (0.1, 1) 开区间。写坏的阈值（1.5 = 等于关掉、0.05 = 每轮都压）不生效并保留上一个
+     * 好值：一个"看起来设了"的阈值如果实际等于关掉，用户会以为自动压缩开着而它永远不会触发。
+     */
+    if (typeof body.compactAtShare === 'number' && Number.isFinite(body.compactAtShare)
+      && body.compactAtShare > 0.1 && body.compactAtShare < 1) {
+      config.context.compactAtShare = body.compactAtShare;
+      setEnv('SHE_CONTEXT_COMPACT_AT', String(body.compactAtShare));
+    }
     if (body.pricing && typeof body.pricing === 'object') {
       for (const key of ['inputPerMillion', 'outputPerMillion', 'cachedInputPerMillion'] as const) {
         const raw = (body.pricing as Record<string, unknown>)[key];
@@ -3402,7 +3440,13 @@ router.put('/api/settings', async (req, res) => {
       || typeof body.allowAllCommands === 'boolean' || typeof body.kbDbPath === 'string'
       || typeof body.allowOutsideWorkspace === 'boolean' || body.outsideWorkspacePolicy !== undefined
       || body.fallbackBaseUrl || body.fallbackApiKey || body.fallbackModel || body.fallbackProvider
-      || typeof body.temperature === 'number' || typeof body.maxTokens === 'number',
+      || typeof body.temperature === 'number' || typeof body.maxTokens === 'number'
+      /*
+       * 窗口是**构造时**解析并冻结的（`Agent` 的字段），所以改它必须重建 agent —— 只改配置对象
+       * 的话，正在跑的那条会话仍然按旧窗口判断。`autoCompact` / `compactAtShare` 不在这里：它们
+       * 每次调用都重读一遍配置，改了立刻生效，而重建会把 language server 拆掉（见上面那段注释）。
+       */
+      || typeof body.contextWindow === 'number',
     );
     if (!structuralChange) {
       for (const agent of agents.values()) agent.setThinkingLevel(config.llm.thinkingLevel || 'medium');
@@ -5882,6 +5926,14 @@ router.post('/api/sessions/:id/move', async (req, res, params) => {
       pricingNote: pricingNote(config.context.pricing),
       compression: config.context.compression,
       allowHistoryReduction: config.context.allowHistoryReduction,
+      autoCompact: config.context.autoCompact,
+      compactAtShare: config.context.compactAtShare,
+      /*
+       * 天花板的状态和"怎么省钱"放在同一个回包里是有意的：面板要能回答"现在离上限还有多远、
+       * 压过没有、压的是哪一份摘要、这个窗口是谁说的"。没有它，压缩就是一件只能从状态行里偶然
+       * 看见的事。
+       */
+      context: agent.getContextStatus(),
       usage,
       allocation,
     });
@@ -5914,6 +5966,18 @@ router.post('/api/sessions/:id/move', async (req, res, params) => {
       applied = wanted;
     }
     sendJSON(res, { ok: true, applied, allocation });
+  });
+
+  /**
+   * 手动压一次。到阈值会自动压，这个入口是给"我想现在压"和"我想离线验证这条路径"用的。
+   *
+   * 它不假装成功：压不动（历史太短、没有合法切点）时回 ok:false 并说明原因 —— 一个回 200 但什么
+   * 都没做的端点，会让用户以为上下文已经变小了。回包里带上压之后的完整状态，面板不必再查一次。
+   */
+  router.post('/api/context/compact', async (req, res) => {
+    const agent = agentFor(req);
+    const result = await agent.forceCompact('manual');
+    sendJSON(res, { ...result, status: agent.getContextStatus() });
   });
 
   router.post('/api/usage/reset', (req, res) => {

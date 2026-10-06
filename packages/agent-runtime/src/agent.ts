@@ -7,8 +7,9 @@ import type {
   StreamChunk,
   ConfirmTicketInfo,
   PendingPatchInfo,
+  ContextWindowInfo,
 } from '@she/shared';
-import { createLogger, resolveModel, resolveSubagentModel, describeModel } from '@she/shared';
+import { createLogger, resolveModel, resolveSubagentModel, describeModel, resolveContextWindow, describeContextWindow } from '@she/shared';
 import type { GroupKBEngine } from '@she/kb';
 import { OpenAIProvider } from './providers/openai.js';
 import { AnthropicProvider } from './providers/anthropic.js';
@@ -70,25 +71,53 @@ import {
   type GuardrailFinding,
   type GuardrailPolicy,
 } from './guardrail.js';
-import { mkdirSync, writeFileSync, readFileSync, renameSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, renameSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import { sessionStateDir } from './session-state.js';
+import { sessionStateDir, workspaceStateFile } from './session-state.js';
+import {
+  appliedMessages,
+  breakdownRequest,
+  calibrateCharsPerToken,
+  chooseCutIndex,
+  CHARS_PER_TOKEN,
+  digestSourceText,
+  estimateRequest,
+  fingerprint,
+  isContextOverflowError,
+  keepTokensFor,
+  retrievalAnchors,
+  summarizeExtractively,
+  windowFromOverflowError,
+  DIGEST_MAX_CHARS,
+  DIGEST_SOURCE_MAX_CHARS,
+  MIN_DIGEST_CHARS,
+  type CompactionState,
+} from './compaction.js';
 
 /** Tool calls one plan step may take before the reflection check calls the plan over budget. */
 export const TOOL_CALLS_PER_PLAN_STEP = 8;
 
-/**
- * Characters per token, as measured for this prompt shape (2026-10-03, deepseek-flash:
- * 48,888 characters of prompt + tool table → 14,087 prompt tokens).
- *
- * Used only to turn a character count into a number a person can compare against a bill. The eval
- * runner carries the same constant for the same reason, and both need re-measuring when the model
- * or the tokenizer changes — it is a conversion, not a law.
+/*
+ * Token 估算的换算比现在只有一处定义（`compaction.ts` 的 `CHARS_PER_TOKEN`，取值与实测出处记在
+ * 那里）：压缩用它判断"该不该压"，这个文件的成本对账用它报数。两处各写一遍就会分叉，而分叉的
+ * 方向恰好是"面板说还有余量、压缩那边说已经超了" —— 那种不一致最后以"会话卡死"的形式落到用户
+ * 头上，而两边的代码各自看着都对。
  */
-const CHARS_PER_TOKEN = 3.47;
 
 const log = createLogger('agent');
+
+/**
+ * 让模型写摘要时给它的指令。
+ *
+ * 逐条点名"必须保留什么"而不是笼统地说"总结一下"：这份摘要要在原文离开上下文之后替原文说话，
+ * 而对话继续下去最需要的是决定、约束、文件路径、坑与没用完的下一步 —— 一份写成读后感的中文摘要
+ * 恰好把这些都丢掉。
+ */
+const DIGEST_INSTRUCTION = `把下面这段对话记录压缩成一份摘要，供之后继续这场对话时使用。
+必须保留：用户的要求、约束与偏好；已经做出的决定和它们的理由；动过或读过的重要文件路径与命令；
+发现的坑与失败；还没做完的事和下一步。不要加入原文里没有的信息，不要评价，不要写成"我建议"。
+用紧凑的条目写，长度不超过 800 字。`;
 
 /**
  * A turn is already running for this conversation.
@@ -330,6 +359,40 @@ export class Agent {
   private readonly modelLabel: string;
   /** `provider/model` of the spare, for the trace and the status line. Null when none is configured. */
   private readonly fallbackLabel: string | null = null;
+  /**
+   * 一次请求的上限，以及它是从哪来的（构造时解析）。
+   *
+   * 和模型名同一个道理，一条会话跑到一半换窗口会让"什么时候压"跟着变、前缀随之漂移。设置页改
+   * 窗口走的是重建 agent（server 的 `structuralChange`）。
+   *
+   * **唯一的例外是"学到的"**：模型端拒绝一次超长请求时会在报文里写出真实上限
+   * （`windowFromOverflowError`），那是证据而不是猜测，所以当场就把这个数改过来（并落盘）——
+   * 它只影响"什么时候压"，不参与前缀，所以改它安全。
+   */
+  private contextWindow: ContextWindowInfo;
+  /** 已冻结的压缩记录。null = 这条会话还没压过。 */
+  private compactionState: CompactionState | null = null;
+  /**
+   * 正在压。防重入：压缩要调一次模型，而那次调用如果也失败，会再进一次这条路 —— 递归地压同一段
+   * 历史，每一次都要重发一整份提示词。
+   */
+  private compacting = false;
+  /** 工具表字符数的备忘：它在一轮里不变，而每轮重新序列化整张表是白花的 CPU。 */
+  private overheadMemo: { tools: ToolDefinition[]; chars: number } | null = null;
+  /**
+   * "字符 → token"的换算比。默认是先验常量（3.47，实测值），之后按**真实用量**校准
+   * （`observeCharsPerToken`）：换模型或换分词器会动它，而它是"什么时候压"的唯一输入。
+   *
+   * 它**不参与请求字节**，所以随时可以改 —— 这与窗口那一条同理（改的只是判断，不是前缀）。
+   */
+  private charsPerToken = CHARS_PER_TOKEN;
+  /** 最近的观测样本（我们发的字符 ÷ 模型数的 token），保留有限条。 */
+  private estimateSamples: number[] = [];
+  /**
+   * 即将发出的这次请求有多少字符。观测要用它，而它必须在**发请求之前**取 —— 压缩会改 messages，
+   * 发出去的正是改过的那一份。
+   */
+  private pendingRequestChars = 0;
   /** Aborts the in-flight turn (LLM request + tool loop). */
   private aborter: AbortController | null = null;
   /**
@@ -444,6 +507,19 @@ export class Agent {
     }
     log.info(`Model: ${describeModel(chosen)}`);
     this.modelLabel = `${chosen.provider}/${chosen.model}`;
+    /*
+     * 窗口在这里定下来，并且**来源一起报出来**：这个数字决定"什么时候压"，猜错了（尤其猜大）
+     * 是用户唯一看不见、也最需要能怀疑的一件事。填错就能在这里改回来。
+     */
+    this.contextWindow = resolveContextWindow({
+      configured: config.llm.contextWindow,
+      envValue: process.env.SHE_CONTEXT_WINDOW,
+      learned: this.learnedWindow(),
+      model: chosen.model,
+    });
+    log.info(`上下文窗口 ${describeContextWindow(this.contextWindow)}`);
+    this.restoreCompaction();
+    this.restoreEstimateCalibration();
 
     if (chosen.provider === 'anthropic') {
       this.provider = new AnthropicProvider(
@@ -954,6 +1030,14 @@ export class Agent {
      * means the model cannot find its way out, and further rounds only spend money.
      */
     let recoveryAttempted = false;
+    /**
+     * 模型端因为"太长"拒绝过几次。
+     *
+     * 两次之后不再压：第三次压出来的东西和第二次几乎一样，而每压一次都要重发一整份提示词 ——
+     * 那是拿钱换一个必然相同的结果。第二次保留得更少（keepScale=0.25），因为第一次没救回来的
+     * 原因很可能是尾巴本身还太大。
+     */
+    let overflowCompactions = 0;
 
     /*
      * ─── Plan autopilot ───
@@ -1032,6 +1116,16 @@ export class Agent {
             },
             prefix: this.prefixHash(),
           });
+          /*
+           * 观测一次换算比：我们完全知道自己发了多少字符（`pendingRequestChars`），模型报回来的
+           * `prompt_tokens` 就是真值。两者相除，就是这个模型/分词器下的"字符 → token"。
+           *
+           * 这是本仓库"用已有观测自校准"的那条路：换算比原本是写死的常量 + 文档里一句"换模型要人工
+           * 重测"，而每次请求的 usage 里其实一直带着答案。
+           */
+          if (this.pendingRequestChars > 0 && (chunk.usage.prompt_tokens || 0) > 0) {
+            this.observeCharsPerToken(this.pendingRequestChars, chunk.usage.prompt_tokens || 0);
+          }
           turnPromptTokens += chunk.usage.prompt_tokens || 0;
           /*
            * Per-turn total, for the budget ceiling. `total_tokens` is preferred but not trusted
@@ -1056,6 +1150,15 @@ export class Agent {
         if (chunk.type === 'status' && chunk.content) this.runRecorder?.step(chunk.content);
         onChunk?.(chunk);
       };
+      /*
+       * 到天花板就先压一次再发。它在 try 之外、也在这一轮真正发请求之前：压缩自身出错（模型写不
+       * 出摘要、盘写不进去）都在 `compactNow` 里就地兜住，不该把这一轮判死 —— 压不动时这次请求
+       * 照发，最坏就是走到下面那个"模型端说太长了"的兜底。
+       */
+      await this.maybeCompact(messages, onChunk, track);
+
+      this.pendingRequestChars = estimateRequest(messages, this.overheadChars(), this.charsPerToken).chars;
+
       let response: LLMMessage;
       try {
         response = await this.provider.chat(messages, this.allToolDefs, track, signal);
@@ -1069,6 +1172,71 @@ export class Agent {
           this.runFailure = { reason: 'aborted' };
           this.runRecorder?.step('已中断当前执行');
           return stopped;
+        }
+        /*
+         * ─── 模型说"太长了"：当场压一次，再发一遍 ───
+         *
+         * 这一条是这个功能真正的兜底。上面那条阈值线靠的是"我们猜的窗口"，猜大了、或者一次工具调用
+         * 就把历史顶过了窗口，都轮不到它出手 —— 而那时唯一能救回这条会话的事实，是**模型端自己说了
+         * 太长**。所以要把它和限流/断网分开处理（`isContextOverflowError`）：对溢出重试两次是一模
+         * 一样的失败，对溢出压缩再试才有意义。
+         *
+         * `continue` 而不是继续往下走备用接口：备用接口有自己的窗口，同一份超长提示词发给它大概率
+         * 一样被拒 —— 那只会把一次失败变成两次，还让用户以为是"接口切换救不了"。
+         */
+        if (isContextOverflowError(err)) {
+          /*
+           * ── 先从这次失败里学到边界 ──
+           *
+           * 这是唯一一处能把"猜的窗口"换成"量的窗口"的地方：报文里通常写着真实上限。学到就当场改
+           * 这个数并落盘（下次构造直接用）。它**不受 autoCompact 管** —— 学一个事实和在设置里关掉
+           * 自动压缩是两件事，而且用户此刻最需要的就是这个数字对不对。
+           *
+           * 只收比当前更小的值：比当前窗口还大的"上限"不可能拒掉这个请求，那是误读（见
+           * `windowFromOverflowError` 里的三条安全线）。
+           */
+          const learned = windowFromOverflowError(err);
+          if (learned !== undefined && learned < this.contextWindow.tokens) {
+            const was = this.contextWindow.tokens;
+            this.contextWindow = {
+              tokens: learned,
+              source: 'learned',
+              detail: `模型端拒绝时给出的上限（本次会话从错误里学到，原先按 ${was} 判断）`,
+            };
+            this.recordLearnedWindow(learned, err instanceof Error ? err.message : '');
+            const said = `模型端给出的上限是 ${learned} tokens（原先按 ${was} 判断）；已记下，之后的判断改按 ${learned}。`;
+            onChunk?.({ type: 'status', content: said });
+            this.runRecorder?.step(`从拒绝报文里学到窗口：${was} → ${learned}`);
+          }
+          if (!this.autoCompactEnabled()) {
+            /*
+             * 关掉就是关掉：这条兜底也归 `autoCompact` 管，否则用户把开关关掉之后仍然会被压缩 ——
+             * 而那是"设置里明明关了"的那类意外。
+             *
+             * 但也不能只说"失败了"：用户此刻的问题正是"一到上限就不动了"，唯一有意义的回复是**告诉
+             * 他那个开关在哪、以及还能怎么修**。所以这条状态行点名设置项与环境变量，并顺带报出我们
+             * 以为的窗口大小（填错了就是它）。
+             */
+            onChunk?.({
+              type: 'status',
+              content: `提示词已超过模型窗口（当前按 ${this.contextWindow.tokens} tokens 判断，${this.contextWindow.detail}），`
+                + '而自动压缩被关掉了（设置页的「接近窗口时自动压缩」/ SHE_CONTEXT_AUTO_COMPACT=0）。'
+                + '打开它，或把窗口填对（设置页的「上下文窗口」/ SHE_CONTEXT_WINDOW）后重试。',
+            });
+            this.runRecorder?.step('上下文溢出，但自动压缩被关闭：未压缩，按失败处理');
+          } else if (overflowCompactions < 2) {
+            overflowCompactions += 1;
+            const done = await this.compactNow('overflow', {
+              onChunk,
+              track,
+              keepScale: overflowCompactions > 1 ? 0.25 : 0.5,
+            });
+            if (done) {
+              const fresh = this.messagesForRequest().messages;
+              messages.splice(0, messages.length, ...fresh);
+              continue;
+            }
+          }
         }
         if (this.fallbackProvider) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -1836,18 +2004,19 @@ export class Agent {
 
   private messagesForRequest(): { messages: LLMMessage[] } {
     this.persistFrozenSystemMessage();
-    return {
-      messages: [
-        { role: 'system', content: this.systemMessageContent() },
-        /*
-         * `fitToolResultsToBudget` is a no-op for anything this build wrote (see `tool-output.ts`)
-         * and the only thing standing between a RESTORED session and its old oversized results: a
-         * 732,633-character tool result from before this rule would otherwise be re-sent on every
-         * request of every later turn.
-         */
-        ...fitToolResultsToBudget(this.history),
-      ],
-    };
+    const systemMessage = this.systemMessage();
+    /*
+     * `fitToolResultsToBudget` is a no-op for anything this build wrote (see `tool-output.ts`)
+     * and the only thing standing between a RESTORED session and its old oversized results: a
+     * 732,633-character tool result from before this rule would otherwise be re-sent on every
+     * request of every later turn.
+     *
+     * 压缩套在这一层（"发给模型的那一份"）而不是历史本身：盘上的转写一条不动，`historyForDisk()`
+     * 仍然是完整的，用户打开会话看到的也还是完整记录。**没到阈值时这里逐字节等于没压**，
+     * 这正是 `prefix-stability.test.ts` 与 `compaction.test.ts` 钉住的东西。
+     */
+    const fitted = fitToolResultsToBudget(this.history);
+    return { messages: appliedMessages(fitted, this.compactionState, systemMessage).messages };
   }
 
   /**
@@ -1866,6 +2035,17 @@ export class Agent {
     return this.calibrationBlock
       ? `${this.systemPrompt}\n\n${this.calibrationBlock}`
       : this.systemPrompt;
+  }
+
+  /**
+   * 请求里那条系统消息。**只此一处**拼它。
+   *
+   * 系统消息是缓存前缀的头，所以"谁拼它"必须是一个能数得出来的数（`check:reflection` 就数它）：
+   * 两处各拼各的，迟早有一处漏掉自评块或多一个空格 —— 那种分叉不会报错，只会让每一轮都按全价
+   * 重算整段历史。压缩对账也走这里，因为"压完到底小了没有"必须拿真的那份请求去算。
+   */
+  private systemMessage(): LLMMessage {
+    return { role: 'system', content: this.systemMessageContent() };
   }
 
   /** Where this session's frozen system message lives, or null without a (valid) session. */
@@ -2888,6 +3068,480 @@ export class Agent {
    */
   historyForDisk(): LLMMessage[] {
     return repairApiMessages(this.history);
+  }
+
+  /**
+   * 天花板状态：现在离窗口还有多远、按什么阈值压、压过没有、压的是哪一份摘要。
+   *
+   * 面板与接口共用这一份。压缩如果只能从状态行里偶然看见，用户就没法回答"它到底压没压、压的是
+   * 什么、什么时候压的" —— 而这三个问题正是"一到上限就不动了"之后最先要回答的。
+   */
+  getContextStatus(): {
+    window: { tokens: number; source: string; detail: string };
+    usedTokens: number;
+    breakdown: ReturnType<typeof breakdownRequest>;
+    /** 换算比与它的样本数：可见才谈得上怀疑（它决定"什么时候压"）。 */
+    estimate: { charsPerToken: number; samples: number };
+    threshold: number;
+    autoCompact: boolean;
+    compacted: boolean;
+    compaction: {
+      covered: number; source: string; at: string; reason: string;
+      beforeTokens: number; afterTokens: number; sourcePath: string | null;
+    } | null;
+  } {
+    const s = this.compactionState;
+    /*
+     * `usedTokens` 与分类账从**同一份请求**算出来（不是两处各算一遍）：两份请求不一样的话，"还
+     * 剩多远"和"谁吃掉的"会互相矛盾，而面板会把矛盾原样显示给用户。
+     */
+    const breakdown = breakdownRequest(this.messagesForRequest().messages, this.overheadChars(), this.charsPerToken);
+    return {
+      window: { tokens: this.contextWindow.tokens, source: this.contextWindow.source, detail: this.contextWindow.detail },
+      usedTokens: breakdown.total,
+      breakdown,
+      estimate: { charsPerToken: this.charsPerToken, samples: this.estimateSamples.length },
+      threshold: this.compactAtShare(),
+      autoCompact: this.autoCompactEnabled(),
+      compacted: s !== null,
+      compaction: s
+        ? {
+          covered: s.covered, source: s.source, at: s.at, reason: s.reason,
+          beforeTokens: s.beforeTokens, afterTokens: s.afterTokens, sourcePath: s.sourcePath ?? null,
+        }
+        : null,
+    };
+  }
+
+  /**
+   * 手动压一次。压不动就说压不动，并说明为什么 —— 一个回 200 但什么都没做的端点，会让用户以为
+   * 上下文已经变小了。
+   *
+   * 手动这条路**不受「接近窗口时自动压缩」开关管**：那个开关的名字与设置页文案都是关于"自动"的，
+   * 而这里是用户按下的按钮。两条自动路径（阈值、模型端溢出）都由开关把关 —— 见
+   * `maybeCompact()` 与 catch 里的那段。
+   */
+  async forceCompact(reason = 'manual'): Promise<{ ok: boolean; reason?: string; beforeTokens?: number; afterTokens?: number }> {
+    const before = estimateRequest(this.messagesForRequest().messages, this.overheadChars(), this.charsPerToken).tokens;
+    const done = await this.compactNow(reason, {});
+    if (!done) {
+      return {
+        ok: false,
+        beforeTokens: before,
+        reason: '压不动：历史太短，或者找不到落在 assistant 消息上的切点。'
+          + '切在 user 上会得到连续两条 user，请求当场不合法（摘要以 user 角色插入），所以宁可不动。',
+      };
+    }
+    return {
+      ok: true,
+      beforeTokens: before,
+      afterTokens: estimateRequest(this.messagesForRequest().messages, this.overheadChars(), this.charsPerToken).tokens,
+    };
+  }
+
+  /**
+   * 到窗口的百分之多少就压。
+   *
+   * 压过一次之后阈值抬到 0.95：压缩只折叠一次，之后每一轮都在摘要后面追加。阈值不抬的话，压完
+   * 紧接着又会越线 —— 于是每轮压一次、每轮改一次前缀，那正是这个设计要避免的东西。抬到很高而不是
+   * 抬到 1：真到了窗口边缘还是得压，否则会话又会卡死在同一个地方。
+   */
+  private compactAtShare(): number {
+    const configured = (this.config as { context?: { compactAtShare?: number } }).context?.compactAtShare;
+    const base = typeof configured === 'number' && Number.isFinite(configured) && configured > 0.1 && configured < 1
+      ? configured
+      : 0.8;
+    return this.compactionState ? Math.max(base, 0.95) : base;
+  }
+
+  /**
+   * 「接近窗口时自动压缩」。**关掉就是关掉**：阈值与模型端溢出这两条自动路径都归它管。
+   *
+   * 默认开着，和 `context.compression` / `allowHistoryReduction` 的"默认什么都不做"不冲突：
+   * 那两个开关改的是用户的东西（删不删历史），这个改的是"发出去的那一份"，盘上一条不丢 —— 而
+   * 关掉它的后果不是"什么都不做"，是会话一到窗口就死在那儿。所以关掉时也不能静默失败：溢出那条
+   * 路会报出开关位置和我们以为的窗口大小，因为用户此刻的问题正是"一到上限就不动了"。
+   */
+  private autoCompactEnabled(): boolean {
+    return (this.config as { context?: { autoCompact?: boolean } }).context?.autoCompact !== false;
+  }
+
+  /**
+   * 不在 messages 里、但和它们一起决定这次请求大小的那部分：**工具表**。
+   *
+   * 它必须算进去：实测 32 个工具 23,474 字符 ≈ 6.8k tokens（40k 窗口的六分之一），漏掉它估算
+   * 就系统性偏小，而偏小的方向正好是"该压的时候不压"。
+   *
+   * **系统消息不在这里。** 它已经是 `messagesForRequest()` 的第一条，再算一遍就是重复计入 ——
+   * 实测那一份 20,748 字符 ≈ 6k tokens，足以让触发线整体前移（对 40k 窗口是 15%），也就是
+   * "还没到该压的时候就压了"：一次白付的缓存未命中，外加一段提前离开上下文的细节。这个数字
+   * 来自一次实测对账（`scripts/context-measure.mjs`），不是推理出来的。
+   */
+  private overheadChars(): number {
+    const m = this.overheadMemo;
+    if (m && m.tools === this.allToolDefs) return m.chars;
+    const chars = JSON.stringify(this.allToolDefs).length;
+    this.overheadMemo = { tools: this.allToolDefs, chars };
+    return chars;
+  }
+
+  /** 压缩记录落在哪。没有会话就没有可落的地方（子 agent 也走这条路，但它有自己的会话目录）。 */
+  private compactionFile(): string | null {
+    if (!this.sessionId) return null;
+    try {
+      return join(sessionStateDir(this.config.workspace.root, this.sessionId), 'compaction.json');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 读回这条会话已经冻结的摘要。
+   *
+   * 这里只做**形状校验**：边界对不对由 `compactionCut()` 在每次请求前判（历史可能在两次请求之间
+   * 被改写，那时这份记录就该作废、下次重新压）。用不了的文件**挪到一边**而不是就地覆盖 —— 仓库对
+   * `.she/` 下所有文件的约定都是这样（`state-file.ts`），而这里手写一份小的，是因为
+   * agent-runtime 不能反向依赖 server 包。
+   */
+  private restoreCompaction(): void {
+    const file = this.compactionFile();
+    if (!file) return;
+    let rec: Partial<CompactionState>;
+    try {
+      rec = JSON.parse(readFileSync(file, 'utf8')) as Partial<CompactionState>;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        this.quarantineCompaction(file, `不是合法 JSON: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return;
+    }
+    if (!rec || rec.v !== 1 || typeof rec.digest !== 'string' || typeof rec.nextFingerprint !== 'string'
+      || typeof rec.covered !== 'number' || rec.digest.length < MIN_DIGEST_CHARS) {
+      this.quarantineCompaction(file, '内容形状不符合压缩记录');
+      return;
+    }
+    this.compactionState = rec as CompactionState;
+    log.info(`复用已冻结的摘要（覆盖 ${rec.covered} 条，${rec.source === 'model' ? '模型总结' : '机械折叠'}）`);
+  }
+
+  /** 把用不了的压缩记录挪到一边（不删），并说清为什么。 */
+  private quarantineCompaction(file: string, why: string): void {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    let backup = `${file}.unusable-${stamp}`;
+    for (let n = 1; existsSync(backup); n++) backup = `${file}.unusable-${stamp}-${n}`;
+    try {
+      renameSync(file, backup);
+      log.warn(`压缩记录用不了（${why}），已挪到 ${backup}；下次重新压一次`);
+    } catch (err) {
+      log.warn(`压缩记录用不了（${why}），且没能挪走：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * 落盘。原子写（tmp + rename）：半个文件比没有文件更坏 —— 恢复时它会当成一份可用的摘要。
+   */
+  private persistCompaction(): void {
+    const file = this.compactionFile();
+    const state = this.compactionState;
+    if (!file || !state) return;
+    try {
+      mkdirSync(dirname(file), { recursive: true });
+      const tmp = `${file}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
+      renameSync(tmp, file);
+    } catch (err) {
+      log.warn(`压缩记录没能落盘（下次会重新压一次）：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * 把被折叠的那一段原文落盘，让压缩不再等于"永久丢失"。
+   *
+   * 摘要是有损的（模型写的那份尤其），而模型之后很可能要引用具体某一行输出或某条报错原文。落一
+   * 份原文、抬头给出路径，它就能用 `fs_read` 按需取回 —— `tool-output.ts` 对超预算的工具结果早
+   * 就在这么做，压缩这一层此前缺的正是同一个保证。
+   *
+   * 返回工作区相对路径（工具认这个），失败或不在工作区内则返回 null。
+   */
+  private spillCompacted(head: readonly LLMMessage[], at: string): string | null {
+    if (!this.sessionId) return null;
+    try {
+      const dir = join(sessionStateDir(this.config.workspace.root, this.sessionId), 'compacted');
+      mkdirSync(dir, { recursive: true });
+      const name = `${at.replace(/[:.]/g, '-')}-${head.length}.jsonl`;
+      const file = join(dir, name);
+      writeFileSync(file, head.map((m) => JSON.stringify(m)).join('\n'), 'utf8');
+      const rel = relative(resolve(this.config.workspace.root), file).split('\\').join('/');
+      if (!rel || rel.startsWith('..')) return null;
+      return rel;
+    } catch (err) {
+      log.warn(`被折叠的原文没能落盘（摘要照常）：${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
+  /** 学到的上限按"哪个端点上的哪个模型"记 —— 换模型不该继承上一个模型的边界。 */
+  private windowKey(): string {
+    return `${this.modelLabel}|${this.config.llm.baseUrl}`;
+  }
+
+  private contextWindowFile(): string | null {
+    try {
+      return workspaceStateFile(this.config.workspace.root, 'context-window.json');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 上一次被模型端拒绝时，它自己在报文里给出的上限。
+   *
+   * 只认同一个 key（模型 + 端点）的记录：把 A 模型的上限用在 B 模型上，比不学还坏 —— 那是一个
+   * 看起来有依据的错误数字。
+   */
+  private learnedWindow(): number | undefined {
+    const file = this.contextWindowFile();
+    if (!file) return undefined;
+    try {
+      const rec = JSON.parse(readFileSync(file, 'utf8')) as { v?: unknown; key?: unknown; tokens?: unknown };
+      if (!rec || rec.v !== 1 || rec.key !== this.windowKey()) return undefined;
+      const n = Number(rec.tokens);
+      return Number.isFinite(n) && n >= 4096 ? Math.trunc(n) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** 记下学到的上限（原子写）。写不进去只影响"下次还要再学一遍"，不影响这次会话。 */
+  private recordLearnedWindow(tokens: number, detail: string): void {
+    const file = this.contextWindowFile();
+    if (!file) return;
+    try {
+      mkdirSync(dirname(file), { recursive: true });
+      const tmp = `${file}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify({
+        v: 1,
+        key: this.windowKey(),
+        tokens,
+        at: new Date().toISOString(),
+        detail: detail.slice(0, 300),
+      }, null, 2), 'utf8');
+      renameSync(tmp, file);
+    } catch (err) {
+      log.warn(`学到的窗口没能落盘（下次会再学一遍）：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** 校准文件的落点（工作区级：换算比是"这个端点 + 这个模型"的属性，不是某条会话的）。 */
+  private estimateCalibrationFile(): string | null {
+    try {
+      return workspaceStateFile(this.config.workspace.root, 'estimate-calibration.json');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 读回这台机器上、这个端点/模型下已经量出来的换算比。
+   *
+   * 只认同一个 key（模型 + 端点）：把 A 模型的分词器比例用在 B 模型上，比不校准还坏 —— 那是一个
+   * 看起来有依据的错误数字。写坏了（超范围、不是数）就退回先验，下次重新量。
+   */
+  private restoreEstimateCalibration(): void {
+    const file = this.estimateCalibrationFile();
+    if (!file) return;
+    try {
+      const rec = JSON.parse(readFileSync(file, 'utf8')) as { v?: unknown; key?: unknown; charsPerToken?: unknown; samples?: unknown };
+      if (!rec || rec.v !== 1 || rec.key !== this.windowKey()) return;
+      const n = Number(rec.charsPerToken);
+      if (!Number.isFinite(n) || n < 2.5 || n > 5) return;
+      this.charsPerToken = n;
+      if (Array.isArray(rec.samples)) {
+        this.estimateSamples = rec.samples
+          .filter((x): x is number => typeof x === 'number' && Number.isFinite(x) && x > 0)
+          .slice(-20);
+      }
+      log.info(`换算比按实测校准：${n} 字符/token（${this.estimateSamples.length} 个样本）`);
+    } catch {
+      /* 坏文件当没有：先验常量仍然是对的起点 */
+    }
+  }
+
+  /**
+   * 观测一次：我们发了 `chars` 个字符，模型数出 `tokens` 个 token。
+   *
+   * 只在换算比真的动了（1% 以上）才换：每轮抖一下没有意义，而且它会在状态行里闪。落盘失败只影响
+   * "下次重新学"，不影响这次会话。
+   */
+  private observeCharsPerToken(chars: number, tokens: number): void {
+    const sample = chars / tokens;
+    if (!Number.isFinite(sample) || sample <= 0) return;
+    /*
+     * 数量级不对的样本**不算**。真实的换算比差异来自分词器与语言，量级在 ±50% 以内；而差一个数量级
+     * 的"样本"说明那个数字根本不是 prompt token（本仓库的判据脚本里就有一个固定报 100 的桩）。把它
+     * 当换算比会把"什么时候压"整体带偏，而带偏的方向可能正是撞墙的那一侧。
+     */
+    if (sample < CHARS_PER_TOKEN / 2 || sample > CHARS_PER_TOKEN * 2) return;
+    this.estimateSamples.push(Number(sample.toFixed(3)));
+    if (this.estimateSamples.length > 20) this.estimateSamples = this.estimateSamples.slice(-20);
+    const next = calibrateCharsPerToken(this.estimateSamples);
+    if (Math.abs(next - this.charsPerToken) / this.charsPerToken < 0.01) return;
+    const was = this.charsPerToken;
+    this.charsPerToken = next;
+    this.persistEstimateCalibration();
+    const said = `换算比按 ${this.estimateSamples.length} 个真实样本校准：${was} → ${next} 字符/token（只影响"什么时候压"，不改发出去的字节）`;
+    log.info(said);
+    this.runRecorder?.step(said);
+  }
+
+  private persistEstimateCalibration(): void {
+    const file = this.estimateCalibrationFile();
+    if (!file) return;
+    try {
+      mkdirSync(dirname(file), { recursive: true });
+      const tmp = `${file}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify({
+        v: 1,
+        key: this.windowKey(),
+        charsPerToken: this.charsPerToken,
+        samples: this.estimateSamples.slice(-20),
+        at: new Date().toISOString(),
+      }, null, 2), 'utf8');
+      renameSync(tmp, file);
+    } catch (err) {
+      log.warn(`换算比没能落盘（下次重新学）：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * 生成摘要：**优先让模型写**，失败或太短就退回机械提取。
+   *
+   * 机械提取不是失败 —— 真正失败的是"压不动"（没有合法切点、或压完没变小）。所以两条路里任何一条
+   * 交回一份可用摘要，这次压缩就算成立；`source` 跟着摘要一起存下来并显示给用户，机械摘要不会
+   * 看起来像模型总结。
+   *
+   * 取样有界（DIGEST_SOURCE_MAX_CHARS）：生成摘要的这次调用自己不能溢出，否则救援代码会先撞墙。
+   * `track` 是这一轮的用量漏斗：这次调用真的花了钱，就该记在账上，而它也真的是一次模型请求。
+   */
+  private async writeDigest(
+    head: readonly LLMMessage[],
+    track?: (c: StreamChunk) => void,
+  ): Promise<{ text: string; source: 'model' | 'extractive' }> {
+    const fallback = () => ({ text: summarizeExtractively(head, DIGEST_MAX_CHARS), source: 'extractive' as const });
+    const ask: LLMMessage[] = [
+      { role: 'system', content: DIGEST_INSTRUCTION },
+      { role: 'user', content: digestSourceText(head, DIGEST_SOURCE_MAX_CHARS) },
+    ];
+    // 摘要这一次调用也观测：它**不带工具表**，所以固定开销是 0，别把工具表的字符算进去。
+    this.pendingRequestChars = estimateRequest(ask, 0, this.charsPerToken).chars;
+    try {
+      const reply = await this.provider.chat(ask, [], track);
+      const text = (reply.content ?? '').trim();
+      if (text.length >= MIN_DIGEST_CHARS) return { text: text.slice(0, DIGEST_MAX_CHARS), source: 'model' };
+      log.warn(`摘要太短（${text.length} 字符），改用机械提取`);
+      return fallback();
+    } catch (err) {
+      log.warn(`模型写摘要失败（${err instanceof Error ? err.message : String(err)}），改用机械提取`);
+      return fallback();
+    }
+  }
+
+  /**
+   * 压一次：把历史的前一段换成一份冻结的摘要。返回"这次真的压了吗"。
+   *
+   * 四条约束缺一不可，每条都有它的来路：
+   *   1. 切点落在 assistant 上 —— 摘要以 user 角色插入，切在 user 上会让请求不合法（见
+   *      `chooseCutIndex`）；
+   *   2. 摘要冻结 —— 写进 state 与盘上，之后每轮原样重发，不再重算（重算 = 每轮改前缀 = 每轮全价）；
+   *   3. 压完确实更小 —— 算一遍对账。没变小就如实说压不动，而不是把"压过了"报上去；
+   *   4. 盘上的转写一条不动 —— 压的只是发给模型的那一份，`historyForDisk()` 不受影响。
+   */
+  private async compactNow(
+    reason: string,
+    opts: { onChunk?: (c: StreamChunk) => void; track?: (c: StreamChunk) => void; keepScale?: number } = {},
+  ): Promise<boolean> {
+    if (this.compacting) return false;
+    const history = this.history;
+    const cut = chooseCutIndex(history, keepTokensFor(this.contextWindow.tokens, opts.keepScale ?? 1));
+    if (cut <= 0) {
+      this.runRecorder?.step(`上下文压缩：没有可用的切点（历史 ${history.length} 条），不压`);
+      return false;
+    }
+    const before = estimateRequest(this.messagesForRequest().messages, this.overheadChars(), this.charsPerToken).tokens;
+    this.compacting = true;
+    try {
+      const head = history.slice(0, cut);
+      const at = new Date().toISOString();
+      /*
+       * 先落原文，再写摘要：摘要抬头要带上那个路径，而路径只在**这一刻**算一次（之后逐字节不变，
+       * 见 `digestMessage`）。落盘失败不影响压缩 —— 抬头会退回"原文不在摘要里"的说法，而不是给
+       * 一个读不到的路径。
+       */
+      const sourcePath = this.spillCompacted(head, at);
+      const digest = await this.writeDigest(head, opts.track);
+      const state: CompactionState = {
+        v: 1,
+        covered: cut,
+        nextFingerprint: fingerprint(history[cut]),
+        digest: digest.text,
+        source: digest.source,
+        at,
+        reason,
+        sourcePath,
+        // 锚点算一次就进 state：它和摘要一样要冻结，否则每压一次抬头就变一次。
+        anchors: retrievalAnchors(head),
+        beforeTokens: before,
+        afterTokens: 0,
+      };
+      /*
+       * 对账用的是**同一个**系统消息对象（`systemMessage()`）：请求那份和这一步必须逐字节相同，
+       * 否则"压完到底小了没有"算的是另一个请求。
+       */
+      const after = estimateRequest(
+        appliedMessages(history, state, this.systemMessage()).messages,
+        this.overheadChars(),
+        this.charsPerToken,
+      ).tokens;
+      if (after >= before) {
+        this.runRecorder?.step(`上下文压缩：压完没有变小（${before} → ${after} tokens），不改`);
+        return false;
+      }
+      state.afterTokens = after;
+      this.compactionState = state;
+      this.persistCompaction();
+      const how = state.source === 'model' ? '模型总结' : '机械提取';
+      const why = reason === 'overflow' ? '模型端拒绝了超长提示词' : reason === 'threshold' ? '接近窗口上限' : '手动';
+      opts.onChunk?.({
+        type: 'status',
+        content: `上下文压缩（${why}）：较早的 ${cut} 条记录换成一份摘要（${how}），${before} → ${after} tokens`,
+      });
+      this.runRecorder?.step(`上下文压缩（${why}）：覆盖 ${cut} 条，${before} → ${after} tokens，摘要来源 ${state.source}`);
+      return true;
+    } finally {
+      this.compacting = false;
+    }
+  }
+
+  /**
+   * 到阈值就先压一次，然后照常发这一轮。
+   *
+   * 放在**发请求之前**：这是唯一不花钱的一刻 —— 压完还发得出去，就没有那次必然失败的请求，也没有
+   * 用户看到的红字。模型端那条路（`isContextOverflowError`）是兜底，管的是"我们猜的窗口偏大"或者
+   * "一次工具调用就把历史顶过了窗口"。
+   */
+  private async maybeCompact(
+    messages: LLMMessage[],
+    onChunk?: (c: StreamChunk) => void,
+    track?: (c: StreamChunk) => void,
+  ): Promise<void> {
+    if (!this.autoCompactEnabled()) return;
+    const estimate = estimateRequest(messages, this.overheadChars(), this.charsPerToken);
+    if (estimate.tokens < Math.round(this.contextWindow.tokens * this.compactAtShare())) return;
+    const done = await this.compactNow('threshold', { onChunk, track });
+    if (!done) return;
+    // 压成功了才动这个数组：没压的时候它必须逐字节等于压之前 —— 见 messagesForRequest 的注释。
+    const fresh = this.messagesForRequest().messages;
+    messages.splice(0, messages.length, ...fresh);
   }
 
   setHistory(messages: LLMMessage[]): void {

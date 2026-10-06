@@ -53,6 +53,27 @@ export {
 } from './tool-result.js';
 export type { ToolFailureKind, ToolResultVerdict } from './tool-result.js';
 export { budgetToolResult, elisionRemedy, fitToolResultsToBudget, TOOL_RESULT_CONTEXT_CHARS } from './tool-output.js';
+export {
+  appliedMessages,
+  chooseCutIndex,
+  compactionCut,
+  digestMessage,
+  digestSourceText,
+  estimateRequest,
+  estimateTokens,
+  fingerprint,
+  isContextOverflowError,
+  keepTokensFor,
+  messageChars,
+  summarizeExtractively,
+  CHARS_PER_TOKEN,
+  DIGEST_MAX_CHARS,
+  DIGEST_SOURCE_MAX_CHARS,
+  MIN_DIGEST_CHARS,
+  MIN_KEEP_TOKENS,
+  MAX_KEEP_TOKENS,
+} from './compaction.js';
+export type { CompactionState, TokenEstimate } from './compaction.js';
 export type { BudgetedToolResult, BudgetableMessage } from './tool-output.js';
 export { DEFAULT_BUDGET, budgetStop, parseBudgetLimits, renderBudgetStop } from './budget.js';
 export type { BudgetKind, BudgetLimits, BudgetStop, BudgetUsage } from './budget.js';

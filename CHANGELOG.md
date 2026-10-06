@@ -8,11 +8,39 @@ features, patch for fixes.
 
 ### Added
 
+- **上下文管理看到"被谁吃掉了"，压缩不再等于永久丢失，窗口能从一次失败里学出来。** 三处都对着 Cursor 官方文档里那套（`cursor.com/docs/agent/prompting`：到顶压摘要 + 上下文环分类账）做的对照，见 `docs/context-and-caching.md`。
+
+  - `breakdownRequest()` 把一次请求拆成系统提示词 / 工具表 / 压缩摘要 / 工具结果 / 对话五格，`getContextStatus()` 与 `/api/context/plan` 直接给出来。`usedTokens` 只回答"还有多远"，而"是谁吃掉的"才是下一步该动的地方 —— 摘要涨了而工具结果没涨，和反过来，是两种不同的病。
+  - 压缩时把**被折叠的那一段原文**落盘（`.she/sessions/<id>/compacted/*.jsonl`），摘要抬头写出工作区相对路径。摘要是有损的，而具体某一行输出、某条报错的原文常常还要用 —— 从此可以用 `fs_read` 按需取回，和 `tool-output.ts` 对超预算工具结果的做法一致。路径只在压缩那一刻算一次并冻结，所以前缀仍然是稳定的。
+  - `windowFromOverflowError()` 从模型端的拒绝报文里读出真实上限（`maximum context length is 65536 tokens`），当场改按它算、按"模型+端点"落盘、下次构造直接用。**这是这套机制里唯一一处能从失败里学到东西的地方**：窗口原本是按模型名猜的，实测这个端点的真实上限比表里大得多。三条安全线写在函数注释里 —— 只认点名了上下文的数字（`max_tokens: 4096` 这种不认）、范围夹紧、只收比当前更小的值。
+
+  故意没做：清理旧工具结果（旧的早已随压缩进摘要，单独清一次只会多改一次前缀），以及界面上的上下文环（`check:i18n` 是棘轮，加中文文案要连着基线一起决定）。
+
+- **换算比不再靠人工重测，摘要也不再只回答"去哪找"而说不出"找什么"。** 两处都从这个仓库已有的东西里长出来：每轮请求的用量账与词法/结构化的取回文化。
+
+  - `calibrateCharsPerToken()`：每次拿到 usage 就观测一次（我们发了多少字符 ÷ 模型报的 `prompt_tokens`），样本不足 3 个不动、取中位数、夹紧 [2.5, 5.0]，按"模型 + 端点"落到 `.she/estimate-calibration.json`。**数量级不对的样本一律不算** —— 真实的换算比差异在 ±50% 以内，差一个数量级的数字说明它根本不是 prompt token，把它当换算比会把阈值带偏到可能撞墙的那一侧。它只影响"什么时候压"，不改发出去的字节。
+  - `retrievalAnchors()`：压缩时从被折叠的那一段里抽出**原文里真的出现过**的可检索串 —— 文件路径、命令的可执行名、报错标记、知识库组路径 —— 写进摘要抬头，和摘要一起冻结。有了它，"压过了"才真的能变成"找回来"：grep 它、`fs_read` 它、`kb_query` 它。抽不出东西时一个字都不印（空的锚点表等于在暗示有线索）。
+
+  判据：`context-ceiling.test.ts`（新增 6 条）+ `check:context` 第 12 节（真 server，自校准与"不印空表"各一条链路）。
+
 **A dependency advisory ratchet, so the count cannot climb back.** `pnpm check:deps` (`scripts/deps-check.mjs`) queries the advisory database and checks the per-severity counts against a baseline in the script — the same ratchet shape as the dead-CSS and colour-literal counts. Three things it insists on, each because the failure would otherwise be silent: the report must have the shape of a real audit *and* report a plausible dependency count before any counts are trusted (an unreachable registry returns "no advisories", which is byte-identical to "no vulnerabilities", so an unusable measurement fails rather than reading as clean); the counts may fall but never rise; and `devDependencies` are in scope, because in this repository they always were the majority — all 12 advisories that survived the Electron pass were build/test tooling. Advisories muted via `pnpm.auditConfig.ignoreGhsas` fail rather than pass, since one config line must not be able to hide an advisory from the count. It is deliberately **not** a step in `check:offline`, which is offline by contract; CI runs it as its own step.
 
 `.github/dependabot.yml` covers the other half: weekly grouped minor/patch update PRs (majors stay ungrouped, because each one needs its own full gate run), plus `github-actions`. Electron majors at `>= 42` are blocked on purpose — see below. Dependabot *security* updates were also switched on for the repository; without them an advisory produces an alert and nothing else.
 
 ### Fixed
+
+- **The window table carried a guess where the vendor publishes a number.** DeepSeek's model page puts `deepseek-flash` (V4.1-Flash) and `deepseek-v4-pro` at **1M** context; the table matched every `deepseek` name to a conservative 128k, so those models would have compacted at ~102k while they had room for eight times that — a cache miss and a lost tail paid for nothing. The entry is now split: `deepseek-` followed by `flash` or `v4` → 1M, and every other `deepseek` name (chat, reasoner — the pre-V4 models) keeps the conservative 128k. The narrow pattern is written first because a single `/deepseek/` can only be one of the two, and both directions are wrong in their own way. This also puts the table back in its place: it is what we use **when nobody has told us the real number** — a setting, `SHE_CONTEXT_WINDOW`, or the model's own refusal (learned) all outrank it.
+
+- **A conversation no longer dies when it reaches the model's context window.** `messagesForRequest()` sent the whole transcript and nothing in the codebase knew how many tokens the model takes, so once the history passed the window the provider answered 4xx, `failTurn` filed it as a provider error and advised "just send it again" — advice that could only fail the same way, on a history that only grows. The session was gone at that point.
+
+  The fix is compaction, not trimming, and `docs/context-and-caching.md` is why: the prompt cache is a **prefix** cache, so cutting from the head makes every later turn diverge at the cut point (measured: 96% → 0% hit rate, i.e. full price forever) while permanently hiding the early turns from the model.
+
+  - `packages/shared/src/context-window.ts` resolves the window from settings → `SHE_CONTEXT_WINDOW` → the model family → a conservative 128k, and **returns where the number came from**, because a limit nobody can trace is a limit nobody can fix. Guessing low costs an early compaction; guessing high costs "no compaction when it was needed", which the model's own refusal still catches.
+  - `packages/agent-runtime/src/compaction.ts` is the pure core: the token estimate **includes the tool table** (32 tools ≈ 6.8k tokens at a 40k window is not a rounding error, and counting the system message twice moves the trigger line by 15%), the cut point must land on an `assistant` message (the digest is inserted as `user`, and cutting on a `user` would produce two consecutive user messages — a request the endpoint rejects), the extractive fallback digest is deterministic, and `isContextOverflowError` separates "too long" from rate limits and timeouts, because compressing for a 429 pays a full-price cache miss and fixes nothing.
+  - The agent compacts at 80% of the window and at 95% once compacted (otherwise it compacts every round and rewrites the prefix every round), and it compacts **before** sending rather than after failing — that is the only moment the rescue is free. A wrong window guess is caught by the model's refusal: compact, re-send, at most twice.
+  - The digest is frozen into `.she/sessions/<id>/compaction.json` (atomic write; an unusable file is moved aside and reported, never overwritten) and reused byte for byte, so the prefix stays stable. **The transcript on disk is untouched** — `historyForDisk()` still returns everything, and only "the copy sent to the model" is compressed.
+
+  Measured through `dist` against a local stub model at a 40k window: a 24-message / 120,160-character history went from 25 request messages to 5, 47,373 → 15,807 estimated tokens, with one model-written digest of 494 characters and the on-disk transcript still complete. `scripts/context-budget-check.mjs` sections 7-10 drive the real server end to end, including a provider 400 that says `maximum context length` — the session survives it. ``context.compactAtShare`` / ``context.autoCompact`` / ``llm.contextWindow`` are settable from Settings and persist to `.env`.
 
 - **The desktop shell was on Electron 33, carrying 92 of the repository's 104 open dependency advisories; it is now on 41.** Electron is the one dependency whose advisories reach a user, because it *is* the application shell; everything else on the list was build or test tooling. The upgrade moved `@electron/get` to v5 and `extract-zip` to the scoped `@electron-internal` fork, which is how three advisories with no upstream patch (`extract-zip` ×2, `http-cache-semantics`) disappeared — they were never fixed, they were replaced. `tar` (12 advisories, one critical) went the same way once electron-builder's chain lost `node-gyp`/`cacache`. **No `pnpm.overrides` entry was needed for any of the 104.**
 

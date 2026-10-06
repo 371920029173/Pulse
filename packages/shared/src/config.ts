@@ -1,6 +1,7 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { parseContextWindowValue } from './context-window.js';
 import { loadEnvFile, resolveEnvFile } from './env.js';
 
 /**
@@ -95,6 +96,14 @@ export interface SheConfig {
     temperature: number;
     /** Reasoning / depth hint for providers that support it. */
     thinkingLevel: ThinkingLevel;
+    /**
+     * 一次请求的提示词上限（token）。**0 = 按模型名自动识别。**
+     *
+     * 这个数字决定"什么时候压"，而它是个会被猜错的值：猜大了是"该压的时候不压"（那时靠模型端
+     * 拒绝兜底），猜小了是过早压缩。所以它必须能从设置里改、改完能落盘 —— 否则用户遇到的就是
+     * "我知道要填 32k，但填完重启就没了"。
+     */
+    contextWindow: number;
     /** Optional secondary endpoint when primary fails. */
     fallback?: {
       provider?: 'openai' | 'anthropic';
@@ -335,6 +344,13 @@ export interface SheConfig {
     compression: 'off' | 'light' | 'balanced' | 'aggressive' | 'auto';
     /** 是否允许压缩时删减历史记录。默认 false：一条都不删。 */
     allowHistoryReduction: boolean;
+    /**
+     * 接近窗口上限时自动压缩。默认**开着** —— 见 DEFAULTS 里那一组默认值的说明：
+     * 它不删盘上的任何东西，而关掉它的后果是会话一到窗口就死在那儿。
+     */
+    autoCompact: boolean;
+    /** 从窗口的百分之多少开始压（0.1 ~ 1）。默认 0.8。压过一次之后这一格抬到 0.95。 */
+    compactAtShare: number;
     /** 每 100 万 token 的单价。全 0 表示没填，界面只报 token 数、不报钱。 */
     pricing: {
       inputPerMillion: number;
@@ -384,6 +400,9 @@ const DEFAULTS: SheConfig = {
     maxTokens: 0,
     temperature: 0.3,
     thinkingLevel: 'medium',
+    // 0 = 按模型名自动识别（见 context-window.ts）。不猜一个具体数字，是因为猜错的代价比"说出来
+    // 这是猜的"更大：状态行与接口都会点名这个数字的来历。
+    contextWindow: 0,
     fallback: {
       provider: 'openai',
       model: '',
@@ -478,6 +497,16 @@ const DEFAULTS: SheConfig = {
   context: {
     compression: 'off',
     allowHistoryReduction: false,
+    /*
+     * 和上面两个"默认什么都不做"不同，这一对默认**开着**，而且这是刻意的：它们改的是"发给模型的
+     * 那一份"，盘上的转写一条不丢（`historyForDisk()` 照旧完整），而关掉它的后果不是"什么都不做"，
+     * 是会话一到窗口就死在那儿 —— 用户报的正是这个。
+     *
+     * 阈值 0.8 而不是贴着 1.0：一次工具调用就可能加进来几千 token，贴着上限触发等于每次都先撞一次墙
+     * 再救援。
+     */
+    autoCompact: true,
+    compactAtShare: 0.8,
     pricing: {
       inputPerMillion: 0,
       outputPerMillion: 0,
@@ -881,6 +910,19 @@ export function loadConfig(workspaceRoot?: string): SheConfig {
       } else if (src.allowHistoryReduction === 'false' || src.allowHistoryReduction === '0') {
         config.context.allowHistoryReduction = false;
       }
+      /*
+       * 天花板这一组只认合法的形状，其余回落到默认值：文件里写坏了一个键，不该让"什么时候压"
+       * 变成一个没人知道的数。`autoCompact` 的默认方向是"开"，理由见 DEFAULTS。
+       */
+      if (typeof src.autoCompact === 'boolean') {
+        config.context.autoCompact = src.autoCompact;
+      } else if (src.autoCompact === 'true' || src.autoCompact === '1') {
+        config.context.autoCompact = true;
+      } else if (src.autoCompact === 'false' || src.autoCompact === '0') {
+        config.context.autoCompact = false;
+      }
+      const atShare = Number(src.compactAtShare);
+      if (Number.isFinite(atShare) && atShare > 0.1 && atShare < 1) config.context.compactAtShare = atShare;
       const pricing = src.pricing;
       if (pricing && typeof pricing === 'object' && !Array.isArray(pricing)) {
         const p = pricing as Record<string, unknown>;
@@ -892,6 +934,16 @@ export function loadConfig(workspaceRoot?: string): SheConfig {
         }
       }
     }
+  }
+
+  /*
+   * `llm.contextWindow`：0 是合法值（回到自动识别），所以这里不能写成 `if (raw)` —— 那会把 0 当成
+   * "没填"，这一格就永远关不掉自动识别。写坏的值（`"40k"`、负数、null）一律回落到 0，而不是被
+   * 当成一个窗口用。
+   */
+  {
+    const raw = (config.llm as { contextWindow?: unknown }).contextWindow;
+    config.llm.contextWindow = parseContextWindowValue(raw) ?? 0;
   }
 
   const env = process.env;
@@ -1052,6 +1104,22 @@ export function loadConfig(workspaceRoot?: string): SheConfig {
   if (env.SHE_ALLOW_HISTORY_REDUCTION !== undefined) {
     const raw = env.SHE_ALLOW_HISTORY_REDUCTION.trim().toLowerCase();
     config.context.allowHistoryReduction = ['1', 'true', 'yes', 'on'].includes(raw);
+  }
+  /*
+   * 上下文天花板。`SHE_CONTEXT_WINDOW` 认正整数；0 与写坏的值都表示"按模型名自动识别"。
+   *
+   * 阈值只认 (0.1, 1) 开区间：1.0 等于把压缩关掉，而"关掉"应该由开关说，不该由一个阈值顺手做掉 ——
+   * 那样用户会看到开关是开的、压缩却永远不触发。
+   */
+  const contextWindow = parseContextWindowValue(env.SHE_CONTEXT_WINDOW);
+  if (contextWindow !== undefined) config.llm.contextWindow = contextWindow;
+  if (env.SHE_CONTEXT_AUTO_COMPACT !== undefined) {
+    const raw = env.SHE_CONTEXT_AUTO_COMPACT.trim().toLowerCase();
+    config.context.autoCompact = ['1', 'true', 'yes', 'on'].includes(raw);
+  }
+  const compactAtShare = Number(env.SHE_CONTEXT_COMPACT_AT);
+  if (Number.isFinite(compactAtShare) && compactAtShare > 0.1 && compactAtShare < 1) {
+    config.context.compactAtShare = compactAtShare;
   }
   const priceIn = readNonNegative(env.SHE_PRICE_INPUT_PER_MILLION);
   if (priceIn !== undefined) config.context.pricing.inputPerMillion = priceIn;
