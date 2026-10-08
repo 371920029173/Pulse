@@ -84,13 +84,23 @@ function requestHeaders(json: boolean): Record<string, string> {
  * (or no body), which is what `sendError(res, 'Unauthorized')` produces.
  */
 function authHint(status: number, fallback: string): Error {
-  if (status !== 401) return new Error(fallback);
+  if (status !== 401) return withStatus(new Error(fallback), status);
   // `HTTP 401` is the shape `fetchJSON` builds itself when the body is not JSON — equally uninformative.
   const body = fallback.trim();
   const generic = !body || /^(unauthorized|http 401)$/i.test(body);
-  return new Error(generic
+  return withStatus(new Error(generic
     ? t('本地服务要求访问令牌，但这次请求没带上。令牌来自 SHE_AUTH_TOKEN（多个用 SHE_AUTH_TOKENS）启动服务；桌面端开窗时会自动带上。浏览器标签页没有填令牌的入口 —— 它读的是 localStorage 里的 she.authToken，在控制台里 localStorage.setItem("she.authToken", "<令牌>") 后刷新。')
-    : fallback);
+    : fallback), status);
+}
+
+/**
+ * 状态码跟着错误一起走。
+ *
+ * 调用方需要按它分流：409 是「这一轮已经在跑」—— useChat 的发送路径靠它决定把用户刚敲的这句
+ * 改成「追加」送去，而不是丢掉。只看正文做不到：正文是给人看的中文句子，改一个词就断了。
+ */
+function withStatus(err: Error, status: number): Error {
+  return Object.assign(err, { status });
 }
 
 /**

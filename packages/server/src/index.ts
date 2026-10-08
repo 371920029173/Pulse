@@ -2689,6 +2689,20 @@ function registerRoutes(router: Router): void {
     res.on('close', () => { t.subs.delete(sub); });
   });
 
+/**
+ * How often a streaming turn writes its transcript to disk.
+ *
+ * It is a crash-safety copy, not the deliverable: the turn is persisted in full when it ends
+ * (`finally`), and bulky tool output already lives on disk under `.she/sessions/<id>/tool-output/`.
+ * Each write here rewrites the WHOLE session store — measured at 5.3 MB — so the old 2-second
+ * cadence turned one long turn into hundreds of megabytes of writes, and on a workspace inside an
+ * indexed folder (a Desktop directory) into continuous indexer and antivirus work: what the user
+ * reported as the machine stalling while the app was open. Ten seconds bounds the loss after a hard
+ * crash to a few tool rows and cuts the churn by 5x; unchanged content is skipped entirely
+ * (see `saveStateFile`).
+ */
+const STREAM_PERSIST_MS = 10_000;
+
   router.post('/api/chat', async (req, res) => {
     const body = await parseBody<{
       message: string;
@@ -2770,7 +2784,7 @@ function registerRoutes(router: Router): void {
           sendSSEEvent(res, chunk);
           liveTap(sid, chunk);
           const now = Date.now();
-          if (now - lastPersist > 2000) {
+          if (now - lastPersist > STREAM_PERSIST_MS) {
             lastPersist = now;
             try { persistHistory(sid); } catch { /* the final persist still runs */ }
           }

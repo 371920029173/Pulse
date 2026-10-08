@@ -16,7 +16,7 @@
  */
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadStateFile, saveStateFile } from '../state-file.js';
@@ -305,3 +305,53 @@ describe('saveStateFile：校验失败时磁盘上的旧数据必须原样留着
     assert.deepEqual(siblings().filter((f) => f.includes('.tmp')), [], '留下了临时文件');
   });
 });
+
+
+/**
+ * 写放大：内容没变就不许碰文件。
+ *
+ * 用户报「开启一会以后 System 进程磁盘占用暴涨、机器极度卡顿」。实测（.she/tmp/rewrite-probe.ps1
+ * 与 scripts/disk-probe.mjs，2026-10-08）：一轮进行中，`.she/sessions.json` 5.3 MB 被整份重写，
+ * 而内容一个字都没变 —— persistHistory 有 ~25 个调用点、流式期间每 2 秒还来一次，每次
+ * saveStateFile 都把整个 store 序列化后整份写出（临时文件 + rename，等于换了一个新文件）。
+ * 工作区落在桌面这类被索引的位置时，每次重写还会连带索引更新与杀软重扫，那就是用户看到的卡顿。
+ *
+ * 判据：同样的内容存两次，第二次不许碰文件；内容变了必须照写；外面改过的文件不许被跳过。
+ */
+describe('内容没变就不写盘（写放大）', () => {
+  it('第二次数同样的内容：文件不动，也不留临时文件', async () => {
+    saveStateFile(file, { schema_version: 'v2', items: ['a', 'b'] });
+
+    // 隔开一点时间：真写了的话 mtime 一定会往前走（NTFS 的分辨率远高于 20ms），
+    // 这样"没写"就不是靠"两次写落在同一毫秒"这种巧合成立的。
+    await sleep(20);
+    const before = statSync(file);
+
+    saveStateFile(file, { schema_version: 'v2', items: ['a', 'b'] });
+    const after = statSync(file);
+
+    assert.equal(after.mtimeMs, before.mtimeMs, '文件被整份重写了（mtime 变了）');
+    assert.equal(after.size, before.size, '文件大小变了');
+    assert.equal(siblings().length, 0, `留下了临时文件：${siblings().join(', ')}`);
+  });
+
+  it('内容真的变了：照写', () => {
+    saveStateFile(file, { schema_version: 'v2', items: ['a'] });
+    saveStateFile(file, { schema_version: 'v2', items: ['a', 'b'] });
+
+    assert.match(readFileSync(file, 'utf8'), /"b"/, '内容变了却没有写');
+    assert.equal(siblings().length, 0, `留下了临时文件：${siblings().join(', ')}`);
+  });
+
+  it('文件被外面改过：不许跳过，把我们的内容写回去', () => {
+    saveStateFile(file, { schema_version: 'v2', items: ['a'] });
+    writeFileSync(file, JSON.stringify({ schema_version: 'v2', items: ['外面改的'] }), 'utf8');
+
+    saveStateFile(file, { schema_version: 'v2', items: ['a'] });
+
+    assert.match(readFileSync(file, 'utf8'), /"a"/, '外面改动把我们的跳过逻辑骗过去了');
+  });
+});
+
+/** 隔开一点时间，让 mtime 的变化可观测。 */
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

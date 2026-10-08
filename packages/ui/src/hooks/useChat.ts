@@ -279,7 +279,13 @@ export function useChat(sessionId?: string | null) {
 
   const abortRef = useRef<AbortController | null>(null);
   const followRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const armFollowRef = useRef<(sid: string) => void>(() => {});
+  const armFollowRef = useRef<(sid: string, opts?: { skipPull?: boolean }) => void>(() => {});
+
+  /**
+   * `interject` 定义在 `sendMessage` 之后，而发送路径要在「服务端说在跑」时把这条字接上去。
+   * 直接在 render 期引用会撞上 TDZ（依赖数组在声明之前求值），所以照 `armFollowRef` 的做法用 ref 传。
+   */
+  const interjectRef = useRef<(text: string) => void>(() => {});
 
   /**
    * The session this window is bound to. Held in a ref so every callback reads
@@ -696,15 +702,52 @@ export function useChat(sessionId?: string | null) {
     if (!isLoading) setSendBlocked(false);
   }, [isLoading]);
 
-  const sendMessage = useCallback((text: string, images?: ChatMessage['images']) => {
-    if (!text.trim() && !images?.length) return;
-    if (isLoading) {
-      // 不静默吞掉：界面会显示"上一轮还在进行"，并提供打断按钮。
-      setSendBlocked(true);
-      return;
+  /**
+   * 服务端说这条会话在不在跑。
+   *
+   * 客户端手上那个 `isLoading` 是会骗人的：聊天流的空闲超时是显式关掉的（一次工具调用可能真的
+   * 跑很久），所以连接只要死得安静一点，它就永远为真，界面从此不再发送 —— 用户看到的现象就是
+   * 「这条会话发不出消息了」。只有服务端知道真相（turnActive 是内存态，重启即假），所以每次
+   * 「本地说忙」的发送都问它一次。
+   *
+   * 返回 null = 问不到（服务端不可达）。这时候不能假设：把用户的字吞掉、又装作发过，比明说
+   * 「发不出去」更糟。
+   */
+  const serverTurnRunning = useCallback(async (): Promise<boolean | null> => {
+    const sid = sidRef.current;
+    if (!sid) return null;
+    try {
+      const st = await fetchJSON<{ running: boolean }>(withSid('/api/chat/running', sid));
+      return Boolean(st.running);
+    } catch {
+      return null;
     }
-    setSendBlocked(false);
+  }, []);
 
+  /**
+   * 把「本地以为在跑、服务端说没在跑」的那点本地状态清掉。
+   *
+   * 要紧的是顺手把 `abortRef` 摘干净：`loadHistory` 与 `armFollow` 都以 `abortRef === null` 为门，
+   * 一条安静的尸体压在上面，自愈就永远轮不到 —— 这正是「自愈明明写了却不生效」的原因。
+   * 走到这里的每个入口，前提都是服务端说没人跑（或调用方刚问过），所以摘掉它不会打断任何还在
+   * 工作的东西。
+   */
+  const healStaleTurn = useCallback(() => {
+    if (followRef.current) { clearInterval(followRef.current); followRef.current = null; }
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setIsLoading(false);
+    setStalled(false);
+  }, []);
+
+  /**
+   * Put one user message on the wire, and open its stream.
+   *
+   * Split out of `sendMessage` because that one may have to make a round trip first and then send
+   * anyway — re-entering itself would read a stale `isLoading` out of its own closure and refuse the
+   * very message it had just decided to send.
+   */
+  const dispatchSend = useCallback((text: string, images?: ChatMessage['images']) => {
     const userMsg: ChatMessage = { role: 'user', content: text, ...(images?.length ? { images } : {}) };
     setMessages((prev) => [...prev, userMsg]);
     setIsLoading(true);
@@ -734,6 +777,42 @@ export function useChat(sessionId?: string | null) {
       },
       {
         ...handlers,
+        /*
+         * Drop the dead controller BEFORE the error handler runs — not only when the user aborted.
+         *
+         * `handlers.onError` re-arms the follow watcher, and `armFollow` returns immediately while
+         * `abortRef` is set. Clearing it only for `signal.aborted` meant a network death — or the
+         * server's 409 for a turn that is already running — left the corpse in place, so the re-arm
+         * never ran: the window showed Send, the server refused every attempt, and there was no Stop
+         * button anywhere, because `isLoading` was false. The identity check keeps this from clearing
+         * a NEWER stream's controller.
+         */
+        onError: (err: Error) => {
+          if (abortRef.current === controller) abortRef.current = null;
+          /*
+           * 409 = 服务端说这一轮已经在跑，而这扇窗口不知道（或知道得太晚）。
+           *
+           * 这时把用户刚敲的字丢掉是最坏的选择 —— 他会以为消息发出去了。按这个界面的既有语义
+           * 把这句话接成「追加」：服务端在下一轮迭代读到它，界面上留一行说明。别的错误一律走原来
+           * 的报错路径（那条路会自己重新挂上 follow）。
+           *
+           * 这里直接 POST 而不是走 `interject()`：dispatchSend 已经把这条消息画在屏幕上了，
+           * 再走一次会让同一句话出现两遍。
+           */
+          if ((err as Error & { status?: number }).status === 409) {
+            void fetchJSON(withSid('/api/chat/interject'), {
+              method: 'POST',
+              body: { message: text, session_id: sidRef.current },
+            }).catch(() => undefined);
+            setMessages((prev) => [...prev, {
+              role: 'system',
+              content: t('这一轮还在进行：这条已作为「追加」发给当前这一轮（按停止可立刻接手）。'),
+            }]);
+            armFollowRef.current(sidRef.current, { skipPull: true });
+          } else {
+            handlers.onError(err);
+          }
+        },
         onDone: () => {
           handlers.onDone();
           // The turn is over: stop claiming to be the live view, so a later history load for
@@ -744,7 +823,54 @@ export function useChat(sessionId?: string | null) {
       controller.signal,
       { idleTimeoutMs: 0 },
     );
-  }, [isLoading, attachStreamHandlers]);
+  }, [attachStreamHandlers]);
+
+  /**
+   * Send. While the window believes a turn is running, ask the server rather than trusting that
+   * belief, and let the answer decide:
+   *
+   *  - nobody is running → the local state was stale. Heal it and send for real. This is the
+   *    「这条会话发不出消息」 fix: `isLoading` used to be final, so a chat whose stream had died
+   *    quietly could never send again — the box showed Send, the server answered 409 to every
+   *    attempt, and no Stop button existed because `isLoading` was false.
+   *  - someone is running → keep the text: it goes out as an append (exactly what Enter does in a
+   *    window that knows), with a line saying so, and the running turn is made visible so a Stop
+   *    button exists. Refusing while leaving the sentence sitting in the box is what the user
+   *    reported as "can't send".
+   *  - unreachable → refuse, with the echo. Guessing would either swallow the message or send it
+   *    twice.
+   */
+  const sendMessage = useCallback((text: string, images?: ChatMessage['images']) => {
+    if (!text.trim() && !images?.length) return;
+    if (isLoading) {
+      void (async () => {
+        const running = await serverTurnRunning();
+        if (running === null) {
+          setSendBlocked(true);
+          return;
+        }
+        /*
+         * `sendMessage` only reaches here with `isLoading` true, and a stream that is still alive
+         * keeps `isLoading` true until its terminal frame — so a controller left in `abortRef` now
+         * is already a corpse. Clearing it is what lets the attach below (and `loadHistory`) run.
+         */
+        healStaleTurn();
+        if (running === false) {
+          dispatchSend(text, images);
+          return;
+        }
+        interjectRef.current(text);
+        setMessages((prev) => [...prev, {
+          role: 'system',
+          content: t('这一轮还在进行：这条已作为「追加」接在当前这轮后面（按停止可立刻接手）。'),
+        }]);
+        armFollowRef.current(sidRef.current, { skipPull: true });
+      })();
+      return;
+    }
+    setSendBlocked(false);
+    dispatchSend(text, images);
+  }, [isLoading, dispatchSend, healStaleTurn, serverTurnRunning]);
 
   const confirmPending = useCallback(() => {
     if (!pendingConfirm || isLoading) return;
@@ -975,6 +1101,21 @@ export function useChat(sessionId?: string | null) {
   const interject = useCallback(async (text: string) => {
     const value = text.trim();
     if (!value) return;
+    /*
+     * 追加只对「真的在跑」的那一轮有意义。
+     *
+     * 服务端没在跑时 `/api/chat/interject` 照样回 ok —— 文本进了历史里的 `[用户补充]` 行，而那一行
+     * 永远不会被读到（没有在跑的一轮会去读它）。用户看到自己的话躺在记录里、等不到回复，这就是
+     * 「发出去没反应」。所以先问一次：没在跑就归位本地状态，当成一条新消息真的发出去。
+     *
+     * 问不到（null）时照旧发，让这次 POST 自己去失败 —— 那条「追加失败」比静默更诚实。
+     */
+    const running = await serverTurnRunning();
+    if (running === false) {
+      healStaleTurn();
+      dispatchSend(value);
+      return;
+    }
     setMessages((prev) => [...prev, { role: 'user', content: value }]);
     try {
       await fetchJSON(withSid('/api/chat/interject'), {
@@ -987,7 +1128,9 @@ export function useChat(sessionId?: string | null) {
         { role: 'system', content: `追加失败：${(err as Error).message}` },
       ]);
     }
-  }, []);
+  }, [serverTurnRunning, healStaleTurn, dispatchSend]);
+  /* 发送路径要在「服务端说在跑」时把这条字接上去，而它定义在上面。 */
+  interjectRef.current = interject;
 
   /**
    * Rewind the conversation to (and including) the given message index: that
@@ -1068,7 +1211,7 @@ export function useChat(sessionId?: string | null) {
    * user comes back, poll until the turn finishes and then load the result.
    * A local stream (abortRef set) is the live view — don't overwrite it.
    */
-  const armFollow = useCallback((sid: string) => {
+  const armFollow = useCallback((sid: string, opts?: { skipPull?: boolean }) => {
     if (followRef.current) { clearInterval(followRef.current); followRef.current = null; }
     if (!sid || abortRef.current) return;
     const pull = async () => {
@@ -1090,19 +1233,33 @@ export function useChat(sessionId?: string | null) {
     void (async () => {
       try {
         const st = await fetchJSON<{ running: boolean }>(withSid('/api/chat/running', sid));
-        if (sidRef.current !== sid || abortRef.current) return;
+        if (sidRef.current !== sid) return;
         if (!st.running) {
           /*
            * 自愈。重启、崩溃、换窗口之后，界面可能还留着上一次的 isLoading ——
-           * 那时发送会被静默拒绝，用户看到的就是"这条会话发不出消息了"。
+           * 那时发送会被拒绝，用户看到的就是「这条会话发不出消息了」。
            * 服务端说没在跑（running 是内存态，重启即假），就把本地状态归位。
+           *
+           * 这里**不问 abortRef**：一条死掉的流正压在它上面，而它同时是 loadHistory 与下面那一段
+           * 的门 —— 自愈要是也被它挡住，就等于给「自愈不生效」上了把锁。走到这里的前提是服务端说
+           * 最后几帧可能还在路上，而盘上已经是完整的。
            */
-          setIsLoading(false);
-          setStalled(false);
+          healStaleTurn();
+          /*
+           * 不回读盘上那份记录。用户正在读的那半截回复还没落盘（那一轮没写完），拿盘上的覆盖它
+           * 就是把正文擦掉 —— stream-integrity.test.tsx 那条判据立的正是这件事。盘上那份由下一次
+           * loadHistory（切会话、重开）去对；自愈只负责让这条会话重新发得出消息。
+           */
           return;
         }
+        if (abortRef.current) return;
         setIsLoading(true);
-        await pull();
+        /*
+         * 回读盘上记录会把「还没落盘的本地行」擦掉：刚刚接成「追加」的那句话还在服务端的排队里，
+         * 而盘上那份当然没有它 —— 屏幕上看起来就是被吞了。所以发送路径传 skipPull：先让 attach
+         * 把正在跑的那一轮重放出来，那句话由服务端自己落盘后再出现。
+         */
+        if (!opts?.skipPull) await pull();
         const startPolling = () => {
         if (sidRef.current !== sid || abortRef.current) return;
         followRef.current = setInterval(() => {

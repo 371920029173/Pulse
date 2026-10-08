@@ -31,7 +31,7 @@
  *
  *   Never write a value the loader would not read back intact.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 /**
@@ -42,6 +42,22 @@ import { dirname, join } from 'node:path';
  * into place.
  */
 let writeSeq = 0;
+
+/**
+ * What this process last wrote, per path — so an unchanged save can be skipped.
+ *
+ * `persistHistory()` is called from ~25 routes and again every couple of seconds while a turn
+ * streams, and every save rewrites the WHOLE store: the session file holds every conversation's
+ * transcript, so it is megabytes. Measured on a real workspace: 5.3 MB rewritten per save,
+ * several times a minute, for content that had not changed at all — and when the workspace sits
+ * in an indexed place (a folder on the Desktop), each rewrite also costs an index update and an
+ * antivirus re-scan, which is what the user sees as the machine stalling.
+ *
+ * Skipping only when the bytes are identical AND the file on disk is still the one we left (same
+ * size, same mtime) keeps the old behaviour for a file that was edited by hand or by another
+ * process: that write still happens.
+ */
+const lastWritten = new Map<string, { text: string; size: number; mtimeMs: number }>();
 
 export interface LoadOutcome<T> {
   data: T;
@@ -245,11 +261,28 @@ export function saveStateFile<T>(
 ): void {
   if (opts.validate) opts.validate(data);
 
+  const text = JSON.stringify(data, null, 2) + '\n';
+  const previous = lastWritten.get(path);
+  if (previous && previous.text === text) {
+    try {
+      const now = statSync(path);
+      if (now.size === previous.size && now.mtimeMs === previous.mtimeMs) return;
+    } catch {
+      // Missing or unreadable: fall through and write it.
+    }
+  }
+
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${++writeSeq}.tmp`;
   try {
-    writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8');
+    writeFileSync(tmp, text, 'utf8');
     renameSync(tmp, path);
+    try {
+      const stat = statSync(path);
+      lastWritten.set(path, { text, size: stat.size, mtimeMs: stat.mtimeMs });
+    } catch {
+      lastWritten.delete(path);
+    }
   } catch (err) {
     try {
       rmSync(tmp, { force: true });
