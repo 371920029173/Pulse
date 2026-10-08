@@ -13,6 +13,7 @@ import { loadShortcuts, matchesChord, type ShortcutMap } from '../lib/shortcuts'
 import { AskCard } from './AskCard';
 import { SKILL_PROFILES, type SkillProfileId } from '../lib/skills';
 import { highlight } from '../lib/highlight';
+import { loadDraft, saveDraft } from '../lib/draft';
 
 export type { SkillProfileId } from '../lib/skills';
 
@@ -52,6 +53,12 @@ interface ChatProps {
   onDraftConsumed?: () => void;
   /** Title of the active conversation, shown in the header. */
   sessionTitle?: string | null;
+  /** 上一轮长时间没有进展（看门狗判定）—— 提示条据此出现。 */
+  stalled?: boolean;
+  /** 刚才有一次发送被"上一轮还在进行"挡住了 —— 必须让用户看见。 */
+  sendBlocked?: boolean;
+  /** 草稿按会话分键存在 localStorage；关掉窗口再回来还在。 */
+  draftKey?: string | null;
   /**
    * Present only in work-group mode: the agents sharing this conversation.
    * Rendered as a strip so you can see who is thinking / who has spoken.
@@ -931,6 +938,9 @@ export function Chat({
   draftInsert,
   onDraftConsumed,
   sessionTitle,
+  stalled,
+  sendBlocked,
+  draftKey,
   groupPeers,
   onDropPaths,
   onImportContext,
@@ -943,6 +953,21 @@ export function Chat({
   onToggleFocus,
 }: ChatProps) {
   const [input, setInput] = useState('');
+
+  /*
+   * 草稿跟着会话走。
+   *
+   * 抱怨很具体："关闭窗口后不会保留窗口内未发送的消息"。所以存 localStorage
+   * （sessionStorage 的生命周期就是那个窗口，正是要修的行为），按会话分键，
+   * 切回来时把草稿放回输入框；发送后 input 变空，saveDraft 顺手把键删掉。
+   */
+  useEffect(() => {
+    setInput(loadDraft(draftKey));
+  }, [draftKey]);
+
+  useEffect(() => {
+    saveDraft(draftKey, input);
+  }, [draftKey, input]);
   const [dragging, setDragging] = useState(false);
   /*
    * Files waiting to be sent with the next message.
@@ -1463,20 +1488,38 @@ export function Chat({
       ) : null}
 
       {pendingConfirm && (
-        <div className={styles.confirmBar}>
-          <div>
-            <div className={styles.confirmTitle}>需要确认</div>
-            <div className={styles.confirmSummary}>
-              {pendingConfirm.tool}: {pendingConfirm.summary}
-            </div>
-            <div className={styles.confirmTicket}>{pendingConfirm.ticket_id}</div>
+        <div className={styles.confirmBar} role="dialog" aria-label={t('需要确认')} data-surface="confirm">
+          <div className={styles.confirmHead}>
+            <span className={styles.confirmHeadIcon} aria-hidden>⚠</span>
+            <span>{t('需要确认')}</span>
           </div>
+          <div className={styles.confirmSummary}>
+            <code className={styles.confirmTool}>{pendingConfirm.tool}</code> {pendingConfirm.summary}
+          </div>
+          <div className={styles.confirmTicket}>{pendingConfirm.ticket_id}</div>
           <div className={styles.confirmActions}>
-            <button className={styles.confirmYes} onClick={onConfirm} disabled={isLoading}>确认</button>
-            <button className={styles.confirmNo} onClick={onDismissConfirm} disabled={isLoading}>取消</button>
+            <button className={styles.confirmYes} onClick={onConfirm} disabled={isLoading}>{t('确认执行')}</button>
+            <button className={styles.confirmNo} onClick={onDismissConfirm} disabled={isLoading}>{t('取消')}</button>
           </div>
         </div>
       )}
+
+      {/*
+        卡住 / 发不出去时的提示条。
+        "上一轮还在进行"与"这一轮卡住了"是两件事，但用户要做的是同一个动作：要么等，要么停。
+      */}
+      {isLoading && (stalled || sendBlocked) ? (
+        <div className={styles.runNotice} role="status" data-surface="run-notice">
+          <span className={styles.runNoticeText}>
+            {sendBlocked
+              ? t('上一轮还在进行 —— 先停掉它，或者等它结束')
+              : t('这一轮已经 90 秒没有新进展了（长命令也会这样）')}
+          </span>
+          <button type="button" className={styles.runNoticeBtn} onClick={onStop}>
+            {t('打断这一轮')}
+          </button>
+        </div>
+      ) : null}
 
       <AskCard onAnswer={(text) => onSend(text)} />
 

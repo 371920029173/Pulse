@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchJSON, streamSSE } from '../lib/api';
 import { t } from '../lib/i18n';
 
@@ -161,7 +161,7 @@ function attachmentPreviewUrl(path: string): string | undefined {
  * The server stores assistant messages with `tool_calls` (snake_case) and raw
  * `tool` rows; the UI renders tool activity via `toolCalls` and system notes.
  */
-function normalizeHistory(raw: ServerHistoryMessage[]): ChatMessage[] {
+export function normalizeHistory(raw: ServerHistoryMessage[]): ChatMessage[] {
   const nameByCallId = new Map<string, string>();
   for (const m of raw) {
     for (const tc of m.tool_calls ?? []) {
@@ -195,6 +195,14 @@ function normalizeHistory(raw: ServerHistoryMessage[]): ChatMessage[] {
 
     // The plan autopilot resumes a turn with a `[自动续跑]` user message; it is the system talking, not the user.
     if (m.role === 'user' && content.startsWith('[自动续跑]')) return { role: 'system', content: '计划还没做完，自动继续下一步' };
+    /*
+     * 压缩摘要以 user 角色插进历史（协议要求 user/assistant 交替），但它不是用户说的话。
+     * 渲染成用户气泡时，屏幕上会出现一整团几千字的"我说过的话"，看起来就是显示坏了 ——
+     * 用户报的"部分 chat 显示异常"里就有它。归成系统说明（原文仍在会话文件里）。
+     */
+    if (m.role === 'user' && content.startsWith('[压缩记录]')) {
+      return { role: 'system', content: '以上较早的记录已压缩成摘要（模型仍然看得到它）' };
+    }
     // The stuck-loop nudge is persisted (so the next request keeps the same prefix); it is the agent
     // talking to itself, not the user. The prefix is a protocol marker, hence the escapes.
     if (m.role === 'user' && content.startsWith('[\u7cfb\u7edf\u63d0\u793a]')) {
@@ -217,6 +225,15 @@ function normalizeHistory(raw: ServerHistoryMessage[]): ChatMessage[] {
 export function useChat(sessionId?: string | null) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  /**
+   * 上一轮还在进行，用户又按了发送 —— 界面上必须说出来。
+   *
+   * 原来这里是静默 return：用户敲了字、按了发送，什么都没有发生（用户报的正是
+   * "无法发送消息"）。静默的拒绝最难查，因为界面看起来一切正常。
+   */
+  const [sendBlocked, setSendBlocked] = useState(false);
+  /** 开着 isLoading 却长时间没有任何新内容 —— 大概率是那一轮卡住了。 */
+  const [stalled, setStalled] = useState(false);
   /**
    * Live progress of a tool call that has not finished yet, keyed by `tool_call_id`.
    *
@@ -661,8 +678,32 @@ export function useChat(sessionId?: string | null) {
     };
   }, []);
 
+  /*
+   * 90 秒看门狗。
+   *
+   * 聊天流的空闲超时被显式关掉了（idleTimeoutMs: 0 —— 因为一次工具调用可能真的跑很久），
+   * 代价是：连接死了以后界面会永远停在"运行中"。这里按"有没有新内容"来判断，而不是按
+   * 连接是否活着：只要有新帧就会重置计时（依赖里带上 messages，流式每来一段都会重置）。
+   */
+  useEffect(() => {
+    if (!isLoading) { setStalled(false); return; }
+    const t = setTimeout(() => setStalled(true), 90_000);
+    return () => clearTimeout(t);
+  }, [isLoading, messages]);
+
+  /* 一轮结束后，之前那次"发不出去"的提示就该消失。 */
+  useEffect(() => {
+    if (!isLoading) setSendBlocked(false);
+  }, [isLoading]);
+
   const sendMessage = useCallback((text: string, images?: ChatMessage['images']) => {
-    if ((!text.trim() && !images?.length) || isLoading) return;
+    if (!text.trim() && !images?.length) return;
+    if (isLoading) {
+      // 不静默吞掉：界面会显示"上一轮还在进行"，并提供打断按钮。
+      setSendBlocked(true);
+      return;
+    }
+    setSendBlocked(false);
 
     const userMsg: ChatMessage = { role: 'user', content: text, ...(images?.length ? { images } : {}) };
     setMessages((prev) => [...prev, userMsg]);
@@ -1049,7 +1090,17 @@ export function useChat(sessionId?: string | null) {
     void (async () => {
       try {
         const st = await fetchJSON<{ running: boolean }>(withSid('/api/chat/running', sid));
-        if (sidRef.current !== sid || !st.running || abortRef.current) return;
+        if (sidRef.current !== sid || abortRef.current) return;
+        if (!st.running) {
+          /*
+           * 自愈。重启、崩溃、换窗口之后，界面可能还留着上一次的 isLoading ——
+           * 那时发送会被静默拒绝，用户看到的就是"这条会话发不出消息了"。
+           * 服务端说没在跑（running 是内存态，重启即假），就把本地状态归位。
+           */
+          setIsLoading(false);
+          setStalled(false);
+          return;
+        }
         setIsLoading(true);
         await pull();
         const startPolling = () => {
@@ -1136,6 +1187,8 @@ export function useChat(sessionId?: string | null) {
     pendingPatches,
     clearHistory,
     resetLocal,
+    stalled,
+    sendBlocked,
     loadHistory,
     stopStreaming,
     interject,

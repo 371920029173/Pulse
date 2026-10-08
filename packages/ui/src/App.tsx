@@ -79,6 +79,33 @@ function useIsSheDesktop(): boolean {
 }
 
 
+/**
+ * 壁纸视频。
+ *
+ * 原来就是一个裸的 <video autoPlay loop>：每个窗口都在持续解码 —— 开三个窗口就有三路
+ * 视频在跑，同时还有三份渲染在抢 CPU，表现就是"多窗口卡顿、壁纸播放开始一顿一顿"。
+ * 窗口不可见（最小化、切到后台标签）时没人看得见它，直接暂停；回到可见时再续播。
+ */
+function BackgroundVideo({ src }: { src: string }) {
+  const ref = useRef<HTMLVideoElement | null>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const sync = () => {
+      if (document.hidden) {
+        el.pause();
+      } else {
+        // play() 可能被拒绝（自动播放策略），拒了就保持暂停，不要抛出。
+        void el.play().catch(() => {});
+      }
+    };
+    sync();
+    document.addEventListener('visibilitychange', sync);
+    return () => document.removeEventListener('visibilitychange', sync);
+  }, [src]);
+  return <video ref={ref} className="she-bg-video" src={src} autoPlay loop muted playsInline />;
+}
+
 export function App() {
   const isDesktop = useIsSheDesktop();
   useEffect(() => {
@@ -968,7 +995,7 @@ export function App() {
    */
   const backgroundLayer =
     bg.enabled && bg.meta.kind === 'video' && bg.meta.url ? (
-      <video className="she-bg-video" src={bg.meta.url} autoPlay loop muted playsInline />
+      <BackgroundVideo src={bg.meta.url} />
     ) : null;
 
   /**
@@ -1228,6 +1255,9 @@ export function App() {
               onSkillProfile={(p) => { void handleSkillProfile(p); }}
               thinkingLevel={thinkingLevel}
               onThinkingLevel={(l) => { void handleThinkingLevel(l); }}
+              stalled={chat.stalled}
+              sendBlocked={chat.sendBlocked}
+              draftKey={activeSessionId}
               onSend={inGroupMode ? clusterChat.send : chat.sendMessage}
               onInterject={inGroupMode ? clusterChat.send : chat.interject}
               onStop={inGroupMode ? clusterChat.stop : chat.stopStreaming}

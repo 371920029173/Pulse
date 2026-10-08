@@ -111,6 +111,15 @@
   display: flex;
   animation: sheBubbleIn 380ms var(--ease-sheet) both;
   will-change: transform, opacity;
+  /*
+   * 长会话的卡顿主要来自"每一行都在参与布局与绘制"：500 行的会话里，滚动时浏览器
+   * 要处理每一行的 markdown、代码高亮和工具卡片。content-visibility: auto 让屏幕外的
+   * 行跳过布局与绘制，DOM 仍然完整保留 —— 所以"第一条和最后一条都在页面上"这条判据
+   * 依然成立，只是没被画出来。contain-intrinsic-size 给一个占位高度，
+   * 否则滚动条长度会在滚动时不停跳。
+   */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 96px;
 }
 
 @keyframes fadeIn {
@@ -788,7 +797,14 @@
 
 .prose {
   font-size: 13.5px;
-  line-height: 1.68;
+  /*
+   * 行长上限（measure）。
+   *
+   * 宽屏 + 侧栏收起时一行正文能到 150 字符以上，眼睛每次换行都要重新找行首，
+   * 读长回答很快就累 —— 用户说的"注意力涣散且烦躁"就是这个。74ch 是常见正文宽度。
+   */
+  max-width: min(100%, 74ch);
+  line-height: 1.75;
   color: var(--text-primary);
   max-width: 100%;
   min-width: 0;
@@ -2027,3 +2043,36 @@
 :global(html[data-theme="light"]) .thinkSlider {
   background: color-mix(in srgb, var(--bg-tertiary) 48%, transparent);
 }
+
+/* ── 卡住 / 发不出去的提示条（用户报过"敲了没反应"）── */
+.runNotice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 10px 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--warning, #d29922) 45%, transparent);
+  background: color-mix(in srgb, var(--warning, #d29922) 12%, transparent);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.runNoticeText { flex: 1 1 auto; min-width: 0; word-break: break-word; }
+.runNoticeBtn {
+  flex: 0 0 auto;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--fill-control);
+  color: var(--text-primary);
+  font-size: 12px;
+  height: 24px;
+  padding: 0 10px;
+  cursor: pointer;
+}
+.runNoticeBtn:hover { background: var(--bg-hover); }
+
+/* ── 需要确认：有图标、有层级、有阴影的卡片（原来是一条光秃秃的横幅）── */
+.confirmHead { display: flex; align-items: center; gap: 8px; font-weight: 650; font-size: 13px; }
+.confirmHeadIcon { font-size: 15px; line-height: 1; }
+.confirmTool { font-size: 11.5px; opacity: 0.85; }
