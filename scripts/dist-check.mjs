@@ -24,7 +24,7 @@
  * would have caught all three.
  * ─────────────────────────────────────────────────────────────────────────────
  */
-import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -221,6 +221,68 @@ const isBundleInput = (p) => !/(^|[\\/])__tests__[\\/]/.test(p) && !/\.(test|spe
     problems.length === 0,
     problems.slice(0, 4).join('；'),
   );
+}
+
+/*
+ * 桌面应用加载的是**另一份**产物：packages/desktop/runtime/。
+ *
+ * 2026-10-08 实测踩到：UI 改好、packages/ui/dist 重建、check:offline 全绿，桌面上却还是旧界面
+ * —— runtime 里的 bundle 还是上一次 stage 的（index-CAV0rsmn.js vs index-qZBTbf4W.js）。
+ * 这份副本之前不受任何检查，于是「改了看不到效果」整类问题都能绕过门禁。
+ *
+ * 没有 staged runtime 的机器（CI、刚克隆）跳过：那不是错误，只是没打包过。
+ */
+{
+  const RUNTIME = join(ROOT, 'packages', 'desktop', 'runtime');
+  const RUNTIME_ASSETS = join(RUNTIME, 'ui', 'assets');
+  const nameOf = (dir, ext) =>
+    existsSync(dir) ? readdirSync(dir).filter((n) => n.endsWith(ext)).sort() : [];
+
+  if (existsSync(RUNTIME_ASSETS)) {
+    const stagedJs = nameOf(RUNTIME_ASSETS, '.js');
+    const distJs = nameOf(ASSETS, '.js');
+    const stagedCss = nameOf(RUNTIME_ASSETS, '.css');
+    const distCss = cssFile ? [cssFile] : [];
+    check(
+      'staged runtime 的界面产物与 packages/ui/dist 是同一份（否则桌面应用加载旧界面）',
+      stagedJs.length > 0 && stagedJs.join(',') === distJs.join(','),
+      `runtime: ${stagedJs.join(',') || '(空)'} vs dist: ${distJs.join(',') || '(空)'} —— 跑 node scripts/stage-desktop-runtime.mjs`,
+    );
+    check(
+      'staged runtime 的样式产物与 packages/ui/dist 是同一份',
+      stagedCss.length > 0 && stagedCss.join(',') === distCss.join(','),
+      `runtime: ${stagedCss.join(',') || '(空)'} vs dist: ${distCss.join(',') || '(空)'}`,
+    );
+  }
+
+  /*
+   * 后端是 pnpm deploy 出来的目录（不是文件拷贝），比不了文件名，就比时间：
+   * 任何后端源码比 staged 产物新，就说明这次改动没进桌面应用。
+   */
+  const stagedServer = join(RUNTIME, 'server', 'dist', 'index.js');
+  if (existsSync(stagedServer)) {
+    const stagedAt = statSync(stagedServer).mtimeMs;
+    let newest = 0;
+    let newestPath = '';
+    const walk = (dir) => {
+      if (!existsSync(dir)) return;
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) { walk(p); continue; }
+        if (!/\.ts$/.test(e.name) || /\.test\.ts$/.test(e.name)) continue;
+        const m = statSync(p).mtimeMs;
+        if (m > newest) { newest = m; newestPath = p; }
+      }
+    };
+    for (const pkg of ['server', 'agent-runtime', 'shared', 'sandbox', 'kb']) {
+      walk(join(ROOT, 'packages', pkg, 'src'));
+    }
+    check(
+      'staged 后端产物不比后端源码旧（否则桌面应用跑的是旧后端）',
+      newest <= stagedAt,
+      `最新源码 ${newestPath || '(无)'} 于 ${new Date(newest).toISOString().slice(0, 16)}，产物于 ${new Date(stagedAt).toISOString().slice(0, 16)} —— 跑 node scripts/stage-desktop-runtime.mjs`,
+    );
+  }
 }
 
 console.log('');
