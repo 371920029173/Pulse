@@ -150,11 +150,18 @@ export function formatReport(summary) {
   lines.push(`  通过率        ${totals.passed}/${totals.samples} (${pct(totals.rate)})   门槛 ${pct(threshold)}`);
   if (repeats > 1) {
     lines.push(`  每任务重跑    ${repeats} 次   样本 ${totals.samples}   任务 ${totals.tasks}`);
-    lines.push(`  用量          ${Math.round(totals.tokens.mean)}±${Math.round(totals.tokens.sd)} tokens   （单次全套均值）`);
+    lines.push(`  用量          每任务 ${Math.round(totals.tokens.mean)}±${Math.round(totals.tokens.sd)} tokens`);
   } else {
-    lines.push(`  用量          ${totals.tokens.mean} tokens`);
+    lines.push(`  用量          每任务 ${Math.round(totals.tokens.mean)} tokens`);
   }
-  lines.push(`  总耗时        ${secs(totals.ms.mean * repeats)}`);
+  /*
+   * 这个"单次全套"是按任务数**推算**的，标签必须这么写。
+   *
+   * 之前这里把每任务均值直接印成「用量 X tokens」与「总耗时 T」，读起来就是整套一次跑的开销 ——
+   * 实测那一轮 15 个任务真实花了约 106 万 tokens / 约 95 秒，而这两行印的是 70748 / 6.1s，小了
+   * 「任务数」倍。README 里「改动前后跑一次评测，对比总 tokens」正是拿这几行比的。
+   */
+  lines.push(`  单次全套      约 ${Math.round(totals.tokens.mean * totals.tasks)} tokens / ${secs(totals.ms.mean * totals.tasks)}（${totals.tasks} 个任务，按每任务均值推算）`);
 
   /*
    * The verdict, in the order that matters: a dead task first, because it is the
