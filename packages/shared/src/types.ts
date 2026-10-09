@@ -481,6 +481,11 @@ export type SandboxJobStatus = 'running' | 'done' | 'killed';
  * every wait, and the reader (a model with a context budget) pays for it every time.
  */
 export interface SandboxJobView {
+  /**
+   * True when a `shell_wait` returned because the USER stopped the turn, not because the job
+   * reached an outcome. The job is still running: the wait ended, the work did not.
+   */
+  interruptedWait?: boolean;
   id: string;
   command: string;
   status: SandboxJobStatus;

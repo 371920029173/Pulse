@@ -427,3 +427,40 @@ describe('前台超时：留在后台，而不是被杀掉', () => {
     }
   });
 });
+
+
+describe('停止这一轮：等待要结束，任务不因此被杀', () => {
+  it('【关键】abort 打断 shell_wait：很快返回、说清任务仍在跑、任务确实还在', async () => {
+    /*
+     * 用户报「都 400 秒了…先停下说一下情况」，而那一轮还在 shell_wait 里。
+     * 根因：停止只打断了模型请求（provider 拿到 signal），工具里的等待没有 signal ——
+     * 一轮要等 shell_wait 返回（最长 10 分钟）才结束。
+     *
+     * 语义要点：**停的是等待，不是任务**。所以这条判据同时要求三件事：很快返回、明说任务仍在跑、
+     * 任务真的还能被继续等（不能被顺手杀掉 —— 那会丢掉一整轮的算力）。
+     */
+    const started = await tools.execute('shell', {
+      command: nodeEval('setTimeout(()=>console.log("LONG-DONE"),60000)'),
+      background: true,
+    });
+    const id = jobIdOf(started);
+
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 400);
+    const t0 = Date.now();
+    const interrupted = await tools.execute('shell_wait', { id, wait_ms: 60000 }, { signal: ac.signal });
+    const took = Date.now() - t0;
+    clearTimeout(timer);
+
+    assert.ok(took < 5000, `abort 之后应当很快返回，实测 ${took}ms`);
+    assert.match(interrupted, /等待是被用户停止的/, interrupted);
+    assert.match(interrupted, /还在运行/, interrupted);
+    assert.ok(!interrupted.includes('LONG-DONE'), '任务没结束，不该出现它的收尾输出');
+
+    // 任务没有被杀：还能继续等它
+    const still = await tools.execute('shell_wait', { id, wait_ms: 0 });
+    assert.match(still, /还在运行/, still);
+
+    await tools.execute('shell_kill', { id });
+  });
+});

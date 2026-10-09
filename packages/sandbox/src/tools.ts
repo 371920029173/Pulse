@@ -112,7 +112,7 @@ function withoutBom(text: string): string {
 
 export interface ToolSet {
   definitions: ToolDefinition[];
-  execute: (name: string, args: Record<string, unknown>) => Promise<string>;
+  execute: (name: string, args: Record<string, unknown>, ctx?: ToolCallContext) => Promise<string>;
   /**
    * Stop anything this toolset started that outlives a single call.
    *
@@ -240,6 +240,10 @@ function renderJobView(view: SandboxJobView): string {
     head.push(`job_id=${view.id} 已结束（耗时 ${seconds(view.elapsedMs)} 秒）。`);
   }
   if (view.matched) head.push('（pattern 匹配到了，所以提前返回；任务本身可能还在跑。）');
+  if (view.interruptedWait) {
+    head.push('（这次等待是被用户停止的：任务仍在后台跑（要真的杀掉用 shell_kill id=' + view.id
+      + '），所以下面这些不是它的结局。）');
+  }
   if (view.droppedBytes) {
     head.push(`（较早的 ${view.droppedBytes} 字节输出被丢弃，没有发给你 —— 下面看到的是最近的。）`);
   }
@@ -330,6 +334,14 @@ const CONTROL_TOKEN_REASON =
   '控制面凭据不能直接读取：它决定沙箱档位能被谁改，读得到就等于给自己换一套边界。'
   + '需要改设置请说明想改什么、为什么，由用户在自己的界面上决定 —— 这不是你可以自己开的门。';
 
+/**
+ * Per-call context, threaded by `execute`. Kept to what a tool actually needs:
+ * `signal` is the turn's abort signal, so a WAIT can end when the user stops the turn.
+ */
+export interface ToolCallContext {
+  signal?: AbortSignal;
+}
+
 export function createTools(
   shell: SandboxShell,
   workspaceRoot: string,
@@ -364,9 +376,9 @@ export function createTools(
   // 同理，但保护的是"能改边界"的那份凭据 —— 读得到就等于给自己换一套边界。
   if (opts?.controlTokenPath) shell.protectDatabase(opts.controlTokenPath, CONTROL_TOKEN_REASON);
 
-  const toolMap = new Map<string, { def: ToolDefinition; fn: (args: Record<string, unknown>) => Promise<string> }>();
+  const toolMap = new Map<string, { def: ToolDefinition; fn: (args: Record<string, unknown>, ctx?: ToolCallContext) => Promise<string> }>();
 
-  function reg(def: ToolDefinition, fn: (args: Record<string, unknown>) => Promise<string>) {
+  function reg(def: ToolDefinition, fn: (args: Record<string, unknown>, ctx?: ToolCallContext) => Promise<string>) {
     toolMap.set(def.name, { def, fn });
   }
 
@@ -485,7 +497,7 @@ export function createTools(
         required: ['id'],
       },
     },
-    async (args) => {
+    async (args, ctx) => {
       const id = String(args.id ?? '').trim();
       if (!id) return 'Error: id 必填：shell_wait 需要 shell 返回的 job_id。';
       const pattern = typeof args.pattern === 'string' && args.pattern ? args.pattern : undefined;
@@ -499,6 +511,8 @@ export function createTools(
       }
       const view = await shell.waitJob(id, {
         waitMs: typeof args.wait_ms === 'number' ? args.wait_ms : undefined,
+        // 用户停止这一轮时，等待要结束；任务本身不因此被杀（renderJobView 会说清）。
+        signal: ctx?.signal,
         pattern,
         // A blocked wait that reports nothing looks like a hang. The UI shows these under the
         // running tool card, which is how "still waiting, 42s" is visible while it happens.
@@ -1082,7 +1096,7 @@ function boundaryDecision(name: string, args: Record<string, unknown>): Boundary
   return { kind: 'allow' };
 }
 
-async function execute(name: string, args: Record<string, unknown>): Promise<string> {
+async function execute(name: string, args: Record<string, unknown>, ctx?: ToolCallContext): Promise<string> {
     const entry = toolMap.get(name);
     if (!entry) {
       return `Error: unknown tool "${name}"`;
@@ -1152,7 +1166,7 @@ async function execute(name: string, args: Record<string, unknown>): Promise<str
       if (decision.kind === 'confirm' && _confirm_ticket) {
         (rest as Record<string, unknown>)._approved = true;
       }
-      return await entry.fn(rest);
+      return await entry.fn(rest, ctx);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return `Error: ${msg}`;

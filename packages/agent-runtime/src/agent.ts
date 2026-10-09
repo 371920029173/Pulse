@@ -624,7 +624,8 @@ export class Agent {
       // `shell` is where intentional failures (a test run to watch it fail) happen, so it advertises
       // the error book's `expect_failure` switch; every tool honours it (see `recordMistake` callers).
       this.allToolDefs.push(def.name === 'shell' ? withExpectFailureParam(def) : def);
-      this.executors.set(def.name, (args) => this.sandboxTools.execute(def.name, args));
+      /* 读调用时的 aborter：executor 是构造时注册的，而 aborter 每轮新建 —— 这样「停止」能打断工具里的等待。 */
+      this.executors.set(def.name, (args) => this.sandboxTools.execute(def.name, args, { signal: this.aborter?.signal }));
     }
 
     /*

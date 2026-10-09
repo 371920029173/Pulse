@@ -1925,7 +1925,7 @@ export class SandboxShell {
    */
   async waitJob(
     id: string,
-    opts?: { waitMs?: number; pattern?: string; onTick?: (elapsedMs: number) => void },
+    opts?: { waitMs?: number; pattern?: string; onTick?: (elapsedMs: number) => void; signal?: AbortSignal },
   ): Promise<SandboxJobView> {
     const proc = this.jobs.get(id);
     if (!proc) return notFoundJob(id);
@@ -1945,6 +1945,15 @@ export class SandboxShell {
       // Bound what THIS call collects. See `JOB_READ_CHARS`: the loop below keeps reading while the
       // job runs, so without this a long wait returns the job's whole log in one result.
       dropped += capAccumulated(out, err);
+
+      /*
+       * 用户按了停止：这一等就该结束 —— 但要如实说清"停的是等待，不是任务"。
+       * `interruptedWait` 让 renderJobView 明说这一点，否则这条结果会被读成"任务有了结局"。
+       * 检查放在这里而不是去打断 sleep：`idle()` 每次最多 250ms，所以响应仍在亚秒级。
+       */
+      if (opts?.signal?.aborted) {
+        return { ...read, stdout: out.join(''), stderr: err.join(''), droppedBytes: dropped, interruptedWait: true };
+      }
 
       const matched = opts?.pattern ? this.matchesTail(proc, opts.pattern) : false;
       if (read.status !== 'running' || matched || read.matched || waitMs === 0) {
