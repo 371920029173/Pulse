@@ -232,8 +232,6 @@ export function useChat(sessionId?: string | null) {
    * "无法发送消息"）。静默的拒绝最难查，因为界面看起来一切正常。
    */
   const [sendBlocked, setSendBlocked] = useState(false);
-  /** 开着 isLoading 却长时间没有任何新内容 —— 大概率是那一轮卡住了。 */
-  const [stalled, setStalled] = useState(false);
   /**
    * Live progress of a tool call that has not finished yet, keyed by `tool_call_id`.
    *
@@ -684,18 +682,6 @@ export function useChat(sessionId?: string | null) {
     };
   }, []);
 
-  /*
-   * 90 秒看门狗。
-   *
-   * 聊天流的空闲超时被显式关掉了（idleTimeoutMs: 0 —— 因为一次工具调用可能真的跑很久），
-   * 代价是：连接死了以后界面会永远停在"运行中"。这里按"有没有新内容"来判断，而不是按
-   * 连接是否活着：只要有新帧就会重置计时（依赖里带上 messages，流式每来一段都会重置）。
-   */
-  useEffect(() => {
-    if (!isLoading) { setStalled(false); return; }
-    const t = setTimeout(() => setStalled(true), 90_000);
-    return () => clearTimeout(t);
-  }, [isLoading, messages]);
 
   /* 一轮结束后，之前那次"发不出去"的提示就该消失。 */
   useEffect(() => {
@@ -737,7 +723,6 @@ export function useChat(sessionId?: string | null) {
     abortRef.current?.abort();
     abortRef.current = null;
     setIsLoading(false);
-    setStalled(false);
   }, []);
 
   /**
@@ -1344,7 +1329,6 @@ export function useChat(sessionId?: string | null) {
     pendingPatches,
     clearHistory,
     resetLocal,
-    stalled,
     sendBlocked,
     loadHistory,
     stopStreaming,

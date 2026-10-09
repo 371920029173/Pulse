@@ -117,7 +117,6 @@ registerDictionary('en', {
   '展开 {verb} 的详情': 'Expand {verb} details',
   '思维链': 'Reasoning',
   '上一轮还在进行 —— 先停掉它，或者等它结束': 'The previous turn is still running — stop it first, or wait',
-  '这一轮已经 90 秒没有新进展了（长命令也会这样）': 'No progress for 90 seconds (a long command can look like this too)',
   '打断这一轮': 'Interrupt this turn',
   '确认执行': 'Confirm',
   '以上较早的记录已压缩成摘要（模型仍然看得到它）': 'Earlier records were compacted into a summary (the model still sees it)',

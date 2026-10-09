@@ -89,12 +89,18 @@ describe('发不出去的时候要说话', () => {
     expect(onStop).toHaveBeenCalled();
   });
 
-  it('90 秒没进展 → 说清是"卡住"而不是"你在跑长命令"', () => {
+  it('长命令跑着（isLoading 但没有别的理由）→ 不许冒出提示条', () => {
+    /*
+     * 用户报「这个提示一直存在，但其实根本不需要」。它会亮，是因为一次工具调用本来就几分钟
+     * 没有新帧（长命令、长思考都是），而那正是最常见的路径 —— 在正常路径上就会亮的警告，
+     * 只会训练人忽略它。出口没丢：运行中发送键本来就是「停止」。
+     */
     const { container } = render(<Chat {...chatProps({
-      isLoading: true, stalled: true,
+      isLoading: true,
       messages: [{ role: 'user', content: '在吗' } as ChatMessage],
     })} />);
-    expect(container.textContent ?? '').toContain('90 秒');
+    expect(container.querySelector('[data-surface="run-notice"]'), '长命令跑着时冒出了提示条').toBeNull();
+    expect(container.querySelector('button[aria-label="停止"]'), '停止入口不见了').toBeTruthy();
   });
 
   it('空闲时不显示任何提示条（不能变成常驻噪音）', () => {

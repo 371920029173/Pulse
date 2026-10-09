@@ -1255,7 +1255,6 @@ export function App() {
               onSkillProfile={(p) => { void handleSkillProfile(p); }}
               thinkingLevel={thinkingLevel}
               onThinkingLevel={(l) => { void handleThinkingLevel(l); }}
-              stalled={chat.stalled}
               sendBlocked={chat.sendBlocked}
               draftKey={activeSessionId}
               onSend={inGroupMode ? clusterChat.send : chat.sendMessage}
