@@ -1050,16 +1050,43 @@ export function Chat({
     return () => el.removeEventListener('scroll', onScroll);
   }, []);
 
+  /**
+   * Land on the newest row, and STAY there.
+   *
+   * `scrollIntoView({ behavior: 'smooth' })` stopped being enough the moment the rows got
+   * `content-visibility: auto` (`.messageRow`, styles/Chat.module.css): rows outside the viewport are
+   * laid out at the `contain-intrinsic-size` guess, so the offset a smooth animation aims at is stale
+   * as soon as the animation passes a row and its real height replaces the guess. The visible symptom
+   * was the user's report: press 回到最新 and land short of the newest message.
+   *
+   * Instant assignment, then re-assign while the height is still settling (each pass realises the rows
+   * near the bottom, so the next `scrollHeight` is the truer one). No smooth: an animation cannot
+   * chase a target that moves under it.
+   */
+  const landAtLatest = useCallback(() => {
+    const el = messagesRef.current;
+    if (!el) return;
+    let passes = 0;
+    const land = () => {
+      el.scrollTop = el.scrollHeight;
+      passes += 1;
+      if (passes < 3 && el.scrollHeight - el.scrollTop - el.clientHeight > 2) {
+        requestAnimationFrame(land);
+      }
+    };
+    land();
+  }, []);
+
   useEffect(() => {
     if (!stickToBottomRef.current) return;
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, pendingConfirm, pendingPatch]);
+    landAtLatest();
+  }, [messages, pendingConfirm, pendingPatch, landAtLatest]);
 
   const jumpToLatest = useCallback(() => {
     stickToBottomRef.current = true;
     setAtBottom(true);
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, []);
+    landAtLatest();
+  }, [landAtLatest]);
 
   /*
    * Mention autocomplete.
@@ -1425,7 +1452,7 @@ export function Chat({
         </div>
       ) : null}
 
-      <div className={styles.messages} ref={messagesRef}>
+      <div className={styles.messages} ref={messagesRef} data-surface="transcript">
         {messages.length === 0 ? (
           <div className={styles.emptyMessages}>
             <div className={styles.emptyOrb} aria-hidden />

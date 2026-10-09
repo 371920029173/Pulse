@@ -148,3 +148,42 @@ describe('草稿键', () => {
     expect(loadDraft('sess_a')).toBe('');
   });
 });
+
+
+/**
+ * 「回到最新」必须真的回到最新。
+ *
+ * 用户报的原话：「现在点击"回到最新"，并不能回到最新的」。根因是平滑滚动 + `content-visibility: auto`
+ * 打架：视口外的行按 `contain-intrinsic-size` 估算布局，而平滑动画瞄准的是动画开始那一刻的坐标，
+ * 动画过程中行被真实布局、高度变了，于是落短。
+ *
+ * jsdom 不做排版，所以这里把几何量塞进容器：断言的是**契约**（点完 scrollTop 等于 scrollHeight），
+ * 而不是某个实现细节 —— 旧写法在这条判据下会红，因为 scrollIntoView 在 jsdom 里是被桩掉的空操作，
+ * scrollTop 会留在 0。
+ */
+describe('回到最新：点了必须真的落到底', () => {
+  it('点击后 scrollTop 落到 scrollHeight', () => {
+    const { container } = render(<Chat {...chatProps({
+      messages: [
+        { role: 'user', content: '在吗' } as ChatMessage,
+        { role: 'assistant', content: '在' } as ChatMessage,
+      ],
+    })} />);
+
+    const scroller = container.querySelector('[data-surface="transcript"]') as HTMLElement;
+    expect(scroller, '找不到滚动容器').toBeTruthy();
+    Object.defineProperty(scroller, 'scrollHeight', { value: 1200, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 400, configurable: true });
+    scroller.scrollTop = 0;
+
+    // 先让「不在底部」成立（滚动监听按当前几何量算），按钮才会出现。
+    fireEvent.scroll(scroller);
+    const btn = container.querySelector('button[title="回到最新"]') as HTMLButtonElement;
+    expect(btn, '不在底部时没有给跳转入口').toBeTruthy();
+
+    fireEvent.click(btn);
+
+    expect(scroller.scrollTop, '点了却停在半路（旧写法在 jsdom 下就是 0）').toBe(1200);
+    expect(container.querySelector('button[title="回到最新"]'), '落到底之后按钮就该消失').toBeNull();
+  });
+});
