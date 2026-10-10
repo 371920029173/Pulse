@@ -82,7 +82,7 @@ function PermissionChips({ list }: { list?: string[] }) {
             className={`${styles.permChip} ${DANGEROUS_PERMS.has(p) ? styles.permChipWarn : ''} ${known ? '' : styles.permChipUnknown}`}
             title={known
               ? PERM_LABEL[p]
-              : `运行时不认识这个权限，它不会生效 —— 已知权限：${Object.keys(PERM_LABEL).join(' / ')}`}
+              : t('运行时不认识这个权限，它不会生效 —— 已知权限：{known}', { known: (Object.keys(PERM_LABEL).join(' / ')) })}
           >
             {known ? PERM_LABEL[p] : t('{p}（未知）', { p: (p) })}
           </span>
@@ -381,7 +381,7 @@ export function Dock() {
                     disabled={c.installed || busyKey === `install:${c.dir}`}
                     onClick={() => void install(c.dir)}
                   >
-                    {c.installed ? '已安装' : busyKey === `install:${c.dir}` ? '安装中…' : '安装'}
+                    {c.installed ? t('已安装') : busyKey === `install:${c.dir}` ? t('安装中…') : t('安装')}
                   </button>
                 </div>
               </div>
@@ -414,7 +414,7 @@ export function Dock() {
                 />
               </label>
               <button type="button" className={styles.small} disabled={busyKey === 'scaffold'} onClick={scaffold}>
-                {busyKey === 'scaffold' ? '创建中…' : '创建骨架'}
+                {busyKey === 'scaffold' ? t('创建中…') : t('创建骨架')}
               </button>
             </div>
 
@@ -432,7 +432,7 @@ export function Dock() {
                 />
               </label>
               <button type="button" className={styles.small} disabled={busyKey === 'install-path'} onClick={installFromPath}>
-                {busyKey === 'install-path' ? '安装中…' : '安装'}
+                {busyKey === 'install-path' ? t('安装中…') : t('安装')}
               </button>
             </div>
 
@@ -483,7 +483,7 @@ export function Dock() {
                 ))}
               </div>
               <button type="button" className={styles.small} disabled={busyKey === 'save-source'} onClick={saveEditor}>
-                {busyKey === 'save-source' ? '保存中…' : '保存并重载'}
+                {busyKey === 'save-source' ? t('保存中…') : t('保存并重载')}
               </button>
               <button type="button" className={styles.small} onClick={() => setEditor(null)}>{t('关闭')}</button>
             </div>

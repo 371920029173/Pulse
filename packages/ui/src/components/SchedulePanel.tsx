@@ -205,7 +205,7 @@ export function SchedulePanel({ onClose }: { onClose?: () => void }) {
               <div className={styles.windowDetail}>
                 {snap.workingWindow.start}–{snap.workingWindow.end}
                 {snap.workingWindow.days?.length
-                  ? ` · 周${snap.workingWindow.days.map((d) => DAY_LABELS[d] ?? d).join('')}`
+                  ? t(' · 周{days}', { days: (snap.workingWindow.days.map((d) => DAY_LABELS[d] ?? d).join('')) })
                   : t('· 每天')}
                 {!snap.withinWindow && snap.nextWindowStart
                   ? ` · ${t('下次开窗')} ${new Date(snap.nextWindowStart).toLocaleString()}`

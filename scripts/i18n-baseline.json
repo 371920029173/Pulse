@@ -1,5 +1,5 @@
 {
-  "baseline": 363,
-  "updatedAt": "2026-10-10T17:31:59.646Z",
+  "baseline": 0,
+  "updatedAt": "2026-10-10T18:09:18.908Z",
   "note": "Hardcoded user-facing Chinese strings. Lower this as components are converted; never raise it."
 }

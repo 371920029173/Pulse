@@ -299,7 +299,7 @@ export function Sidebar({
                       ? styles.sessionDotActive
                       : styles.sessionDotIdle
                 }`}
-                title={s.kind === 'cluster' ? '讨论群' : s.id === activeSessionId ? '当前会话' : '普通会话'}
+                title={s.kind === 'cluster' ? t('讨论群') : s.id === activeSessionId ? t('当前会话') : t('普通会话')}
               />
               {editingId === s.id ? (
                 <input

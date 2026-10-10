@@ -930,7 +930,7 @@ export function App() {
     { id: 'trace', title: showTrace ? t('隐藏组结构轨迹') : t('显示组结构轨迹'), group: t('导航'), run: () => setShowTrace((v) => !v) },
     { id: 'cp', title: t('打开检查点时间线'), group: t('工作区'), run: () => setShowCheckpoints(true) },
     { id: 'focus', title: focusChat ? t('退出专注对话') : t('专注对话（放大聊天区）'), group: t('外观'), hint: '\\', run: () => setFocusChat((v) => !v) },
-    { id: 'theme', title: theme === 'dark' ? '切换到浅色主题' : '切换到深色主题', group: t('外观'), hint: 'T', run: () => setTheme((v) => (v === 'dark' ? 'light' : 'dark')) },
+    { id: 'theme', title: theme === 'dark' ? t('切换到浅色主题') : t('切换到深色主题'), group: t('外观'), hint: 'T', run: () => setTheme((v) => (v === 'dark' ? 'light' : 'dark')) },
     { id: 'clear', title: t('清空当前对话'), group: t('会话'), run: () => { void chat.clearHistory(); } },
   ];
 

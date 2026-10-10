@@ -208,7 +208,7 @@ export function ClusterPanel({
                 else if (/完成|done/i.test(text)) setMemberState((s) => ({ ...s, [chunk.member]: 'done' }));
               }
               if (chunk.type === 'room' && chunk.room) setRoom(chunk.room as ClusterRoom);
-              if (chunk.type === 'done') setStatus('本波完成');
+              if (chunk.type === 'done') setStatus(t('本波完成'));
             },
             onError: (err) => reject(err),
             onDone: () => resolve(),

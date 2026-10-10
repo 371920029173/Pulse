@@ -237,7 +237,7 @@ export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, fo
         disabled={undoing || !latest}
         title={latest ? t('撤销对 {path} 的应用', { path: (latest.path) }) : t('暂无检查点')}
       >
-        {undoing ? '撤销中…' : latest ? `撤销 ${latest.path.split('/').pop()}` : '撤销'}
+        {undoing ? t('撤销中…') : latest ? t('撤销 {file}', { file: String(latest.path.split('/').pop()) }) : t('撤销')}
       </button>
       {undoMsg ? <span className={styles.hint}>{undoMsg}</span> : null}
       <button type="button" className={styles.refresh} onClick={refresh} title={t('刷新')}>{t('刷新')}</button>

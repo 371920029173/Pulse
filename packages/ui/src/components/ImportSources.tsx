@@ -271,7 +271,7 @@ export function ImportSources({ onClose, destination = 'sessions', onImported }:
             There was a second, louder t("一键全部导入(n)") beside this one. Two primary actions in the
             same footer made the deliberate path (select, then import) look like the slow way, and
             bulk-importing every conversation on the machine is not something to make the easiest
-            click on the screen. "全选" in the toolbar already covers the bulk case in one extra
+            click on the screen. 「全选」 in the toolbar already covers the bulk case in one extra
             step, and it shows what is about to be imported before it happens.
           */}
           <button

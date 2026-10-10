@@ -32,8 +32,8 @@ function fmtWhen(iso?: string): string {
   if (!iso) return '—';
   const d = new Date(iso);
   const days = Math.floor((Date.now() - d.getTime()) / 86_400_000);
-  if (days === 0) return '今天';
-  if (days === 1) return '昨天';
+  if (days === 0) return t('今天');
+  if (days === 1) return t('昨天');
   if (days < 30) return t('{days} 天前', { days: (days) });
   return d.toISOString().slice(0, 10);
 }
@@ -211,7 +211,7 @@ export function SessionHistory({ onClose, onReopened }: Props) {
                     disabled={busy === s.id}
                     onClick={() => void reopen(s.id)}
                   >
-                    {busy === s.id ? '恢复中…' : '恢复'}
+                    {busy === s.id ? t('恢复中…') : t('恢复')}
                   </button>
                 ) : (
                   <span className={styles.badgeOpen}>{t('进行中')}</span>

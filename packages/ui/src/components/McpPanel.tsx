@@ -221,7 +221,7 @@ export function McpPanel() {
                   disabled={probing === s.name}
                   onClick={() => void probe(s.name)}
                 >
-                  {probing === s.name ? '检测中…' : '检测'}
+                  {probing === s.name ? t('检测中…') : t('检测')}
                 </button>
                 {s.source === 'she' ? (
                   <>

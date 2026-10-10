@@ -56,7 +56,7 @@ export function CheckpointTimeline({ onClose }: { onClose: () => void }) {
         disabled={!!busyId || list.length === 0}
         onClick={() => void undoOne()}
       >
-        {busyId === 'latest' ? '回滚中…' : '撤销最近一次应用'}
+        {busyId === 'latest' ? t('回滚中…') : t('撤销最近一次应用')}
       </button>
       <div className={styles.body}>
         {list.length === 0 ? (
@@ -76,7 +76,7 @@ export function CheckpointTimeline({ onClose }: { onClose: () => void }) {
                   disabled={!!busyId}
                   onClick={() => void undoOne(c.checkpoint_id)}
                 >
-                  {busyId === c.checkpoint_id ? '回滚中…' : '回滚到此点之前'}
+                  {busyId === c.checkpoint_id ? t('回滚中…') : t('回滚到此点之前')}
                 </button>
               </div>
             </div>

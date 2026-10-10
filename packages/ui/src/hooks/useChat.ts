@@ -194,13 +194,13 @@ export function normalizeHistory(raw: ServerHistoryMessage[]): ChatMessage[] {
     }
 
     // The plan autopilot resumes a turn with a `[自动续跑]` user message; it is the system talking, not the user.
-    if (m.role === 'user' && content.startsWith('[自动续跑]')) return { role: 'system', content: '计划还没做完，自动继续下一步' };
+    if (m.role === 'user' && content.startsWith(t('[自动续跑]'))) return { role: 'system', content: t('计划还没做完，自动继续下一步') };
     /*
      * 压缩摘要以 user 角色插进历史（协议要求 user/assistant 交替），但它不是用户说的话。
      * 渲染成用户气泡时，屏幕上会出现一整团几千字的"我说过的话"，看起来就是显示坏了 ——
      * 用户报的"部分 chat 显示异常"里就有它。归成系统说明（原文仍在会话文件里）。
      */
-    if (m.role === 'user' && content.startsWith('[压缩记录]')) {
+    if (m.role === 'user' && content.startsWith(t('[压缩记录]'))) {
       return { role: 'system', content: t('以上较早的记录已压缩成摘要（模型仍然看得到它）') };
     }
     // The stuck-loop nudge is persisted (so the next request keeps the same prefix); it is the agent
@@ -934,7 +934,7 @@ export function useChat(sessionId?: string | null) {
      * (Same hazard class as session delete / background remove.)
      */
     // eslint-disable-next-line no-alert
-    if (typeof window !== 'undefined' && !window.confirm('清空当前对话会删除全部消息，且无法撤销。确定吗？')) {
+    if (typeof window !== 'undefined' && !window.confirm(t('清空当前对话会删除全部消息，且无法撤销。确定吗？'))) {
       return;
     }
     await fetchJSON(withSid('/api/chat/history'), { method: 'DELETE' });

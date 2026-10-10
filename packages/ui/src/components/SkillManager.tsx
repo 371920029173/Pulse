@@ -105,7 +105,7 @@ export function SkillManager({ onClose }: { onClose: () => void }) {
   const remove = useCallback(async (f: SkillFile) => {
     // Deleting a skill file is permanent; it is the user's own content.
     // eslint-disable-next-line no-alert
-    if (typeof window !== 'undefined' && !window.confirm(`删除技能「${f.name}」？此操作无法撤销。`)) return;
+    if (typeof window !== 'undefined' && !window.confirm(t('删除技能「{name}」？此操作无法撤销。', { name: (f.name) }))) return;
     setBusy(true);
     try {
       await fetchJSON(`/api/skills/files?path=${encodeURIComponent(f.path)}`, { method: 'DELETE' });

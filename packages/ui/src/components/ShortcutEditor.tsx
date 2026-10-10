@@ -116,7 +116,7 @@ export function ShortcutEditor() {
                   <div className={styles.rowHint}>{a.hint}</div>
                 </div>
                 <div className={styles.rowScope}>
-                  {a.scope === 'composer' ? '输入框' : '全局'}
+                  {a.scope === 'composer' ? t('输入框') : t('全局')}
                 </div>
                 <button
                   type="button"

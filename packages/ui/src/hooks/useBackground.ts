@@ -97,7 +97,7 @@ export function useBackground() {
      * beside "显示中") silently destroyed a chosen wallpaper.
      */
     // eslint-disable-next-line no-alert
-    if (typeof window !== 'undefined' && !window.confirm('移除背景会删除已选的文件，且无法撤销。确定吗？')) {
+    if (typeof window !== 'undefined' && !window.confirm(t('移除背景会删除已选的文件，且无法撤销。确定吗？'))) {
       return;
     }
     setBusy(true);

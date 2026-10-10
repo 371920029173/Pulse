@@ -63,7 +63,7 @@ export function KbImport({ onClose }: Props) {
         body: { path: p, label: label.trim() || undefined },
       });
       setMsg(
-        `已导入 ${res.memoriesAdded} 条（${res.kind === 'directory' ? '文件夹' : '文件'}）→ ${res.groupPath}`,
+        t('已导入 {count} 条（{kind}）→ {path}', { count: (res.memoriesAdded), kind: (res.kind === 'directory' ? t('文件夹') : t('文件')), path: (res.groupPath) }),
       );
       setPath('');
     } catch (e) {

@@ -480,7 +480,7 @@ function ToolCallCard({
 function clipCode(text: string, maxLines = 12): string {
   const lines = text.split('\n');
   if (lines.length <= maxLines) return text;
-  return lines.slice(0, maxLines).join('\n') + `\n… 还有 ${lines.length - maxLines} 行`;
+  return lines.slice(0, maxLines).join('\n') + t('\n… 还有 {left} 行', { left: (lines.length - maxLines) });
 }
 
 /**
@@ -1771,7 +1771,7 @@ export function Chat({
               </div>
             </div>
             <span className={`${styles.thinkValue} ${thinkingLevel === 'high' ? styles.thinkValueHigh : ''}`}>
-              {THINK_LEVELS.find((lv) => lv.id === thinkingLevel)?.short ?? '中'}
+              {THINK_LEVELS.find((lv) => lv.id === thinkingLevel)?.short ?? t('中')}
             </span>
           </div>
         </div>
