@@ -1,5 +1,6 @@
 import type { PendingPatch } from '../hooks/useChat';
 import styles from '../styles/DiffPanel.module.css';
+import { t } from '../lib/i18n';
 
 interface Props {
   patch: PendingPatch;
@@ -13,7 +14,7 @@ export function DiffPanel({ patch, busy, onApply, onReject }: Props) {
     <div className={styles.wrap}>
       <div className={styles.head}>
         <div>
-          <div className={styles.title}>待应用修改</div>
+          <div className={styles.title}>{t('待应用修改')}</div>
           <div className={styles.path}>{patch.path}</div>
         </div>
         <div className={styles.actions}>

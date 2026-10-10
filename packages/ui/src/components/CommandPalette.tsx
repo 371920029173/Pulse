@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import styles from '../styles/CommandPalette.module.css';
+import { t } from '../lib/i18n';
 
 export interface CommandItem {
   id: string;
@@ -76,11 +77,11 @@ export function CommandPalette({ open, commands, onClose }: Props) {
           className={styles.input}
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="搜索命令…（Ctrl+K）"
+          placeholder={t('搜索命令…（Ctrl+K）')}
         />
         <div className={styles.list}>
           {filtered.length === 0 ? (
-            <div className={styles.empty}>没有匹配的命令</div>
+            <div className={styles.empty}>{t('没有匹配的命令')}</div>
           ) : (
             filtered.map((c, i) => (
               <button
@@ -100,9 +101,9 @@ export function CommandPalette({ open, commands, onClose }: Props) {
           )}
         </div>
         <div className={styles.footer}>
-          <span>↑↓ 选择</span>
-          <span>Enter 执行</span>
-          <span>Esc 关闭</span>
+          <span>{t('↑↓ 选择')}</span>
+          <span>{t('Enter 执行')}</span>
+          <span>{t('Esc 关闭')}</span>
         </div>
       </div>
     </div>

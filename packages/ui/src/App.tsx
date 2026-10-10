@@ -1177,7 +1177,7 @@ export function App() {
               type="button"
               className={styles.railBtn}
               onClick={() => setSidebarCollapsed(false)}
-              title="展开侧栏"
+              title={t('展开侧栏')}
             >»</button>
             <span className={styles.railLabel}>Pulse</span>
           </div>
@@ -1283,7 +1283,7 @@ export function App() {
           {showTerminal && (
             <div
               className={styles.resizeHandleRow}
-              title="拖拽调节终端高度；双击复位"
+              title={t('拖拽调节终端高度；双击复位')}
               onDoubleClick={() => setTerminalHeight(220)}
               onMouseDown={(e) => {
                 dragRef.current = { kind: 'terminal', startX: e.clientX, startY: e.clientY, startW: sidebarWidth, startH: terminalHeight };
@@ -1297,7 +1297,7 @@ export function App() {
         </div>
 
         {!focusChat && (
-          <button type="button" className={styles.sidebarFab} title="折叠 / 展开侧栏" onClick={() => setSidebarCollapsed((v) => !v)}>
+          <button type="button" className={styles.sidebarFab} title={t('折叠 / 展开侧栏')} onClick={() => setSidebarCollapsed((v) => !v)}>
             {sidebarCollapsed ? '侧栏' : '收侧栏'}
           </button>
         )}
@@ -1386,8 +1386,8 @@ export function App() {
                     setDraftInsert('`' + filePreview.path + '`\n```\n' + filePreview.content + '\n```');
                     setFilePreview(null);
                   }}
-                >插入到对话</button>
-                <button type="button" onClick={() => setFilePreview(null)}>关闭</button>
+                >{t('插入到对话')}</button>
+                <button type="button" onClick={() => setFilePreview(null)}>{t('关闭')}</button>
               </div>
             </div>
             <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'var(--font-mono)', fontSize: 12, margin: 0 }}>

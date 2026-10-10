@@ -180,7 +180,7 @@ export function Sidebar({
           type="button"
           className={styles.logoHome}
           onClick={onGoHome}
-          title="回到主页"
+          title={t('回到主页')}
         >
           <span className={styles.logoIcon} aria-hidden><span className={styles.logoPulse} /></span>
           <span className={styles.logoText}>Pulse</span>
@@ -192,7 +192,7 @@ export function Sidebar({
             type="button"
             className={styles.iconBtn}
             onClick={() => { void window.sheDesktop?.newWindow(); }}
-            title="新建窗口（Ctrl+Shift+N）— 独立会话，可与本窗口并列"
+            title={t('新建窗口（Ctrl+Shift+N）— 独立会话，可与本窗口并列')}
           >
             <IconWindows size={15} />
           </button>
@@ -201,7 +201,7 @@ export function Sidebar({
           type="button"
           className={styles.iconBtn}
           onClick={onOpenSettings}
-          title="设置"
+          title={t('设置')}
         >
           <IconSettings size={15} />
         </button>
@@ -232,17 +232,17 @@ export function Sidebar({
       ) : null}
 
       <div className={styles.sectionHeader}>
-        <span>会话</span>
+        <span>{t('会话')}</span>
         <div className={styles.sectionActions}>
           <button
             type="button"
             className={styles.iconBtn}
             onClick={onOpenHistory}
-            title="历史记录（含已关闭的对话）"
+            title={t('历史记录（含已关闭的对话）')}
           >
             <IconHistory size={15} />
           </button>
-          <button type="button" className={styles.iconBtn} onClick={onNewSession} title="新建会话">
+          <button type="button" className={styles.iconBtn} onClick={onNewSession} title={t('新建会话')}>
             <IconPlus size={15} />
           </button>
         </div>
@@ -253,8 +253,8 @@ export function Sidebar({
             className={styles.sessionFilter}
             value={sessionQuery}
             onChange={(e) => setSessionQuery(e.target.value)}
-            placeholder="筛选会话…"
-            aria-label="筛选会话"
+            placeholder={t('筛选会话…')}
+            aria-label={t('筛选会话')}
           />
         </div>
       ) : null}
@@ -270,9 +270,9 @@ export function Sidebar({
             {[0, 1, 2].map((i) => <span key={i} className={styles.skeletonRow} />)}
           </div>
         ) : sessions.length === 0 ? (
-          <div className={styles.emptyState}>暂无会话</div>
+          <div className={styles.emptyState}>{t('暂无会话')}</div>
         ) : visibleSessions.length === 0 ? (
-          <div className={styles.emptyState}>无匹配会话</div>
+          <div className={styles.emptyState}>{t('无匹配会话')}</div>
         ) : (
           renderedSessions.map((s, i) => (
             <div
@@ -359,7 +359,7 @@ export function Sidebar({
                   <button
                     type="button"
                     className="she-btn she-btn--sm she-btn--danger"
-                    title="确认永久删除这条会话"
+                    title={t('确认永久删除这条会话')}
                     onClick={(e) => {
                       e.stopPropagation();
                       setPendingDeleteId(null);
@@ -371,7 +371,7 @@ export function Sidebar({
                   <button
                     type="button"
                     className="she-btn she-btn--sm"
-                    title="取消"
+                    title={t('取消')}
                     onClick={(e) => {
                       e.stopPropagation();
                       setPendingDeleteId(null);
@@ -385,7 +385,7 @@ export function Sidebar({
                   <button
                     type="button"
                     className={styles.rowAction}
-                    title="导出 Markdown"
+                    title={t('导出 Markdown')}
                     onClick={(e) => {
                       e.stopPropagation();
                       onExportSession?.(s.id);
@@ -396,7 +396,7 @@ export function Sidebar({
                   <button
                     type="button"
                     className={styles.rowAction}
-                    title="关闭（保留在历史记录里）"
+                    title={t('关闭（保留在历史记录里）')}
                     onClick={(e) => {
                       e.stopPropagation();
                       onCloseSession?.(s.id);
@@ -407,7 +407,7 @@ export function Sidebar({
                   <button
                     type="button"
                     className={`${styles.rowAction} ${styles.rowActionDanger}`}
-                    title="删除（不可恢复，会先让你确认）"
+                    title={t('删除（不可恢复，会先让你确认）')}
                     onClick={(e) => {
                       e.stopPropagation();
                       setPendingDeleteId(s.id);
@@ -435,7 +435,7 @@ export function Sidebar({
             type="button"
             className={styles.foldToggle}
             onClick={() => setShowAllSessions(false)}
-            title="只显示最近的会话"
+            title={t('只显示最近的会话')}
           >
             只显示最近 {COLLAPSED_COUNT} 条 ▴
           </button>
@@ -451,7 +451,7 @@ export function Sidebar({
         title={showFiles ? '收起工作区文件' : '展开工作区文件'}
       >
         <span className={styles.collapseChevron}>{showFiles ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}</span>
-        <span>工作区文件</span>
+        <span>{t('工作区文件')}</span>
       </button>
       {showFiles ? (
         <div className={styles.mcpSection}>
@@ -484,7 +484,7 @@ export function Sidebar({
         title={showMcp ? '收起 MCP 服务' : '展开 MCP 服务'}
       >
         <span className={styles.collapseChevron}>{showMcp ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}</span>
-        <span>MCP 服务</span>
+        <span>{t('MCP 服务')}</span>
       </button>
       {showMcp ? (
         <div className={styles.mcpSection}>

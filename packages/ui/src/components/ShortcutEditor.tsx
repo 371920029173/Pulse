@@ -10,6 +10,7 @@ import {
   type ShortcutMap,
 } from '../lib/shortcuts';
 import styles from '../styles/Shortcuts.module.css';
+import { t } from '../lib/i18n';
 
 /** Tell the rest of the app the bindings changed. */
 function broadcast(): void {
@@ -87,12 +88,12 @@ export function ShortcutEditor() {
     <div className={styles.wrap}>
       <div className={styles.head}>
         <div>
-          <div className={styles.headTitle}>快捷键</div>
+          <div className={styles.headTitle}>{t('快捷键')}</div>
           <div className={styles.headHint}>
             点一下右侧的按键框，然后按下你想用的组合。Esc 取消，Delete 清空。
           </div>
         </div>
-        <button type="button" className={styles.resetBtn} onClick={resetAll}>恢复默认</button>
+        <button type="button" className={styles.resetBtn} onClick={resetAll}>{t('恢复默认')}</button>
       </div>
 
       {conflicts.length > 0 ? (

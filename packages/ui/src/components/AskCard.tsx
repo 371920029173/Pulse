@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { fetchJSON } from '../lib/api';
 import styles from '../styles/AskCard.module.css';
+import { t } from '../lib/i18n';
 
 interface PendingQuestion {
   question: string | null;
@@ -80,7 +81,7 @@ export function AskCard({ onAnswer }: { onAnswer: (text: string) => void }) {
     <div className={styles.card} data-surface="card">
       <div className={styles.head}>
         <span className={styles.icon}>?</span>
-        <span className={styles.label}>智能体需要你确认</span>
+        <span className={styles.label}>{t('智能体需要你确认')}</span>
       </div>
 
       {q.context ? <div className={styles.context}>{q.context}</div> : null}
@@ -101,7 +102,7 @@ export function AskCard({ onAnswer }: { onAnswer: (text: string) => void }) {
           className={styles.input}
           value={custom}
           onChange={(e) => setCustom(e.target.value)}
-          placeholder="或直接输入你的回答…"
+          placeholder={t('或直接输入你的回答…')}
           onKeyDown={(e) => { if (e.key === 'Enter') answer(custom); }}
         />
         <button
@@ -109,15 +110,15 @@ export function AskCard({ onAnswer }: { onAnswer: (text: string) => void }) {
           className={styles.send}
           disabled={!custom.trim()}
           onClick={() => answer(custom)}
-        >回答</button>
+        >{t('回答')}</button>
         {/* Without this there was no way to get rid of the card except by
             answering it — and it came back on every reload anyway. */}
         <button
           type="button"
           className={styles.dismiss}
-          title="忽略这个问题（不再显示）"
+          title={t('忽略这个问题（不再显示）')}
           onClick={() => forget(qKey)}
-        >忽略</button>
+        >{t('忽略')}</button>
       </div>
     </div>
   );

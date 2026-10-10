@@ -1,6 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import type { KBQueryResult, ActivationTrace, PulseHop } from '../hooks/useKB';
 import styles from '../styles/PulseTracePanel.module.css';
+import { t } from '../lib/i18n';
 
 interface PulseTracePanelProps {
   result: KBQueryResult | null;
@@ -136,19 +137,19 @@ function TraceEntry({ trace }: { trace: ActivationTrace }) {
       {expanded && (
         <div className={styles.traceDetail}>
           <div className={styles.traceDetailRow}>
-            <span className={styles.traceDetailLabel}>节点 ID</span>
+            <span className={styles.traceDetailLabel}>{t('节点 ID')}</span>
             <span className={styles.traceDetailValue}>{trace.nodeId}</span>
           </div>
           <div className={styles.traceDetailRow}>
-            <span className={styles.traceDetailLabel}>激活能量</span>
+            <span className={styles.traceDetailLabel}>{t('激活能量')}</span>
             <span className={styles.traceDetailValue}>{trace.activationLevel.toFixed(4)}</span>
           </div>
           <div className={styles.traceDetailRow}>
-            <span className={styles.traceDetailLabel}>种子数</span>
+            <span className={styles.traceDetailLabel}>{t('种子数')}</span>
             <span className={styles.traceDetailValue}>{trace.pulseSeeds.length}</span>
           </div>
           <div className={styles.traceDetailRow}>
-            <span className={styles.traceDetailLabel}>跳数</span>
+            <span className={styles.traceDetailLabel}>{t('跳数')}</span>
             <span className={styles.traceDetailValue}>{allHops.length}</span>
           </div>
           {trace.groupPath.length > 0 && (
@@ -175,7 +176,7 @@ export function PulseTracePanel({ result, onClose }: PulseTracePanelProps) {
           <span className={styles.headerDot} />
           组结构共振轨迹
         </div>
-        <button className={styles.closeBtn} onClick={onClose} title="关闭面板（Esc）">
+        <button className={styles.closeBtn} onClick={onClose} title={t('关闭面板（Esc）')}>
           ×
         </button>
       </div>
@@ -183,7 +184,7 @@ export function PulseTracePanel({ result, onClose }: PulseTracePanelProps) {
       {!result ? (
         <div className={styles.empty}>
           <div className={styles.emptyIcon}>◉</div>
-          <div>还没有共振轨迹</div>
+          <div>{t('还没有共振轨迹')}</div>
           <div style={{ fontSize: '11px', opacity: 0.7 }}>
             智能体查询知识库时，这里会显示激活路径
           </div>
@@ -205,7 +206,7 @@ export function PulseTracePanel({ result, onClose }: PulseTracePanelProps) {
           <div className={styles.body}>
             {result.traces.length === 0 ? (
               <div className={styles.empty}>
-                <div>本次查询没有共振轨迹</div>
+                <div>{t('本次查询没有共振轨迹')}</div>
               </div>
             ) : (
               result.traces.map((trace, i) => (

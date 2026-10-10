@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { fetchJSON } from '../lib/api';
 import { toast } from '../lib/toast';
 import styles from '../styles/Dock.module.css';
+import { t } from '../lib/i18n';
 
 /**
  * Feishu remote control.
@@ -103,7 +104,7 @@ export function FeishuPanel() {
     <div className={styles.remote}>
       <div className={styles.remoteHead}>
         <span className={`${styles.dot} ${status?.running && status?.connected ? styles.dotOn : ''}`} />
-        <span className={styles.remoteTitle}>飞书遥控</span>
+        <span className={styles.remoteTitle}>{t('飞书遥控')}</span>
         <button type="button" className={styles.small} onClick={() => setOpen((v) => !v)}>
           {open ? '收起' : '配置'}
         </button>
@@ -112,7 +113,7 @@ export function FeishuPanel() {
             type="button"
             className={styles.small}
             disabled={busy}
-            title="先连上，然后用飞书给机器人发消息，把返回的 open_id 填进白名单"
+            title={t('先连上，然后用飞书给机器人发消息，把返回的 open_id 填进白名单')}
             onClick={() => void toggle(true)}
           >
             {busy ? '处理中…' : '配对模式'}
@@ -193,24 +194,24 @@ export function FeishuPanel() {
             />
           </label>
           <label className={styles.fsField}>
-            <span>授权账号 open_id</span>
+            <span>{t('授权账号 open_id')}</span>
             <textarea
               rows={2}
               value={form.allowedUsers}
-              placeholder="多个用英文逗号分隔。留空则谁都不能用。"
+              placeholder={t('多个用英文逗号分隔。留空则谁都不能用。')}
               onChange={(e) => setForm((v) => ({ ...v, allowedUsers: e.target.value }))}
             />
           </label>
           <div className={styles.fsHelp}>
-            在 <b>open.feishu.cn</b> 建一个<b>企业自建应用</b>，然后：
-            <br />1. 复制 <b>App ID / App Secret</b>（填在上面）
-            <br />2. 权限加 <code>im:message</code> + <code>im:message:send_as_bot</code>
-            <br />3. 事件订阅选 <b>长连接</b>，订阅 <code>im.message.receive_v1</code>
-            <br />4. <b>发布版本</b>（不发布不会推事件）
+            在 <b>open.feishu.cn</b> {t('建一个')}<b>{t('企业自建应用')}</b>，然后：
+            <br />{t('1. 复制')} <b>App ID / App Secret</b>（填在上面）
+            <br />{t('2. 权限加')} <code>im:message</code> + <code>im:message:send_as_bot</code>
+            <br />{t('3. 事件订阅选')} <b>{t('长连接')}</b>{t('，订阅')} <code>im.message.receive_v1</code>
+            <br />4. <b>{t('发布版本')}</b>（不发布不会推事件）
             <br />
             <span className={styles.fsHelpNote}>
               还不知道自己的 open_id？先保存 App ID / Secret，
-              点上面的 <b>配对模式</b>，然后在飞书里给机器人随便发一句话 ——
+              点上面的 <b>{t('配对模式')}</b>，然后在飞书里给机器人随便发一句话 ——
               这里会显示你的 open_id，点一下就能加入白名单。
             </span>
           </div>

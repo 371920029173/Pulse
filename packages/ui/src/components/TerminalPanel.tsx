@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchJSON } from '../lib/api';
 import styles from '../styles/Terminal.module.css';
+import { t } from '../lib/i18n';
 
 interface TermLine {
   id: string;
@@ -118,12 +119,12 @@ export function TerminalPanel({ open, onToggle, height = 220 }: { open: boolean;
     // the cursor — the "change layout doesn't follow the mouse" complaint.
     <div className={styles.panel} data-surface="panel" style={{ height: `var(--term-h, ${height}px)`, maxHeight: '70vh' }}>
       <div className={styles.header}>
-        <span className={styles.title}>终端</span>
+        <span className={styles.title}>{t('终端')}</span>
         <span className={styles.cwd}>{cwd}</span>
-        <button type="button" className={styles.headerBtn} onClick={() => setLines([])} title="清空">
+        <button type="button" className={styles.headerBtn} onClick={() => setLines([])} title={t('清空')}>
           清空
         </button>
-        <button type="button" className={styles.headerBtn} onClick={onToggle} title="收起">
+        <button type="button" className={styles.headerBtn} onClick={onToggle} title={t('收起')}>
           ⌄
         </button>
       </div>

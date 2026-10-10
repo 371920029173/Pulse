@@ -3,6 +3,7 @@ import { fetchJSON, streamSSE } from '../lib/api';
 import { toast } from '../lib/toast';
 import styles from '../styles/Cluster.module.css';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { t } from '../lib/i18n';
 
 export interface ClusterRole {
   key: string;
@@ -245,7 +246,7 @@ export function ClusterPanel({
       <div className={styles.panel} data-surface="panel" onClick={(e) => e.stopPropagation()}>
         <header className={styles.header}>
           <div>
-            <h2 className={styles.title}>自动化工作群</h2>
+            <h2 className={styles.title}>{t('自动化工作群')}</h2>
             <p className={styles.sub}>
               一个 API、多个智能体在一个群里干活，你也在群里。角色数量与分工都可自定义。
             </p>
@@ -259,7 +260,7 @@ export function ClusterPanel({
             <button type="button" className={styles.primaryBtn} onClick={() => void createRoom()}>
               + 新建工作群
             </button>
-            {rooms.length === 0 ? <p className={styles.hint}>还没有工作群。</p> : null}
+            {rooms.length === 0 ? <p className={styles.hint}>{t('还没有工作群。')}</p> : null}
             {rooms.map((x) => (
               <button
                 key={x.id}
@@ -280,7 +281,7 @@ export function ClusterPanel({
             {!room ? (
               <div className={styles.placeholder}>
                 <div className={styles.placeholderIcon}>◇</div>
-                <div className={styles.placeholderText}>新建或选择一个工作群</div>
+                <div className={styles.placeholderText}>{t('新建或选择一个工作群')}</div>
                 <div className={styles.placeholderHint}>
                   流程：指挥拆解 → 产出角色并行 → 审查 → 指挥汇总
                 </div>
@@ -315,7 +316,7 @@ export function ClusterPanel({
                 {/* ── role configuration ── */}
                 {showRoles ? (
                   <div className={styles.roleEditor}>
-                    <div className={styles.roleEditorHead}>角色与数量（0 = 不参与）</div>
+                    <div className={styles.roleEditorHead}>{t('角色与数量（0 = 不参与）')}</div>
                     <div className={styles.roleGrid}>
                       {room.roles.map((r) => (
                         <div key={r.key} className={styles.roleCard}>
@@ -323,7 +324,7 @@ export function ClusterPanel({
                           <div className={styles.roleInfo}>
                             <div className={styles.roleName}>
                               {r.name}
-                              {r.isCustom ? <em className={styles.roleCustom}>自定义</em> : null}
+                              {r.isCustom ? <em className={styles.roleCustom}>{t('自定义')}</em> : null}
                             </div>
                             <div className={styles.roleTitle}>{r.title}</div>
                           </div>
@@ -341,14 +342,14 @@ export function ClusterPanel({
                             >+</button>
                           </div>
                           {r.isCustom ? (
-                            <button type="button" className={styles.roleDel} onClick={() => void removeRole(r.key)} title="删除角色">×</button>
+                            <button type="button" className={styles.roleDel} onClick={() => void removeRole(r.key)} title={t('删除角色')}>×</button>
                           ) : null}
                         </div>
                       ))}
                     </div>
 
                     <div className={styles.roleAddRow}>
-                      <span className={styles.roleAddLabel}>快速添加</span>
+                      <span className={styles.roleAddLabel}>{t('快速添加')}</span>
                       {presets
                         .filter((p) => !room.roles.some((r) => r.key === p.key))
                         .map((p) => (
@@ -366,17 +367,17 @@ export function ClusterPanel({
                     </div>
 
                     <div className={styles.customRole}>
-                      <div className={styles.roleAddLabel}>自定义角色</div>
+                      <div className={styles.roleAddLabel}>{t('自定义角色')}</div>
                       <div className={styles.customRow}>
                         <input
                           className={styles.input}
-                          placeholder="名称，例如：法务"
+                          placeholder={t('名称，例如：法务')}
                           value={newRole.name}
                           onChange={(e) => setNewRole({ ...newRole, name: e.target.value })}
                         />
                         <input
                           className={styles.input}
-                          placeholder="职责一句话"
+                          placeholder={t('职责一句话')}
                           value={newRole.title}
                           onChange={(e) => setNewRole({ ...newRole, title: e.target.value })}
                         />
@@ -385,15 +386,15 @@ export function ClusterPanel({
                           value={newRole.phase}
                           onChange={(e) => setNewRole({ ...newRole, phase: e.target.value as 'lead' | 'work' | 'review' })}
                         >
-                          <option value="lead">指挥</option>
-                          <option value="work">产出</option>
-                          <option value="review">审查</option>
+                          <option value="lead">{t('指挥')}</option>
+                          <option value="work">{t('产出')}</option>
+                          <option value="review">{t('审查')}</option>
                         </select>
                       </div>
                       <textarea
                         className={styles.textarea}
                         rows={2}
-                        placeholder="想让它干什么？（可留空，AI 会按名称与职责自动生成 skill）"
+                        placeholder={t('想让它干什么？（可留空，AI 会按名称与职责自动生成 skill）')}
                         value={newRole.requirement}
                         onChange={(e) => setNewRole({ ...newRole, requirement: e.target.value })}
                       />
@@ -428,13 +429,13 @@ export function ClusterPanel({
                 {/* ── transcript ── */}
                 <div className={styles.transcript}>
                   {room.messages.length === 0 ? (
-                    <div className={styles.placeholderHint}>下发目标后，群成员会依次/并行发言。</div>
+                    <div className={styles.placeholderHint}>{t('下发目标后，群成员会依次/并行发言。')}</div>
                   ) : (
                     room.messages.map((m) => (
                       <div key={m.id} className={styles.msg}>
                         <div className={styles.msgHead}>
                           <strong className={styles.msgName}>{m.name}</strong>
-                          {m.parallel_group ? <span className={styles.msgTag}>并行</span> : null}
+                          {m.parallel_group ? <span className={styles.msgTag}>{t('并行')}</span> : null}
                         </div>
                         <div className={styles.msgBody}>{m.content}</div>
                       </div>
@@ -447,7 +448,7 @@ export function ClusterPanel({
                   value={goal}
                   onChange={(e) => setGoal(e.target.value)}
                   rows={3}
-                  placeholder="下发本波目标，例如：为 Pulse 写一份夜间巡检脚本的用户说明"
+                  placeholder={t('下发本波目标，例如：为 Pulse 写一份夜间巡检脚本的用户说明')}
                 />
                 <div className={styles.actions}>
                   <button

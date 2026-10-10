@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { fetchJSON } from '../lib/api';
 import styles from '../styles/Sidebar.module.css';
 import { IconRefresh } from './Icons';
+import { t } from '../lib/i18n';
 
 export interface FsNode {
   name: string;
@@ -114,13 +115,13 @@ export function FileTree({ onOpenFile }: FileTreeProps) {
   return (
     <div className={styles.treeContainer} style={{ maxHeight: 220 }}>
       <div className={styles.sectionHeader} style={{ paddingLeft: 0 }}>
-        <span title={root}>文件</span>
-        <button type="button" className={styles.iconBtn} onClick={refresh} title="刷新">
+        <span title={root}>{t('文件')}</span>
+        <button type="button" className={styles.iconBtn} onClick={refresh} title={t('刷新')}>
           <IconRefresh size={15} />
         </button>
       </div>
       {err && <div className={styles.emptyState}>{err}</div>}
-      {!err && tree.length === 0 && <div className={styles.emptyState}>工作区为空</div>}
+      {!err && tree.length === 0 && <div className={styles.emptyState}>{t('工作区为空')}</div>}
       {tree.map((n) => (
         <FsRow key={n.path} node={n} depth={0} onOpenFile={onOpenFile} />
       ))}

@@ -162,7 +162,7 @@ export function ImportSources({ onClose, destination = 'sessions', onImported }:
           <div>
             <h2 className={styles.title}>{t('导入对话记录')}</h2>
             <p className={styles.sub}>
-              扫描本机的 Cursor / Claude Code / Codex 记录；默认<b>移植为对话记录</b>：原件会复制到 <code>.she/imports/</code> 留底，同时生成可直接打开、接着往下聊的对话。
+              扫描本机的 Cursor / Claude Code / Codex 记录；默认<b>{t('移植为对话记录')}</b>{t('：原件会复制到')} <code>.she/imports/</code> 留底，同时生成可直接打开、接着往下聊的对话。
             </p>
           </div>
           <button type="button" className={styles.close} onClick={onClose}>Esc</button>

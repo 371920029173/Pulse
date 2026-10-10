@@ -149,7 +149,7 @@ export function PlanPanel({ onClose, sessionId }: { onClose: () => void; session
       {plans.length === 0 ? (
         <div className={styles.empty}>
           <div className={styles.emptyIcon}>◐</div>
-          <div className={styles.emptyText}>还没有计划</div>
+          <div className={styles.emptyText}>{t('还没有计划')}</div>
           <div className={styles.emptyHint}>
             让智能体处理多步骤任务时，它会用 <code>plan_create</code> 立计划，进度会显示在这里。
           </div>

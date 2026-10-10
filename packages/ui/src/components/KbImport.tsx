@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { fetchJSON } from '../lib/api';
 import styles from '../styles/Settings.module.css';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { t } from '../lib/i18n';
 
 interface SessionRow {
   id: string;
@@ -112,7 +113,7 @@ export function KbImport({ onClose }: Props) {
     <div className={styles.backdrop} data-surface="backdrop" onClick={onClose}>
       <div className={styles.panel} data-surface="panel" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 640 }}>
         <header className={styles.header}>
-          <h2>导入知识库</h2>
+          <h2>{t('导入知识库')}</h2>
           <button type="button" className={styles.close} onClick={onClose}>Esc</button>
         </header>
 
@@ -122,38 +123,38 @@ export function KbImport({ onClose }: Props) {
             className={styles.close}
             style={{ opacity: mode === 'path' ? 1 : 0.55 }}
             onClick={() => setMode('path')}
-          >粘贴地址</button>
+          >{t('粘贴地址')}</button>
           <button
             type="button"
             className={styles.close}
             style={{ opacity: mode === 'paste' ? 1 : 0.55 }}
             onClick={() => setMode('paste')}
-          >粘贴内容</button>
+          >{t('粘贴内容')}</button>
         </div>
 
         {mode === 'path' ? (
           <div className={styles.form}>
             <p className={styles.hint}>
-              粘贴文件或<b>文件夹</b>的绝对路径。粘贴文件夹意味着把它里面的东西全部导入。
-              写入 <code>imports/标签/日期</code>，每条知识的名字都会带上来源。
+              粘贴文件或<b>{t('文件夹')}</b>的绝对路径。粘贴文件夹意味着把它里面的东西全部导入。
+              写入 <code>{t('imports/标签/日期')}</code>，每条知识的名字都会带上来源。
             </p>
             <label>
-              <span>路径</span>
+              <span>{t('路径')}</span>
               <input
                 value={path}
                 onChange={(e) => setPath(e.target.value)}
-                placeholder="例如 ~/notes 或 ~/notes/spec.md"
+                placeholder={t('例如 ~/notes 或 ~/notes/spec.md')}
                 spellCheck={false}
                 style={{ fontFamily: 'ui-monospace, monospace' }}
                 onKeyDown={(e) => { if (e.key === 'Enter') void submitPath(); }}
               />
             </label>
             <label>
-              <span>来源标签（选填）</span>
+              <span>{t('来源标签（选填）')}</span>
               <input
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
-                placeholder="默认用文件夹名"
+                placeholder={t('默认用文件夹名')}
               />
             </label>
             <div className={styles.actions}>
@@ -166,10 +167,10 @@ export function KbImport({ onClose }: Props) {
         ) : (
         <div className={styles.form}>
           <p className={styles.hint}>
-            支持 md / txt / json（含 Cursor / Claude / Codex 导出）。写入外挂库分组 <code>imports/来源/日期</code>。
+            支持 md / txt / json（含 Cursor / Claude / Codex 导出）。写入外挂库分组 <code>{t('imports/来源/日期')}</code>。
           </p>
           <label>
-            <span>来源标签</span>
+            <span>{t('来源标签')}</span>
             <select value={source} onChange={(e) => setSource(e.target.value)}>
               {SOURCES.map((s) => (
                 <option key={s.id} value={s.id}>{s.label}</option>
@@ -178,9 +179,9 @@ export function KbImport({ onClose }: Props) {
           </label>
           {source === 'session' ? (
             <label>
-              <span>会话</span>
+              <span>{t('会话')}</span>
               <select value={sessionId} onChange={(e) => setSessionId(e.target.value)}>
-                <option value="">当前活动会话</option>
+                <option value="">{t('当前活动会话')}</option>
                 {sessions.map((s) => (
                   <option key={s.id} value={s.id}>{s.title || s.id}</option>
                 ))}
@@ -189,7 +190,7 @@ export function KbImport({ onClose }: Props) {
           ) : (
             <>
               <label>
-                <span>选择文件</span>
+                <span>{t('选择文件')}</span>
                 <input
                   type="file"
                   accept=".md,.txt,.json,.jsonl,text/plain,application/json"
@@ -197,13 +198,13 @@ export function KbImport({ onClose }: Props) {
                 />
               </label>
               <label>
-                <span>或粘贴内容</span>
+                <span>{t('或粘贴内容')}</span>
                 <textarea
                   value={text}
                   onChange={(e) => setText(e.target.value)}
                   rows={12}
                   spellCheck={false}
-                  placeholder="粘贴对话记录 / Markdown / JSON…"
+                  placeholder={t('粘贴对话记录 / Markdown / JSON…')}
                   style={{ width: '100%', fontFamily: 'ui-monospace, monospace', fontSize: 12 }}
                 />
               </label>

@@ -1,6 +1,7 @@
 ﻿import { useState } from 'react';
 import type { PendingPatch } from '../hooks/useChat';
 import styles from '../styles/ComposerPanel.module.css';
+import { t } from '../lib/i18n';
 
 interface Props {
   patches: PendingPatch[];
@@ -27,16 +28,12 @@ export function ComposerPanel({
     <div className={styles.wrap}>
       <div className={styles.head}>
         <div>
-          <div className={styles.title}>多文件 Composer</div>
+          <div className={styles.title}>{t('多文件 Composer')}</div>
           <div className={styles.sub}>{patches.length} 个待应用补丁</div>
         </div>
         <div className={styles.actions}>
-          <button type="button" className={styles.apply} onClick={onApplyAll} disabled={busy}>
-            全部应用
-          </button>
-          <button type="button" className={styles.reject} onClick={onRejectAll} disabled={busy}>
-            全部拒绝
-          </button>
+          <button type="button" className={styles.apply} onClick={onApplyAll} disabled={busy}>{t('全部应用')} </button>
+          <button type="button" className={styles.reject} onClick={onRejectAll} disabled={busy}>{t('全部拒绝')} </button>
         </div>
       </div>
       <div className={styles.body}>
@@ -61,17 +58,13 @@ export function ComposerPanel({
                 className={styles.apply}
                 disabled={busy}
                 onClick={() => onApplyOne(active.patch_id)}
-              >
-                应用
-              </button>
+              >{t('应用')} </button>
               <button
                 type="button"
                 className={styles.reject}
                 disabled={busy}
                 onClick={() => onRejectOne(active.patch_id)}
-              >
-                拒绝
-              </button>
+              >{t('拒绝')} </button>
             </div>
           </div>
           <pre className={styles.diff}>{active.unified || '(empty diff)'}</pre>

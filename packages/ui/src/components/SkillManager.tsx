@@ -3,6 +3,7 @@ import { fetchJSON } from '../lib/api';
 import { toast } from '../lib/toast';
 import { SKILL_PROFILES, type SkillProfileId } from '../lib/skills';
 import styles from '../styles/SkillManager.module.css';
+import { t } from '../lib/i18n';
 
 interface SkillFile {
   name: string;
@@ -132,14 +133,14 @@ export function SkillManager({ onClose }: { onClose: () => void }) {
     <div className={styles.panel} data-surface="panel">
       <header className={styles.header}>
         <div className={styles.headerMain}>
-          <h2 className={styles.title}>技能管理</h2>
+          <h2 className={styles.title}>{t('技能管理')}</h2>
           <span className={styles.sub}>
             {mode === 'list'
               ? `${files.length} 个技能文件 · 放在 .she/skills/<档位>/`
               : selected ? `编辑 ${selected.name}` : '新建技能'}
           </span>
         </div>
-        <button type="button" className={styles.close} onClick={onClose} title="关闭">×</button>
+        <button type="button" className={styles.close} onClick={onClose} title={t('关闭')}>×</button>
       </header>
 
       {error ? <div className={styles.error}>{error}</div> : null}
@@ -147,16 +148,16 @@ export function SkillManager({ onClose }: { onClose: () => void }) {
       {mode === 'list' ? (
         <>
           <div className={styles.toolbar}>
-            <button type="button" className={styles.primary} onClick={openNew}>+ 新建技能</button>
+            <button type="button" className={styles.primary} onClick={openNew}>{t('+ 新建技能')}</button>
             <span className={styles.hint}>
               当前档位的技能 + <code>_common</code> + <code>custom</code> 会注入系统提示
             </span>
           </div>
           <div className={styles.body}>
             {loading ? (
-              <div className={styles.empty}>读取中…</div>
+              <div className={styles.empty}>{t('读取中…')}</div>
             ) : files.length === 0 ? (
-              <div className={styles.empty}>还没有技能文件。点「新建技能」开始。</div>
+              <div className={styles.empty}>{t('还没有技能文件。点「新建技能」开始。')}</div>
             ) : (
               grouped.map(([profile, list]) => (
                 <section key={profile} className={styles.group}>
@@ -165,13 +166,13 @@ export function SkillManager({ onClose }: { onClose: () => void }) {
                     <div key={f.path} className={styles.row}>
                       <span className={styles.rowName}>{f.name.replace(/\.md$/i, '')}</span>
                       <span className={styles.rowMeta}>{f.size} 字</span>
-                      <button type="button" className={styles.small} onClick={() => void openExisting(f)}>编辑</button>
+                      <button type="button" className={styles.small} onClick={() => void openExisting(f)}>{t('编辑')}</button>
                       <button
                         type="button"
                         className={styles.smallDanger}
                         disabled={busy}
                         onClick={() => void remove(f)}
-                      >删除</button>
+                      >{t('删除')}</button>
                     </div>
                   ))}
                 </section>
@@ -186,7 +187,7 @@ export function SkillManager({ onClose }: { onClose: () => void }) {
               className={styles.input}
               value={draftName}
               onChange={(e) => setDraftName(e.target.value)}
-              placeholder="技能名称，例如 code-review"
+              placeholder={t('技能名称，例如 code-review')}
               spellCheck={false}
             />
             <select
@@ -211,7 +212,7 @@ export function SkillManager({ onClose }: { onClose: () => void }) {
             <button type="button" className={styles.primary} disabled={busy} onClick={() => void save()}>
               {busy ? '保存中…' : '保存'}
             </button>
-            <button type="button" className={styles.small} onClick={() => setMode('list')}>返回列表</button>
+            <button type="button" className={styles.small} onClick={() => setMode('list')}>{t('返回列表')}</button>
           </div>
         </>
       )}

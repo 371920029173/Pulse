@@ -220,7 +220,7 @@ export function SchedulePanel({ onClose }: { onClose?: () => void }) {
                 className={styles.timeInput}
                 defaultValue={snap?.workingWindow?.start ?? '09:00'}
                 onBlur={(e) => setWindow({ start: e.target.value, end: snap?.workingWindow?.end ?? '18:00' })}
-                title="开始时间"
+                title={t('开始时间')}
               />
               <span className={styles.dash}>–</span>
               <input
@@ -228,7 +228,7 @@ export function SchedulePanel({ onClose }: { onClose?: () => void }) {
                 className={styles.timeInput}
                 defaultValue={snap?.workingWindow?.end ?? '18:00'}
                 onBlur={(e) => setWindow({ start: snap?.workingWindow?.start ?? '09:00', end: e.target.value })}
-                title="结束时间"
+                title={t('结束时间')}
               />
               <button type="button" className={styles.ghost} onClick={() => setWindow({ start: '09:00', end: '18:00' })}>
                 {t('应用')}

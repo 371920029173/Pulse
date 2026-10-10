@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { fetchJSON } from '../lib/api';
 import styles from '../styles/Settings.module.css';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { t } from '../lib/i18n';
 
 interface Props {
   onClose: () => void;
@@ -62,12 +63,12 @@ export function ImportKnowledge({ onClose, activeSessionId }: Props) {
     <div className={styles.backdrop} data-surface="backdrop" onClick={onClose}>
       <div className={styles.panel} data-surface="panel" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 560 }}>
         <header className={styles.header}>
-          <h2>导入知识</h2>
+          <h2>{t('导入知识')}</h2>
           <button type="button" className={styles.close} onClick={onClose}>Esc</button>
         </header>
         <div className={styles.form}>
           <label>
-            <span>来源</span>
+            <span>{t('来源')}</span>
             <select value={source} onChange={(e) => setSource(e.target.value)}>
               {SOURCES.map((s) => (
                 <option key={s.id} value={s.id}>{s.label}</option>
@@ -77,7 +78,7 @@ export function ImportKnowledge({ onClose, activeSessionId }: Props) {
           {source !== 'session' && (
             <>
               <label>
-                <span>文件（md / txt / json）</span>
+                <span>{t('文件（md / txt / json）')}</span>
                 <input
                   type="file"
                   accept=".md,.txt,.json,.jsonl,.markdown"
@@ -88,22 +89,22 @@ export function ImportKnowledge({ onClose, activeSessionId }: Props) {
                 />
               </label>
               <label>
-                <span>或粘贴内容</span>
+                <span>{t('或粘贴内容')}</span>
                 <textarea
                   value={text}
                   onChange={(e) => setText(e.target.value)}
                   rows={12}
-                  placeholder="支持 Markdown / 纯文本 / 聊天 JSON 数组"
+                  placeholder={t('支持 Markdown / 纯文本 / 聊天 JSON 数组')}
                   style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }}
                 />
               </label>
             </>
           )}
           {source === 'session' && (
-            <p className={styles.hint}>将把当前会话消息切块写入 Group KB（imports/session/日期）。</p>
+            <p className={styles.hint}>{t('将把当前会话消息切块写入 Group KB（imports/session/日期）。')}</p>
           )}
           <p className={styles.hint}>
-            外挂库建议：留空即用 <code>&lt;工作区&gt;/.she/kb.sqlite</code>。入库走结构组，不是向量 RAG。
+            外挂库建议：留空即用 <code>{t('&lt;工作区&gt;/.she/kb.sqlite')}</code>。入库走结构组，不是向量 RAG。
           </p>
           <div className={styles.actions}>
             <button type="button" onClick={() => void submit()} disabled={busy || (source !== 'session' && !text.trim())}>

@@ -138,7 +138,7 @@ export function SessionHistory({ onClose, onReopened }: Props) {
       <div className={styles.panel} data-surface="panel" onClick={(e) => e.stopPropagation()}>
         <header className={styles.header}>
           <div className={styles.headerMain}>
-            <h2 className={styles.title}>历史记录</h2>
+            <h2 className={styles.title}>{t('历史记录')}</h2>
             <span className={styles.sub}>
               {t('{n} 个对话（含已关闭，不含已删除）', { n: rows.length })}
               {allWorkspaces ? t(' · 全部工作区') : t(' · 仅当前工作区')}
@@ -152,7 +152,7 @@ export function SessionHistory({ onClose, onReopened }: Props) {
             className={styles.search}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索历史对话…"
+            placeholder={t('搜索历史对话…')}
             spellCheck={false}
           />
           {/*
@@ -179,7 +179,7 @@ export function SessionHistory({ onClose, onReopened }: Props) {
 
         <div className={styles.body}>
           {loading ? (
-            <div className={styles.empty}>读取中…</div>
+            <div className={styles.empty}>{t('读取中…')}</div>
           ) : rows.length === 0 ? (
             <div className={styles.empty}>
               {query ? '没有匹配的对话。' : '还没有任何对话记录。'}
@@ -214,7 +214,7 @@ export function SessionHistory({ onClose, onReopened }: Props) {
                     {busy === s.id ? '恢复中…' : '恢复'}
                   </button>
                 ) : (
-                  <span className={styles.badgeOpen}>进行中</span>
+                  <span className={styles.badgeOpen}>{t('进行中')}</span>
                 )}
               </div>
             ))

@@ -120,12 +120,12 @@ export function McpPanel() {
   return (
     <div className={styles.wrap}>
       <div className={styles.head}>
-        <span className={styles.headTitle}>MCP 服务</span>
+        <span className={styles.headTitle}>{t('MCP 服务')}</span>
         <span className={styles.headMeta}>
           {loading ? '检测中…' : `${reachableCount}/${servers.length} 可用`}
         </span>
-        <button type="button" className={styles.iconBtn} onClick={() => void load()} title="重新检测">↻</button>
-        <button type="button" className={styles.iconBtn} onClick={() => setAdding((v) => !v)} title="添加服务">+</button>
+        <button type="button" className={styles.iconBtn} onClick={() => void load()} title={t('重新检测')}>↻</button>
+        <button type="button" className={styles.iconBtn} onClick={() => setAdding((v) => !v)} title={t('添加服务')}>+</button>
       </div>
 
       {error ? <div className={styles.error}>{error}</div> : null}
@@ -134,23 +134,23 @@ export function McpPanel() {
         <div className={styles.addBox}>
           <input
             className={styles.input}
-            placeholder="名称，例如 tavily"
+            placeholder={t('名称，例如 tavily')}
             value={draft.name}
             onChange={(e) => setDraft({ ...draft, name: e.target.value })}
           />
           <input
             className={styles.input}
-            placeholder="命令，例如 npx"
+            placeholder={t('命令，例如 npx')}
             value={draft.command}
             onChange={(e) => setDraft({ ...draft, command: e.target.value })}
           />
           <input
             className={styles.input}
-            placeholder="参数，空格分隔，例如 -y mcp-remote https://…"
+            placeholder={t('参数，空格分隔，例如 -y mcp-remote https://…')}
             value={draft.args}
             onChange={(e) => setDraft({ ...draft, args: e.target.value })}
           />
-          <button type="button" className={styles.primaryBtn} onClick={() => void add()}>保存</button>
+          <button type="button" className={styles.primaryBtn} onClick={() => void add()}>{t('保存')}</button>
         </div>
       ) : null}
 
@@ -253,7 +253,7 @@ export function McpPanel() {
           );
         })}
         {!loading && servers.length === 0 ? (
-          <div className={styles.empty}>没有发现 MCP 服务。点 + 添加，或在 Cursor 配置后回来重新检测。</div>
+          <div className={styles.empty}>{t('没有发现 MCP 服务。点 + 添加，或在 Cursor 配置后回来重新检测。')}</div>
         ) : null}
       </div>
     </div>

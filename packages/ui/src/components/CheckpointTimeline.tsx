@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { fetchJSON } from '../lib/api';
 import styles from '../styles/CheckpointTimeline.module.css';
+import { t } from '../lib/i18n';
 
 interface CheckpointMeta {
   checkpoint_id: string;
@@ -44,10 +45,10 @@ export function CheckpointTimeline({ onClose }: { onClose: () => void }) {
     <div className={styles.panel} data-surface="panel">
       <header className={styles.header}>
         <div className={styles.headerMain}>
-          <h2 className={styles.title}>检查点时间线</h2>
+          <h2 className={styles.title}>{t('检查点时间线')}</h2>
           <span className={styles.sub}>{list.length} 个可回滚的改动</span>
         </div>
-        <button type="button" className={styles.close} onClick={onClose} title="关闭">×</button>
+        <button type="button" className={styles.close} onClick={onClose} title={t('关闭')}>×</button>
       </header>
       <button
         type="button"
@@ -59,7 +60,7 @@ export function CheckpointTimeline({ onClose }: { onClose: () => void }) {
       </button>
       <div className={styles.body}>
         {list.length === 0 ? (
-          <div className={styles.empty}>暂无检查点。<br />应用补丁后会出现在这里。</div>
+          <div className={styles.empty}>{t('暂无检查点。')}<br />{t('应用补丁后会出现在这里。')}</div>
         ) : (
           list.map((c) => (
             <div key={c.checkpoint_id} className={styles.item}>

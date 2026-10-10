@@ -3,6 +3,7 @@ import { fetchJSON } from '../lib/api';
 import { toast } from '../lib/toast';
 import { FeishuPanel } from './FeishuPanel';
 import styles from '../styles/Dock.module.css';
+import { t } from '../lib/i18n';
 
 /**
  * Dock — install and manage plugins, plus the built-in remote control.
@@ -70,7 +71,7 @@ const PERM_LABEL: Record<string, string> = {
 const DANGEROUS_PERMS = new Set(['shell', 'write', 'network']);
 
 function PermissionChips({ list }: { list?: string[] }) {
-  if (!list?.length) return <span className={styles.permNone}>未声明任何权限</span>;
+  if (!list?.length) return <span className={styles.permNone}>{t('未声明任何权限')}</span>;
   return (
     <span className={styles.permRow}>
       {list.map((p) => {
@@ -210,11 +211,11 @@ export function Dock() {
   return (
     <div className={styles.wrap}>
       <div className={styles.head}>
-        <span className={styles.headTitle}>扩展坞</span>
+        <span className={styles.headTitle}>{t('扩展坞')}</span>
         <span className={styles.headMeta}>
           {loading ? '读取中…' : `${plugins.length} 已装 · ${totalTools} 工具 · ${available} 可装`}
         </span>
-        <button type="button" className={styles.iconBtn} onClick={() => void load()} title="重新扫描">↻</button>
+        <button type="button" className={styles.iconBtn} onClick={() => void load()} title={t('重新扫描')}>↻</button>
       </div>
 
       <div className={styles.tabs}>
@@ -239,12 +240,12 @@ export function Dock() {
 
         {tab === 'installed' ? (
           loading ? (
-            <div className={styles.empty}>读取中…</div>
+            <div className={styles.empty}>{t('读取中…')}</div>
           ) : plugins.length === 0 ? (
             <div className={styles.empty}>
               还没有插件。
               <br />
-              去 <b>可安装</b> 一键装一个，或在 <b>新建</b> 里做一个。
+              去 <b>{t('可安装')}</b> {t('一键装一个，或在')} <b>{t('新建')}</b> 里做一个。
             </div>
           ) : (
             plugins.map((p) => {
@@ -261,7 +262,7 @@ export function Dock() {
                         {m?.name || p.dir}
                         {m?.version ? <span className={styles.ver}>v{m.version}</span> : null}
                         {!p.hasModule && (m?.tools?.length ?? 0) > 0 ? (
-                          <span className={styles.warnBadge} title="manifest 声明了工具，但没有 index.mjs，所以它们不会生效">
+                          <span className={styles.warnBadge} title={t('manifest 声明了工具，但没有 index.mjs，所以它们不会生效')}>
                             无实现
                           </span>
                         ) : null}
@@ -298,7 +299,7 @@ export function Dock() {
                       className={styles.small}
                       disabled={!m || busyKey === `edit:${p.dir}`}
                       onClick={() => void openEditor(p.dir)}
-                      title="查看并修改 manifest 与 index.mjs，保存后立即生效"
+                      title={t('查看并修改 manifest 与 index.mjs，保存后立即生效')}
                     >
                       编辑
                     </button>
@@ -315,12 +316,12 @@ export function Dock() {
                   {isOpen ? (
                     <div className={styles.detail}>
                       <div className={styles.row}>
-                        <b>目录</b>
+                        <b>{t('目录')}</b>
                         <code>{p.manifestPath}</code>
                       </div>
-                      {m?.author ? <div className={styles.row}><b>作者</b><span>{m.author}</span></div> : null}
+                      {m?.author ? <div className={styles.row}><b>{t('作者')}</b><span>{m.author}</span></div> : null}
                       <div className={styles.row}>
-                        <b>权限</b>
+                        <b>{t('权限')}</b>
                         <PermissionChips list={m?.permissions} />
                       </div>
 
@@ -357,7 +358,7 @@ export function Dock() {
 
         {tab === 'catalog' ? (
           catalog.length === 0 ? (
-            <div className={styles.empty}>没有可安装的插件。目录里还没有内容。</div>
+            <div className={styles.empty}>{t('没有可安装的插件。目录里还没有内容。')}</div>
           ) : (
             catalog.map((c) => (
               <div key={c.dir} className={styles.plugin}>
@@ -391,24 +392,24 @@ export function Dock() {
         {tab === 'new' ? (
           <>
             <div className={styles.formCard}>
-              <div className={styles.formTitle}>做一个新插件</div>
+              <div className={styles.formTitle}>{t('做一个新插件')}</div>
               <div className={styles.formHint}>
                 会生成一个能直接跑起来的骨架：manifest.json + index.mjs，
                 里面有一个可调用的示例工具。建好点「编辑」就能改。
               </div>
               <label className={styles.fsField}>
-                <span>插件名</span>
+                <span>{t('插件名')}</span>
                 <input
                   value={scaffoldName}
-                  placeholder="例如 pdf-tools（字母、数字、- 或 _）"
+                  placeholder={t('例如 pdf-tools（字母、数字、- 或 _）')}
                   onChange={(e) => setScaffoldName(e.target.value)}
                 />
               </label>
               <label className={styles.fsField}>
-                <span>说明（可选）</span>
+                <span>{t('说明（可选）')}</span>
                 <input
                   value={scaffoldDesc}
-                  placeholder="一句话说明这个插件做什么"
+                  placeholder={t('一句话说明这个插件做什么')}
                   onChange={(e) => setScaffoldDesc(e.target.value)}
                 />
               </label>
@@ -418,15 +419,15 @@ export function Dock() {
             </div>
 
             <div className={styles.formCard}>
-              <div className={styles.formTitle}>从文件夹安装</div>
+              <div className={styles.formTitle}>{t('从文件夹安装')}</div>
               <div className={styles.formHint}>
                 已经有一个插件目录？粘贴它的完整路径即可。目录里必须有 manifest.json。
               </div>
               <label className={styles.fsField}>
-                <span>插件目录</span>
+                <span>{t('插件目录')}</span>
                 <input
                   value={pathInput}
-                  placeholder="例如 ~/my-plugins/pdf-tools"
+                  placeholder={t('例如 ~/my-plugins/pdf-tools')}
                   onChange={(e) => setPathInput(e.target.value)}
                 />
               </label>
@@ -436,7 +437,7 @@ export function Dock() {
             </div>
 
             <div className={styles.formCard}>
-              <div className={styles.formTitle}>插件装在哪</div>
+              <div className={styles.formTitle}>{t('插件装在哪')}</div>
               <div className={styles.formHint}>
                 装在应用目录里（所有工作区共用）：
                 <br />
@@ -452,10 +453,10 @@ export function Dock() {
               plugin code runs in-process.
             */}
             <div className={styles.disclosure}>
-              <b>关于插件安全</b>
+              <b>{t('关于插件安全')}</b>
               <div>
                 插件代码和 Pulse 在同一个进程里运行，所以 manifest 里的「权限」是
-                <b>声明</b>，<b>不是限制</b> —— 它告诉你插件打算碰什么，但拦不住它做别的。
+                <b>{t('声明')}</b>，<b>{t('不是限制')}</b> —— 它告诉你插件打算碰什么，但拦不住它做别的。
                 装之前请看清上面列出的权限，来源不明的插件不要装。
               </div>
             </div>
@@ -484,7 +485,7 @@ export function Dock() {
               <button type="button" className={styles.small} disabled={busyKey === 'save-source'} onClick={saveEditor}>
                 {busyKey === 'save-source' ? '保存中…' : '保存并重载'}
               </button>
-              <button type="button" className={styles.small} onClick={() => setEditor(null)}>关闭</button>
+              <button type="button" className={styles.small} onClick={() => setEditor(null)}>{t('关闭')}</button>
             </div>
             <textarea
               className={styles.editorArea}

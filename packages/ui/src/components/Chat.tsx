@@ -446,7 +446,7 @@ function ToolCallCard({
         <div className={styles.toolCallBody}>
           {diff ? (
             <div className={styles.toolCallSection}>
-              <div className={styles.toolCallSectionLabel}>改动</div>
+              <div className={styles.toolCallSectionLabel}>{t('改动')}</div>
               <DiffView unified={diff} lang={langFromPath(written?.path ?? summary)} />
             </div>
           ) : null}
@@ -457,14 +457,14 @@ function ToolCallCard({
             </div>
           ) : null}
           <div className={styles.toolCallSection}>
-            <div className={styles.toolCallSectionLabel}>参数</div>
+            <div className={styles.toolCallSectionLabel}>{t('参数')}</div>
             <pre className={styles.toolCallPre}>
               {Object.keys(argsObj).length ? JSON.stringify(argsObj, null, 2) : '(接收中…)'}
             </pre>
           </div>
           {result && !diff ? (
             <div className={styles.toolCallSection}>
-              <div className={styles.toolCallSectionLabel}>返回</div>
+              <div className={styles.toolCallSectionLabel}>{t('返回')}</div>
               <pre className={styles.toolCallPre}>
                 {result}
               </pre>
@@ -723,7 +723,7 @@ const MessageBubble = memo(function MessageBubble({
         <div className={`${styles.bubbleWrap}`}>
           <div className={`${styles.bubble} ${styles.bubbleSystem}`} data-surface="bubble">{msg.content}</div>
           {msg.content ? (
-            <button type="button" className={styles.copyBtn} title="复制" onClick={() => void copyText(msg.content)}>
+            <button type="button" className={styles.copyBtn} title={t('复制')} onClick={() => void copyText(msg.content)}>
               复制
             </button>
           ) : null}
@@ -755,7 +755,7 @@ const MessageBubble = memo(function MessageBubble({
                 {msg.isStreaming && <span className={styles.streamingDot} />}
               </div>
               {!msg.isStreaming ? (
-                <button type="button" className={styles.copyBtn} title="复制" onClick={() => void copyText(msg.content)}>
+                <button type="button" className={styles.copyBtn} title={t('复制')} onClick={() => void copyText(msg.content)}>
                   复制
                 </button>
               ) : null}
@@ -820,7 +820,7 @@ const MessageBubble = memo(function MessageBubble({
             <button
               type="button"
               className={`${styles.copyBtn} ${styles.copyBtnUser}`}
-              title="复制"
+              title={t('复制')}
               onClick={() => void copyText(msg.content)}
             >
               复制
@@ -830,7 +830,7 @@ const MessageBubble = memo(function MessageBubble({
             <button
               type="button"
               className={styles.rewindBtn}
-              title="从这里撤销：本条及其之后的对话都会被删除，并回到这一轮重新开始"
+              title={t('从这里撤销：本条及其之后的对话都会被删除，并回到这一轮重新开始')}
               onClick={() => onRewind(index)}
             >
               撤销到此
@@ -848,7 +848,7 @@ const MessageBubble = memo(function MessageBubble({
           <button
             type="button"
             className={styles.copyBtn}
-            title="复制"
+            title={t('复制')}
             onClick={() => void copyText(msg.content)}
           >
             复制
@@ -858,7 +858,7 @@ const MessageBubble = memo(function MessageBubble({
           <button
             type="button"
             className={styles.rewindBtn}
-            title="从这里撤销：本条及其之后的对话都会被删除，并回到这一轮重新开始"
+            title={t('从这里撤销：本条及其之后的对话都会被删除，并回到这一轮重新开始')}
             onClick={() => onRewind(index)}
           >
             撤销到此
@@ -1427,7 +1427,7 @@ export function Chat({
         if (paths.length) onDropPaths?.(paths);
       }}
     >
-      {dragging && <div className={styles.dropOverlay}>松开以引用到对话</div>}
+      {dragging && <div className={styles.dropOverlay}>{t('松开以引用到对话')}</div>}
       <div className={styles.header}>
         <span className={styles.headerTitle}>{sessionTitle || '对话'}</span>
         <div className={styles.headerActions}>
@@ -1457,12 +1457,12 @@ export function Chat({
           <div className={styles.emptyMessages}>
             <div className={styles.emptyOrb} aria-hidden />
             <div className={styles.emptyIcon}>✦</div>
-            <div className={styles.emptyText}>开始对话</div>
+            <div className={styles.emptyText}>{t('开始对话')}</div>
             <div className={styles.emptyHint}>
                   用 @file: / @folder: / @symbol: 挂工作区；#标题 走结构共振（非 RAG）
             </div>
             <div className={styles.emptyShortcuts}>
-              <kbd>Enter</kbd> 发送 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行 · <kbd>Ctrl</kbd>+<kbd>K</kbd> 命令面板
+              <kbd>Enter</kbd> {t('发送 ·')} <kbd>Shift</kbd>+<kbd>Enter</kbd> {t('换行 ·')} <kbd>Ctrl</kbd>+<kbd>K</kbd> 命令面板
             </div>
             <div className={styles.emptyShortcuts}>
               拖入壁纸可换背景 · 拖入项目目录可挂载工作区
@@ -1492,7 +1492,7 @@ export function Chat({
         {/* Sticky so it stays at the bottom edge of the scrollport rather than
             scrolling away with the content. */}
         {!atBottom && messages.length > 0 ? (
-          <button type="button" className={styles.jumpLatest} onClick={jumpToLatest} title="回到最新">
+          <button type="button" className={styles.jumpLatest} onClick={jumpToLatest} title={t('回到最新')}>
             ↓ 回到最新
           </button>
         ) : null}
@@ -1585,7 +1585,7 @@ export function Chat({
                   type="button"
                   className={styles.refChipRemove}
                   onClick={() => removeRef(r.type, r.path, r.line, r.name)}
-                  title="移除引用"
+                  title={t('移除引用')}
                 >
                   ×
                 </button>
@@ -1688,7 +1688,7 @@ export function Chat({
             <button
               className={`${styles.sendBtn} ${styles.sendBtnStop}`}
               onClick={onStop}
-              title="打断当前执行（已收到的内容保留）"
+              title={t('打断当前执行（已收到的内容保留）')}
               aria-label={t('停止')}
             ><IconStop size={16} /></button>
           ) : (
@@ -1719,8 +1719,8 @@ export function Chat({
             ))}
           </div>
 
-          <div className={styles.thinkSlider} title="推理深度：越高越慢但越稳">
-            <span className={styles.thinkLabel}>推理</span>
+          <div className={styles.thinkSlider} title={t('推理深度：越高越慢但越稳')}>
+            <span className={styles.thinkLabel}>{t('推理')}</span>
             <div className={styles.thinkTrackWrap}>
               <input
                 type="range"
@@ -1754,7 +1754,7 @@ export function Chat({
                   setThinkRaw(idx);
                   if (lv && lv.id !== thinkingLevel) onThinkingLevel?.(lv.id);
                 }}
-                aria-label="推理深度"
+                aria-label={t('推理深度')}
               />
               <div className={styles.thinkTicks}>
                 {THINK_LEVELS.map((lv, i) => (
@@ -1781,17 +1781,17 @@ export function Chat({
             global status bar. */}
         <div className={styles.chatActions}>
           {onImportContext ? (
-            <button type="button" className="she-btn she-btn--chip" onClick={onImportContext} title="把 Cursor / Claude Code / Codex 的对话上下文搬进本对话">
+            <button type="button" className="she-btn she-btn--chip" onClick={onImportContext} title={t('把 Cursor / Claude Code / Codex 的对话上下文搬进本对话')}>
               导入对话
             </button>
           ) : null}
           {onOpenPlans ? (
-            <button type="button" className="she-btn she-btn--chip" onClick={onOpenPlans} title="本对话的长程计划">
+            <button type="button" className="she-btn she-btn--chip" onClick={onOpenPlans} title={t('本对话的长程计划')}>
               计划
             </button>
           ) : null}
           {onOpenTimeline ? (
-            <button type="button" className="she-btn she-btn--chip" onClick={onOpenTimeline} title="本对话的检查点时间线">
+            <button type="button" className="she-btn she-btn--chip" onClick={onOpenTimeline} title={t('本对话的检查点时间线')}>
               时间线
             </button>
           ) : null}
@@ -1800,7 +1800,7 @@ export function Chat({
               type="button"
               className="she-btn she-btn--chip"
               onClick={onOpenSkills}
-              title="打开技能库：新建 / 编辑 / 删除自定义技能（写入 .she/skills/custom/）"
+              title={t('打开技能库：新建 / 编辑 / 删除自定义技能（写入 .she/skills/custom/）')}
               >
                 技能库
               </button>
@@ -1810,7 +1810,7 @@ export function Chat({
                 type="button"
                 className="she-btn she-btn--chip"
                 onClick={onOpenSchedule}
-                title="定时任务：让助手在指定时间自动干活，并设置允许工作的时间段"
+                title={t('定时任务：让助手在指定时间自动干活，并设置允许工作的时间段')}
               >
                 定时任务
               </button>
@@ -1825,7 +1825,7 @@ export function Chat({
                 {t('缓存管理')}
               </button>
             ) : null}
-          <span className={styles.inputHintInline}>Enter 发送 · Shift+Enter 换行 · Tab 选中 @ 联想</span>
+          <span className={styles.inputHintInline}>{t('Enter 发送 · Shift+Enter 换行 · Tab 选中 @ 联想')}</span>
         </div>
       </div>
     </div>

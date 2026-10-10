@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchJSON } from '../lib/api';
 import styles from '../styles/Home.module.css';
+import { t } from '../lib/i18n';
 
 export interface WorkspaceEntry {
   root: string;
@@ -173,7 +174,7 @@ export function Home({ onEnter, appearance, dock }: Props) {
         {/* ── appearance: theme + wallpaper, right on the landing page ── */}
         <section className={styles.appearance}>
           <div className={styles.row}>
-            <span className={styles.rowLabel}>主题</span>
+            <span className={styles.rowLabel}>{t('主题')}</span>
             <div className={styles.segmented}>
               <button
                 type="button"
@@ -193,7 +194,7 @@ export function Home({ onEnter, appearance, dock }: Props) {
           </div>
 
           <div className={styles.row}>
-            <span className={styles.rowLabel}>背景</span>
+            <span className={styles.rowLabel}>{t('背景')}</span>
             <div className={styles.bgControls}>
               <button
                 type="button"
@@ -217,7 +218,7 @@ export function Home({ onEnter, appearance, dock }: Props) {
                   </button>
                 </>
               ) : (
-                <span className={styles.rowHint}>支持 jpg / png / mp4，拖到这里也行</span>
+                <span className={styles.rowHint}>{t('支持 jpg / png / mp4，拖到这里也行')}</span>
               )}
             </div>
             <input
@@ -238,14 +239,14 @@ export function Home({ onEnter, appearance, dock }: Props) {
         {/* ── workspace ── */}
         <section className={styles.picker}>
           <div className={styles.pickerHead}>
-            <span className={styles.rowLabel}>工作区</span>
+            <span className={styles.rowLabel}>{t('工作区')}</span>
             <span className={styles.rowHint}>
               {loading ? '读取中…' : '会话与知识库以它为边界'}
             </span>
           </div>
 
           {!loading && workspaces.length === 0 ? (
-            <div className={styles.empty}>还没有打开过工作区，选一个文件夹开始。</div>
+            <div className={styles.empty}>{t('还没有打开过工作区，选一个文件夹开始。')}</div>
           ) : null}
 
           <div className={styles.list}>
@@ -264,11 +265,11 @@ export function Home({ onEnter, appearance, dock }: Props) {
                   <span className={styles.wsPath}>{shortPath(w.root)}</span>
                 </span>
                 {w.root === current ? (
-                  <span className={styles.wsBadgeOn}>当前</span>
+                  <span className={styles.wsBadgeOn}>{t('当前')}</span>
                 ) : w.sessionCount > 0 ? (
                   <span className={styles.wsBadge}>{w.sessionCount} 会话</span>
                 ) : (
-                  <span className={styles.wsBadgeMuted}>进入</span>
+                  <span className={styles.wsBadgeMuted}>{t('进入')}</span>
                 )}
               </button>
             ))}
@@ -312,7 +313,7 @@ export function Home({ onEnter, appearance, dock }: Props) {
                 value={manual}
                 autoFocus
                 onChange={(e) => setManual(e.target.value)}
-                placeholder="例如 ~/projects/my-app"
+                placeholder={t('例如 ~/projects/my-app')}
                 spellCheck={false}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') void enter(manual);
@@ -344,7 +345,7 @@ export function Home({ onEnter, appearance, dock }: Props) {
               type="button"
               className={styles.linkBtn}
               onClick={appearance.onOpenSkills}
-              title="新建 / 编辑自定义技能（写入 .she/skills/custom/）"
+              title={t('新建 / 编辑自定义技能（写入 .she/skills/custom/）')}
             >
               技能库
             </button>
