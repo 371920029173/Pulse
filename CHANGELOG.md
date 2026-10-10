@@ -8,11 +8,21 @@ features, patch for fixes.
 
 ### Fixed
 
+- **会话发不出消息：本地说"忙"就拒发，是错的 —— 以服务端为权威。** 轮次锁在服务端，而客户端的 `isLoading` 会过期：聊天流的空闲超时是显式关掉的，流只要死得安静，它就永远为真；`armFollow` 的自愈与 `loadHistory` 又都以 `abortRef === null` 为门，死掉的那条流把自愈一起锁死。结果是：界面看着空闲（`isLoading` 为假 → 连停止按钮都不渲染），服务端那一轮还在跑，每条消息都吃 409，无处可停。现在发送先问 `/api/chat/running`：空闲 → 归位并真的发出去；在跑 → 把这句话接成「追加」并把那一轮显示出来（停止入口出现）；409 也不再丢掉用户那句话。判据 `packages/ui/src/__tests__/send-recovery.test.tsx` 4 条；反向验证：收走修复 → 4/4 红。
+- **每一次状态保存都整份重写会话文件（磁盘写放大）。** `saveStateFile()` 把整个 store 序列化后写出（临时文件 + rename），而 `sessions.json` 装着所有会话的全文（实测 5.35 MB）；`persistHistory()` 有 ~25 个调用点，流式期间每 2 秒还来一次。用户报「程序严重占用磁盘，开启一会以后 System 进程暴涨、机器卡顿」。现在**内容没变就不碰文件**（文件被手工或别的进程改过照旧写回），流式落盘 2s → 10s。A/B（真实负载、内容 20 次完全相同）：106.9 MB → 5.3 MB。判据 `packages/server/src/__tests__/state-file.test.ts` 3 条。
+- **停止打不断"正在等待"的工具。** `agent.ts` 只把本轮 signal 传给 provider（模型请求），工具执行那条路没有 signal，而 `shell_wait` 最长等 10 分钟 —— 用户按停止、甚至直接说「先停下说一下情况」时，那一轮要等它返回才结束。现在 `execute` / `ToolSet` 多一个可选 `{ signal }`，`shell.waitJob` 收到 abort 就带着已收输出返回，并明说「这次等待是被用户停止的：任务仍在后台跑（要真的杀掉用 shell_kill），所以下面这些不是它的结局」。判据 `packages/sandbox/src/__tests__/background.test.ts` 新增一条；反向验证：收走修复 → `# fail 1`。
+- **拿掉 90 秒「卡住了」提示条。** 它按"有没有新内容"计时，而一次工具调用本来就几分钟没有新帧（长命令、长思考都是），于是它在**正常路径**上就会亮 —— 一条在正常路径上会亮的警告，只会训练人忽略它。出口没丢：运行中发送键就是「停止」，另有连按两次 Enter 的打断快捷键。
+- **「回到最新」点不回最新。** `scrollIntoView({behavior:'smooth'})` 瞄准的是动画开始那一刻的坐标，而每行的 `content-visibility: auto` 让视口外的行按 `contain-intrinsic-size`（96px）估算 —— 动画过程中高度变了，于是落短。改成瞬时置底 + 收敛重试；跟随新消息那条路径共用同一个助手。判据在 `chat-recovery.test.tsx`（反向验证过）。
+- **评测汇总行把"每任务均值"印成了整套用量/总耗时。** 实测那一轮 15 个任务真实约 106 万 tokens / 95 秒，而印的是 `70748 tokens` / `6.1s`。README 里「改动前后对比总 tokens」正是拿这几行比的，标签错了对比就失真。现在是「每任务 X」+「单次全套 约 Y（N 个任务，按每任务均值推算）」。
+
 - **工具卡片不再把原始 JSON 当摘要显示，"思维链"也不会被压成竖排。** 两处都是"用久了有些部件渲染出问题"的成因，各自留了一条判据。
   - `summarizeToolArgs()` 只给 15 个工具手写了摘要，其余（`errorbook_*` / `memo_*` / `plan_update` / `schedule_*` / `skill_read` / `lsp_*` / `mcp_call` …）**回退成 `JSON.stringify(args)`** —— 记录里于是出现 `errorbook_forget {"id":"…","reason":"…"}` 这样的行，整条记录看起来像调试日志。现在补齐了 24 个自有工具，并给未知工具（含 MCP 与插件的）加了一层"按目标键取名"（`query` / `command` / `path` / `text` / `name` / `id` / `step_id` / `server` …），**一个都取不到才退回 JSON** —— 那时 JSON 仍是唯一能说明问题的东西，调试信息不丢。判据：`packages/ui/src/__tests__/tool-summary.test.tsx`。
   - `.reasoningLabel` 与 `.reasoningMeta` 是那一行 flex 里**唯一**没有 `nowrap` / 不收缩保护的两个标签（同行的 `.toolCallVerb`、`.toolCallName`、`.toolResultLabel`、`.toolResultMeta` 都写了 `flex-shrink: 0`）：窗口被拖窄（侧栏 + 轨迹面板同时打开时聊天列只剩几百 px）时 flex 会把它们压到一字宽，"思维链"就竖着排成 思/维/链。判据：`check:ui` 新增的一节（已反向测过 —— 去掉 `nowrap` 会报红）。jsdom 没有布局引擎，所以这件事只能靠静态判据钉，不能靠单元测试。
   - 取证结论一并记下：截图里出现的 `跳到此处` 与 `[工具结果]` **在本工作区的源码、构建产物、桌面 runtime、会话记录里一处都没有**（同一次扫描里 `回到最新` / `轨迹` / `思维链` 都能找到，对照组有效），所以那个页面不是这份代码构建的。
 ### Added
+
+- **两条开发档技能进了版本控制**：`skills/dev/device-control.md`（用 adb 把 UI 树读成"文字 + 坐标"来当眼睛控制手机：键盘弹出会整体上移所以坐标要用当次 dump 的、卡片消息是 WebView 读不到字、adb daemon 会让命令挂着不退）与 `skills/dev/disk-forensics.md`（磁盘 IO 取证的顺序：逻辑 IO ≠ 物理 IO、看物理队列、排除换页、找出"谁在写"）。把技能放进 `.she/skills/` 是**回退**位置 —— 那里 gitignore、不进构建、新克隆也没有。
+- **`docs/feishu-remote.md` 补了三条实测要点**：机器人名字不用猜（`GET open-apis/bot/v3/info` 回 `app_name`，不需要额外权限）；面板上那两个字段**不回填**已保存的值（它们是给新值用的 —— 已配置的应用只显示状态，别再粘一遍 Secret 把自己覆盖掉）；手机消息落进桌面端**当前打开的那个对话**，而那一轮正在跑时发送会被拒或接成追加（先停或等）。
 
 - **"压缩会不会丢事实"有了量具：先测，再决定要不要加保护。** `scripts/context-survival-probe.mjs`（真端点，故意不进 `check:offline`）把"前面埋事实、后面全是填充"的历史直接塞进去，用一个小窗口逼出一次压缩，然后报三个数：真压过没有、事实在摘要里逐字保住了几条、事实在答复里活下来几条。**最后一次干净读数是 8/8 全活**（摘要里 6/8 逐字，模型读懂了那个模式）—— 在这份夹具上压缩没有丢事实，"事实会被抹平"的判断是坏量具造出来的假象。量具自己踩过的五个坑（评测任务那条路走不通、探针复用了陈摘要、探针的预算掐掉了回合、种下的历史差一点、种子只种了 4 条却说 8 条）记在 `docs/context-and-caching.md` 那一节里；配一个默认关着的 `SHE_DIGEST_APPENDIX`（摘要 + 用户原话摘录）备用。另留下：`contextCompacted` 判据类型（把"这次真的压过"变成断言）、生成式夹具 `{ lines, prefix }`、以及压缩失败/到阈值时的日志。
 

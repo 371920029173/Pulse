@@ -12,6 +12,16 @@ sends nothing anywhere else.
 ## 本次更新：修复了一些已知问题并进行大幅升级与优化
 
 **Reliability**
+- A conversation can no longer get stuck refusing every message. The "is this chat busy" bit was
+  local and could go stale for good (a quietly dead stream left it true), while the turn lock lives
+  on the server — so the box showed Send, every attempt came back 409, and there was no Stop button
+  anywhere. Sending now asks the server first: idle heals and sends for real, busy appends your text
+  to the running turn and shows it with a Stop button.
+- Stop now interrupts a pending tool wait. `shell_wait` could hold a turn for up to ten minutes, so
+  stopping (or asking the agent to stop) did nothing until it returned. The wait ends immediately and
+  says so honestly: it is the wait that stopped, the job keeps running — `shell_kill` is how you end it.
+- The 90-second "no progress" notice is gone: it fired on the normal path (a tool call is minutes long
+  by design). The composer's Stop button and the double-Enter shortcut are the way out.
 - `lsp_diagnostics` no longer hangs for 15 s on a file that was already opened for go-to-definition
   (the diagnostics pushed on open were cached under the wrong content). That hang used to trip the
   stuck-loop guard and end a whole turn.
@@ -52,6 +62,9 @@ sends nothing anywhere else.
   (`kb_get` fetches the full text by id). History is never rewritten, so the prompt cache keeps hitting.
 
 **Housekeeping**
+- State files are no longer rewritten when nothing changed, and a streaming turn persists every ten
+  seconds instead of every two. A single save used to rewrite the whole session store (5.3 MB
+  measured); on a workspace in an indexed folder that also meant continuous indexer and antivirus work.
 - Default skills now live in a version-controlled `skills/` folder. `.she/` is gitignored, so a fresh
   clone previously had no skills at all.
 - Stale `4577` port defaults (inside a Windows excluded port range) were changed to `5577`, and
