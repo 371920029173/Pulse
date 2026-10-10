@@ -16,6 +16,7 @@
     "desktop": "pnpm --filter @she/desktop start",
     "eval": "node evals/retrieval/run.mjs",
     "eval:recall": "node evals/recall/run.mjs --check",
+    "check:kbpack": "node scripts/kb-pack-check.mjs",
     "eval:agent": "node evals/agent/run.mjs",
     "check:security": "node scripts/security-check.mjs",
     "check:deps": "node scripts/deps-check.mjs",

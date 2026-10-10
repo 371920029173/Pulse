@@ -2,10 +2,22 @@
   "name": "@she/kb",
   "version": "0.3.0",
   "license": "Apache-2.0",
-  "private": true,
+  "description": "Group memory: PulseSeed structural resonance retrieval over a group tree. No embeddings; every result carries its activation trace.",
+  "keywords": ["knowledge-base", "retrieval", "bm25", "memory", "sqlite"],
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "node --import tsx --test-timeout=300000 --test src/__tests__/*.test.ts",
