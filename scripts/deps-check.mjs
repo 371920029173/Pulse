@@ -48,7 +48,13 @@ const ROOT = resolve(HERE, '..');
  * Lower these as advisories are fixed. Raising one is how an advisory becomes permanent: do it
  * only in its own commit, with the reason — including why it cannot be fixed — in the message.
  */
-const BASELINE = { critical: 0, high: 0, moderate: 0, low: 0 };
+/*
+ * 2026-10-10 抬高一格（moderate 0 → 1）。理由：`sprintf-js <=1.1.3` 的 DoS 告警 ——
+ * **没有修复版**（`npm view sprintf-js version` 就是 1.1.3，上游停更），它是构建期的传递依赖
+ * （argparse / js-yaml 那一串），不随产品发到用户机器上。要降回 0 只有两条路：上游发新版，
+ * 或把那层带它的工具换掉。详见同一次提交的说明。
+ */
+const BASELINE = { critical: 0, high: 0, moderate: 1, low: 0 };
 
 /**
  * `info` is reported by pnpm but carries no remediation obligation, so it is shown and not
