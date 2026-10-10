@@ -217,6 +217,9 @@ const child = spawn('node', [SERVER_ENTRY], {
   env: hermeticEnv({
     SHE_WORKSPACE: ws,
     SHE_PORT: PORT,
+    // 这一套是少数没 pin SHE_ENV_FILE 的（其它十几套都 pin 了）：而下面新加的一节会走
+    // PUT /api/auth/config —— 那条路由写 .env。不 pin 的话它写的就是**仓库那份真配置**。
+    SHE_ENV_FILE: join(ws, '.env'),
     SHE_APP_DIR: join(ws, 'appdir'),
     SHE_STATE_DIR: ws,
     SHE_AUTH_TOKENS: `acme:${TOKEN_A},beta:${TOKEN_B}`,
@@ -340,6 +343,50 @@ let sessionA = null;
 
   const status = await api('/api/audit?kind=auth&limit=20', { token: TOKEN_A });
   check('审计能按 kind=auth 查（新 kind 接进了校验白名单）', status.status === 200, `status=${status.status}`);
+}
+
+/* ─── 设置页能不能开关认证 ─────────────────────────────────────────────
+ * 与界面走同一个入口（PUT /api/auth/config），所以这一节钉的是"开关本身"：写进 SHE_ENV_FILE 指的
+ * 那份 .env、当场生效、令牌一个字都不回显、太短的令牌被服务端那条规则拒掉，而且**仓库那份真配置
+ * 一个字节都没动**。
+ *
+ * 放在最后：它会改掉本进程一直用的那套令牌，之后前面的断言都不再需要它们。
+ */
+{
+  const NEW_TOKEN = 'ui-auth-token-0123456789';
+  const put = (body, token) => api('/api/auth/config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    token,
+  });
+
+  const onRes = await put({ token: NEW_TOKEN }, TOKEN_A);
+  const onBody = await json(onRes);
+  check('开启认证：200', onRes.status === 200, `status=${onRes.status}`);
+  check('【关键】响应里没有令牌', !JSON.stringify(onBody ?? {}).includes(NEW_TOKEN), JSON.stringify(onBody));
+  check('响应里说清已开启', onBody?.enabled === true, JSON.stringify(onBody));
+
+  const locked = await api('/api/sessions?all=1');
+  check('【关键】开启后：不带令牌 → 401', locked.status === 401, `status=${locked.status}`);
+  check('【关键】开启后：带着新令牌 → 200', (await api('/api/sessions?all=1', { token: NEW_TOKEN })).status === 200);
+
+  const short = await put({ token: 'short' }, NEW_TOKEN);
+  check('【关键】太短的令牌被拒（用的是服务端那条规则）', short.status === 400, `status=${short.status}`);
+
+  const myEnv = join(ws, '.env');
+  check('写进了检查自己的 .env', existsSync(myEnv) && readFileSync(myEnv, 'utf8').includes('SHE_AUTH_TOKEN='), null);
+  const repoEnv = join(ROOT, '.env');
+  check('【关键】仓库那份 .env 没被动（一个字都没写进去）', !readFileSync(repoEnv, 'utf8').includes(NEW_TOKEN), null);
+
+  const raw = existsSync(join(ws, '.she', 'audit.log')) ? readFileSync(join(ws, '.she', 'audit.log'), 'utf8') : '';
+  check('【关键】审计里也没有令牌', !raw.includes(NEW_TOKEN), null);
+  check('审计记了这次动作（不记令牌）', raw.includes('api_auth'), null);
+
+  const off = await put({ disable: true }, NEW_TOKEN);
+  check('关闭认证：200', off.status === 200, `status=${off.status}`);
+  const openAgain = await api('/api/sessions?all=1');
+  check('关闭之后：不带令牌也能进（回到默认的"本机开放"）', openAgain.status === 200, `status=${openAgain.status}`);
 }
 
 killTree(child.pid);

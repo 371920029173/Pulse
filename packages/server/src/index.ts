@@ -743,6 +743,8 @@ function isControlPlanePath(pathname: string): boolean {
   // 控制面的**读**也要凭据：`GET /api/settings` 会回出 `.env` 里那一套档位，而"先读出来确认哪一档
   // 好改"是改写的前一半。所以这里不看 method。
   if (pathname === '/api/settings') return true;
+  // 改 API 认证 = 改"谁能连这个 API"，与设置同属能改变边界宽度的那一类。
+  if (pathname === '/api/auth/config') return true;
   if (pathname === '/api/config/rollback' || pathname === '/api/config/recovery') return true;
   if (pathname === '/api/workspaces' || pathname.startsWith('/api/workspaces/')) return true;
   return false;
@@ -2429,6 +2431,22 @@ function registerRoutes(router: Router): void {
    * reach. It never echoes the token back — a client that has it does not need it returned, and a
    * response is one more place it could be logged.
    */
+/**
+ * 重新从环境变量读一遍令牌，供改动配置的路由调用。
+ *
+ * `tenancy` 是模块级的（每个请求都要看它），代价是改 `SHE_AUTH_TOKEN(S)` 本来要重启才生效。
+ * 配置错误**保留**而不是抛出：下一个请求会带着原因被拒（`tenancyError`）—— 热改配置时，"fail
+ * closed"要长成这个样子，而不是让进程在编辑到一半时死去。
+ */
+function reloadTenancy(): void {
+  try {
+    tenancy = loadTenancy(process.env);
+    tenancyError = null;
+  } catch (err) {
+    tenancyError = err instanceof Error ? err.message : String(err);
+  }
+}
+
   router.get('/api/auth/status', (_req, res) => {
     sendJSON(res, {
       enabled: tenancy.enabled,
@@ -2437,6 +2455,67 @@ function registerRoutes(router: Router): void {
       header: AUTH_HEADER,
       /** How many tenants exist. Not their ids: that is a list of who else uses this install. */
       tenants: tenancy.tenants.length,
+    });
+  });
+
+/**
+ * 打开/关闭 API 认证，从设置页来。
+ *
+ * 为什么是一条路由而不是"自己改 .env"：这里要防的错是**操作者以为自己受保护**（或反过来，一把锁
+ * 把自己关在外面）。输入用服务端启动时那套解析器校验（`loadTenancy`），所以太短、重复的令牌会当场
+ * 拿到那条规则自己的话，而不是重启之后每个请求都被拒。
+ *
+ * 令牌一个字都不回显。`token` 写单用户那一格，`tokens` 写多租户那一格，`disable: true` 两格都删。
+ */
+  router.put('/api/auth/config', async (req, res) => {
+    const body = await parseBody<{ token?: string; tokens?: string; disable?: boolean }>(req);
+    const patch: Record<string, string | null> = {};
+
+    if (body.disable === true) {
+      patch.SHE_AUTH_TOKEN = null;
+      patch.SHE_AUTH_TOKENS = null;
+    } else if (typeof body.tokens === 'string' && body.tokens.trim()) {
+      const multi = body.tokens.trim();
+      try {
+        loadTenancy({ SHE_AUTH_TOKENS: multi });
+      } catch (err) {
+        throw new HttpError(400, (err as Error).message);
+      }
+      patch.SHE_AUTH_TOKENS = multi;
+      patch.SHE_AUTH_TOKEN = null;
+    } else if (typeof body.token === 'string' && body.token.trim()) {
+      const single = body.token.trim();
+      try {
+        loadTenancy({ SHE_AUTH_TOKEN: single });
+      } catch (err) {
+        throw new HttpError(400, (err as Error).message);
+      }
+      patch.SHE_AUTH_TOKEN = single;
+      patch.SHE_AUTH_TOKENS = null;
+    } else {
+      throw new HttpError(400, 'Missing required field: token, or tokens, or disable: true');
+    }
+
+    updateEnvFile(ENV_PATH, patch);
+    for (const key of ['SHE_AUTH_TOKEN', 'SHE_AUTH_TOKENS']) {
+      const value = patch[key];
+      if (value === null) delete process.env[key];
+      else if (value !== undefined) process.env[key] = value;
+    }
+    reloadTenancy();
+    // 审计里只记"做了什么"，不记令牌（与 tenant_adopt 那条一致）。
+    auditSafe({
+      kind: 'config',
+      change: body.disable === true
+        ? 'disable_api_auth'
+        : patch.SHE_AUTH_TOKENS ? 'set_api_auth_multi' : 'set_api_auth_single',
+      note: body.disable === true ? '关闭 API 认证（回到本机开放）' : `开启/更新 API 认证：${tenancy.tenants.length} 个租户`,
+    });
+    sendJSON(res, {
+      ok: true,
+      enabled: tenancy.enabled,
+      tenants: tenancy.tenants.length,
+      header: AUTH_HEADER,
     });
   });
 

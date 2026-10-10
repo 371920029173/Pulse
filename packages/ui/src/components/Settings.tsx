@@ -4,6 +4,7 @@ import { SKILL_PROFILES, isSkillProfile, type SkillProfileId } from '../lib/skil
 import { LOCALES, t } from '../lib/i18n';
 import type { Locale } from '../lib/i18n';
 import { ShortcutEditor } from './ShortcutEditor';
+import { AuthSettings } from './AuthSettings';
 import styles from '../styles/Settings.module.css';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
@@ -630,6 +631,9 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
           <p className={styles.hint}>
             {t('这里决定 Agent 执行命令时会不会先来问你。改完点保存，立即生效，不用重启。')}
           </p>
+
+          {/* API 认证：默认开放，想关就能关 —— 入口只有 .env 与文档时，这件事等于不存在。 */}
+          <AuthSettings />
           {/*
             自动化模式与沙箱姿态的张力。服务端只在**真的会停住无人值守那一轮**时才给这段话，所以
             它出现就意味着"你勾了自动化，但它仍会在某些操作上停下来等确认" —— 这件事以前是被静默
