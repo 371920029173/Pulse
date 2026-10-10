@@ -1,7 +1,8 @@
 # Pulse (SHE v2)
 
-**A local coding agent with a group-structure knowledge base and structural-resonance retrieval —
-not vector RAG.** Runs on your machine, talks to any OpenAI-compatible endpoint or Anthropic, and
+**A local coding agent with a group-structure knowledge base, structural-resonance retrieval —
+**not vector RAG** — and automatic context compaction, so long sessions stay affordable. Runs on your
+machine, talks to any OpenAI-compatible endpoint or Anthropic, and sends nothing anywhere else.
 sends nothing anywhere else.
 
 > 本地编程智能体：组结构记忆 + 脉冲种子结构共振检索（不是向量 RAG）。全本地运行，只与你配置的
@@ -147,8 +148,10 @@ config, and multiple models can be registered so you are not locked to one vendo
 > `SHE_ALLOW_ALL_COMMANDS=true` lifts that entirely — and, because that statement means "run it on
 > this machine", it also steps real isolation aside (the settings page's 勾选 +「所有」tier is the
 > same thing). Read `.env.example` before enabling it.
-> The local API has **no authentication**, so binding address is the security boundary; see
-> [Deployment](#deployment) before exposing it beyond this machine.
+> The local API is **open by default**, so the binding address is the boundary. To require a token,
+> set `SHE_AUTH_TOKEN` (one user) — or `SHE_AUTH_TOKENS` for several (`acme:tokenA,beta:tokenB`, each
+> tenant seeing only its own sessions, nothing unlisted getting in). The desktop shell hands the token
+> to its windows by itself; see [Deployment](#deployment) before exposing this beyond the machine.
 
 ## What it does
 
@@ -157,6 +160,10 @@ config, and multiple models can be registered so you are not locked to one vendo
 - **Tools** — files, shell, grep, git, knowledge base, plans, memos, reports, `ask_user`, subagents,
   language-server code intelligence, scheduled tasks, web search/fetch (`web_search` + `web_fetch`,
   key-free by default; every result names which source answered), computer use (Windows, opt-in)
+- **Context management that does not grow without bound** — near the model window the transcript
+  compacts into a frozen summary at a fixed point, so the request prefix stays byte-identical and the
+  prompt cache keeps hitting; the folded range is written to disk with retrieval anchors and can be read
+  back with `fs_read`. The window itself can be learned from the provider's own overflow message.
 - **Knowledge base** — group-structure memory with activation traces; every result explains *which
   groups and edges* produced it
 - **Sandbox** — workspace jail including symlinks, destructive-command patterns, an optional
@@ -185,15 +192,46 @@ docker run --rm -p 127.0.0.1:5577:5577 -v "$PWD/workspace:/workspace" \
   -e OPENAI_API_KEY=sk-... pulse:0.3.0
 ```
 
-> **There is no authentication on this API.** It can run shell commands, read and write your
-> workspace, and change its own settings — so publishing the port is equivalent to handing over the
-> machine. `-p 127.0.0.1:5577:5577` (above) keeps it loopback-only. For LAN or phone access put it
-> behind a reverse proxy with auth, and never expose it directly to the internet.
+> **The API is open by default — and it can run shell commands, read and write your workspace, and
+> change its own settings, so publishing the port is equivalent to handing over the machine.**
+> `-p 127.0.0.1:5577:5577` (above) keeps it loopback-only. Before exposing it to a LAN, a container
+> network or a phone, turn the token on: `SHE_AUTH_TOKEN` for one user, `SHE_AUTH_TOKENS` for several
+> (`acme:tokenA,beta:tokenB` — each tenant sees only its own sessions, and an id that is not listed is
+> refused outright). Clients send it as `X-SHE-Token`; the desktop shell passes it to its windows on its
+> own, and a browser tab reads `localStorage['she.authToken']`. `GET /api/health` stays open — it is a
+> liveness probe and carries no workspace content. Full walkthrough: [docs/feishu-remote.md](docs/feishu-remote.md).
 
 `GET /api/metrics` reports turns, latency (avg/p95), token breakdown, tool usage and failures, and
 the prompt-cache hit rate. Watch the cache number: prompt caching is prefix-based, so a change that
 rewrites the request prefix moves every later turn from ~97% cached to full price with no visible
 symptom — see [docs/context-and-caching.md](docs/context-and-caching.md).
+
+## What it looks like in practice
+
+Every number below names the script or file that produced it, so you can re-run it and disagree with
+us. Nothing here is from a benchmark suite.
+
+| Reading | Value | Produced by |
+|---|---|---|
+| Fixed cost of every request (system prompt + 36 tool schemas) | ≈ 12,958 prompt tokens | printed by each `evals/agent` run; measured offline by `pnpm check:evals` |
+| Prompt-cache hit rate over one 15-task eval run | 88% (923,392 hit / 129,560 miss) | the summary line of that run |
+| Prompt-cache behaviour (5,475-token prompt, DeepSeek) | re-sending it identically: 96% cached · appending to the end: 74% · **trimming from the head: 0%** | `docs/context-and-caching.md` — the probe was one-shot and deliberately deleted after its conclusion (it spends ~24k prompt tokens per run); the numbers stay in that document |
+| Planted facts surviving one compaction | 8/8 alive, 6/8 verbatim in the summary | `scripts/context-survival-probe.mjs` |
+| End-to-end agent tasks | 14/15, plus 5/5 self-verification tasks | `pnpm eval:agent` / `pnpm eval:verify` — one sample on `deepseek-flash`; those suites call themselves a regression detector, not a capability benchmark |
+
+Two consequences shaped the design, and both are easy to get wrong:
+
+- **The request prefix is load-bearing.** Prompt caching is prefix-based, so the compaction point is
+  frozen and the request stays byte-identical until the window is genuinely near. Anything that
+  rewrites the start of a request — re-ordering tools, regenerating a summary every turn — moves every
+  later turn to full price with no visible symptom. That measurement is why the transcript is never
+  trimmed from the head.
+- **Everything folded away is still on disk.** The summary carries retrieval anchors (file paths, error
+  strings, KB group paths) and the folded range is written to `.she/sessions/<id>/compacted/*.jsonl`,
+  so any of it can be read back by path.
+
+The whole offline gate — build, unit suites, retrieval evaluation and every regression check — is one
+command: `pnpm check:offline`. It is what CI runs, and it needs no API key.
 
 ## Documentation
 
