@@ -43,8 +43,8 @@ export function FeishuPanel() {
   // Poll while connected so the recent-message list stays live.
   useEffect(() => {
     if (!status?.running) return;
-    const t = window.setInterval(() => void load(), 5000);
-    return () => window.clearInterval(t);
+    const timer = window.setInterval(() => void load(), 5000);
+    return () => window.clearInterval(timer);
   }, [status?.running, load]);
 
   const save = useCallback(async () => {

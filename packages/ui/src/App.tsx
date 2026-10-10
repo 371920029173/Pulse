@@ -482,8 +482,8 @@ export function App() {
       } catch { /* ignore */ }
     };
     void adopt();
-    const t = window.setInterval(adopt, 2500);
-    return () => { cancelled = true; window.clearInterval(t); };
+    const timer = window.setInterval(adopt, 2500);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [activeSessionId, clusterRoomId]);
 
   // Re-bind history whenever this window switches session.

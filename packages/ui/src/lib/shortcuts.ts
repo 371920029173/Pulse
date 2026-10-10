@@ -1,3 +1,4 @@
+import { t } from './i18n';
 /**
  * Keyboard shortcut registry.
  *
@@ -36,28 +37,28 @@ export interface ShortcutAction {
 
 export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   // ── composer ──
-  { id: 'chat.send', group: '对话输入', label: '发送', hint: '把输入框内容发给智能体', defaultChord: 'Enter', scope: 'composer' },
-  { id: 'chat.interject', group: '对话输入', label: '追加补充', hint: '不打断执行，追加信息', defaultChord: 'Ctrl+Enter', scope: 'composer' },
-  { id: 'chat.interrupt', group: '对话输入', label: '打断执行', hint: '中止当前这一轮（含服务端）', defaultChord: 'Shift+Backspace', scope: 'composer' },
-  { id: 'chat.newline', group: '对话输入', label: '换行', hint: '在输入框内换行而不发送', defaultChord: 'Shift+Enter', scope: 'composer' },
+  { id: 'chat.send', group: t('对话输入'), label: t('发送'), hint: t('把输入框内容发给智能体'), defaultChord: 'Enter', scope: 'composer' },
+  { id: 'chat.interject', group: t('对话输入'), label: t('追加补充'), hint: t('不打断执行，追加信息'), defaultChord: 'Ctrl+Enter', scope: 'composer' },
+  { id: 'chat.interrupt', group: t('对话输入'), label: t('打断执行'), hint: t('中止当前这一轮（含服务端）'), defaultChord: 'Shift+Backspace', scope: 'composer' },
+  { id: 'chat.newline', group: t('对话输入'), label: t('换行'), hint: t('在输入框内换行而不发送'), defaultChord: 'Shift+Enter', scope: 'composer' },
 
   // ── thinking ──
-  { id: 'think.cycle', group: '思考强度', label: '循环切换', hint: '在四档之间循环', defaultChord: 'Ctrl+T', scope: 'global' },
-  { id: 'think.up', group: '思考强度', label: '提高一档', hint: '升到更高强度', defaultChord: 'Ctrl+Shift+ArrowUp', scope: 'global' },
-  { id: 'think.down', group: '思考强度', label: '降低一档', hint: '降到更低强度', defaultChord: 'Ctrl+Shift+ArrowDown', scope: 'global' },
+  { id: 'think.cycle', group: t('思考强度'), label: t('循环切换'), hint: t('在四档之间循环'), defaultChord: 'Ctrl+T', scope: 'global' },
+  { id: 'think.up', group: t('思考强度'), label: t('提高一档'), hint: t('升到更高强度'), defaultChord: 'Ctrl+Shift+ArrowUp', scope: 'global' },
+  { id: 'think.down', group: t('思考强度'), label: t('降低一档'), hint: t('降到更低强度'), defaultChord: 'Ctrl+Shift+ArrowDown', scope: 'global' },
 
   // ── approvals ──
-  { id: 'plan.approveTop', group: '请求批准', label: '批准最上面一条', hint: '通过待确认的补丁 / 操作', defaultChord: 'Ctrl+Y', scope: 'global' },
-  { id: 'plan.rejectTop', group: '请求批准', label: '驳回最上面一条', hint: '拒绝待确认的补丁 / 操作', defaultChord: 'Ctrl+N', scope: 'global' },
+  { id: 'plan.approveTop', group: t('请求批准'), label: t('批准最上面一条'), hint: t('通过待确认的补丁 / 操作'), defaultChord: 'Ctrl+Y', scope: 'global' },
+  { id: 'plan.rejectTop', group: t('请求批准'), label: t('驳回最上面一条'), hint: t('拒绝待确认的补丁 / 操作'), defaultChord: 'Ctrl+N', scope: 'global' },
 
   // ── toggles ──
-  { id: 'mcp.toggle', group: '开关', label: '启用 / 停用 MCP', hint: '切换 MCP 服务总开关', defaultChord: 'Ctrl+Alt+M', scope: 'global' },
-  { id: 'plugin.toggle', group: '开关', label: '启用 / 停用插件', hint: '切换插件扩展总开关', defaultChord: 'Ctrl+Alt+P', scope: 'global' },
+  { id: 'mcp.toggle', group: t('开关'), label: t('启用 / 停用 MCP'), hint: t('切换 MCP 服务总开关'), defaultChord: 'Ctrl+Alt+M', scope: 'global' },
+  { id: 'plugin.toggle', group: t('开关'), label: t('启用 / 停用插件'), hint: t('切换插件扩展总开关'), defaultChord: 'Ctrl+Alt+P', scope: 'global' },
 
   // ── app ──
-  { id: 'app.palette', group: '应用', label: '命令面板', hint: '打开命令面板', defaultChord: 'Ctrl+K', scope: 'global' },
-  { id: 'app.focusChat', group: '应用', label: '专注对话', hint: '隐藏两侧面板放大对话区', defaultChord: 'Ctrl+\\', scope: 'global' },
-  { id: 'app.toggleTheme', group: '应用', label: '切换明暗主题', hint: '在深色 / 浅色之间切换', defaultChord: 'Ctrl+Shift+L', scope: 'global' },
+  { id: 'app.palette', group: t('应用'), label: t('命令面板'), hint: t('打开命令面板'), defaultChord: 'Ctrl+K', scope: 'global' },
+  { id: 'app.focusChat', group: t('应用'), label: t('专注对话'), hint: t('隐藏两侧面板放大对话区'), defaultChord: 'Ctrl+\\', scope: 'global' },
+  { id: 'app.toggleTheme', group: t('应用'), label: t('切换明暗主题'), hint: t('在深色 / 浅色之间切换'), defaultChord: 'Ctrl+Shift+L', scope: 'global' },
 ];
 
 const STORAGE_KEY = 'she.shortcuts';

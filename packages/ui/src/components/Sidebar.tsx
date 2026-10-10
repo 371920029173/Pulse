@@ -309,8 +309,8 @@ export function Sidebar({
                   onClick={(e) => e.stopPropagation()}
                   onChange={(e) => setEditingTitle(e.target.value)}
                   onBlur={() => {
-                    const t = editingTitle.trim();
-                    if (t && t !== s.title) onRenameSession?.(s.id, t);
+                    const next = editingTitle.trim();
+                    if (next && next !== s.title) onRenameSession?.(s.id, next);
                     setEditingId(null);
                   }}
                   onKeyDown={(e) => {

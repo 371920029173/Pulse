@@ -72,8 +72,8 @@ export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, fo
 
   useEffect(() => {
     refresh().catch(() => undefined);
-    const t = setInterval(() => { refresh().catch(() => undefined); }, 5000);
-    return () => clearInterval(t);
+    const timer = setInterval(() => { refresh().catch(() => undefined); }, 5000);
+    return () => clearInterval(timer);
   }, [refresh]);
 
   const undo = useCallback(async () => {

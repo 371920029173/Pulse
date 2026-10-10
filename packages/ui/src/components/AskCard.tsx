@@ -50,8 +50,8 @@ export function AskCard({ onAnswer }: { onAnswer: (text: string) => void }) {
 
   useEffect(() => {
     void load();
-    const t = window.setInterval(() => void load(), 3000);
-    return () => window.clearInterval(t);
+    const timer = window.setInterval(() => void load(), 3000);
+    return () => window.clearInterval(timer);
   }, [load]);
 
   /** Remember this question as handled, locally and on the server. */

@@ -97,15 +97,15 @@ const RE_RULE = /^\s*([-*_])(\s*\1){2,}\s*$/;
 const RE_TABLE_SEP = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 
 function splitRow(line: string): string[] {
-  let t = line.trim();
-  if (t.startsWith('|')) t = t.slice(1);
-  if (t.endsWith('|') && !t.endsWith('\\|')) t = t.slice(0, -1);
+  let row = line.trim();
+  if (row.startsWith('|')) row = row.slice(1);
+  if (row.endsWith('|') && !row.endsWith('\\|')) row = row.slice(0, -1);
   const cells: string[] = [];
   let cur = '';
   let inCode = false;
-  for (let j = 0; j < t.length; j++) {
-    const c = t[j];
-    if (c === '\\' && t[j + 1] === '|') { cur += '|'; j++; continue; }
+  for (let j = 0; j < row.length; j++) {
+    const c = row[j];
+    if (c === '\\' && row[j + 1] === '|') { cur += '|'; j++; continue; }
     if (c === '`') inCode = !inCode;
     if (c === '|' && !inCode) { cells.push(cur.trim()); cur = ''; continue; }
     cur += c;

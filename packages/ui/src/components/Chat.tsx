@@ -32,13 +32,13 @@ export type { SkillProfileId } from '../lib/skills';
 export type ThinkingLevel = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 const THINK_LEVELS: { id: ThinkingLevel; short: string; title: string }[] = [
-  { id: 'none', short: '关', title: '关：完全不思考，最快（实测 reasoning 0 tokens）' },
-  { id: 'minimal', short: '极简', title: '极简：很短的思考（实测与「低」基本同档）' },
-  { id: 'low', short: '低', title: '低：少量推理（实测与「极简」基本同档）' },
-  { id: 'medium', short: '中', title: '中：默认强度，明显多于低档' },
-  { id: 'high', short: '高', title: '高：深度推理，显著多于中档' },
-  { id: 'xhigh', short: '很高', title: '很高：实测与「高」「最大」基本同档' },
-  { id: 'max', short: '最大', title: '最大：实测与「高」「很高」基本同档' },
+  { id: 'none', short: t('关'), title: t('关：完全不思考，最快（实测 reasoning 0 tokens）') },
+  { id: 'minimal', short: t('极简'), title: t('极简：很短的思考（实测与「低」基本同档）') },
+  { id: 'low', short: t('低'), title: t('低：少量推理（实测与「极简」基本同档）') },
+  { id: 'medium', short: t('中'), title: t('中：默认强度，明显多于低档') },
+  { id: 'high', short: t('高'), title: t('高：深度推理，显著多于中档') },
+  { id: 'xhigh', short: t('很高'), title: t('很高：实测与「高」「最大」基本同档') },
+  { id: 'max', short: t('最大'), title: t('最大：实测与「高」「很高」基本同档') },
 ];
 
 interface ChatProps {
@@ -203,16 +203,16 @@ function summarizeToolArgs(name: string, rawArgs: string): string {
  * verbatim as raw JSON, which made the transcript look like a debug log.
  */
 function resultPreviewText(result: string): string {
-  const t = result.trim();
-  if (t.startsWith('{')) {
+  const text = result.trim();
+  if (text.startsWith('{')) {
     try {
-      const o = JSON.parse(t) as Record<string, unknown>;
-      if (o.needs_apply) return '已暂存改动，等待应用';
-      if (o.needs_confirm) return '需要确认后执行';
+      const o = JSON.parse(text) as Record<string, unknown>;
+      if (o.needs_apply) return t('已暂存改动，等待应用');
+      if (o.needs_confirm) return t('需要确认后执行');
       if (typeof o.error === 'string') return o.error;
     } catch { /* not JSON, fall through */ }
   }
-  return (t.split('\n').find((l) => l.trim()) ?? '').slice(0, 70);
+  return (text.split('\n').find((l) => l.trim()) ?? '').slice(0, 70);
 }
 
 /**
@@ -392,7 +392,7 @@ function ToolCallCard({
           {summary ? <span className={styles.toolCallSummary}>{summary}</span> : null}
           {running ? (
             <span className={styles.toolCallRunningLabel}>
-              {isSearch ? '检索中' : '执行中'}
+              {isSearch ? t('检索中') : t('执行中')}
               <span className={styles.dots}><i /><i /><i /></span>
             </span>
           ) : null}
@@ -459,7 +459,7 @@ function ToolCallCard({
           <div className={styles.toolCallSection}>
             <div className={styles.toolCallSectionLabel}>{t('参数')}</div>
             <pre className={styles.toolCallPre}>
-              {Object.keys(argsObj).length ? JSON.stringify(argsObj, null, 2) : '(接收中…)'}
+              {Object.keys(argsObj).length ? JSON.stringify(argsObj, null, 2) : t('(接收中…)')}
             </pre>
           </div>
           {result && !diff ? (
@@ -549,7 +549,7 @@ function KbResult({ content }: { content: string }) {
       ))}
       {hits.length > VISIBLE ? (
         <button type="button" className={styles.kbMore} onClick={() => setShowAll((v) => !v)}>
-          {showAll ? `收起（只显示前 ${VISIBLE} 条）` : `展开全部 ${hits.length} 条 ▾`}
+          {showAll ? t('收起（只显示前 {VISIBLE} 条）', { VISIBLE: (VISIBLE) }) : t('展开全部 {length} 条 ▾', { length: (hits.length) })}
         </button>
       ) : null}
     </div>
@@ -561,9 +561,9 @@ async function copyText(text: string) {
   if (!value) return;
   try {
     await navigator.clipboard.writeText(value);
-    toast('已复制');
+    toast(t('已复制'));
   } catch {
-    toast('复制失败');
+    toast(t('复制失败'));
   }
 }
 
@@ -601,7 +601,7 @@ function ReasoningBlock({ text, streaming }: { text: string; streaming?: boolean
         type="button"
         className={styles.reasoningHeader}
         onClick={() => { userToggled.current = true; setOpen((v) => !v); }}
-        title={open ? '收起思考过程' : '展开思考过程'}
+        title={open ? t('收起思考过程') : t('展开思考过程')}
       >
         <span className={styles.reasoningChevron}>{open ? '▾' : '▸'}</span>
         <span className={styles.reasoningLabel}>
@@ -622,7 +622,7 @@ function ReasoningBlock({ text, streaming }: { text: string; streaming?: boolean
 }
 function ToolResultCard({ name, content }: { name?: string; content: string }) {
   const [open, setOpen] = useState(false);
-  const label = name || '工具';
+  const label = name || t('工具');
   const firstLine = (content.split('\n')[0] || '').slice(0, 72);
   return (
     <div className={styles.toolResult}>
@@ -630,7 +630,7 @@ function ToolResultCard({ name, content }: { name?: string; content: string }) {
         type="button"
         className={styles.toolResultHeader}
         onClick={() => setOpen((v) => !v)}
-        title={open ? '折叠' : '展开完整返回'}
+        title={open ? t('折叠') : t('展开完整返回')}
       >
         <span className={styles.toolResultChevron}>{open ? '▾' : '▸'}</span>
         <span className={styles.toolResultLabel}>{label}</span>
@@ -773,7 +773,7 @@ const MessageBubble = memo(function MessageBubble({
   const isUser = msg.role === 'user';
   // A turn that is only a chain is not an empty reply. Showing "（空回复）"
   // under a collapsed header is what made the chain look missing.
-  const body = msg.content || (msg.isStreaming || msg.reasoning ? '' : '（空回复）');
+  const body = msg.content || (msg.isStreaming || msg.reasoning ? '' : t('（空回复）'));
   return (
     <>
     {!isUser && msg.speaker ? (
@@ -1354,7 +1354,7 @@ export function Chat({
           const uploaded = await uploadAttachment(file, file.name || 'pasted');
           setAttachments((prev) => [...prev, uploaded]);
         } catch (err) {
-          failed.push(`${file.name || '未命名'}：${(err as Error).message}`);
+          failed.push(t('{v1}：{message}', { v1: (file.name || '未命名'), message: ((err as Error).message) }));
         }
       }
     } finally {
@@ -1429,7 +1429,7 @@ export function Chat({
     >
       {dragging && <div className={styles.dropOverlay}>{t('松开以引用到对话')}</div>}
       <div className={styles.header}>
-        <span className={styles.headerTitle}>{sessionTitle || '对话'}</span>
+        <span className={styles.headerTitle}>{sessionTitle || t('对话')}</span>
         <div className={styles.headerActions}>
         </div>
       </div>
@@ -1441,7 +1441,7 @@ export function Chat({
             <span
               key={p.id}
               className={`${styles.peerChip} ${p.active ? styles.peerActive : ''} ${p.done ? styles.peerDone : ''}`}
-              title={p.active ? `${p.name} 正在发言` : p.done ? `${p.name} 本轮已发言` : `${p.name} 待命`}
+              title={p.active ? t('{name} 正在发言', { name: (p.name) }) : p.done ? t('{name} 本轮已发言', { name: (p.name) }) : t('{name} 待命', { name: (p.name) })}
             >
               <span className={styles.peerAvatar} style={{ background: `hsl(${p.hue} 68% 56%)` }}>
                 {p.name.slice(0, 1)}
@@ -1564,7 +1564,7 @@ export function Chat({
                   onMouseDown={(e) => { e.preventDefault(); applyHit(h); }}
                 >
                   {/* Icon carries the file/folder distinction; the old text label
-                      ("目录"/"文件") pushed the path out of view. */}
+                      (t("目录")/t("文件")) pushed the path out of view. */}
                   <span className={styles.mentionKind}>{h.type === 'dir' ? '📁' : '📄'}</span>
                   <span className={styles.mentionLeaf}>{leaf}</span>
                   {parent ? <span className={styles.mentionPath}>{parent}</span> : null}
@@ -1606,12 +1606,12 @@ export function Chat({
           {attachments.length || attachError || attachBusy ? (
             <div className={styles.attachRow}>
               {attachments.map((a) => (
-                <div key={a.name} className={styles.attachChip} title={`${a.path} · ${a.mime || '未知类型'} · ${humanSize(a.bytes)}`}>
+                <div key={a.name} className={styles.attachChip} title={t('{path} · {v2} · {v3}', { path: (a.path), v2: (a.mime || '未知类型'), v3: (humanSize(a.bytes)) })}>
                   {/*
                     A picture shows itself; anything else shows what it is.
                     The old chip printed the first four characters of the extension and nothing
-                    else, so a dropped `报告.pdf` and a dropped `数据.csv` looked identical — the
-                    user could not tell what they had attached, which is most of "上传过于简陋".
+                    else, so a dropped t('报告.pdf') and a dropped t('数据.csv') looked identical — the
+                    user could not tell what they had attached, which is most of t("上传过于简陋").
                   */}
                   {a.mime.startsWith('image/') ? (
                     <img className={styles.attachThumb} src={attachmentUrl(a.url)} alt={a.name} />
@@ -1671,7 +1671,7 @@ export function Chat({
             className={styles.textarea}
             placeholder={
               isLoading
-                ? '补充信息…（Enter 追加 · 连按两次 Enter 打断 · Shift+Enter 换行）'
+                ? t('补充信息…（Enter 追加 · 连按两次 Enter 打断 · Shift+Enter 换行）')
                 : '@file: / @folder: / @symbol: · 用 📎 添加文件、拖进来或粘贴（Enter 发送 · Shift+Enter 换行）'
             }
             value={input}

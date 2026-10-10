@@ -60,11 +60,11 @@ type Tab = 'installed' | 'catalog' | 'new';
 
 /** Human wording for the declared permission values. */
 const PERM_LABEL: Record<string, string> = {
-  read: '读取工作区文件',
-  write: '写入工作区文件',
-  shell: '执行命令',
-  network: '访问网络',
-  kb: '读写知识库',
+  read: t('读取工作区文件'),
+  write: t('写入工作区文件'),
+  shell: t('执行命令'),
+  network: t('访问网络'),
+  kb: t('读写知识库'),
 };
 
 /** Permissions worth flagging in red rather than amber. */
@@ -84,7 +84,7 @@ function PermissionChips({ list }: { list?: string[] }) {
               ? PERM_LABEL[p]
               : `运行时不认识这个权限，它不会生效 —— 已知权限：${Object.keys(PERM_LABEL).join(' / ')}`}
           >
-            {known ? PERM_LABEL[p] : `${p}（未知）`}
+            {known ? PERM_LABEL[p] : t('{p}（未知）', { p: (p) })}
           </span>
         );
       })}
@@ -152,33 +152,33 @@ export function Dock() {
 
   const install = useCallback((name: string) => act(`install:${name}`,
     () => fetchJSON('/api/plugins/install', { method: 'POST', body: { name } }),
-    `已安装 ${name}`), [act]);
+    t('已安装 {name}', { name: (name) })), [act]);
 
   const installFromPath = useCallback(() => {
     const p = pathInput.trim();
-    if (!p) { setError('先填一个插件文件夹路径'); return; }
+    if (!p) { setError(t('先填一个插件文件夹路径')); return; }
     void act('install-path',
       () => fetchJSON('/api/plugins/install', { method: 'POST', body: { path: p } }),
-      '已安装').then(() => setPathInput(''));
+      t('已安装')).then(() => setPathInput(''));
   }, [pathInput, act]);
 
   const scaffold = useCallback(() => {
     const n = scaffoldName.trim();
-    if (!n) { setError('先填插件名'); return; }
+    if (!n) { setError(t('先填插件名')); return; }
     void act('scaffold',
       () => fetchJSON('/api/plugins/scaffold', { method: 'POST', body: { name: n, description: scaffoldDesc } }),
-      `已创建 ${n}`).then(() => { setScaffoldName(''); setScaffoldDesc(''); setTab('installed'); });
+      t('已创建 {n}', { n: (n) })).then(() => { setScaffoldName(''); setScaffoldDesc(''); setTab('installed'); });
   }, [scaffoldName, scaffoldDesc, act]);
 
   const toggleEnabled = useCallback((dir: string, enabled: boolean) => act(`toggle:${dir}`,
     () => fetchJSON('/api/plugins/enabled', { method: 'PUT', body: { dir, enabled } }),
-    enabled ? '已启用' : '已停用'), [act]);
+    enabled ? t('已启用') : t('已停用')), [act]);
 
   const uninstall = useCallback((dir: string) => {
     // Deleting a plugin removes its folder from disk.
     // eslint-disable-next-line no-alert
-    if (!window.confirm(`卸载「${dir}」？会删除它的目录，无法撤销。`)) return;
-    void act(`uninstall:${dir}`, () => fetchJSON(`/api/plugins?dir=${encodeURIComponent(dir)}`, { method: 'DELETE' }), '已卸载');
+    if (!window.confirm(t('卸载「{dir}」？会删除它的目录，无法撤销。', { dir: (dir) }))) return;
+    void act(`uninstall:${dir}`, () => fetchJSON(`/api/plugins?dir=${encodeURIComponent(dir)}`, { method: 'DELETE' }), t('已卸载'));
   }, [act]);
 
   const openEditor = useCallback(async (dir: string) => {
@@ -202,7 +202,7 @@ export function Dock() {
     void act('save-source', () => fetchJSON('/api/plugins/source', {
       method: 'PUT',
       body: { dir: editor.dir, file: editor.file, content },
-    }), '已保存并重新加载');
+    }), t('已保存并重新加载'));
   }, [editor, act]);
 
   const totalTools = plugins.reduce((n, p) => n + (p.manifest?.tools?.length ?? 0), 0);
@@ -213,13 +213,13 @@ export function Dock() {
       <div className={styles.head}>
         <span className={styles.headTitle}>{t('扩展坞')}</span>
         <span className={styles.headMeta}>
-          {loading ? '读取中…' : `${plugins.length} 已装 · ${totalTools} 工具 · ${available} 可装`}
+          {loading ? t('读取中…') : t('{length} 已装 · {totalTools} 工具 · {available} 可装', { length: (plugins.length), totalTools: (totalTools), available: (available) })}
         </span>
         <button type="button" className={styles.iconBtn} onClick={() => void load()} title={t('重新扫描')}>↻</button>
       </div>
 
       <div className={styles.tabs}>
-        {([['installed', '已安装'], ['catalog', '可安装'], ['new', '新建']] as [Tab, string][]).map(([id, label]) => (
+        {([['installed', t('已安装')], ['catalog', t('可安装')], ['new', t('新建')]] as [Tab, string][]).map(([id, label]) => (
           <button
             key={id}
             type="button"
@@ -268,7 +268,7 @@ export function Dock() {
                         ) : null}
                       </div>
                       <div className={styles.pluginDesc}>
-                        {m?.description || (p.error ? `清单读取失败：${p.error}` : '未提供说明')}
+                        {m?.description || (p.error ? t('清单读取失败：{error}', { error: (p.error) }) : t('未提供说明'))}
                       </div>
                       {/* Declarations that cannot work: say so instead of showing a healthy plugin. */}
                       {p.issues?.length ? (
@@ -278,13 +278,13 @@ export function Dock() {
                       ) : null}
                       <div className={styles.pluginMetaRow}>
                         <span className={styles.toolCount}>
-                          {p.hasModule ? `${m?.tools?.length ?? 0} 个工具` : '无可执行工具'}
+                          {p.hasModule ? t('{v1} 个工具', { v1: (m?.tools?.length ?? 0) }) : t('无可执行工具')}
                         </span>
                         <PermissionChips list={m?.permissions} />
                       </div>
                     </div>
                     <button type="button" className={styles.small} onClick={() => setOpenId(isOpen ? null : p.dir)}>
-                      {isOpen ? '收起' : '详情'}
+                      {isOpen ? t('收起') : t('详情')}
                     </button>
                     <button
                       type="button"
@@ -292,7 +292,7 @@ export function Dock() {
                       disabled={busyKey === `toggle:${p.dir}`}
                       onClick={() => void toggleEnabled(p.dir, !on)}
                     >
-                      {on ? '停用' : '启用'}
+                      {on ? t('停用') : t('启用')}
                     </button>
                     <button
                       type="button"
@@ -328,10 +328,10 @@ export function Dock() {
                       {m?.tools?.length ? (
                         <div className={styles.section}>
                           <b>提供的工具 ({m.tools.length})</b>
-                          {m.tools.map((t) => (
-                            <div key={t.name} className={styles.item}>
-                              <code>{t.name}</code>
-                              <span>{t.description}</span>
+                          {m.tools.map((tool) => (
+                            <div key={tool.name} className={styles.item}>
+                              <code>{tool.name}</code>
+                              <span>{tool.description}</span>
                             </div>
                           ))}
                         </div>
@@ -369,7 +369,7 @@ export function Dock() {
                       {c.manifest.name || c.dir}
                       {c.manifest.version ? <span className={styles.ver}>v{c.manifest.version}</span> : null}
                     </div>
-                    <div className={styles.pluginDesc}>{c.manifest.description || '未提供说明'}</div>
+                    <div className={styles.pluginDesc}>{c.manifest.description || t('未提供说明')}</div>
                     <div className={styles.pluginMetaRow}>
                       <span className={styles.toolCount}>{c.manifest.tools?.length ?? 0} 个工具</span>
                       <PermissionChips list={c.manifest.permissions} />
@@ -441,7 +441,7 @@ export function Dock() {
               <div className={styles.formHint}>
                 装在应用目录里（所有工作区共用）：
                 <br />
-                <code className={styles.pathCode}>{installDir || '(未知)'}</code>
+                <code className={styles.pathCode}>{installDir || t('(未知)')}</code>
                 <br />
                 也可以在某个工作区里放 <code>.she/plugins/</code>，它会覆盖同名的全局插件。
               </div>
