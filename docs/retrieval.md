@@ -39,14 +39,16 @@ Query → Bootstrap Lookup → Create PulseSeeds → Structural Resonance Propag
 
 ```
 $ pnpm eval
-用例                                     hybrid  bm25     条数(hybrid/bm25)
-group-ops-env                           ✓       ✗        13/0
-group-user-preferences                  ✓       ✗         8/2
-group-name-only                         ✓       ✗        15/1
-title-passphrase                        ✓       ✓        11/4
-semantic-encoding-issue                 ✓       ✓        13/8
+用例                                     hybrid  bm25    reRank  条数(hybrid/bm25)
+group-ops-env                           ✓       ✗       ✗       13/0
+fx-group-docker                         ✓       ✗       ✗       12/7
+fx-group-eval-agent                     ✓       ✗       ✗        2/1
+fx-title-docker-symlink                 ✓       ✓       ✓        4/1
+fx-sem-symlink                          ✓       ✗       ✗       15/2
+fx-neg-connect-pool                     ✗       ✗       ✗       15/2
 ...
-Top-1 命中    hybrid 100% (15/15)   bm25 73% (11/15)
+Top-1 命中    hybrid 100% (53/53)   bm25 64% (34/53)   bm25+rerank 64% (34/53)
+负例（不该命中） 14% (1/7)
 ```
 
 **增益来自"组路径"类查询，不是来自语义理解。** 看条数那一列：BM25 对组路径返回 `0`，
@@ -58,7 +60,10 @@ Top-1 命中    hybrid 100% (15/15)   bm25 73% (11/15)
 在语义类用例上两者打平（都是 100%）。所以这个项目能诚实主张的是**结构可寻址性**，
 不是更强的相关性排序。
 
-**限定条件**：16 个用例、单一库形态、没有 embedding 基线。完整限制清单见
+**限定条件**：60 个用例、单一装置库（`fixture.json`，29 组 / 41 节点）、没有 embedding 基线。
+硬负例 7 条只过 1 条（`14%`）——按本仓库自己的要求把负例改成「共享常见词但主题不同」之后，
+两套系统都会自信地给出近邻：**这套设计目前分不清「我不知道」与「这是近邻」**。
+完整限制清单见 [`evals/retrieval/README.md`](../evals/retrieval/README.md)。
 [`evals/retrieval/README.md`](../evals/retrieval/README.md)。
 
 ## 为什么不做向量

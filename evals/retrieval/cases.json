@@ -14,38 +14,47 @@
       "id": "group-ops-env",
       "kind": "group",
       "query": "ops/env",
-      "expectGroups": ["ops/env"],
+      "expectGroups": [
+        "ops/env"
+      ],
       "note": "组路径精确查询"
     },
     {
       "id": "group-ops-kb-connectivity",
       "kind": "group",
       "query": "ops/kb-connectivity",
-      "expectGroups": ["ops/kb-connectivity"],
+      "expectGroups": [
+        "ops/kb-connectivity"
+      ],
       "note": "组路径精确查询"
     },
     {
       "id": "group-user-preferences",
       "kind": "group",
       "query": "user/preferences",
-      "expectGroups": ["user/preferences"],
+      "expectGroups": [
+        "user/preferences"
+      ],
       "note": "组路径精确查询"
     },
     {
       "id": "group-user-passphrases",
       "kind": "group",
       "query": "user/passphrases",
-      "expectGroups": ["user/passphrases"],
+      "expectGroups": [
+        "user/passphrases"
+      ],
       "note": "组路径精确查询"
     },
     {
       "id": "group-name-only",
       "kind": "group",
       "query": "ops/session-context",
-      "expectGroups": ["ops/session-context"],
+      "expectGroups": [
+        "ops/session-context"
+      ],
       "note": "组路径，不带额外关键词"
     },
-
     {
       "id": "title-passphrase",
       "kind": "title",
@@ -67,50 +76,62 @@
       "expectTitle": "工作区状态快照（2026-09-12，会话上下文恢复用）",
       "note": "长标题精确查询"
     },
-
     {
       "id": "semantic-encoding-issue",
       "kind": "semantic",
       "query": "中文乱码 编码问题",
-      "expectGroups": ["ops/env", "ops/kb-connectivity"],
+      "expectGroups": [
+        "ops/env",
+        "ops/kb-connectivity"
+      ],
       "note": "语义意图：编码坑，两个组都记录了"
     },
     {
       "id": "semantic-write-channel",
       "kind": "semantic",
       "query": "fs_write 被审批拦截",
-      "expectGroups": ["ops/env"],
+      "expectGroups": [
+        "ops/env"
+      ],
       "note": "语义意图：写入双通道"
     },
     {
       "id": "semantic-workspace-state",
       "kind": "semantic",
       "query": "沙箱根目录是什么",
-      "expectGroups": ["ops/session-context"],
+      "expectGroups": [
+        "ops/session-context"
+      ],
       "note": "语义意图：工作区快照"
     },
     {
       "id": "semantic-reply-style",
       "kind": "semantic",
       "query": "用户偏好 回复风格",
-      "expectGroups": ["user/preferences"],
+      "expectGroups": [
+        "user/preferences"
+      ],
       "note": "语义意图：偏好"
     },
     {
       "id": "semantic-pending-patches",
       "kind": "semantic",
       "query": "pending-patches 过期补丁残留",
-      "expectGroups": ["ops/env"],
+      "expectGroups": [
+        "ops/env"
+      ],
       "note": "语义意图：残留文件"
     },
     {
       "id": "semantic-cross-session-recall",
       "kind": "semantic",
       "query": "跨会话记忆召回测试",
-      "expectGroups": ["ops/session-context", "user/passphrases"],
+      "expectGroups": [
+        "ops/session-context",
+        "user/passphrases"
+      ],
       "note": "语义意图：召回验证"
     },
-
     {
       "id": "distractor-passphrase-vs-style",
       "kind": "title",
@@ -124,6 +145,409 @@
       "query": "量子计算 硬件架构",
       "expectNoConfidentHit": true,
       "note": "库里完全没有的主题，不应给出高相关命中"
+    },
+    {
+      "id": "fx-group-ts",
+      "kind": "group",
+      "query": "code/ts",
+      "expectGroups": [
+        "code/ts"
+      ],
+      "note": "新组：组路径精确查询",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-group-python",
+      "kind": "group",
+      "query": "code/python",
+      "expectGroups": [
+        "code/python"
+      ],
+      "note": "新组：组路径精确查询",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-group-sql",
+      "kind": "group",
+      "query": "code/sql",
+      "expectGroups": [
+        "code/sql"
+      ],
+      "note": "新组：组路径精确查询",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-group-docker",
+      "kind": "group",
+      "query": "infra/docker",
+      "expectGroups": [
+        "infra/docker"
+      ],
+      "note": "新组：组路径精确查询",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-group-ci",
+      "kind": "group",
+      "query": "infra/ci",
+      "expectGroups": [
+        "infra/ci"
+      ],
+      "note": "新组：组路径精确查询",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-group-latency",
+      "kind": "group",
+      "query": "perf/latency",
+      "expectGroups": [
+        "perf/latency"
+      ],
+      "note": "新组：组路径精确查询",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-group-docs-api",
+      "kind": "group",
+      "query": "docs/api",
+      "expectGroups": [
+        "docs/api"
+      ],
+      "note": "新组：两级组路径",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-group-lsp",
+      "kind": "group",
+      "query": "tools/lsp",
+      "expectGroups": [
+        "tools/lsp"
+      ],
+      "note": "新组：组路径精确查询",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-group-git",
+      "kind": "group",
+      "query": "tools/git",
+      "expectGroups": [
+        "tools/git"
+      ],
+      "note": "新组：组路径精确查询",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-group-i18n",
+      "kind": "group",
+      "query": "i18n",
+      "expectGroups": [
+        "i18n"
+      ],
+      "note": "新组：单级组名",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-group-security",
+      "kind": "group",
+      "query": "security",
+      "expectGroups": [
+        "security"
+      ],
+      "note": "新组：单级组名",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-group-migrations",
+      "kind": "group",
+      "query": "migrations",
+      "expectGroups": [
+        "migrations"
+      ],
+      "note": "新组：单级组名",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-group-eval-retrieval",
+      "kind": "group",
+      "query": "eval/retrieval",
+      "expectGroups": [
+        "eval/retrieval"
+      ],
+      "note": "新组：与「评测」同词根的组名",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-group-eval-agent",
+      "kind": "group",
+      "query": "eval/agent",
+      "expectGroups": [
+        "eval/agent"
+      ],
+      "note": "新组：与另一个 eval 子组构成干扰对",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-title-tsbuildinfo",
+      "kind": "title",
+      "query": "tsc -b 的增量缓存：tsbuildinfo 过期会静默沿用旧类型",
+      "expectTitle": "tsc -b 的增量缓存：tsbuildinfo 过期会静默沿用旧类型",
+      "note": "新用例：标题精确，含标识符",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-title-mkdtemp",
+      "kind": "title",
+      "query": "Python：pytest 里 mkdtemp 不清理会堆出成千个临时目录",
+      "expectTitle": "Python：pytest 里 mkdtemp 不清理会堆出成千个临时目录",
+      "note": "新用例：标题精确（多语言混排）",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-title-docker-symlink",
+      "kind": "title",
+      "query": "Docker：只拷 dist 会让 pnpm 的依赖符号链接全部悬空",
+      "expectTitle": "Docker：只拷 dist 会让 pnpm 的依赖符号链接全部悬空",
+      "note": "新用例：标题精确（今天的真实故障）",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-title-docker-bind",
+      "kind": "title",
+      "query": "Docker：容器内绑定 127.0.0.1 时端口映射访问不到",
+      "expectTitle": "Docker：容器内绑定 127.0.0.1 时端口映射访问不到",
+      "note": "新用例：标题精确",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-title-ci-cancel",
+      "kind": "title",
+      "query": "CI：并发规则 cancel-in-progress 会让新推送取消在跑的 run",
+      "expectTitle": "CI：并发规则 cancel-in-progress 会让新推送取消在跑的 run",
+      "note": "新用例：标题精确",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-title-p95",
+      "kind": "title",
+      "query": "延迟：p95 比均值更能暴露长尾，只看均值会漏掉卡顿",
+      "expectTitle": "延迟：p95 比均值更能暴露长尾，只看均值会漏掉卡顿",
+      "note": "新用例：标题精确",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-title-api-errors",
+      "kind": "title",
+      "query": "API 文档：错误响应必须给出下一步动作，而不只是状态码",
+      "expectTitle": "API 文档：错误响应必须给出下一步动作，而不只是状态码",
+      "note": "新用例：标题精确",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-title-lsp-bom",
+      "kind": "title",
+      "query": "LSP：BOM 会让列号整体偏移一格",
+      "expectTitle": "LSP：BOM 会让列号整体偏移一格",
+      "note": "新用例：标题精确（短标题）",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-title-stash",
+      "kind": "title",
+      "query": "Git：stash 当安全网时用 apply 而不是 pop",
+      "expectTitle": "Git：stash 当安全网时用 apply 而不是 pop",
+      "note": "新用例：标题精确",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-title-i18n-ratchet",
+      "kind": "title",
+      "query": "本地化：界面硬编码中文是一条棘轮，只许降不许升",
+      "expectTitle": "本地化：界面硬编码中文是一条棘轮，只许降不许升",
+      "note": "新用例：标题精确",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-sem-symlink",
+      "kind": "semantic",
+      "query": "依赖符号链接悬空导致模块找不到",
+      "expectGroups": [
+        "infra/docker"
+      ],
+      "note": "语义：用现象词找容器那条",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-sem-timeout-background",
+      "kind": "semantic",
+      "query": "等太久应该转后台而不是把界面挂住",
+      "expectGroups": [
+        "perf/latency"
+      ],
+      "note": "语义：用意图词找超时策略",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-sem-token-in-url",
+      "kind": "semantic",
+      "query": "把令牌放在查询串里安全吗",
+      "expectGroups": [
+        "security"
+      ],
+      "note": "语义：疑问句形式",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-sem-old-type-errors",
+      "kind": "semantic",
+      "query": "改完代码还报旧的类型错",
+      "expectGroups": [
+        "code/ts",
+        "tools/lsp"
+      ],
+      "note": "语义：两个组都合法（增量缓存 / 诊断陈旧）",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-sem-broken-state-file",
+      "kind": "semantic",
+      "query": "状态文件读不动了怎么办，会不会把数据冲掉",
+      "expectGroups": [
+        "migrations"
+      ],
+      "note": "语义：用担忧词找迁移约定",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-sem-temp-dirs",
+      "kind": "semantic",
+      "query": "临时目录堆了几千个是谁没清理",
+      "expectGroups": [
+        "code/python"
+      ],
+      "note": "语义：现象找原因",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-sem-pagination",
+      "kind": "semantic",
+      "query": "分页参数两套并存的问题",
+      "expectGroups": [
+        "docs/api"
+      ],
+      "note": "语义：约定类",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-sem-matrix",
+      "kind": "semantic",
+      "query": "多平台任务一次看到全部结果",
+      "expectGroups": [
+        "infra/ci"
+      ],
+      "note": "语义：意图找配置项",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-sem-single-sample",
+      "kind": "semantic",
+      "query": "一次跑挂了怎么判断是回归还是波动",
+      "expectGroups": [
+        "eval/agent"
+      ],
+      "note": "语义：判据类",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-sem-baseline-evidence",
+      "kind": "semantic",
+      "query": "怎么证明自己比基线好",
+      "expectGroups": [
+        "eval/retrieval"
+      ],
+      "note": "语义：方法论类",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-sem-code-module",
+      "kind": "semantic",
+      "query": "ERR_MODULE_NOT_FOUND",
+      "expectGroups": [
+        "infra/docker"
+      ],
+      "note": "混合：报错原文当查询",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-sem-code-wal",
+      "kind": "semantic",
+      "query": "WAL busy_timeout",
+      "expectGroups": [
+        "code/sql"
+      ],
+      "note": "混合：英文标识符当查询",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-sem-code-flag",
+      "kind": "semantic",
+      "query": "--node-linker=hoisted",
+      "expectGroups": [
+        "infra/docker"
+      ],
+      "note": "混合：命令行参数当查询",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-sem-code-p95",
+      "kind": "semantic",
+      "query": "p95 长尾",
+      "expectGroups": [
+        "perf/latency"
+      ],
+      "note": "混合：缩写 + 中文",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-neg-connect-pool",
+      "kind": "negative",
+      "query": "PostgreSQL 连接池耗尽时的超时与重试",
+      "note": "硬负例：共享「超时/重试」，主题库里没有",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-neg-redis-cache",
+      "kind": "negative",
+      "query": "Redis 缓存击穿与雪崩的防护",
+      "note": "硬负例：共享「缓存」，主题库里没有",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-neg-android-permission",
+      "kind": "negative",
+      "query": "Android 权限弹窗的申请时机",
+      "note": "硬负例：共享「权限」，主题库里没有",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-neg-unity-shader",
+      "kind": "negative",
+      "query": "Unity 着色器编译超时怎么调",
+      "note": "硬负例：共享「编译/超时」，主题库里没有",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-neg-figma-version",
+      "kind": "negative",
+      "query": "Figma 组件库的版本管理",
+      "note": "硬负例：共享「版本」，主题库里没有",
+      "requires": "fixture"
+    },
+    {
+      "id": "fx-neg-jenkins",
+      "kind": "negative",
+      "query": "Jenkins 流水线的并发限制配置",
+      "note": "硬负例：共享「并发」，主题库里没有",
+      "requires": "fixture"
     }
   ]
 }

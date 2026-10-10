@@ -175,11 +175,46 @@ function recallAt(ranked, c, n) {
   });
 }
 
+/**
+ * Tokens of a string, for the rerank baseline: letters, digits, `_` and `-`, length > 1.
+ * `\p{L}` rather than `a-z` because half of this library is written in Chinese.
+ */
+const tokensOf = (s) => (s.toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []).filter((t) => t.length > 1);
+
+/**
+ * The SECOND baseline: BM25 top-N, re-ranked.
+ *
+ * "Why not just BM25?" has a second half — "…with a reranker?" — and a comparison that stops at
+ * plain BM25 is easy to dismiss. So this reranks the SAME candidate list BM25 produced, using the
+ * two fields BM25 does not index here (title and group path) plus a small depth penalty. It gets a
+ * signal *similar* to structural resonance on purpose: a strawman baseline would prove nothing.
+ *
+ * The weights are a judgement call, and the report says so — what matters is that the candidates are
+ * identical and only the ordering differs, so the column isolates the effect of reranking.
+ */
+function rerankBaseline(query, hits) {
+  const qt = new Set(tokensOf(query));
+  const scored = hits.map((h, i) => {
+    const id = h.mem.id;
+    const titleHit = tokensOf(store.getMemory(id)?.title ?? '').filter((t) => qt.has(t)).length;
+    const path = memGroup.get(id) ?? '';
+    const pathHit = tokensOf(path).filter((t) => qt.has(t)).length;
+    // BM25's own order supplies the base (its scores are not comparable across queries).
+    const base = 1 / (1 + i);
+    return { id, s: base + 0.6 * titleHit + 0.4 * pathHit - 0.02 * path.split('/').length };
+  });
+  return scored.sort((a, b) => b.s - a.s).map((r) => r.id);
+}
+
 // ── run ─────────────────────────────────────────────────────────────────────
 const { cases } = JSON.parse(readFileSync(join(HERE, 'cases.json'), 'utf8'));
 
+let skippedForeign = 0;
+
 const rows = [];
 for (const c of cases) {
+  // 按 fixture 装置库写的用例，在真实库模式下跳过 —— 并如实报数，不静默少测。
+  if (!usingFixture && c.requires === 'fixture') { skippedForeign++; continue; }
   const t0 = performance.now();
   const hybrid = engine.query(c.query).nodes.map((n) => n.id);
   const hybridMs = performance.now() - t0;
@@ -187,6 +222,8 @@ for (const c of cases) {
   const t1 = performance.now();
   const bm25 = store.bm25Search(c.query, { limit: 40 }).map((h) => h.mem.id);
   const bm25Ms = performance.now() - t1;
+
+  const rerank = rerankBaseline(c.query, store.bm25Search(c.query, { limit: 40 }));
 
   rows.push({
     id: c.id,
@@ -200,6 +237,7 @@ for (const c of cases) {
     bm25Count: bm25.length,
     hybridMs,
     bm25Ms,
+    rerankTop1: score(rerank, c),
   });
 }
 
@@ -222,12 +260,12 @@ if (asJson) {
 console.log(`\n库: ${DB}${usingFixture ? '  【fixture 装置库 — 未找到真实库】' : ''}`);
 console.log(`    ${groups.length} 组 / ${store.getStats().totalMemories} 节点\n`);
 
-console.log('用例                                     hybrid  bm25    hybrid≤3  bm25≤3   条数');
+console.log('用例                                     hybrid  bm25    reRank  hybrid≤3  bm25≤3   条数');
 console.log('─'.repeat(92));
 for (const r of rows) {
   const mark = (b) => (b ? ' ✓  ' : ' ✗  ');
   console.log(
-    `${r.id.padEnd(38).slice(0, 38)} ${mark(r.hybridTop1)}    ${mark(r.bm25Top1)}    ` +
+    `${mark(r.bm25Top1)}    ${mark(r.rerankTop1)}    ` +
     `${mark(r.hybridTop3)}      ${mark(r.bm25Top3)}      ${String(r.hybridCount).padStart(2)}/${r.bm25Count}`,
   );
 }
@@ -241,10 +279,15 @@ const neg = negatives.filter((r) => r.hybridTop1).length;
 console.log('\n' + '─'.repeat(92));
 console.log(`Top-1 命中    hybrid ${pct(h1, positives.length).padEnd(12)} bm25 ${pct(b1, positives.length)}`);
 console.log(`Top-3 召回    hybrid ${pct(h3, positives.length).padEnd(12)} bm25 ${pct(b3, positives.length)}`);
+const rr1 = positives.filter((r) => r.rerankTop1).length;
+console.log(`Top-1 命中    bm25+rerank ${pct(rr1, positives.length)}    （第二个基线：同一批候选的重排）`);
+if (skippedForeign) console.log(`跳过 ${skippedForeign} 条按 fixture 装置库写的用例（真实库模式下它们没有对应的节点）`);
 if (negatives.length) console.log(`负例（不该命中） ${pct(neg, negatives.length)}`);
 
 const gain = h1 - b1;
 console.log(`\n相对 BM25 的 Top-1 增益: ${gain >= 0 ? '+' : ''}${gain} 个用例`);
+const gainVsRerank = h1 - rr1;
+console.log(`相对 BM25+重排 的 Top-1 增益: ${gainVsRerank >= 0 ? '+' : ''}${gainVsRerank} 个用例`);
 if (gain > 0) {
   console.log('  → 结构共振检索在这些用例上确实优于纯词法检索（这是可引用的证据）');
 } else if (gain === 0) {

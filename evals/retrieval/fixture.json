@@ -12,15 +12,110 @@
     "outcomes and preferences grouped by area."
   ],
   "groups": [
-    { "name": "ops" },
-    { "name": "env", "parent": "ops" },
-    { "name": "kb-connectivity", "parent": "ops" },
-    { "name": "session-context", "parent": "ops" },
-    { "name": "user" },
-    { "name": "preferences", "parent": "user" },
-    { "name": "passphrases", "parent": "user" },
-    { "name": "imports" },
-    { "name": "notes", "parent": "imports" }
+    {
+      "name": "ops"
+    },
+    {
+      "name": "env",
+      "parent": "ops"
+    },
+    {
+      "name": "kb-connectivity",
+      "parent": "ops"
+    },
+    {
+      "name": "session-context",
+      "parent": "ops"
+    },
+    {
+      "name": "user"
+    },
+    {
+      "name": "preferences",
+      "parent": "user"
+    },
+    {
+      "name": "passphrases",
+      "parent": "user"
+    },
+    {
+      "name": "imports"
+    },
+    {
+      "name": "notes",
+      "parent": "imports"
+    },
+    {
+      "name": "code"
+    },
+    {
+      "name": "ts",
+      "parent": "code"
+    },
+    {
+      "name": "python",
+      "parent": "code"
+    },
+    {
+      "name": "sql",
+      "parent": "code"
+    },
+    {
+      "name": "infra"
+    },
+    {
+      "name": "docker",
+      "parent": "infra"
+    },
+    {
+      "name": "ci",
+      "parent": "infra"
+    },
+    {
+      "name": "perf"
+    },
+    {
+      "name": "latency",
+      "parent": "perf"
+    },
+    {
+      "name": "docs"
+    },
+    {
+      "name": "api",
+      "parent": "docs"
+    },
+    {
+      "name": "tools"
+    },
+    {
+      "name": "lsp",
+      "parent": "tools"
+    },
+    {
+      "name": "git",
+      "parent": "tools"
+    },
+    {
+      "name": "i18n"
+    },
+    {
+      "name": "security"
+    },
+    {
+      "name": "migrations"
+    },
+    {
+      "name": "eval"
+    },
+    {
+      "name": "retrieval",
+      "parent": "eval"
+    },
+    {
+      "name": "agent",
+      "parent": "eval"
+    }
   ],
   "memories": [
     {
@@ -100,6 +195,174 @@
       "kind": "text",
       "title": "密钥管理",
       "content": "密钥只存本地 .env，不入库不外传。"
+    },
+    {
+      "group": "code/ts",
+      "kind": "fact",
+      "title": "TypeScript：noUncheckedIndexedAccess 打开后所有索引取值都要判空",
+      "content": "开这个开关会把大量 array[i] 变成 T | undefined，是好事但要有心理准备。"
+    },
+    {
+      "group": "code/ts",
+      "kind": "tool_outcome",
+      "title": "tsc -b 的增量缓存：tsbuildinfo 过期会静默沿用旧类型",
+      "content": "改完类型还报旧错（或不报新错）时先删 tsbuildinfo 再构建。"
+    },
+    {
+      "group": "code/python",
+      "kind": "tool_outcome",
+      "title": "Python：pytest 里 mkdtemp 不清理会堆出成千个临时目录",
+      "content": "夹具用 mkdtemp 必须注册清理；一次排查在 TEMP 下发现 5264 个残留目录。"
+    },
+    {
+      "group": "code/python",
+      "kind": "fact",
+      "title": "Python：venv 里升级 pip 后 shebang 仍指向旧解释器",
+      "content": "直接改 shebang 或用 python -m pip 才是稳的。"
+    },
+    {
+      "group": "code/sql",
+      "kind": "fact",
+      "title": "SQLite：WAL 模式下多进程读要设 busy_timeout",
+      "content": "否则并发读会立刻 SQLITE_BUSY 而不是等待。"
+    },
+    {
+      "group": "code/sql",
+      "kind": "preference",
+      "title": "SQLite：Windows 上不要开 mmap_size，先保持默认",
+      "content": "mmap 在 Windows 上与杀软/索引器交互差，收益不稳定。"
+    },
+    {
+      "group": "infra/docker",
+      "kind": "tool_outcome",
+      "title": "Docker：只拷 dist 会让 pnpm 的依赖符号链接全部悬空",
+      "content": "镜像建得起来、启动即 ERR_MODULE_NOT_FOUND；修法是 pnpm deploy --node-linker=hoisted 出自包含产物。"
+    },
+    {
+      "group": "infra/docker",
+      "kind": "tool_outcome",
+      "title": "Docker：容器内绑定 127.0.0.1 时端口映射访问不到",
+      "content": "端口映射经过 bridge 网关，容器内必须绑 0.0.0.0 才能被外部访问。"
+    },
+    {
+      "group": "infra/ci",
+      "kind": "tool_outcome",
+      "title": "CI：并发规则 cancel-in-progress 会让新推送取消在跑的 run",
+      "content": "等一个 run 出结果时不要推东西，否则它会被取消、白等。"
+    },
+    {
+      "group": "infra/ci",
+      "kind": "preference",
+      "title": "CI：平台矩阵要 fail-fast: false，一次看到两个平台的结果",
+      "content": "默认会在第一个失败时取消其余任务，反而看不到全貌。"
+    },
+    {
+      "group": "perf/latency",
+      "kind": "fact",
+      "title": "延迟：p95 比均值更能暴露长尾，只看均值会漏掉卡顿",
+      "content": "均值被大量快请求拉平，用户感受到的是长尾。"
+    },
+    {
+      "group": "perf/latency",
+      "kind": "preference",
+      "title": "超时：交互式等待上限 120 秒，再长要转后台任务",
+      "content": "超过两分钟的等待应该返回 job id，而不是把界面挂住。"
+    },
+    {
+      "group": "docs/api",
+      "kind": "preference",
+      "title": "API 文档：错误响应必须给出下一步动作，而不只是状态码",
+      "content": "指错方向的指示比没有指示更贵：用户会去改一个不相干的开关。"
+    },
+    {
+      "group": "docs/api",
+      "kind": "fact",
+      "title": "API 文档：分页统一 page / page_size，不要混用 offset / limit",
+      "content": "两套参数并存时，客户端总有一半人写错。"
+    },
+    {
+      "group": "tools/lsp",
+      "kind": "tool_outcome",
+      "title": "LSP：诊断在打开文件时缓存，内容改了要重新解析",
+      "content": "刚改完就查询会拿到旧结论；判据要覆盖这个时序。"
+    },
+    {
+      "group": "tools/lsp",
+      "kind": "tool_outcome",
+      "title": "LSP：BOM 会让列号整体偏移一格",
+      "content": "定义/悬停/诊断三处都要覆盖，否则只在其中一处偏移。"
+    },
+    {
+      "group": "tools/git",
+      "kind": "preference",
+      "title": "Git：stash 当安全网时用 apply 而不是 pop",
+      "content": "apply 保留条目，验证完再手动 drop。"
+    },
+    {
+      "group": "tools/git",
+      "kind": "tool_outcome",
+      "title": "Git：push 报 Empty reply from server 是瞬时的，直接重试",
+      "content": "同一个命令第二次通常就成功，不要因此改配置。"
+    },
+    {
+      "group": "i18n",
+      "kind": "fact",
+      "title": "本地化：界面硬编码中文是一条棘轮，只许降不许升",
+      "content": "计数上涨会让构建失败，降下来才是进度。"
+    },
+    {
+      "group": "i18n",
+      "kind": "fact",
+      "title": "本地化：t() 的键就是中文原文，缺翻译时降级为中文而不是裸键",
+      "content": "所以漏翻只是不够好，不会露出 key。"
+    },
+    {
+      "group": "security",
+      "kind": "preference",
+      "title": "安全：默认开放要看得见，想关就能关（令牌机制要有一等公民入口）",
+      "content": "机制存在但只有 .env 和文档时，等于没有。"
+    },
+    {
+      "group": "security",
+      "kind": "fact",
+      "title": "安全：令牌只从头里读，查询串会被日志与历史抄走",
+      "content": "?token= 一律拒绝。"
+    },
+    {
+      "group": "migrations",
+      "kind": "fact",
+      "title": "迁移：状态文件版本升级要先备份再改写，坏的移走而不是覆盖",
+      "content": "读不动的文件移一边（quarantine），原始字节必须留着。"
+    },
+    {
+      "group": "migrations",
+      "kind": "preference",
+      "title": "迁移：加字段要能向前兼容旧文件，缺字段按默认值读",
+      "content": "否则降级回旧版本会直接读不动。"
+    },
+    {
+      "group": "eval/retrieval",
+      "kind": "fact",
+      "title": "检索评测：每个用例要同时跑基线与被测系统，差值才是证据",
+      "content": "只报自己的分数等于没有基线。"
+    },
+    {
+      "group": "eval/retrieval",
+      "kind": "fact",
+      "title": "检索评测：负例要共享常见词但主题不同",
+      "content": "词一个都不重合的负例，两套系统都返回 0，等于白测。"
+    },
+    {
+      "group": "eval/agent",
+      "kind": "fact",
+      "title": "Agent 评测：判分不调用 LLM，用文件系统与字符串断言",
+      "content": "用模型当裁判会让成本翻倍并引入不确定性。"
+    },
+    {
+      "group": "eval/agent",
+      "kind": "preference",
+      "title": "Agent 评测：单样本说不清回归与波动，要跑 --repeat 才能分类",
+      "content": "失败的任务先重复跑三次再判定。"
     }
   ]
 }
