@@ -3483,6 +3483,7 @@ router.put('/api/settings', async (req, res) => {
       autoCompact?: boolean;
       /** 从窗口的百分之多少开始压。0.1 ~ 1 之间。 */
       compactAtShare?: number;
+      compactionLevel?: string;
     }>(req);
 
     const prevWorkspaceRoot = config.workspace.root;
@@ -3682,6 +3683,10 @@ router.put('/api/settings', async (req, res) => {
       && body.compactAtShare > 0.1 && body.compactAtShare < 1) {
       config.context.compactAtShare = body.compactAtShare;
       setEnv('SHE_CONTEXT_COMPACT_AT', String(body.compactAtShare));
+    }
+    if (body.compactionLevel === 'conservative' || body.compactionLevel === 'balanced' || body.compactionLevel === 'aggressive') {
+      config.context.compactionLevel = body.compactionLevel;
+      setEnv('SHE_CONTEXT_COMPACTION_LEVEL', body.compactionLevel);
     }
     if (body.pricing && typeof body.pricing === 'object') {
       for (const key of ['inputPerMillion', 'outputPerMillion', 'cachedInputPerMillion'] as const) {

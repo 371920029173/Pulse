@@ -285,6 +285,14 @@ console.log('\n8. 窗口能改、能落盘、写坏了不改');
   check('默认是"按模型名识别"（没被填过）', s0.llm.contextWindow === 0 && (await plan()).context.window.source !== 'config',
     JSON.stringify({ configured: s0.llm.contextWindow }));
 
+  await send('PUT', '/api/settings', { compactionLevel: 'aggressive' });
+  const pLevel = await plan();
+  check('档位能改、能读回，并影响阈值', pLevel.context.compactionLevel === 'aggressive' && pLevel.context.threshold === 0.9,
+    JSON.stringify({ level: pLevel.context.compactionLevel, threshold: pLevel.context.threshold }));
+  await send('PUT', '/api/settings', { compactionLevel: 'nonsense' });
+  check('写坏的档位不生效（保留上一个好值）', (await plan()).context.compactionLevel === 'aggressive');
+  await send('PUT', '/api/settings', { compactionLevel: 'balanced' });
+  check('回到平衡档 → 阈值回到 0.8', (await plan()).context.threshold === 0.8, JSON.stringify((await plan()).context.threshold));
   await send('PUT', '/api/settings', { contextWindow: 40000 });
   const s1 = await settings();
   const p1 = await plan();
@@ -437,6 +445,12 @@ console.log('\n10. 真压一次：跑的是用户实际会跑的那份 dist（�
       && Number(manual.afterTokens) < Number(manual.beforeTokens),
       JSON.stringify({ ok: manual.ok, before: manual.beforeTokens, after: manual.afterTokens, reason: manual.reason }));
     const manualRecord = compactionRecords().find((r) => r.reason === 'manual');
+    check('日志能读出被压范围（压了哪一段）',
+      Boolean(manualRecord) && manualRecord.coveredFrom === 0 && manualRecord.coveredTo === manualRecord.covered - 1,
+      JSON.stringify({ covered: manualRecord?.covered, from: manualRecord?.coveredFrom, to: manualRecord?.coveredTo }));
+    check('日志能读出留了什么（压那一刻保留的条数）',
+      typeof manualRecord?.keptCount === 'number' && manualRecord.keptCount >= 0,
+      JSON.stringify({ keptCount: manualRecord?.keptCount }));
     check('压缩记录落了盘，并写清来源是模型还是机械提取', Boolean(manualRecord)
       && (manualRecord.source === 'model' || manualRecord.source === 'extractive'),
       JSON.stringify(manualRecord ?? null).slice(0, 200));

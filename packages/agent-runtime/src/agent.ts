@@ -3138,6 +3138,7 @@ export class Agent {
     compacted: boolean;
     compaction: {
       covered: number; source: string; at: string; reason: string;
+      coveredFrom?: number; coveredTo?: number; keptCount?: number | null;
       beforeTokens: number; afterTokens: number; sourcePath: string | null;
       anchors: number;
     } | null;
@@ -3157,6 +3158,8 @@ export class Agent {
     } | null;
     /** 这一刻一条工具结果允许带进来的字符数（离天花板越近越小）。 */
     budgetChars: number;
+    /** 当前档位（配置读出来的，未配置时 balanced）。 */
+    compactionLevel: 'conservative' | 'balanced' | 'aggressive';
   } {
     const s = this.compactionState;
     /*
@@ -3170,11 +3173,14 @@ export class Agent {
       breakdown,
       estimate: { charsPerToken: this.charsPerToken, samples: this.estimateSamples.length },
       threshold: this.compactAtShare(),
+      compactionLevel: (this.config as { context?: { compactionLevel?: 'conservative' | 'balanced' | 'aggressive' } }).context?.compactionLevel ?? 'balanced',
       autoCompact: this.autoCompactEnabled(),
       compacted: s !== null,
       compaction: s
         ? {
           covered: s.covered, source: s.source, at: s.at, reason: s.reason,
+          coveredFrom: s.coveredFrom ?? 0, coveredTo: s.coveredTo ?? (s.covered - 1),
+          keptCount: s.keptCount ?? null,
           beforeTokens: s.beforeTokens, afterTokens: s.afterTokens, sourcePath: s.sourcePath ?? null,
           anchors: s.anchors?.length ?? 0,
         }
@@ -3237,10 +3243,16 @@ export class Agent {
    * 抬到 1：真到了窗口边缘还是得压，否则会话又会卡死在同一个地方。
    */
   private compactAtShare(): number {
-    const configured = (this.config as { context?: { compactAtShare?: number } }).context?.compactAtShare;
-    const base = typeof configured === 'number' && Number.isFinite(configured) && configured > 0.1 && configured < 1
+    const ctx = (this.config as { context?: { compactAtShare?: number; compactionLevel?: string } }).context;
+    /*
+     * 档位与显式值的关系：写了 compactAtShare 就以它为准，没写才按档位（保守 0.7 / 平衡 0.8 / 激进 0.9）。
+     * 判"写没写"的依据是"等于默认 0.8" —— 默认值就是没写的意思，这一条写进了 docs/context-and-caching.md。
+     */
+    const byLevel = ctx?.compactionLevel === 'conservative' ? 0.7 : ctx?.compactionLevel === 'aggressive' ? 0.9 : 0.8;
+    const configured = ctx?.compactAtShare;
+    const base = typeof configured === 'number' && Number.isFinite(configured) && configured > 0.1 && configured < 1 && configured !== 0.8
       ? configured
-      : 0.8;
+      : byLevel;
     return this.compactionState ? Math.max(base, 0.95) : base;
   }
 
@@ -3595,6 +3607,9 @@ export class Agent {
       const state: CompactionState = {
         v: 1,
         covered: cut,
+        coveredFrom: 0,
+        coveredTo: cut - 1,
+        keptCount: history.length - cut,
         nextFingerprint: fingerprint(history[cut]),
         digest: digest.text,
         source: digest.source,

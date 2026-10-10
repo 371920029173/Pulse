@@ -54,6 +54,10 @@ export interface CompactionState {
    * 所以恢复时先用它定位、再退回指纹匹配 —— 见 `compactionCut()` 里为什么是这个顺序。
    */
   covered: number;
+  /** 压掉的是哪一段（0 … coveredTo）、压的那一刻还留了多少条 —— 供"压缩日志"读。 */
+  coveredFrom?: number;
+  coveredTo?: number;
+  keptCount?: number;
   /**
    * 摘要后面第一条消息的指纹。
    *

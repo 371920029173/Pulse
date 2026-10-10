@@ -399,3 +399,24 @@ tokens，对 40k 窗口意味着触发线整体前移 15% —— 也就是"还�
   窗口能改能落盘、写坏的窗口与阈值不生效、手动压不假装成功；端到端四条 —— 关掉开关时历史完整发出、
   手动压真的变小、阈值那条自己动手、**模型端 400 报 `maximum context length` 之后当场压并重发成功**。
 
+
+## 压缩档位（保守 / 平衡 / 激进）
+
+`context.compactionLevel`（env `SHE_CONTEXT_COMPACTION_LEVEL`，也可由 `PUT /api/settings` 改）决定**到窗口的百分之多少就压**：
+
+| 档位 | 阈值 | 意思 |
+|---|---|---|
+| `conservative` | 0.7 | 压得早、留的上下文多：单轮更贵，但被折叠掉的更少 |
+| `balanced`（默认） | 0.8 | 默认档，行为与加档位之前逐字节一致 |
+| `aggressive` | 0.9 | 压得晚、单轮更省，但离窗口更近 |
+
+**与 `context.compactAtShare` 的关系**：显式写了 compactAtShare（且不等于默认的 0.8）就以它为准；
+没写、或者写的就是 0.8，则按档位走。判"写没写"的依据是"等于默认值" —— 这是不需要额外状态的判法，
+代价是"激进档 + 显式写 0.8"会被当成没写（少见，且这两个值本来就相邻）。
+压过一次之后阈值抬到 0.95（只折叠一次，之后每一轮在摘要后面追加），这条与档位无关。
+
+**压缩日志**：`.she/sessions/<id>/compaction.json` 除摘要与原因外，还写明**压了哪一段、留了什么** ——
+`covered`（压掉多少条）、`coveredFrom`/`coveredTo`（区间，从 0 开始）、`keptCount`（压的那一刻保留了多少条）、
+`beforeTokens`/`afterTokens`（前后 token）、`sourcePath`（原文去哪读）。
+plan API 的 `context.compaction` 带同样几项，其中 `keptCount` 是**当场**按当前历史算的（历史还会继续长）。
+`check:context` 第 8 节按真 server 验档位能改能读回并影响阈值，第 9/10 节验"日志能读出被压范围"。

@@ -351,6 +351,8 @@ export interface SheConfig {
     autoCompact: boolean;
     /** 从窗口的百分之多少开始压（0.1 ~ 1）。默认 0.8。压过一次之后这一格抬到 0.95。 */
     compactAtShare: number;
+    /** 压缩激进程度：保守压得早、激进压得晚（没写 compactAtShare 时按它走）。 */
+    compactionLevel: 'conservative' | 'balanced' | 'aggressive';
     /** 每 100 万 token 的单价。全 0 表示没填，界面只报 token 数、不报钱。 */
     pricing: {
       inputPerMillion: number;
@@ -507,6 +509,7 @@ const DEFAULTS: SheConfig = {
      */
     autoCompact: true,
     compactAtShare: 0.8,
+    compactionLevel: 'balanced',
     pricing: {
       inputPerMillion: 0,
       outputPerMillion: 0,
@@ -921,6 +924,9 @@ export function loadConfig(workspaceRoot?: string): SheConfig {
       } else if (src.autoCompact === 'false' || src.autoCompact === '0') {
         config.context.autoCompact = false;
       }
+      if (src.compactionLevel === 'conservative' || src.compactionLevel === 'balanced' || src.compactionLevel === 'aggressive') {
+        config.context.compactionLevel = src.compactionLevel;
+      }
       const atShare = Number(src.compactAtShare);
       if (Number.isFinite(atShare) && atShare > 0.1 && atShare < 1) config.context.compactAtShare = atShare;
       const pricing = src.pricing;
@@ -1117,6 +1123,8 @@ export function loadConfig(workspaceRoot?: string): SheConfig {
     const raw = env.SHE_CONTEXT_AUTO_COMPACT.trim().toLowerCase();
     config.context.autoCompact = ['1', 'true', 'yes', 'on'].includes(raw);
   }
+  const level = String(env.SHE_CONTEXT_COMPACTION_LEVEL ?? '').toLowerCase();
+  if (level === 'conservative' || level === 'balanced' || level === 'aggressive') config.context.compactionLevel = level;
   const compactAtShare = Number(env.SHE_CONTEXT_COMPACT_AT);
   if (Number.isFinite(compactAtShare) && compactAtShare > 0.1 && compactAtShare < 1) {
     config.context.compactAtShare = compactAtShare;
