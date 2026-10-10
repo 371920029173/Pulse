@@ -87,11 +87,11 @@ interface Props {
  * 一起保存。
  */
 const SECTIONS: { id: SectionId; label: string; hint: string }[] = [
-  { id: 'llm', label: '模型与接入', hint: '提供商、模型、密钥、备用线路' },
-  { id: 'workspace', label: '工作区与知识库', hint: '目录、技能档、共享知识库' },
-  { id: 'sandbox', label: '沙箱与权限', hint: '命令审批、工作区边界' },
-  { id: 'appearance', label: '外观与快捷键', hint: '主题、语言、按键' },
-  { id: 'background', label: '背景', hint: '图片 / 视频背景' },
+  { id: 'llm', label: t('模型与接入'), hint: t('提供商、模型、密钥、备用线路') },
+  { id: 'workspace', label: t('工作区与知识库'), hint: t('目录、技能档、共享知识库') },
+  { id: 'sandbox', label: t('沙箱与权限'), hint: t('命令审批、工作区边界') },
+  { id: 'appearance', label: t('外观与快捷键'), hint: t('主题、语言、按键') },
+  { id: 'background', label: t('背景'), hint: t('图片 / 视频背景') },
 ];
 
 type SectionId = 'llm' | 'workspace' | 'sandbox' | 'appearance' | 'background';
@@ -636,7 +636,7 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
           <AuthSettings />
           {/*
             自动化模式与沙箱姿态的张力。服务端只在**真的会停住无人值守那一轮**时才给这段话，所以
-            它出现就意味着"你勾了自动化，但它仍会在某些操作上停下来等确认" —— 这件事以前是被静默
+            它出现就意味着t("你勾了自动化，但它仍会在某些操作上停下来等确认") —— 这件事以前是被静默
             处理掉的（打开自动化顺手把边界放宽），现在是说出来让人自己决定要不要放宽。
           */}
           {postureNotice && (
@@ -683,8 +683,8 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
           </label>
 
           {/*
-            档位只在勾选后才有意义 —— 不勾选时规则是"除阅读类外一律确认"，没有"外面怎么处理"这回事。
-            置灰而不是隐藏，是为了让"勾上之后还有更细的选择"这件事在没勾的时候也看得见。
+            档位只在勾选后才有意义 —— 不勾选时规则是t("除阅读类外一律确认")，没有t("外面怎么处理")这回事。
+            置灰而不是隐藏，是为了让t("勾上之后还有更细的选择")这件事在没勾的时候也看得见。
           */}
           <div className={`${styles.policyList} ${outsideAllow === true ? '' : styles.policyDisabled}`}>
             {([
@@ -860,7 +860,7 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
             <div className={styles.shell}>
               {/*
                 分区导航。原来是一整条平铺表单，用户要在一千多像素之后才能找到权限开关，找到之前
-                只能认为它不存在 —— 侧栏把"这里有五件事"先说出来，再让他挑。
+                只能认为它不存在 —— 侧栏把t("这里有五件事")先说出来，再让他挑。
               */}
               <nav className={styles.nav}>
                 {SECTIONS.map((s) => (

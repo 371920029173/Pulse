@@ -55,9 +55,9 @@ interface RolePreset {
 type MemberState = 'idle' | 'running' | 'done' | 'error';
 
 const PHASE_LABEL: Record<string, string> = {
-  lead: '指挥',
-  work: '产出',
-  review: '审查',
+  lead: t('指挥'),
+  work: t('产出'),
+  review: t('审查'),
 };
 
 export function ClusterPanel({
@@ -120,7 +120,7 @@ export function ClusterPanel({
   async function createRoom() {
     const r = await fetchJSON<ClusterRoom>('/api/cluster/rooms', {
       method: 'POST',
-      body: { title: '工作群' },
+      body: { title: t('工作群') },
     });
     await refreshList();
     setRoom(r);
@@ -154,7 +154,7 @@ export function ClusterPanel({
         };
     if (!payload.name) return;
     setGenBusy(true);
-    setStatus('正在生成角色 skill…');
+    setStatus(t('正在生成角色 skill…'));
     try {
       const r = await fetchJSON<{ room: ClusterRoom }>(`/api/cluster/rooms/${activeId}/roles`, {
         method: 'POST',
@@ -163,7 +163,7 @@ export function ClusterPanel({
       setRoom(r.room);
       setNewRole({ name: '', title: '', phase: 'work', requirement: '' });
       await refreshList();
-      setStatus('角色已添加');
+      setStatus(t('角色已添加'));
     } catch (e) {
       setStatus((e as Error).message);
     } finally {
@@ -183,8 +183,8 @@ export function ClusterPanel({
   async function runWave() {
     if (!activeId || !goal.trim() || busy) return;
     setBusy(true);
-    setStatus('并行波次运行中…');
-    setPhase('启动');
+    setStatus(t('并行波次运行中…'));
+    setPhase(t('启动'));
     setMemberState({});
     const id = activeId;
     try {
@@ -226,13 +226,13 @@ export function ClusterPanel({
 
   async function exportKb() {
     if (!activeId) return;
-    setStatus('导入讨论纪要到知识库…');
+    setStatus(t('导入讨论纪要到知识库…'));
     try {
       const res = await fetchJSON<{ groupPath: string; messages: number }>(
         `/api/cluster/rooms/${activeId}/export-kb`,
-        { method: 'POST', body: { title: room?.title || '讨论纪要' } },
+        { method: 'POST', body: { title: room?.title || t('讨论纪要') } },
       );
-      setStatus(`已导入知识库 ${res.groupPath}（${res.messages} 条）`);
+      setStatus(t('已导入知识库 {groupPath}（{messages} 条）', { groupPath: (res.groupPath), messages: (res.messages) }));
     } catch (e) {
       setStatus((e as Error).message);
     }
@@ -305,10 +305,10 @@ export function ClusterPanel({
                     className={styles.ghostBtn}
                     onClick={() => setShowRoles((v) => !v)}
                   >
-                    {showRoles ? '收起角色设置' : '角色设置'}
+                    {showRoles ? t('收起角色设置') : t('角色设置')}
                   </button>
                   <span className={styles.roomStatus}>
-                    {phase ? `阶段：${phase}` : room.status}
+                    {phase ? t('阶段：{phase}', { phase: (phase) }) : room.status}
                     {status ? ` · ${status}` : ''}
                   </span>
                 </div>
@@ -404,7 +404,7 @@ export function ClusterPanel({
                         disabled={genBusy || !newRole.name.trim()}
                         onClick={() => void addRole()}
                       >
-                        {genBusy ? '生成 skill 中…' : '添加角色（AI 生成 skill）'}
+                        {genBusy ? t('生成 skill 中…') : t('添加角色（AI 生成 skill）')}
                       </button>
                     </div>
                   </div>
@@ -457,7 +457,7 @@ export function ClusterPanel({
                     disabled={busy || !goal.trim()}
                     onClick={() => void runWave()}
                   >
-                    {busy ? '并行运行中…' : '跑一波'}
+                    {busy ? t('并行运行中…') : t('跑一波')}
                   </button>
                   <button type="button" className={styles.ghostBtn} disabled={!room.messages.length} onClick={() => void exportKb()}>
                     纪要导入知识库

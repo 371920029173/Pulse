@@ -774,12 +774,12 @@ export function App() {
     try {
       res = await apiFetch(endpoint);
     } catch (e) {
-      toast(`导出失败：${(e as Error).message}`);
+      toast(t('导出失败：{message}', { message: ((e as Error).message) }));
       return;
     }
     if (!res.ok) {
       // Tell the user instead of failing mutely in the console.
-      toast(`导出失败（HTTP ${res.status}）`);
+      toast(t('导出失败（HTTP {status}）', { status: (res.status) }));
       return;
     }
     const text = await res.text();
@@ -881,7 +881,7 @@ export function App() {
   }, [sessions, chat, refreshSessions, kb]);
 
   const paletteCommands: CommandItem[] = [
-    { id: 'new', title: '新建会话', group: t('会话'), hint: 'N', run: () => { void handleNewSession(); } },
+    { id: 'new', title: t('新建会话'), group: t('会话'), hint: 'N', run: () => { void handleNewSession(); } },
     {
       id: 'worktree',
       title: t('新建并行工作副本'),
@@ -911,27 +911,27 @@ export function App() {
         })();
       },
     },
-    { id: 'skill-dev', title: '技能档位：开发', group: t('技能'), run: () => { void handleSkillProfile('dev'); } },
-    { id: 'skill-lib', title: '技能档位：创作', group: t('技能'), run: () => { void handleSkillProfile('liberal'); } },
-    { id: 'skill-gen', title: '技能档位：通用', group: t('技能'), run: () => { void handleSkillProfile('general'); } },
-    { id: 'skill-custom', title: '技能档位：自定义', group: t('技能'), run: () => { void handleSkillProfile('custom'); } },
-    { id: 'settings', title: '打开设置', group: t('导航'), hint: ',', run: () => setShowSettings(true) },
-    { id: 'plans', title: '打开长程计划', group: t('协作'), run: () => setShowPlans(true) },
-    { id: 'schedule', title: '打开定时任务', group: t('协作'), run: () => setShowSchedule(true) },
+    { id: 'skill-dev', title: t('技能档位：开发'), group: t('技能'), run: () => { void handleSkillProfile('dev'); } },
+    { id: 'skill-lib', title: t('技能档位：创作'), group: t('技能'), run: () => { void handleSkillProfile('liberal'); } },
+    { id: 'skill-gen', title: t('技能档位：通用'), group: t('技能'), run: () => { void handleSkillProfile('general'); } },
+    { id: 'skill-custom', title: t('技能档位：自定义'), group: t('技能'), run: () => { void handleSkillProfile('custom'); } },
+    { id: 'settings', title: t('打开设置'), group: t('导航'), hint: ',', run: () => setShowSettings(true) },
+    { id: 'plans', title: t('打开长程计划'), group: t('协作'), run: () => setShowPlans(true) },
+    { id: 'schedule', title: t('打开定时任务'), group: t('协作'), run: () => setShowSchedule(true) },
     { id: 'audit', title: t('打开审计记录'), group: t('协作'), run: () => setShowAudit(true) },
     { id: 'runs', title: t('打开运行轨迹'), group: t('协作'), run: () => setShowRuns(true) },
     { id: 'worktrees', title: t('管理并行工作副本'), group: t('协作'), run: () => setShowWorktrees(true) },
     { id: 'theme', title: t('自定义样式（换肤）'), group: t('外观'), run: () => setShowTheme(true) },
-    { id: 'cluster', title: '打开自动化讨论群', group: t('协作'), run: () => setShowCluster(true) },
-    { id: 'sources', title: '导入 Cursor / Claude Code / Codex 对话', group: t('知识库'), run: () => setShowSources(true) },
-    { id: 'kb-import', title: '导入知识库', group: t('知识库'), hint: 'I', run: () => setShowImport(true) },
-    { id: 'import', title: '导入知识到 KB', group: t('知识库'), run: () => setShowKnowledge(true) },
-    { id: 'terminal', title: showTerminal ? '折叠终端' : '展开终端', group: t('导航'), hint: '`', run: () => setShowTerminal((v) => !v) },
-    { id: 'trace', title: showTrace ? '隐藏组结构轨迹' : '显示组结构轨迹', group: t('导航'), run: () => setShowTrace((v) => !v) },
-    { id: 'cp', title: '打开检查点时间线', group: t('工作区'), run: () => setShowCheckpoints(true) },
-    { id: 'focus', title: focusChat ? '退出专注对话' : '专注对话（放大聊天区）', group: t('外观'), hint: '\\', run: () => setFocusChat((v) => !v) },
+    { id: 'cluster', title: t('打开自动化讨论群'), group: t('协作'), run: () => setShowCluster(true) },
+    { id: 'sources', title: t('导入 Cursor / Claude Code / Codex 对话'), group: t('知识库'), run: () => setShowSources(true) },
+    { id: 'kb-import', title: t('导入知识库'), group: t('知识库'), hint: 'I', run: () => setShowImport(true) },
+    { id: 'import', title: t('导入知识到 KB'), group: t('知识库'), run: () => setShowKnowledge(true) },
+    { id: 'terminal', title: showTerminal ? t('折叠终端') : t('展开终端'), group: t('导航'), hint: '`', run: () => setShowTerminal((v) => !v) },
+    { id: 'trace', title: showTrace ? t('隐藏组结构轨迹') : t('显示组结构轨迹'), group: t('导航'), run: () => setShowTrace((v) => !v) },
+    { id: 'cp', title: t('打开检查点时间线'), group: t('工作区'), run: () => setShowCheckpoints(true) },
+    { id: 'focus', title: focusChat ? t('退出专注对话') : t('专注对话（放大聊天区）'), group: t('外观'), hint: '\\', run: () => setFocusChat((v) => !v) },
     { id: 'theme', title: theme === 'dark' ? '切换到浅色主题' : '切换到深色主题', group: t('外观'), hint: 'T', run: () => setTheme((v) => (v === 'dark' ? 'light' : 'dark')) },
-    { id: 'clear', title: '清空当前对话', group: t('会话'), run: () => { void chat.clearHistory(); } },
+    { id: 'clear', title: t('清空当前对话'), group: t('会话'), run: () => { void chat.clearHistory(); } },
   ];
 
   useEffect(() => {
@@ -1298,7 +1298,7 @@ export function App() {
 
         {!focusChat && (
           <button type="button" className={styles.sidebarFab} title={t('折叠 / 展开侧栏')} onClick={() => setSidebarCollapsed((v) => !v)}>
-            {sidebarCollapsed ? '侧栏' : '收侧栏'}
+            {sidebarCollapsed ? t('侧栏') : t('收侧栏')}
           </button>
         )}
 

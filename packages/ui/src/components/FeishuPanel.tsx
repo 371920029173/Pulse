@@ -54,7 +54,7 @@ export function FeishuPanel() {
         method: 'PUT',
         body: { appId: form.appId, appSecret: form.appSecret, allowedUsers: form.allowedUsers },
       });
-      toast('飞书配置已保存');
+      toast(t('飞书配置已保存'));
       setForm((f) => ({ ...f, appSecret: '' }));
       await load();
     } catch (e) {
@@ -71,7 +71,7 @@ export function FeishuPanel() {
         status?.running ? '/api/feishu/stop' : '/api/feishu/start',
         { method: 'POST', body: status?.running ? {} : { pairing } },
       );
-      toast(status?.running ? '飞书遥控已断开' : pairing ? '配对模式已连接（不会执行指令）' : '飞书遥控已连接');
+      toast(status?.running ? t('飞书遥控已断开') : pairing ? t('配对模式已连接（不会执行指令）') : t('飞书遥控已连接'));
       void r;
       await load();
     } catch (e) {
@@ -91,7 +91,7 @@ export function FeishuPanel() {
     setBusy(true);
     try {
       await fetchJSON('/api/feishu/config', { method: 'PUT', body: { appId: form.appId, allowedUsers: next } });
-      toast('已加入白名单，重新连接后生效');
+      toast(t('已加入白名单，重新连接后生效'));
       await load();
     } catch (e) {
       toast((e as Error).message);
@@ -106,7 +106,7 @@ export function FeishuPanel() {
         <span className={`${styles.dot} ${status?.running && status?.connected ? styles.dotOn : ''}`} />
         <span className={styles.remoteTitle}>{t('飞书遥控')}</span>
         <button type="button" className={styles.small} onClick={() => setOpen((v) => !v)}>
-          {open ? '收起' : '配置'}
+          {open ? t('收起') : t('配置')}
         </button>
         {!status?.running && status?.configured && status?.allowedUserCount === 0 ? (
           <button
@@ -116,7 +116,7 @@ export function FeishuPanel() {
             title={t('先连上，然后用飞书给机器人发消息，把返回的 open_id 填进白名单')}
             onClick={() => void toggle(true)}
           >
-            {busy ? '处理中…' : '配对模式'}
+            {busy ? t('处理中…') : t('配对模式')}
           </button>
         ) : null}
         <button
@@ -125,7 +125,7 @@ export function FeishuPanel() {
           disabled={busy || !status?.configured}
           onClick={() => void toggle(false)}
         >
-          {busy ? '处理中…' : status?.running ? '断开' : '连接'}
+          {busy ? t('处理中…') : status?.running ? t('断开') : t('连接')}
         </button>
       </div>
 
@@ -133,8 +133,8 @@ export function FeishuPanel() {
         <>
           <div className={styles.remoteHint}>
             {status.pairing
-              ? '配对模式：给机器人发一条消息，它会回你的 open_id，这里也会显示。此模式下不会执行任何指令。'
-              : '已连上飞书。在飞书里私聊机器人即可操控这个对话；群里需要 @ 一下机器人。'}
+              ? t('配对模式：给机器人发一条消息，它会回你的 open_id，这里也会显示。此模式下不会执行任何指令。')
+              : t('已连上飞书。在飞书里私聊机器人即可操控这个对话；群里需要 @ 一下机器人。')}
           </div>
           <div className={styles.remoteMeta}>
             应用 {status.appId} · 授权账号 {status.allowedUserCount} 个
@@ -145,13 +145,13 @@ export function FeishuPanel() {
               {status.recent.slice(0, 5).map((r, i) => (
                 <div key={`${r.at}-${i}`} className={styles.fsRecentRow}>
                   <span className={r.accepted ? styles.fsOk : styles.fsNo}>{r.accepted ? '✓' : '×'}</span>
-                  <span className={styles.fsRecentText}>{r.text || '(空)'}</span>
+                  <span className={styles.fsRecentText}>{r.text || t('(空)')}</span>
                   {!r.accepted && r.from.startsWith('ou_') ? (
                     <button
                       type="button"
                       className={styles.fsAllow}
                       disabled={busy}
-                      title={`把 ${r.from} 加入白名单`}
+                      title={t('把 {from} 加入白名单', { from: (r.from) })}
                       onClick={() => void allowUser(r.from)}
                     >
                       允许 {r.from.slice(0, 10)}…
@@ -163,7 +163,7 @@ export function FeishuPanel() {
               ))}
             </div>
           ) : (
-            <div className={styles.remoteMeta}>{status.pairing ? '等你在飞书里发第一条消息…' : ''}</div>
+            <div className={styles.remoteMeta}>{status.pairing ? t('等你在飞书里发第一条消息…') : ''}</div>
           )}
           {status.lastError ? <div className={styles.error}>{status.lastError}</div> : null}
         </>
@@ -189,7 +189,7 @@ export function FeishuPanel() {
             <input
               type="password"
               value={form.appSecret}
-              placeholder={status?.hasSecret ? '已保存（留空则不修改）' : '粘贴 App Secret'}
+              placeholder={status?.hasSecret ? t('已保存（留空则不修改）') : t('粘贴 App Secret')}
               onChange={(e) => setForm((v) => ({ ...v, appSecret: e.target.value }))}
             />
           </label>
@@ -216,7 +216,7 @@ export function FeishuPanel() {
             </span>
           </div>
           <button type="button" className={styles.small} disabled={busy} onClick={() => void save()}>
-            {busy ? '保存中…' : '保存配置'}
+            {busy ? t('保存中…') : t('保存配置')}
           </button>
         </div>
       ) : null}
