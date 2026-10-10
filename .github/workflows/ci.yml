@@ -28,7 +28,7 @@ jobs:
       # That is what the first run of this workflow did: it died on this step, so every check below
       # was skipped and the repo showed a red badge while nothing had actually been verified.
       # package.json is the single source of truth for the toolchain version.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
       # Node 20 is deprecated on GitHub runners; 22 matches the version this is developed and
       # built against locally, so CI and development agree.
@@ -84,7 +84,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v4
         with:
           node-version: 22
