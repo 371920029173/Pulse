@@ -354,6 +354,11 @@ let sessionA = null;
  */
 {
   const NEW_TOKEN = 'ui-auth-token-0123456789';
+  // 记下仓库那份 .env 的**原来模样**（可能是"不存在" —— CI 的干净 checkout 就是这样）。
+  // 断言必须是"前后一致"，而不是"读出来不含令牌"：读一个不存在的文件会抛 ENOENT，
+  // 那是检查自己在依赖本机状态（本地有 .env 所以过、CI 上没有所以红），不是被测行为有问题。
+  const repoEnv = join(ROOT, '.env');
+  const repoEnvBefore = existsSync(repoEnv) ? readFileSync(repoEnv, 'utf8') : null;
   const put = (body, token) => api('/api/auth/config', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -376,8 +381,10 @@ let sessionA = null;
 
   const myEnv = join(ws, '.env');
   check('写进了检查自己的 .env', existsSync(myEnv) && readFileSync(myEnv, 'utf8').includes('SHE_AUTH_TOKEN='), null);
-  const repoEnv = join(ROOT, '.env');
-  check('【关键】仓库那份 .env 没被动（一个字都没写进去）', !readFileSync(repoEnv, 'utf8').includes(NEW_TOKEN), null);
+  const repoEnvAfter = existsSync(repoEnv) ? readFileSync(repoEnv, 'utf8') : null;
+  check('【关键】仓库那份 .env 一个字节都没变（原本不存在就仍然不存在）',
+    repoEnvBefore === repoEnvAfter,
+    `before=${repoEnvBefore === null ? '(不存在)' : '(有)'} after=${repoEnvAfter === null ? '(不存在)' : '(有)'}`);
 
   const raw = existsSync(join(ws, '.she', 'audit.log')) ? readFileSync(join(ws, '.she', 'audit.log'), 'utf8') : '';
   check('【关键】审计里也没有令牌', !raw.includes(NEW_TOKEN), null);

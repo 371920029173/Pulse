@@ -65,3 +65,60 @@ jobs:
       # Dependabot alerts tell you after the fact, and nothing was watching before it.
       - name: Dependency advisories (ratchet)
         run: pnpm check:deps
+
+
+  # ── 平台：Linux 之外只做「能装、能建、能起、能答一句」的最小验证 ─────────────────────
+  #
+  # 这一段存在的理由不是覆盖率，而是 README 里那张表（Windows 11 / macOS 写着「从未实际运行过」）。
+  # 一台没人跑过的平台，写的分支就只是猜测；这里让每次推送都在两个平台上真的起一次服务。
+  #
+  # 刻意**不**跑整套 check:offline（那是 ubuntu 那个 job 的事，也省 macOS 的额度）；跑的是三条
+  # 分平台最有信号的：security-check（自己起服务、真实 HTTP、不需要 key）、check:lock（本地桩模型
+  # 上跑完一轮对话，证明流式与轮次锁在这台机器上真的工作）、check:shell（cmd.exe 与 POSIX 的引号、
+  # 方言披露正是分平台的代码路径）。
+  platform-minimal:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm -r build
+      - name: Boot a server and probe it over HTTP (no key needed)
+        run: node scripts/security-check.mjs
+      - name: One full turn against a local stub model (no key needed)
+        run: pnpm check:lock
+      - name: Shell quoting and dialect (the platform-specific paths)
+        run: pnpm check:shell
+
+  # ── 容器：Dockerfile 真的能构建，容器真的能起来说话 ────────────────────────────────
+  #
+  # `check:docker` 只看结构（.dockerignore、基础镜像、入口），它按设计不联网也不构建。
+  # 那份静态检查加上这一个 job，「容器能用」才从声明变成事实。
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t pulse:ci .
+      - name: Start it and ask /api/health
+        run: |
+          docker run -d --name pulse-ci -p 127.0.0.1:5577:5577 pulse:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:5577/api/health >/dev/null; then
+              echo "health ok after ${i}s"
+              docker rm -f pulse-ci >/dev/null
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "container never answered /api/health"; docker logs pulse-ci; exit 1
