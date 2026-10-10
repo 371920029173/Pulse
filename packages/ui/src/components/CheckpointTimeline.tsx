@@ -32,7 +32,7 @@ export function CheckpointTimeline({ onClose }: { onClose: () => void }) {
         method: 'POST',
         body: id ? { checkpoint_id: id } : {},
       });
-      setMsg('已回滚 ' + out.path);
+      setMsg(t('已回滚 ') + out.path);
       await refresh();
     } catch (e) {
       setMsg((e as Error).message);

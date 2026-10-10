@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchJSON, apiFetch } from '../lib/api';
+import { t } from '../lib/i18n';
 
 export interface BackgroundMeta {
   url: string | null;
@@ -54,11 +55,11 @@ export function useBackground() {
 
   const setFromFile = useCallback(async (file: File) => {
     if (!/^(image|video)\//.test(file.type)) {
-      setError('只支持图片或视频文件');
+      setError(t('只支持图片或视频文件'));
       return;
     }
     if (file.size > MAX_BYTES) {
-      setError(`文件过大（上限 ${Math.round(MAX_BYTES / 1024 / 1024)}MB）`);
+      setError(t('文件过大（上限 {v1}MB）', { v1: (Math.round(MAX_BYTES / 1024 / 1024)) }));
       return;
     }
     setBusy(true);

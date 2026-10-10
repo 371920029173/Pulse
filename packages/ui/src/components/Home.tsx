@@ -202,7 +202,7 @@ export function Home({ onEnter, appearance, dock }: Props) {
                 disabled={bg.busy}
                 onClick={() => fileRef.current?.click()}
               >
-                {bg.busy ? '处理中…' : '选择图片 / 视频'}
+                {bg.busy ? t('处理中…') : t('选择图片 / 视频')}
               </button>
               {bg.meta.filename ? (
                 <>
@@ -211,7 +211,7 @@ export function Home({ onEnter, appearance, dock }: Props) {
                     className={`${styles.smallBtn} ${bg.enabled ? styles.smallBtnOn : ''}`}
                     onClick={() => bg.setEnabled(!bg.enabled)}
                   >
-                    {bg.enabled ? '显示中' : '已隐藏'}
+                    {bg.enabled ? t('显示中') : t('已隐藏')}
                   </button>
                   <button type="button" className={styles.smallBtn} onClick={() => void bg.clear()}>
                     移除
@@ -241,7 +241,7 @@ export function Home({ onEnter, appearance, dock }: Props) {
           <div className={styles.pickerHead}>
             <span className={styles.rowLabel}>{t('工作区')}</span>
             <span className={styles.rowHint}>
-              {loading ? '读取中…' : '会话与知识库以它为边界'}
+              {loading ? t('读取中…') : t('会话与知识库以它为边界')}
             </span>
           </div>
 
@@ -282,11 +282,11 @@ export function Home({ onEnter, appearance, dock }: Props) {
                 type="button"
                 className={styles.wsMore}
                 onClick={() => setShowAllWorkspaces((v) => !v)}
-                title={showAllWorkspaces ? '只看最近的' : `还有 ${hiddenWorkspaceCount} 个工作区`}
+                title={showAllWorkspaces ? t('只看最近的') : t('还有 {hiddenWorkspaceCount} 个工作区', { hiddenWorkspaceCount: (hiddenWorkspaceCount) })}
               >
                 {showAllWorkspaces
-                  ? `只看最近 ${RECENT_LIMIT} 个 ▴`
-                  : `显示更早的 ${hiddenWorkspaceCount} 个 ▾`}
+                  ? t('只看最近 {RECENT_LIMIT} 个 ▴', { RECENT_LIMIT: (RECENT_LIMIT) })
+                  : t('显示更早的 {hiddenWorkspaceCount} 个 ▾', { hiddenWorkspaceCount: (hiddenWorkspaceCount) })}
               </button>
             ) : null}
           </div>
@@ -302,7 +302,7 @@ export function Home({ onEnter, appearance, dock }: Props) {
               className={styles.ghostBtn}
               onClick={() => setManualOpen((v) => !v)}
             >
-              {manualOpen ? '收起' : '输入路径'}
+              {manualOpen ? t('收起') : t('输入路径')}
             </button>
           </div>
 

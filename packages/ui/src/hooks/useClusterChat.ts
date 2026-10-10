@@ -145,7 +145,7 @@ export function useClusterChat(roomId: string | null) {
 
       setMessages((prev) => [...prev, { role: 'user', content: goal }]);
       setIsLoading(true);
-      setStatus('群成员开始工作…');
+      setStatus(t('群成员开始工作…'));
       setActiveMembers([]);
       setDoneMembers([]);
 
@@ -172,12 +172,12 @@ export function useClusterChat(roomId: string | null) {
 
             if (chunk.phase) setStatus(String(chunk.phase));
             if (chunk.type === 'error') {
-              setStatus(String(chunk.error ?? '出错了'));
+              setStatus(String(chunk.error ?? t('出错了')));
               setIsLoading(false);
               return;
             }
             if (chunk.type === 'done') {
-              setStatus('本轮完成');
+              setStatus(t('本轮完成'));
               setIsLoading(false);
               return;
             }
@@ -239,7 +239,7 @@ export function useClusterChat(roomId: string | null) {
             }
           },
           onError: (err) => {
-            setStatus(`出错：${err.message}`);
+            setStatus(t('出错：{message}', { message: (err.message) }));
             setIsLoading(false);
           },
           onDone: () => {
@@ -265,7 +265,7 @@ export function useClusterChat(roomId: string | null) {
         .catch(() => { /* the room may already be idle */ });
     }
     setIsLoading(false);
-    setStatus('已中断');
+    setStatus(t('已中断'));
   }, [roomId, load]);
 
   const refresh = useCallback(() => {

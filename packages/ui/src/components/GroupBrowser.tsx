@@ -176,7 +176,7 @@ export function GroupBrowser({ group, memories, onClose }: GroupBrowserProps) {
               </div>
               <div className={styles.statItem}>
                 <span className={styles.statLabel}>{t('最冷')}</span>
-                <span className={styles.statValue}>{activation.cold[0] ? `${activation.cold[0].title}（${activation.cold[0].idleDays} 天）` : '—'}</span>
+                <span className={styles.statValue}>{activation.cold[0] ? t('{title}（{idleDays} 天）', { title: (activation.cold[0].title), idleDays: (activation.cold[0].idleDays) }) : '—'}</span>
               </div>
             </div>
           )}

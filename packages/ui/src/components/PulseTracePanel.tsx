@@ -9,14 +9,14 @@ interface PulseTracePanelProps {
 }
 
 const EDGE_LABELS: Record<string, string> = {
-  weak: '弱边',
-  co_occurrence: '共现',
-  temporal: '时序',
-  causal_candidate: '因果候选',
-  hierarchical: '层级',
-  cross_group: '跨组',
-  group_member: '同组',
-  parent_child: '父→子',
+  weak: t('弱边'),
+  co_occurrence: t('共现'),
+  temporal: t('时序'),
+  causal_candidate: t('因果候选'),
+  hierarchical: t('层级'),
+  cross_group: t('跨组'),
+  group_member: t('同组'),
+  parent_child: t('父→子'),
 };
 function energyColor(energy: number): string {
   const h = 210;

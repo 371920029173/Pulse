@@ -138,7 +138,7 @@ export function FeishuPanel() {
           </div>
           <div className={styles.remoteMeta}>
             应用 {status.appId} · 授权账号 {status.allowedUserCount} 个
-            {status.lastEventAt ? ` · 最后一条 ${new Date(status.lastEventAt).toLocaleTimeString()}` : ''}
+            {status.lastEventAt ? t(' · 最后一条 {v1}', { v1: (new Date(status.lastEventAt).toLocaleTimeString()) }) : ''}
           </div>
           {status.recent.length > 0 ? (
             <div className={styles.fsRecent}>

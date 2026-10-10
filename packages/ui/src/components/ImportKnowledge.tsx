@@ -10,11 +10,11 @@ interface Props {
 }
 
 const SOURCES = [
-  { id: 'raw', label: '原始文本' },
+  { id: 'raw', label: t('原始文本') },
   { id: 'cursor', label: 'Cursor' },
   { id: 'claude-code', label: 'Claude Code' },
   { id: 'codex', label: 'Codex' },
-  { id: 'session', label: '当前会话' },
+  { id: 'session', label: t('当前会话') },
 ];
 
 export function ImportKnowledge({ onClose, activeSessionId }: Props) {
@@ -51,7 +51,7 @@ export function ImportKnowledge({ onClose, activeSessionId }: Props) {
         method: 'POST',
         body,
       });
-      setMsg(`已导入 ${res.memoriesAdded} 条 → ${res.groupPath}`);
+      setMsg(t('已导入 {memoriesAdded} 条 → {groupPath}', { memoriesAdded: (res.memoriesAdded), groupPath: (res.groupPath) }));
     } catch (e: any) {
       setMsg(e.message || String(e));
     } finally {
@@ -108,7 +108,7 @@ export function ImportKnowledge({ onClose, activeSessionId }: Props) {
           </p>
           <div className={styles.actions}>
             <button type="button" onClick={() => void submit()} disabled={busy || (source !== 'session' && !text.trim())}>
-              {busy ? '导入中…' : '导入到知识库'}
+              {busy ? t('导入中…') : t('导入到知识库')}
             </button>
             {msg ? <span className={styles.hint}>{msg}</span> : null}
           </div>

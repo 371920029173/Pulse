@@ -42,7 +42,7 @@ interface ScheduleSnapshot {
   alerts?: { id: string; name: string; text: string }[];
 }
 
-const DAY_LABELS = ['日', '一', '二', '三', '四', '五', '六'];
+const DAY_LABELS = [t('日'), t('一'), t('二'), t('三'), t('四'), t('五'), t('六')];
 
 function describeTrigger(trigger: ScheduledTask['trigger']): string {
   if (trigger.kind === 'once') return t('一次性 {time}', { time: new Date(trigger.at).toLocaleString() });

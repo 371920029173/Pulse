@@ -17,7 +17,7 @@ interface ConfirmTicket {
 
 export function TerminalPanel({ open, onToggle, height = 220 }: { open: boolean; onToggle: () => void; height?: number }) {
   const [lines, setLines] = useState<TermLine[]>([
-    { id: 'boot', kind: 'sys', text: 'Pulse 终端 — 命令在工作区沙箱内执行；危险命令需确认。' },
+    { id: 'boot', kind: 'sys', text: t('Pulse 终端 — 命令在工作区沙箱内执行；危险命令需确认。') },
   ]);
   const [input, setInput] = useState('');
   const [cwd, setCwd] = useState('.');
@@ -60,13 +60,13 @@ export function TerminalPanel({ open, onToggle, height = 220 }: { open: boolean;
 
       if (res.needs_confirm && res.ticket) {
         setPending({ ticket: res.ticket, command: cmd });
-        push('sys', `需要确认：${res.ticket.summary}`);
+        push('sys', t('需要确认：{summary}', { summary: (res.ticket.summary) }));
         return;
       }
 
       if (res.stdout) push('out', res.stdout.replace(/\s+$/, ''));
       if (res.stderr) push('err', res.stderr.replace(/\s+$/, ''));
-      push('sys', `退出码 ${res.exitCode ?? '?'}${res.timedOut ? '（超时）' : ''} · ${res.durationMs ?? 0}ms`);
+      push('sys', t('退出码 {v1}{v2} · {v3}ms', { v1: (res.exitCode ?? '?'), v2: (res.timedOut ? '（超时）' : ''), v3: (res.durationMs ?? 0) }));
     } catch (e) {
       push('err', (e as Error).message);
     } finally {
@@ -85,7 +85,7 @@ export function TerminalPanel({ open, onToggle, height = 220 }: { open: boolean;
     if (cmd.trim().startsWith('cd ')) {
       const next = cmd.trim().slice(3).trim() || '.';
       setCwd(next);
-      push('sys', `当前目录 → ${next}`);
+      push('sys', t('当前目录 → {next}', { next: (next) }));
       return;
     }
     void run(cmd);
@@ -100,7 +100,7 @@ export function TerminalPanel({ open, onToggle, height = 220 }: { open: boolean;
 
   const cancel = useCallback(() => {
     if (!pending) return;
-    push('sys', '已取消确认');
+    push('sys', t('已取消确认'));
     setPending(null);
   }, [pending, push]);
 
@@ -154,7 +154,7 @@ export function TerminalPanel({ open, onToggle, height = 220 }: { open: boolean;
           value={input}
           disabled={busy}
           onChange={(e) => setInput(e.target.value)}
-          placeholder={busy ? '执行中…' : '输入命令（支持 cd / clear）'}
+          placeholder={busy ? t('执行中…') : t('输入命令（支持 cd / clear）')}
           autoComplete="off"
           spellCheck={false}
         />

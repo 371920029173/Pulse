@@ -67,11 +67,11 @@ const MARK: Record<StepStatus, string> = {
 };
 
 const LABEL: Record<StepStatus, string> = {
-  pending: '待办',
-  active: '进行中',
-  done: '完成',
-  blocked: '受阻',
-  dropped: '已弃',
+  pending: t('待办'),
+  active: t('进行中'),
+  done: t('完成'),
+  blocked: t('受阻'),
+  dropped: t('已弃'),
 };
 
 /**

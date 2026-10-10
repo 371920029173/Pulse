@@ -34,7 +34,7 @@ function fmtWhen(iso?: string): string {
   const days = Math.floor((Date.now() - d.getTime()) / 86_400_000);
   if (days === 0) return '今天';
   if (days === 1) return '昨天';
-  if (days < 30) return `${days} 天前`;
+  if (days < 30) return t('{days} 天前', { days: (days) });
   return d.toISOString().slice(0, 10);
 }
 
@@ -123,7 +123,7 @@ export function SessionHistory({ onClose, onReopened }: Props) {
     setBusy(id);
     try {
       await fetchJSON(`/api/sessions/${id}/reopen`, { method: 'POST', body: {} });
-      toast('已恢复该对话');
+      toast(t('已恢复该对话'));
       await load();
       onReopened?.(id);
     } catch (e) {
@@ -182,7 +182,7 @@ export function SessionHistory({ onClose, onReopened }: Props) {
             <div className={styles.empty}>{t('读取中…')}</div>
           ) : rows.length === 0 ? (
             <div className={styles.empty}>
-              {query ? '没有匹配的对话。' : '还没有任何对话记录。'}
+              {query ? t('没有匹配的对话。') : t('还没有任何对话记录。')}
             </div>
           ) : (
             rows.map((s) => (

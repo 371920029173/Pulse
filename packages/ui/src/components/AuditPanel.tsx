@@ -29,17 +29,17 @@ interface AuditResponse {
 }
 
 const KIND_LABEL: Record<AuditKind, string> = {
-  request: '请求',
-  tool: '工具',
-  confirm: '确认',
-  rotation: '轮转',
+  request: t('请求'),
+  tool: t('工具'),
+  confirm: t('确认'),
+  rotation: t('轮转'),
 };
 
 const FILTERS: Array<{ id: AuditKind | 'all'; label: string }> = [
-  { id: 'all', label: '全部' },
-  { id: 'request', label: '请求' },
-  { id: 'tool', label: '工具' },
-  { id: 'confirm', label: '确认' },
+  { id: 'all', label: t('全部') },
+  { id: 'request', label: t('请求') },
+  { id: 'tool', label: t('工具') },
+  { id: 'confirm', label: t('确认') },
 ];
 
 /** Time of day only: the date is implied by the trail and the seconds are what are compared. */

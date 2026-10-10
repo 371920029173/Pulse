@@ -1,3 +1,4 @@
+import { t } from './i18n';
 /**
  * Skill profiles — the single source of truth.
  *
@@ -26,26 +27,26 @@ export interface SkillProfileDef {
 export const SKILL_PROFILES: SkillProfileDef[] = [
   {
     id: 'dev',
-    label: '开发',
-    title: '开发档：软件 / 终端 / 代码',
+    label: t('开发'),
+    title: t('开发档：软件 / 终端 / 代码'),
     dir: 'dev',
   },
   {
     id: 'liberal',
-    label: '创作',
-    title: '创作档：写作 / 研究 / 文档',
+    label: t('创作'),
+    title: t('创作档：写作 / 研究 / 文档'),
     dir: 'liberal',
   },
   {
     id: 'general',
-    label: '通用',
-    title: '通用档：日常问答，不加载专门技能',
+    label: t('通用'),
+    title: t('通用档：日常问答，不加载专门技能'),
     dir: 'general',
   },
   {
     id: 'custom',
-    label: '自定义',
-    title: '自定义档：加载 .she/skills/custom（在设置里管理）',
+    label: t('自定义'),
+    title: t('自定义档：加载 .she/skills/custom（在设置里管理）'),
     dir: 'custom',
   },
 ];

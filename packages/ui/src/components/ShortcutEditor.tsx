@@ -36,7 +36,7 @@ export function ShortcutEditor() {
 
       if (e.key === 'Escape') {
         setCapturing(null);
-        setMsg('已取消');
+        setMsg(t('已取消'));
         return;
       }
       const chord = chordFromEvent(e);
@@ -48,7 +48,7 @@ export function ShortcutEditor() {
         return next;
       });
       setCapturing(null);
-      setMsg(`已绑定 ${chord}`);
+      setMsg(t('已绑定 {chord}', { chord: (chord) }));
     };
     // capture phase so we win over the app's own listeners
     window.addEventListener('keydown', onKey, true);
@@ -71,7 +71,7 @@ export function ShortcutEditor() {
   const resetAll = useCallback(() => {
     setMap(resetShortcuts());
     broadcast();
-    setMsg('已恢复默认');
+    setMsg(t('已恢复默认'));
   }, []);
 
   const clearOne = useCallback((id: ShortcutActionId) => {
@@ -81,7 +81,7 @@ export function ShortcutEditor() {
       broadcast();
       return next;
     });
-    setMsg('已清空该绑定');
+    setMsg(t('已清空该绑定'));
   }, []);
 
   return (
@@ -129,9 +129,9 @@ export function ShortcutEditor() {
                       setCapturing(null);
                     }
                   }}
-                  title={conflicted ? '与其他快捷键冲突' : '点击后按下新的组合键'}
+                  title={conflicted ? t('与其他快捷键冲突') : t('点击后按下新的组合键')}
                 >
-                  {isCapturing ? '按下按键…' : (chord || '未绑定')}
+                  {isCapturing ? t('按下按键…') : (chord || t('未绑定'))}
                 </button>
               </div>
             );

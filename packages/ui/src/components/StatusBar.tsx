@@ -82,7 +82,7 @@ export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, fo
     setUndoMsg(null);
     try {
       const out = await fetchJSON<{ path: string }>('/api/fs/undo', { method: 'POST', body: {} });
-      setUndoMsg(`已撤销 ${out.path}`);
+      setUndoMsg(t('已撤销 {path}', { path: (out.path) }));
       await refresh();
     } catch (e) {
       setUndoMsg((e as Error).message);
@@ -124,7 +124,7 @@ export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, fo
       <span className={styles.item}>
         <span className={styles.label}>{t('密钥')}</span>
         <span className={`${styles.value} ${s?.llm.hasKey ? styles.ok : styles.warn}`}>
-          {s ? (s.llm.hasKey ? '已配置' : '未配置') : '…'}
+          {s ? (s.llm.hasKey ? t('已配置') : t('未配置')) : '…'}
         </span>
       </span>
       {/*
@@ -153,8 +153,8 @@ export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, fo
         <span className={styles.label}>{t('工作区')}</span>
         <span className={styles.value}>{short}</span>
       </span>
-      <button type="button" className={styles.focusBtn} onClick={onToggleFocus} title="Ctrl+\\ 专注对话">
-        {focusChat ? '退出专注' : '专注'}
+      <button type="button" className={styles.focusBtn} onClick={onToggleFocus} title={t("Ctrl+\\ 专注对话")}>
+        {focusChat ? t('退出专注') : t('专注')}
       </button>
 {usage && usage.total_tokens > 0 ? (
         <>
@@ -188,7 +188,7 @@ export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, fo
               <span className={styles.sep}>·</span>
               <span
                 className={styles.item}
-                title={`提示缓存命中 ${usage.cache_hit_tokens ?? 0} / 未命中 ${usage.cache_miss_tokens ?? 0}；越低说明每轮重发的提示前缀在变，成本越高`}
+                title={t('提示缓存命中 {v1} / 未命中 {v2}；越低说明每轮重发的提示前缀在变，成本越高', { v1: (usage.cache_hit_tokens ?? 0), v2: (usage.cache_miss_tokens ?? 0) })}
               >
                 <span className={styles.label}>{t('缓存')}</span>
                 <span className={styles.value}>{cacheHitRate}%</span>
@@ -235,7 +235,7 @@ export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, fo
         className={styles.undo}
         onClick={() => void undo()}
         disabled={undoing || !latest}
-        title={latest ? `撤销对 ${latest.path} 的应用` : '暂无检查点'}
+        title={latest ? t('撤销对 {path} 的应用', { path: (latest.path) }) : t('暂无检查点')}
       >
         {undoing ? '撤销中…' : latest ? `撤销 ${latest.path.split('/').pop()}` : '撤销'}
       </button>

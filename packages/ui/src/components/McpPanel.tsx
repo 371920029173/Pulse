@@ -71,9 +71,9 @@ export function McpPanel() {
     try {
       const s = await fetchJSON<McpServer>(`/api/mcp/servers/${encodeURIComponent(name)}/probe`, { method: 'POST', body: {} });
       setServers((prev) => prev.map((x) => (x.name === s.name ? { ...x, ...s } : x)));
-      toast(s.reachable ? `${name} 可用（${s.toolCount} 个工具）` : `${name} 不可达`);
+      toast(s.reachable ? t('{name} 可用（{toolCount} 个工具）', { name: (name), toolCount: String(s.toolCount) }) : t('{name} 不可达', { name: (name) }));
     } catch (e) {
-      toast(`探测失败：${(e as Error).message}`);
+      toast(t('探测失败：{message}', { message: ((e as Error).message) }));
     } finally {
       setProbing(null);
     }
@@ -92,7 +92,7 @@ export function McpPanel() {
   const remove = useCallback(async (name: string) => {
     await fetchJSON(`/api/mcp/servers/${encodeURIComponent(name)}`, { method: 'DELETE' });
     setServers((prev) => prev.filter((x) => x.name !== name));
-    toast(`已移除 ${name}`);
+    toast(t('已移除 {name}', { name: (name) }));
   }, []);
 
   const add = useCallback(async () => {
@@ -109,7 +109,7 @@ export function McpPanel() {
       setServers(r.servers ?? []);
       setDraft({ name: '', command: 'npx', args: '' });
       setAdding(false);
-      toast('已添加 MCP 服务');
+      toast(t('已添加 MCP 服务'));
     } catch (e) {
       toast((e as Error).message);
     }
@@ -122,7 +122,7 @@ export function McpPanel() {
       <div className={styles.head}>
         <span className={styles.headTitle}>{t('MCP 服务')}</span>
         <span className={styles.headMeta}>
-          {loading ? '检测中…' : `${reachableCount}/${servers.length} 可用`}
+          {loading ? t('检测中…') : t('{reachableCount}/{length} 可用', { reachableCount: (reachableCount), length: (servers.length) })}
         </span>
         <button type="button" className={styles.iconBtn} onClick={() => void load()} title={t('重新检测')}>↻</button>
         <button type="button" className={styles.iconBtn} onClick={() => setAdding((v) => !v)} title={t('添加服务')}>+</button>

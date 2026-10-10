@@ -23,7 +23,7 @@ type Profile = SkillProfileId;
  */
 const PROFILE_LABEL: Record<string, string> = {
   ...Object.fromEntries(SKILL_PROFILES.map((p) => [p.id, p.label])),
-  _common: '公共',
+  _common: t('公共'),
 };
 
 /**
@@ -82,7 +82,7 @@ export function SkillManager({ onClose }: { onClose: () => void }) {
   const save = useCallback(async () => {
     const name = draftName.trim();
     if (!name) {
-      setError('请填技能名称');
+      setError(t('请填技能名称'));
       return;
     }
     setBusy(true);
@@ -92,7 +92,7 @@ export function SkillManager({ onClose }: { onClose: () => void }) {
         method: 'POST',
         body: { name, profile: draftProfile, content: draftBody },
       });
-      toast('已保存技能');
+      toast(t('已保存技能'));
       await load();
       setMode('list');
     } catch (e) {
@@ -109,7 +109,7 @@ export function SkillManager({ onClose }: { onClose: () => void }) {
     setBusy(true);
     try {
       await fetchJSON(`/api/skills/files?path=${encodeURIComponent(f.path)}`, { method: 'DELETE' });
-      toast('已删除');
+      toast(t('已删除'));
       await load();
       if (selected?.path === f.path) setMode('list');
     } catch (e) {
@@ -136,8 +136,8 @@ export function SkillManager({ onClose }: { onClose: () => void }) {
           <h2 className={styles.title}>{t('技能管理')}</h2>
           <span className={styles.sub}>
             {mode === 'list'
-              ? `${files.length} 个技能文件 · 放在 .she/skills/<档位>/`
-              : selected ? `编辑 ${selected.name}` : '新建技能'}
+              ? t('{length} 个技能文件 · 放在 .she/skills/<档位>/', { length: (files.length) })
+              : selected ? t('编辑 {name}', { name: (selected.name) }) : t('新建技能')}
           </span>
         </div>
         <button type="button" className={styles.close} onClick={onClose} title={t('关闭')}>×</button>
@@ -205,12 +205,12 @@ export function SkillManager({ onClose }: { onClose: () => void }) {
             className={styles.editor}
             value={draftBody}
             onChange={(e) => setDraftBody(e.target.value)}
-            placeholder={'用 Markdown 写这个技能：什么时候用、怎么做、有哪些禁忌。\n\n例如：\n# 代码评审\n\n## 何时使用\n用户在提交前要求评审时。\n\n## 步骤\n1. 先跑测试…'}
+            placeholder={t('用 Markdown 写这个技能：什么时候用、怎么做、有哪些禁忌。\n\n例如：\n# 代码评审\n\n## 何时使用\n用户在提交前要求评审时。\n\n## 步骤\n1. 先跑测试…')}
             spellCheck={false}
           />
           <div className={styles.actions}>
             <button type="button" className={styles.primary} disabled={busy} onClick={() => void save()}>
-              {busy ? '保存中…' : '保存'}
+              {busy ? t('保存中…') : t('保存')}
             </button>
             <button type="button" className={styles.small} onClick={() => setMode('list')}>{t('返回列表')}</button>
           </div>

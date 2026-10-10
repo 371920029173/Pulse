@@ -14,11 +14,11 @@ interface Props {
 }
 
 const SOURCES = [
-  { id: 'raw', label: '粘贴 / 文件' },
+  { id: 'raw', label: t('粘贴 / 文件') },
   { id: 'cursor', label: 'Cursor' },
   { id: 'claude-code', label: 'Claude Code' },
   { id: 'codex', label: 'Codex' },
-  { id: 'session', label: '本机会话' },
+  { id: 'session', label: t('本机会话') },
 ] as const;
 
 export function KbImport({ onClose }: Props) {
@@ -78,7 +78,7 @@ export function KbImport({ onClose }: Props) {
     setFilename(file.name);
     const lower = file.name.toLowerCase();
     if (!(lower.endsWith('.md') || lower.endsWith('.txt') || lower.endsWith('.json') || lower.endsWith('.jsonl'))) {
-      setMsg('建议 md / txt / json / jsonl');
+      setMsg(t('建议 md / txt / json / jsonl'));
     }
     setText(await file.text());
   }, []);
@@ -100,7 +100,7 @@ export function KbImport({ onClose }: Props) {
         method: 'POST',
         body,
       });
-      setMsg(`已写入 ${res.memoriesAdded} 条 → ${res.groupPath}`);
+      setMsg(t('已写入 {memoriesAdded} 条 → {groupPath}', { memoriesAdded: (res.memoriesAdded), groupPath: (res.groupPath) }));
       setText('');
     } catch (e: any) {
       setMsg(e.message || String(e));
@@ -159,7 +159,7 @@ export function KbImport({ onClose }: Props) {
             </label>
             <div className={styles.actions}>
               <button type="button" onClick={() => void submitPath()} disabled={busy || !path.trim()}>
-                {busy ? '导入中…' : '导入'}
+                {busy ? t('导入中…') : t('导入')}
               </button>
               {msg ? <span className={styles.hint}>{msg}</span> : null}
             </div>
@@ -212,7 +212,7 @@ export function KbImport({ onClose }: Props) {
           )}
           <div className={styles.actions}>
             <button type="button" onClick={() => void submit()} disabled={busy}>
-              {busy ? '导入中…' : '写入知识库'}
+              {busy ? t('导入中…') : t('写入知识库')}
             </button>
             {msg ? <span className={styles.hint}>{msg}</span> : null}
           </div>

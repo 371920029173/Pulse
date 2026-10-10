@@ -201,7 +201,7 @@ export function normalizeHistory(raw: ServerHistoryMessage[]): ChatMessage[] {
      * 用户报的"部分 chat 显示异常"里就有它。归成系统说明（原文仍在会话文件里）。
      */
     if (m.role === 'user' && content.startsWith('[压缩记录]')) {
-      return { role: 'system', content: '以上较早的记录已压缩成摘要（模型仍然看得到它）' };
+      return { role: 'system', content: t('以上较早的记录已压缩成摘要（模型仍然看得到它）') };
     }
     // The stuck-loop nudge is persisted (so the next request keeps the same prefix); it is the agent
     // talking to itself, not the user. The prefix is a protocol marker, hence the escapes.
@@ -1110,7 +1110,7 @@ export function useChat(sessionId?: string | null) {
     } catch (err) {
       setMessages((prev) => [
         ...prev,
-        { role: 'system', content: `追加失败：${(err as Error).message}` },
+        { role: 'system', content: t('追加失败：{message}', { message: ((err as Error).message) }) },
       ]);
     }
   }, [serverTurnRunning, healStaleTurn, dispatchSend]);

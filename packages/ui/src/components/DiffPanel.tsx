@@ -26,7 +26,7 @@ export function DiffPanel({ patch, busy, onApply, onReject }: Props) {
           </button>
         </div>
       </div>
-      <pre className={styles.diff}>{patch.unified || '（空 diff）'}</pre>
+      <pre className={styles.diff}>{patch.unified || t('（空 diff）')}</pre>
     </div>
   );
 }

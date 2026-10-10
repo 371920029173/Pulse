@@ -426,7 +426,7 @@ export function Sidebar({
             type="button"
             className={styles.foldToggle}
             onClick={() => setShowAllSessions(true)}
-            title={`还有 ${foldedCount} 条较早的会话`}
+            title={t('还有 {foldedCount} 条较早的会话', { foldedCount: (foldedCount) })}
           >
             显示更早的 {foldedCount} 条 ▾
           </button>
@@ -448,7 +448,7 @@ export function Sidebar({
         type="button"
         className={styles.collapseHeader}
         onClick={() => setShowFiles((v) => !v)}
-        title={showFiles ? '收起工作区文件' : '展开工作区文件'}
+        title={showFiles ? t('收起工作区文件') : t('展开工作区文件')}
       >
         <span className={styles.collapseChevron}>{showFiles ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}</span>
         <span>{t('工作区文件')}</span>
@@ -481,7 +481,7 @@ export function Sidebar({
         type="button"
         className={styles.collapseHeader}
         onClick={() => setShowMcp((v) => !v)}
-        title={showMcp ? '收起 MCP 服务' : '展开 MCP 服务'}
+        title={showMcp ? t('收起 MCP 服务') : t('展开 MCP 服务')}
       >
         <span className={styles.collapseChevron}>{showMcp ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}</span>
         <span>{t('MCP 服务')}</span>

@@ -1672,7 +1672,7 @@ export function Chat({
             placeholder={
               isLoading
                 ? t('补充信息…（Enter 追加 · 连按两次 Enter 打断 · Shift+Enter 换行）')
-                : '@file: / @folder: / @symbol: · 用 📎 添加文件、拖进来或粘贴（Enter 发送 · Shift+Enter 换行）'
+                : t('@file: / @folder: / @symbol: · 用 📎 添加文件、拖进来或粘贴（Enter 发送 · Shift+Enter 换行）')
             }
             value={input}
             onChange={handleTextareaChange}

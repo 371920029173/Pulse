@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import styles from '../styles/Markdown.module.css';
 import { highlight } from '../lib/highlight';
+import { t } from '../lib/i18n';
 
 function inlineParse(text: string): React.ReactNode[] {
   const out: React.ReactNode[] = [];
@@ -70,7 +71,7 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
             });
           }}
         >
-          {copied ? '已复制' : '复制'}
+          {copied ? t('已复制') : t('复制')}
         </button>
       </div>
       <pre>

@@ -1231,7 +1231,7 @@ export function App() {
               pendingPatches={inGroupMode ? [] : chat.pendingPatches}
               sessionTitle={
                 inGroupMode
-                  ? `${clusterChat.room?.title ?? '工作群'} · ${clusterChat.room?.members.length ?? 0} 个智能体`
+                  ? t('{v1} · {v2} 个智能体', { v1: (clusterChat.room?.title ?? '工作群'), v2: (clusterChat.room?.members.length ?? 0) })
                   : sessions.find((s) => s.id === activeSessionId)?.title ?? null
               }
               groupPeers={
