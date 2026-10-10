@@ -108,19 +108,35 @@ console.log('\n=== 运行阶段是否带上必要产物 ===');
     '运行阶段复制了 UI 产物（没有它界面是空白）',
     /COPY --from=build .*packages\/ui\/dist/.test(dockerfile),
   );
+  /*
+   * server 的复制方式变了：不再是 `COPY …/packages/server/dist`，而是 **`pnpm deploy` 的产物**。
+   *
+   * 原因是一次真实故障：只拷 `dist` + 根 `node_modules` 时，pnpm 默认布局下"包自己的依赖"是符号
+   * 链接，链接全部悬空 —— 镜像建得好好的，容器启动即 `ERR_MODULE_NOT_FOUND`。CI 的 docker-build
+   * job 第一次跑就抓到了它（在此之前这个镜像从未被 build 或 run 过）。`--node-linker=hoisted` 是
+   * 那次修法里承重的一步，和桌面 staging 踩的是同一个坑（见 AGENTS.md）。
+   *
+   * 这里钉三件**互相咬合**的事：部署命令写了 `--prod --node-linker=hoisted`、运行阶段从那个目录
+   * 复制、CMD 指的就是那个目录里的入口。改一处漏另一处会在这里报红 —— 这比"某个路径存在"更接近
+   * 真正会坏的地方。
+   */
+  const deploy = /pnpm --filter @she\/server deploy (\/[\w./-]+) --prod --node-linker=hoisted/.exec(dockerfile);
   check(
-    '运行阶段复制了 server 产物',
-    /COPY --from=build .*packages\/server\/dist/.test(dockerfile),
+    '构建阶段用 pnpm deploy 出**自包含**的 server（带 --prod 与 --node-linker=hoisted）',
+    Boolean(deploy),
+    '缺这一步，镜像里的依赖符号链接会全部悬空（启动即 ERR_MODULE_NOT_FOUND）',
+  );
+  const deployed = deploy?.[1] ?? '';
+  const copyLine = deployed ? `COPY --from=build ${deployed} ./server` : '';
+  check(
+    '运行阶段复制的是那个部署产物',
+    copyLine !== '' && dockerfile.includes(copyLine),
+    `部署目录 ${deployed} 与运行阶段的 COPY 对不上`,
   );
   check(
-    '运行阶段复制了 node_modules',
-    /COPY --from=build .*node_modules/.test(dockerfile),
-  );
-  check(
-    'CMD 指向真实存在的入口',
-    /CMD \["node", "packages\/server\/dist\/index\.js"\]/.test(dockerfile)
-      && existsSync(join(ROOT, 'packages', 'server', 'dist', 'index.js')),
-    '入口文件不存在（先 pnpm -r build）',
+    'CMD 指向部署产物里的入口',
+    /CMD \["node", "server\/dist\/index\.js"\]/.test(dockerfile),
+    '入口应当相对 /app：deploy 产物放在 ./server',
   );
 }
 
@@ -133,8 +149,9 @@ console.log('\n=== 镜像是否干净 ===');
     '整包复制会把源码、测试和工具链一起打进镜像',
   );
   check(
-    '构建阶段用 pnpm prune --prod 去掉开发依赖',
-    /pnpm prune --prod/.test(dockerfile),
+    '生产依赖由 deploy 的 --prod 保证（不再靠 pnpm prune）',
+    /deploy[^\n]*--prod/.test(dockerfile),
+    'deploy 不带 --prod，镜像里会塞进整个开发依赖树',
   );
   check(
     '依赖安装使用 frozen-lockfile（构建可复现）',

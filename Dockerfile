@@ -3,11 +3,12 @@
 # Supports the private / self-hosted deployment case: the service runs anywhere a
 # container runs, with the workspace and its state mounted as a volume.
 #
-# NOT YET BUILT. Docker was unavailable in the environment where this was written,
-# so the image has not been built or run. `scripts/docker-check.mjs` verifies that
-# every path referenced here exists in the repository, which catches the likely
-# mistakes (a wrong COPY source, a dist directory that is not produced) — but that
-# is not a substitute for `docker build && docker run`.
+# Built and run on every push: the `docker-build` job in `.github/workflows/ci.yml` runs
+# `docker build` and then starts the container and asks it for /api/health. That job exists
+# precisely because `scripts/docker-check.mjs` (paths and structure only) cannot tell whether the
+# image starts — the first time it ran, the image built fine and died at startup with
+# ERR_MODULE_NOT_FOUND: only `dist` and a root `node_modules` were copied, so every dependency
+# symlink dangled. See the deploy step below.
 #
 # Build:
 #   docker build -t pulse:0.3.0 .
@@ -47,9 +48,13 @@ RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm -r build
 
-# Drop dev dependencies once the build is done. Scripts must run, or better-sqlite3
-# loses its compiled binding.
-RUN pnpm prune --prod
+# A SELF-CONTAINED tree for the runtime stage.
+#
+# `--node-linker=hoisted` is LOAD-BEARING — the same trap AGENTS.md records for the desktop
+# staging: pnpm's default layout keeps a package's dependencies as SIBLINGS of it, reached
+# through symlinks, so an image that copies only `dist` + a root `node_modules` leaves every link
+# dangling and the container dies at startup with ERR_MODULE_NOT_FOUND.
+RUN pnpm --filter @she/server deploy /deploy/server --prod --node-linker=hoisted
 
 # ─── runtime ───
 FROM node:22-bookworm-slim AS runtime
@@ -60,33 +65,26 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends tini ca-certificates git \
   && rm -rf /var/lib/apt/lists/*
 
+# SHE_UI_DIR points at the built UI inside the image (default resolution: UI_DIR in
+# packages/server/src/index.ts).
 ENV NODE_ENV=production \
     SHE_HOST=0.0.0.0 \
     SHE_PORT=5577 \
     SHE_WORKSPACE=/workspace \
-    SHE_STATE_DIR=/workspace
+    SHE_STATE_DIR=/workspace \
+    SHE_UI_DIR=/app/ui
 
 WORKDIR /app
 
 # Only what runs at runtime. Copying the whole build stage would ship sources, tests
 # and the toolchain, and would duplicate the `src` trees that `dist` supersedes.
-COPY --from=build /app/package.json /app/pnpm-workspace.yaml ./
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/packages/shared/package.json ./packages/shared/
-COPY --from=build /app/packages/shared/dist ./packages/shared/dist
-COPY --from=build /app/packages/kb/package.json ./packages/kb/
-COPY --from=build /app/packages/kb/dist ./packages/kb/dist
-COPY --from=build /app/packages/sandbox/package.json ./packages/sandbox/
-COPY --from=build /app/packages/sandbox/dist ./packages/sandbox/dist
-COPY --from=build /app/packages/agent-runtime/package.json ./packages/agent-runtime/
-COPY --from=build /app/packages/agent-runtime/dist ./packages/agent-runtime/dist
-COPY --from=build /app/packages/server/package.json ./packages/server/
-COPY --from=build /app/packages/server/dist ./packages/server/dist
-# The server serves the built UI from packages/ui/dist (see UI_DIR in index.ts).
-COPY --from=build /app/packages/ui/dist ./packages/ui/dist
-# The `she` CLI, so the container can also drive the server as a command.
-COPY --from=build /app/packages/she-cli/package.json ./packages/she-cli/
-COPY --from=build /app/packages/she-cli/dist ./packages/she-cli/dist
+# The deployed server: its own node_modules, hoisted, nothing pointing outside the tree.
+COPY --from=build /deploy/server ./server
+# The built UI, exactly where SHE_UI_DIR says (the desktop runtime uses this same sibling
+# layout: `ui/` next to `server/`).
+COPY --from=build /app/packages/ui/dist ./ui
+# Bundled skills, for the same reason: the prompt index lists them from here.
+COPY --from=build /app/skills ./skills
 
 # The workspace lives on a volume; the agent reads and writes here.
 RUN mkdir -p /workspace/.she
@@ -106,4 +104,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 
 # tini as PID 1, so signals reach the server and orphans are reaped.
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["node", "packages/server/dist/index.js"]
+CMD ["node", "server/dist/index.js"]
