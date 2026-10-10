@@ -10,7 +10,7 @@ import { createLogger, loadConfig, resolveEnvFile, mergeMissingEnvFile, updateEn
 import { type ControlAuth, presentsControlToken, resolveControlAuth } from './control-token.js';
 import { isScratchWorkspace } from './scratch-workspace.js';
 import type { SheConfig, StreamChunk, EdgeKind, SkillProfile, ThinkingLevel } from '@she/shared';
-import { KBStore, GroupKBEngine, mergeKnowledgeBases } from '@she/kb';
+import { KBStore, GroupKBEngine, mergeKnowledgeBases, activationReport } from '@she/kb';
 import type { KBMemoryPatch } from '@she/kb';
 import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLink } from './kb-link.js';
 import { SandboxShell, createTools, ConfirmTicketStore, describeIsolation, isolationNotice } from '@she/sandbox';
@@ -5653,6 +5653,16 @@ router.post('/api/sessions/:id/move', async (req, res, params) => {
     } catch (err) {
       throw new HttpError(400, (err as Error).message);
     }
+  });
+
+  /*
+   * 记忆的激活账：哪些节点真的在被用、哪些已经凉了。
+   *
+   * `accessCount` / `lastAccessedAt` 一直在维护，但从来没有一处把它们成批读回来 —— 于是
+   * 「该清理谁」只能凭感觉，也看不见一个节点在变凉之前的样子。只读路由（不触碰任何节点）。
+   */
+  router.get('/api/kb/activation', (_req, res) => {
+    sendJSON(res, activationReport(store, { hot: 10, cold: 10 }));
   });
 
   router.get('/api/kb/groups', (_req, res) => {

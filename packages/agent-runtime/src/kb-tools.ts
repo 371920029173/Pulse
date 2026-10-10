@@ -284,6 +284,37 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
     },
   );
 
+/**
+ * 概念关联：给新节点找一条**跨组**的最强邻居，**只建议、不自动建边**。
+ *
+ * 为什么只建议，而不是顺手连上：
+ *  - `store.deleteEdge` 有，但没有对应的 `kb_*` 工具 —— 自动建的边**撤不掉**，而"它和它相关"
+ *    这句话本身也只是弱主张，不该由一次写入单方面决定。
+ *  - 同组关系已经由分组表达了，**跨组**才是新信息。
+ *  - 已经连过的（任一方向）不再建议：重复建议等于噪音。
+ *
+ * 阈值不自造：能被 `engine.query` 返回，说明它已经过了引擎自己的 relevance floor。真要连就调
+ * `kb_link`（kind="weak"）—— 因果仍必须人工给证据与反例，这条线不因为"自动"而松开。
+ */
+function suggestCrossGroupNeighbour(
+  query: (q: string) => { nodes: MemoryNode[] },
+  store: { getEdgesBetween: (a: string, b: string) => unknown[] },
+  mem: MemoryNode,
+): MemoryNode | null {
+  try {
+    const mine = new Set(mem.groupIds ?? []);
+    for (const hit of query(mem.title).nodes ?? []) {
+      if (hit.id === mem.id) continue;
+      if ((hit.groupIds ?? []).some((g) => mine.has(g))) continue;
+      if (store.getEdgesBetween(mem.id, hit.id).length > 0) continue;
+      return hit;
+    }
+    return null;
+  } catch {
+    return null; // 建议算不出来不该让这次写入失败
+  }
+}
+
   reg(
     {
       name: 'kb_upsert',
@@ -377,7 +408,13 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
       const alongside = sameTitle.length > 0
         ? `（同组已有同题有效节点 ${sameTitle.map((m) => m.id).join(', ')}，按 onExisting="add" 并存）`
         : '';
-      return `Added memory "${title}" to group "${groupName}" [Node: ${mem.id}, Group: ${group.id}]${alongside}${redirected}`;
+      const neighbour = suggestCrossGroupNeighbour(
+        (q) => engine.query(q), engine['store'], mem);
+      const suggestion = neighbour
+        ? `\n共振最强的跨组邻居：「${neighbour.title}」[Node: ${neighbour.id}]。要连就调 kb_link（kind="weak"）——`
+          + '这里只建议、不自动建边：没有删边的工具，自动建就撤不回来。'
+        : '';
+      return `Added memory "${title}" to group "${groupName}" [Node: ${mem.id}, Group: ${group.id}]${alongside}${redirected}${suggestion}`;
     },
   );
 

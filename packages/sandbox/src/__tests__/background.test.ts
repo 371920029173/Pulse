@@ -452,7 +452,14 @@ describe('停止这一轮：等待要结束，任务不因此被杀', () => {
     const took = Date.now() - t0;
     clearTimeout(timer);
 
-    assert.ok(took < 5000, `abort 之后应当很快返回，实测 ${took}ms`);
+    /*
+     * 预算是 20 秒，不是"很快"，因为这条判据要区分的是两件事：
+     *   - 功能对：abort 之后立即返回（正常几百毫秒）；
+     *   - 功能坏：一直等，直到这个任务自己跑完（它设了 60 秒）。
+     * 满负载的机器上（内存 99% 那种）光是拉起 node 就可能花几秒，5 秒会把"机器慢"判成"功能坏"
+     * —— 上一轮门禁就是这样假红在这里的。20 秒离 60 秒仍然很远，区分度不减。
+     */
+    assert.ok(took < 20_000, `abort 之后应当很快返回，实测 ${took}ms`);
     assert.match(interrupted, /等待是被用户停止的/, interrupted);
     assert.match(interrupted, /还在运行/, interrupted);
     assert.ok(!interrupted.includes('LONG-DONE'), '任务没结束，不该出现它的收尾输出');

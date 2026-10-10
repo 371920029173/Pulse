@@ -1,4 +1,5 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { fetchJSON } from '../lib/api';
 import styles from '../styles/GroupBrowser.module.css';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { t } from '../lib/i18n';
@@ -31,6 +32,14 @@ interface MemoryData {
   content: string;
   accessCount: number;
   isDormant: boolean;
+}
+
+/** `/api/kb/activation` 的形状（只取这个面板要显示的几格）。 */
+interface Activation {
+  total: number;
+  neverAccessed: number;
+  hot: { id: string; title: string; accessCount: number }[];
+  cold: { id: string; title: string; idleDays: number }[];
 }
 
 interface GroupBrowserProps {
@@ -68,6 +77,20 @@ function StatItem({ label, value }: { label: string; value: string | number }) {
 }
 
 export function GroupBrowser({ group, memories, onClose }: GroupBrowserProps) {
+  /*
+   * 全库激活账。放在这里是因为它是本仓库**唯一**的知识库面板：每个节点上都有 `accessCount`，
+   * 但"整库谁在被用、谁凉了"从来没有一个地方看得见。读不到就显示"读不到"，不假装是空库。
+   */
+  const [activation, setActivation] = useState<Activation | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void fetchJSON<Activation>('/api/kb/activation').then(
+      (a) => { if (alive) setActivation(a); },
+      () => { if (alive) setActivation(null); },
+    );
+    return () => { alive = false; };
+  }, []);
+
   // Escape closes this dialog: the backdrop click is a mouse convenience, not a keyboard path.
   useEscapeToClose(onClose);
 
@@ -131,6 +154,32 @@ export function GroupBrowser({ group, memories, onClose }: GroupBrowserProps) {
               ))
             )}
           </div>
+        </div>
+
+        <div className={styles.section}>
+          <div className={styles.sectionTitle}>{t('激活（全库）')}</div>
+          {activation === null ? (
+            <div className={styles.emptyState}>{t('读不到激活账')}</div>
+          ) : (
+            <div className={styles.stats}>
+              <div className={styles.statItem}>
+                <span className={styles.statLabel}>{t('节点')}</span>
+                <span className={styles.statValue}>{String(activation.total)}</span>
+              </div>
+              <div className={styles.statItem}>
+                <span className={styles.statLabel}>{t('从未被访问')}</span>
+                <span className={styles.statValue}>{String(activation.neverAccessed)}</span>
+              </div>
+              <div className={styles.statItem}>
+                <span className={styles.statLabel}>{t('最活跃')}</span>
+                <span className={styles.statValue}>{activation.hot[0] ? `${activation.hot[0].title}（${activation.hot[0].accessCount}×）` : '—'}</span>
+              </div>
+              <div className={styles.statItem}>
+                <span className={styles.statLabel}>{t('最冷')}</span>
+                <span className={styles.statValue}>{activation.cold[0] ? `${activation.cold[0].title}（${activation.cold[0].idleDays} 天）` : '—'}</span>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className={styles.section}>

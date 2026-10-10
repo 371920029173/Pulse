@@ -52,6 +52,30 @@ describe('KB 治理工具', () => {
   const upsert = (content: string, extra: Record<string, unknown> = {}) =>
     tools.execute('kb_upsert', { groupName: 'qa/round2', title: 'walrus-encoding', content, ...extra });
 
+  it('【关键】写新节点时给出跨组关联建议，但**不**自动建边', async () => {
+    /*
+     * 概念关联这一半只做"建议"：没有删边的工具（store.deleteEdge 有，kb_* 里没有），自动建的边
+     * 撤不回来，而"它和它相关"本身也只是弱主张。所以判据有两面：建议要点名那条邻居，
+     * 而且图上**一条边都不许多**。
+     */
+    await tools.execute('kb_upsert', {
+      groupName: 'assoc/one',
+      title: '符号链接悬空导致模块找不到',
+      content: '镜像里只拷 dist，pnpm 的依赖链接全部悬空，容器启动即 ERR_MODULE_NOT_FOUND。',
+    });
+    const second = await tools.execute('kb_upsert', {
+      groupName: 'assoc/two',
+      title: '容器启动报 ERR_MODULE_NOT_FOUND',
+      content: '只拷 dist 的时候依赖符号链接悬空；修法是 pnpm deploy --node-linker=hoisted。',
+    });
+
+    assert.match(second, /共振最强的跨组邻居/, `跨组强邻居没有被建议: ${second}`);
+    const allEdges = store.getAllGroups()
+      .flatMap((g) => store.getMemoriesByGroup(g.id))
+      .flatMap((m) => store.getEdgesForNode(m.id)).length;
+    assert.equal(allEdges, 0, 'upsert 不该自动建边（建议归建议，图上一条边都不许多）');
+  });
+
   it('首次写入照旧 Added', async () => {
     const out = await upsert('runs are garbled');
     assert.match(out, /^Added memory "walrus-encoding"/);

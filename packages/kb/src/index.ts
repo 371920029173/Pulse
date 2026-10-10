@@ -1,4 +1,6 @@
 export { KBStore } from './store.js';
+export { activationReport } from './activation.js';
+export type { ActivationRow, ActivationReport } from './activation.js';
 export type { CreateGroupInput, CreateMemoryInput, CreateEdgeInput, WeightedQueryTerm } from './store.js';
 export {
   GroupKBEngine, KB_RETIRED_KEY, KB_HISTORY_KEY, KB_VERSION_KEY, KB_HISTORY_MAX,
