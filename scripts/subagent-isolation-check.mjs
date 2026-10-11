@@ -44,6 +44,16 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
+
+/*
+ * 所有子进程共用一份**空的** .env。
+ *
+ * 不钉它，子进程就会去读仓库的 .env（hermeticEnv 只丢环境变量，管不到文件）—— 于是本仓库
+ * .env 里的 SHE_KB_PATH 会把检查自己的库指到别处，5 条断言全部观察错对象。
+ * 修法与 check:tenant 当初一样：检查要用的值全部由环境变量钉住，文件给一份空的。
+ */
+const ENV_FILE = join(mkdtempSync(join(tmpdir(), 'she-subagent-env-')), '.env');
+writeFileSync(ENV_FILE, '', 'utf8');
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { pickSafePort } from './safe-port.mjs';
@@ -410,6 +420,7 @@ async function startLive({ ws, task, llmPort, port }) {
   const child = spawn('node', [SERVER_ENTRY], {
     cwd: SERVER_DIR,
     env: hermeticEnv({
+    SHE_ENV_FILE: ENV_FILE,
       SHE_WORKSPACE: ws,
       SHE_PORT: String(port),
       SHE_APP_DIR: join(ws, 'appdir'),
@@ -789,6 +800,7 @@ await new Promise((r) => kbStub.server.listen(KB_LLM_PORT, '127.0.0.1', r));
 const kbChildProc = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
   env: hermeticEnv({
+    SHE_ENV_FILE: ENV_FILE,
     SHE_WORKSPACE: ws3,
     SHE_PORT: String(KB_PORT),
     SHE_APP_DIR: join(ws3, 'appdir'),
@@ -1012,6 +1024,7 @@ await new Promise((r) => rawStub.server.listen(RAW_LLM_PORT, '127.0.0.1', r));
 const rawChild = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
   env: hermeticEnv({
+    SHE_ENV_FILE: ENV_FILE,
     SHE_WORKSPACE: ws4,
     SHE_PORT: String(RAW_PORT),
     SHE_APP_DIR: join(ws4, 'appdir'),
@@ -1203,6 +1216,7 @@ await new Promise((r) => sharedStub.server.listen(SHARED_LLM_PORT, '127.0.0.1', 
 const sharedChild = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
   env: hermeticEnv({
+    SHE_ENV_FILE: ENV_FILE,
     SHE_WORKSPACE: ws5,
     SHE_PORT: String(SHARED_PORT),
     SHE_APP_DIR: join(ws5, 'appdir'),
@@ -1363,6 +1377,7 @@ await new Promise((r) => timeoutStub.server.listen(TIMEOUT_LLM_PORT, '127.0.0.1'
 const timeoutChild = spawn('node', [SERVER_ENTRY], {
   cwd: SERVER_DIR,
   env: hermeticEnv({
+    SHE_ENV_FILE: ENV_FILE,
     SHE_WORKSPACE: ws6,
     SHE_PORT: String(TIMEOUT_PORT),
     SHE_APP_DIR: join(ws6, 'appdir'),

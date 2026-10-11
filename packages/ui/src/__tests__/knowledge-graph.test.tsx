@@ -28,7 +28,7 @@ function installFetch() {
       writes.push({ method: init.method, url, body: init.body ? JSON.parse(String(init.body)) : undefined });
     }
     if (url.includes('/api/kb/batch')) {
-      return new Response(JSON.stringify({ snapshot: 'D:/ws/.she/kb-snapshots/snap.sqlite', applied: 1, failedAt: null, error: null }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ snapshot: '.she/kb-snapshots/snap.sqlite', applied: 1, failedAt: null, error: null }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
     if (url.includes('/api/kb/rollback')) {
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } });
