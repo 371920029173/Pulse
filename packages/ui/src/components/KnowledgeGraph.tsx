@@ -131,8 +131,19 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   const boardRef = useRef<HTMLDivElement | null>(null);
 
   const loadTree = useCallback(() => {
-    fetchJSON<{ roots?: TreeNode[] } | TreeNode[]>('/api/kb/tree')
-      .then((r) => setTree(Array.isArray(r) ? r : (r.roots ?? [])))
+    /*
+     * 形状是**服务端说了算**：GET /api/kb/tree 返回 { tree: buildGroupTree() }。
+     *
+     * 这里踩过一次：组件读的是自己想出来的 `r.roots`，而测试 stub 也用了同一个想出来的形状 ——
+     * 于是"测试全绿、真机空板"（界面上只有「还没有组。」）。所以除了读对字段，还加一条**形状断言**：
+     * 既不是数组也没有 tree 就报错，同类错误下次当场可见。
+     */
+    fetchJSON<{ tree?: TreeNode[] } | TreeNode[]>('/api/kb/tree')
+      .then((r) => {
+        if (Array.isArray(r)) { setTree(r); return; }
+        if (Array.isArray(r?.tree)) { setTree(r.tree); return; }
+        setError(t('返回的形状不对：期望 {tree: […] }'));
+      })
       .catch((e: Error) => setError(e.message));
   }, []);
   useEffect(() => { loadTree(); }, [loadTree]);

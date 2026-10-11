@@ -37,7 +37,8 @@ function installFetch() {
       return new Response(JSON.stringify({ id: 'm1', title: '一条记忆', content: '正文原文' }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
     // 用 includes：无论 fetchJSON 有没有给路径加前缀都能命中
-    const body = url.includes('/api/kb/tree') ? { roots: TREE }
+    // 真形状来自服务端：GET /api/kb/tree → { tree: […] }（不是 roots —— 那个字段是我编的）
+    const body = url.includes('/api/kb/tree') ? { tree: TREE }
       : url.includes('/api/kb/groups/A') ? LEVEL_A
       : url.includes('/api/kb/groups/root1') ? { group: { id: 'root1', name: '项目甲' }, children: [{ id: 'A', name: 'A' }, { id: 'B', name: 'B' }], memories: [] }
       : {};
@@ -202,5 +203,16 @@ describe('知识图谱（s3：操作序列 / 保存并确认 / 回滚）', () =>
     await flush();
     const batch = writes.find((w) => w.url.includes('/api/kb/batch'));
     expect((batch!.body as { ops: Array<{ kind: string; content?: string }> }).ops[0]).toMatchObject({ kind: 'updateMemory', content: '改过的正文' });
+  });
+});
+
+describe('知识图谱（形状对不上要说出来）', () => {
+  it('返回既不是数组也没有 tree 字段时，界面报错而不是静默空板', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ roots: [] }), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    })) as unknown as typeof fetch);
+    const view = render(<KnowledgeGraph onClose={() => {}} />);
+    await flush();
+    expect(view.container.textContent).toContain('返回的形状不对');
   });
 });
