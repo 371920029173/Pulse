@@ -88,6 +88,22 @@ describe('知识图谱：组操作', () => {
     }
   });
 
+  it('复制：记忆与子组都复制过去，原组不动', () => {
+    const a = group('A');
+    const child = group('C', a.id);
+    const m = mem(a.id, '原始记忆');
+    mem(child.id, '子组里的记忆');
+
+    const copy = engine.copyGroup(a.id, null);
+    assert.equal(copy.name, 'A', '默认沿用原名');
+    assert.notEqual(copy.id, a.id);
+    assert.equal(store.getGroup(a.id)!.childGroupIds.length, 1, '原组不受影响');
+    const copiedMem = store.getMemoriesByGroup(copy.id).map((x) => x.title);
+    assert.ok(copiedMem.includes('原始记忆'), '记忆要跟过去（这里同时验了镜像被维护）');
+    assert.equal(store.getGroup(copy.id)!.childGroupIds.length, 1, '子组也要跟过去');
+    assert.equal(store.getMemory(m.id)!.groupIds.length, 1, '原记忆的归属不变');
+  });
+
   it('批量应用：按顺序执行；一条失败就停在它那里并报出位置', () => {
     const a = group('A');
     const ok = engine.applyOps([

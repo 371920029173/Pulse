@@ -48,6 +48,28 @@ interface NodeView {
   depth: number;
 }
 
+/** 与 server 的 KbOp 同形（界面不 import @she/kb —— 那是后端的包）。 */
+type PendingOp =
+  | { kind: 'renameGroup'; id: string; name: string }
+  | { kind: 'moveGroup'; id: string; parentId: string | null }
+  | { kind: 'copyGroup'; id: string; parentId: string | null }
+  | { kind: 'mergeGroups'; from: string; into: string }
+  | { kind: 'createGroup'; name: string; parentId: string | null }
+  | { kind: 'updateMemory'; id: string; title?: string; content?: string };
+
+/** 把一条待同步操作描述成人话（列表里逐条给用户看）。 */
+function describeOp(op: PendingOp, nameOf: (id: string) => string): string {
+  switch (op.kind) {
+    case 'renameGroup': return t('改名：{name}', { name: nameOf(op.id) });
+    case 'moveGroup': return t('移动：{name}', { name: nameOf(op.id) });
+    case 'copyGroup': return t('复制：{name}', { name: nameOf(op.id) });
+    case 'mergeGroups': return t('合并：{from} → {into}', { from: nameOf(op.from), into: nameOf(op.into) });
+    case 'createGroup': return t('新建组：{name}', { name: op.name });
+    case 'updateMemory': return t('改正文');
+    default: return t('操作');
+  }
+}
+
 interface Props {
   onClose: () => void;
   /** 双击记忆时交给上级（s3 里打开编辑面板）。 */
@@ -95,6 +117,17 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   /** 用户拖过的位置；没拖过的按布局算。拖动只改这里，不落库（s3 的改动才落库）。 */
   const [moved, setMoved] = useState<Record<string, { x: number; y: number }>>({});
   const dragRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
+  /** 待同步的操作序列 —— 在点「确认同步」之前，一条都不落库。 */
+  const [ops, setOps] = useState<PendingOp[]>([]);
+  const [clipboard, setClipboard] = useState<{ mode: 'copy' | 'cut'; id: string } | null>(null);
+  const [editing, setEditing] = useState<{ id: string; title: string; content: string } | null>(null);
+  const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
+  const [newGroupName, setNewGroupName] = useState('');
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  /** 最近一次同步落下的快照路径 —— 有它才有"回滚到同步前"。 */
+  const [lastSnapshot, setLastSnapshot] = useState<string | null>(null);
   const boardRef = useRef<HTMLDivElement | null>(null);
 
   const loadTree = useCallback(() => {
@@ -234,9 +267,60 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   };
   const endDrag = () => { dragRef.current = null; };
 
+  const nameOf = (id: string) => views.find((v) => v.id === id)?.name ?? '';
+  const targetParent = current ?? null;
+
+  /** 统一的入口：所有改动都只进待同步序列。 */
+  const addOp = (op: PendingOp) => { setOps((list) => [...list, op]); setNotice(null); };
+
+  const paste = () => {
+    if (!clipboard) return;
+    addOp(clipboard.mode === 'copy'
+      ? { kind: 'copyGroup', id: clipboard.id, parentId: targetParent }
+      : { kind: 'moveGroup', id: clipboard.id, parentId: targetParent });
+    if (clipboard.mode === 'cut') setClipboard(null);
+  };
+
+  const saveAll = async () => {
+    setBusy(true); setNotice(null);
+    try {
+      const r = await fetchJSON<{ snapshot: string; applied: number; failedAt: number | null; error: string | null }>(
+        '/api/kb/batch', { method: 'POST', body: { ops } });
+      setLastSnapshot(r.snapshot);
+      if (r.failedAt === null) {
+        setOps([]); setNotice(t('已同步 {n} 项改动（快照：可回滚）', { n: r.applied }));
+      } else {
+        setNotice(t('同步在第 {n} 项失败：{message}（可回滚到同步前）', { n: r.failedAt + 1, message: r.error ?? '' }));
+      }
+      loadTree();
+    } catch (e) {
+      setNotice(t('同步失败：{message}', { message: (e as Error).message }));
+    } finally { setBusy(false); setConfirming(false); }
+  };
+
+  const rollback = async () => {
+    if (!lastSnapshot) return;
+    setBusy(true); setNotice(null);
+    try {
+      await fetchJSON('/api/kb/rollback', { method: 'POST', body: { snapshot: lastSnapshot } });
+      setLastSnapshot(null); setOps([]); setEditing(null); setRenaming(null);
+      setNotice(t('已回滚到最近一次同步之前'));
+      loadTree();
+    } catch (e) {
+      setNotice(t('回滚失败：{message}', { message: (e as Error).message }));
+    } finally { setBusy(false); }
+  };
+
   const enter = (v: NodeView) => {
     setSelected(v.id);
-    if (v.kind === 'memory') { onOpenMemory?.(v.id); return; }
+    if (v.kind === 'memory') {
+      // 树里的记忆只有标题，正文要另取（/api/kb/memories/:id 返回完整节点）
+      void fetchJSON<{ id: string; title?: string; content?: string }>(`/api/kb/memories/${encodeURIComponent(v.id)}`)
+        .then((m) => setEditing({ id: m.id, title: m.title ?? '', content: m.content ?? '' }))
+        .catch((e: Error) => setNotice(t('打不开这条记忆：{message}', { message: e.message })));
+      onOpenMemory?.(v.id);
+      return;
+    }
     setCurrent(v.id);
   };
   const goUp = () => setCurrent((c) => (c ? (parent.get(c) ?? null) : null));
@@ -275,13 +359,93 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
         <button type="button" className={styles.chip} onClick={goUp} disabled={!current}>
           {t('上一级')}
         </button>
+        <span className={styles.pending}>
+          {ops.length ? t('待同步 {n} 项', { n: ops.length }) : t('没有待同步的改动')}
+          {ops.length ? <button type="button" className={styles.linkBtn} onClick={() => setOps([])}>{t('清空')}</button> : null}
+        </span>
+        <button type="button" className={styles.chip} onClick={() => setConfirming(true)} disabled={busy || !ops.length}>
+          {t('保存并确认')}
+        </button>
+        <button type="button" className={styles.chip} onClick={() => void rollback()} disabled={busy || !lastSnapshot}>
+          {t('回滚到同步前')}
+        </button>
         <button type="button" className={styles.chip} onClick={onClose}>{t('关闭')}</button>
       </div>
+
+      {confirming ? (
+        <div className={styles.confirm}>
+          {t('将按顺序应用 {n} 项改动，并先落一份整库快照（同步后仍可回滚）：', { n: ops.length })}
+          <ul className={styles.opList}>
+            {ops.map((op, i) => <li key={i} className={styles.opItem}>{describeOp(op, nameOf)}</li>)}
+          </ul>
+          <button type="button" className={styles.chip} onClick={() => void saveAll()} disabled={busy}>{t('确认同步')}</button>
+          <button type="button" className={styles.chip} onClick={() => setConfirming(false)}>{t('取消')}</button>
+        </div>
+      ) : null}
 
       <p className={styles.hint}>
         {t('拖动节点可移动位置；双击组进入它，双击祖先（或左上角的层级）返回那一层；灰色的节点不在当前层。')}
       </p>
       {error ? <div className={styles.error}>{t('加载失败：{message}', { message: error })}</div> : null}
+
+      {notice ? <div className={styles.notice}>{notice}</div> : null}
+
+      <div className={styles.ops}>
+        <span className={styles.opsLabel}>{t('操作')}</span>
+        <button type="button" className={styles.chip} disabled={!selected} onClick={() => {
+          const v = views.find((x) => x.id === selected);
+          if (v?.kind === 'group') setRenaming({ id: v.id, name: v.name });
+        }}>{t('改名')}</button>
+        <button type="button" className={styles.chip} disabled={!selected} onClick={() => {
+          const v = views.find((x) => x.id === selected);
+          if (v?.kind === 'group') setClipboard({ mode: 'copy', id: v.id });
+        }}>{t('复制')}</button>
+        <button type="button" className={styles.chip} disabled={!selected} onClick={() => {
+          const v = views.find((x) => x.id === selected);
+          if (v?.kind === 'group') setClipboard({ mode: 'cut', id: v.id });
+        }}>{t('剪切')}</button>
+        <button type="button" className={styles.chip} disabled={!clipboard} onClick={paste}>{t('粘贴到这里')}</button>
+        <button type="button" className={styles.chip} disabled={!selected || !current} onClick={() => {
+          const v = views.find((x) => x.id === selected);
+          if (v?.kind === 'group' && current && v.id !== current) addOp({ kind: 'mergeGroups', from: v.id, into: current });
+        }}>{t('并入当前组')}</button>
+        <input className={styles.input} value={newGroupName} placeholder={t('新组名…')}
+          onChange={(e) => setNewGroupName(e.target.value)} />
+        <button type="button" className={styles.chip} disabled={!newGroupName.trim()} onClick={() => {
+          addOp({ kind: 'createGroup', name: newGroupName.trim(), parentId: targetParent });
+          setNewGroupName('');
+        }}>{t('新建子组')}</button>
+        {clipboard ? <span className={styles.opsLabel}>{t('剪贴板：{name}（{mode}）', { name: nameOf(clipboard.id), mode: clipboard.mode === 'copy' ? t('复制') : t('剪切') })}</span> : null}
+      </div>
+
+      {renaming ? (
+        <div className={styles.editor}>
+          <label className={styles.editorLabel} htmlFor="kg-rename">{t('新名字')}</label>
+          <input id="kg-rename" className={styles.input} value={renaming.name}
+            onChange={(e) => setRenaming({ id: renaming.id, name: e.target.value })} />
+          <button type="button" className={styles.chip} disabled={!renaming.name.trim()} onClick={() => {
+            addOp({ kind: 'renameGroup', id: renaming.id, name: renaming.name.trim() });
+            setRenaming(null);
+          }}>{t('加入待同步')}</button>
+          <button type="button" className={styles.chip} onClick={() => setRenaming(null)}>{t('取消')}</button>
+        </div>
+      ) : null}
+
+      {editing ? (
+        <div className={styles.editor}>
+          <label className={styles.editorLabel} htmlFor="kg-title">{t('标题')}</label>
+          <input id="kg-title" className={styles.input} value={editing.title}
+            onChange={(e) => setEditing({ ...editing, title: e.target.value })} />
+          <label className={styles.editorLabel} htmlFor="kg-content">{t('正文')}</label>
+          <textarea id="kg-content" className={styles.textarea} value={editing.content} rows={6}
+            onChange={(e) => setEditing({ ...editing, content: e.target.value })} />
+          <button type="button" className={styles.chip} onClick={() => {
+            addOp({ kind: 'updateMemory', id: editing.id, title: editing.title, content: editing.content });
+            setEditing(null);
+          }}>{t('加入待同步')}</button>
+          <button type="button" className={styles.chip} onClick={() => setEditing(null)}>{t('取消')}</button>
+        </div>
+      ) : null}
 
       <div className={styles.board} ref={boardRef} onPointerMove={onPointerMove} onPointerUp={endDrag} onPointerLeave={endDrag}>
         {!tree ? <div className={styles.empty}>{t('读取中…')}</div> : null}

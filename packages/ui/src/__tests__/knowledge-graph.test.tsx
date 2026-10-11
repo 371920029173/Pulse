@@ -19,9 +19,23 @@ const LEVEL_A = { group: { id: 'A', name: 'A' }, children: [{ id: 'A1', name: 'A
 
 function installFetch() {
   const calls: string[] = [];
-  vi.stubGlobal('fetch', vi.fn(async (input: unknown) => {
+  /** 写请求（方法 + 路径 + body）—— s3 全靠它来证明"什么时候才真的落库"。 */
+  const writes: Array<{ method: string; url: string; body: unknown }> = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     calls.push(url);
+    if (init?.method && init.method !== 'GET') {
+      writes.push({ method: init.method, url, body: init.body ? JSON.parse(String(init.body)) : undefined });
+    }
+    if (url.includes('/api/kb/batch')) {
+      return new Response(JSON.stringify({ snapshot: 'D:/ws/.she/kb-snapshots/snap.sqlite', applied: 1, failedAt: null, error: null }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.includes('/api/kb/rollback')) {
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (/\/api\/kb\/memories\//.test(url)) {
+      return new Response(JSON.stringify({ id: 'm1', title: '一条记忆', content: '正文原文' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
     // 用 includes：无论 fetchJSON 有没有给路径加前缀都能命中
     const body = url.includes('/api/kb/tree') ? { roots: TREE }
       : url.includes('/api/kb/groups/A') ? LEVEL_A
@@ -29,7 +43,7 @@ function installFetch() {
       : {};
     return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
   }) as unknown as typeof fetch);
-  return { calls };
+  return { calls, writes };
 }
 
 const node = (c: HTMLElement, name: string) =>
@@ -109,5 +123,84 @@ describe('知识图谱白板（s2：看与走）', () => {
     const after = node(view.container, 'A')!.getAttribute('transform');
     expect(after).not.toBe(transform0);
     expect(calls.length).toBe(before);
+  });
+});
+
+describe('知识图谱（s3：操作序列 / 保存并确认 / 回滚）', () => {
+  it('改名只进待同步：一个写请求都不发', async () => {
+    const { writes } = installFetch();
+    const view = render(<KnowledgeGraph onClose={() => {}} />);
+    await flush();
+    await act(async () => { fireEvent.click(node(view.container, 'A')!); });
+    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '改名')!); });
+    const input = view.container.querySelector('#kg-rename') as HTMLInputElement;
+    await act(async () => { fireEvent.change(input, { target: { value: 'A改过' } }); });
+    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '加入待同步')!); });
+    expect(view.container.textContent).toContain('待同步 1 项');
+    expect(writes.length).toBe(0);
+  });
+
+  it('保存并确认是两段式：摊开确认条时不发请求，点确认才发一次 batch（body 带操作）', async () => {
+    const { writes } = installFetch();
+    const view = render(<KnowledgeGraph onClose={() => {}} />);
+    await flush();
+    await act(async () => { fireEvent.click(node(view.container, 'A')!); });
+    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '复制')!); });
+    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '粘贴到这里')!); });
+    expect(view.container.textContent).toContain('待同步 1 项');
+
+    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '保存并确认')!); });
+    expect(view.container.textContent).toContain('将按顺序应用 1 项改动');
+    expect(writes.length).toBe(0);            // 确认条摊开时仍然不许落库
+
+    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '确认同步')!); });
+    await flush();
+    expect(writes.length).toBe(1);
+    expect(writes[0].url).toContain('/api/kb/batch');
+    const ops = (writes[0].body as { ops: Array<{ kind: string; id: string; parentId: string | null }> }).ops;
+    expect(ops).toHaveLength(1);
+    expect(ops[0]).toMatchObject({ kind: 'copyGroup', id: 'A', parentId: null });
+    expect(view.container.textContent).toContain('已同步 1 项改动');
+  });
+
+  it('同步之后出现回滚按钮，点了发 rollback 并带上那次快照', async () => {
+    const { writes } = installFetch();
+    const view = render(<KnowledgeGraph onClose={() => {}} />);
+    await flush();
+    await act(async () => { fireEvent.click(node(view.container, 'A')!); });
+    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '剪切')!); });
+    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '粘贴到这里')!); });
+    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '保存并确认')!); });
+    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '确认同步')!); });
+    await flush();
+
+    const rb = Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '回滚到同步前') as HTMLButtonElement;
+    expect(rb.disabled).toBe(false);
+    await act(async () => { fireEvent.click(rb); });
+    await flush();
+    const rollback = writes.find((w) => w.url.includes('/api/kb/rollback'));
+    expect(rollback).toBeTruthy();
+    expect((rollback!.body as { snapshot: string }).snapshot).toContain('snap.sqlite');
+    expect(view.container.textContent).toContain('已回滚到最近一次同步之前');
+  });
+
+  it('双击记忆打开正文编辑器，改过之后进待同步的是 updateMemory', async () => {
+    const { writes } = installFetch();
+    const view = render(<KnowledgeGraph onClose={() => {}} />);
+    await flush();
+    await act(async () => { fireEvent.doubleClick(node(view.container, 'A')!); });
+    await flush();
+    await act(async () => { fireEvent.doubleClick(node(view.container, '一条记忆')!); });
+    await flush();
+    const ta = view.container.querySelector('#kg-content') as HTMLTextAreaElement;
+    expect(ta).toBeTruthy();
+    expect(ta.value).toBe('正文原文');
+    await act(async () => { fireEvent.change(ta, { target: { value: '改过的正文' } }); });
+    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '加入待同步')!); });
+    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '保存并确认')!); });
+    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '确认同步')!); });
+    await flush();
+    const batch = writes.find((w) => w.url.includes('/api/kb/batch'));
+    expect((batch!.body as { ops: Array<{ kind: string; content?: string }> }).ops[0]).toMatchObject({ kind: 'updateMemory', content: '改过的正文' });
   });
 });

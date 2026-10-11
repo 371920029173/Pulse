@@ -188,6 +188,7 @@ export type KbOp =
   | { kind: 'createGroup'; name: string; parentId?: string | null }
   | { kind: 'renameGroup'; id: string; name: string }
   | { kind: 'moveGroup'; id: string; parentId: string | null }
+  | { kind: 'copyGroup'; id: string; parentId: string | null; name?: string }
   | { kind: 'mergeGroups'; from: string; into: string }
   | { kind: 'updateMemory'; id: string; title?: string; content?: string };
 
@@ -359,6 +360,26 @@ export class GroupKBEngine {
   }
 
   /**
+   * 复制一个组（含记忆；deep 为 true 时连子组一起递归复制）到目标父组下。
+   *
+   * 走正门（createGroup + addMemory）而不是直接搬 store 层：addMemory 维护 group.memoryIds
+   * 那份镜像，少写它，复制出来的组会"看着是空的"（s1 踩过这个坑）。
+   */
+  copyGroup(id: string, newParentId: string | null, opts: { deep?: boolean; name?: string } = {}): Group {
+    const src = this.store.getGroup(id);
+    if (!src) throw new Error(`Group not found: ${id}`);
+    const copy = this.createGroup(opts.name ?? src.name, newParentId ?? undefined);
+    for (const memId of src.memoryIds) {
+      const mem = this.store.getMemory(memId);
+      if (mem) this.addMemory(copy.id, mem.kind, mem.title, mem.content, mem.metadata);
+    }
+    if (opts.deep !== false) {
+      for (const childId of src.childGroupIds) this.copyGroup(childId, copy.id, { deep: true });
+    }
+    return copy;
+  }
+
+  /**
    * 按顺序应用一批操作。任一条失败就**停在它那里**并如实报出进度 —— 已应用的不在这里回退，
    * 回滚由调用方用"同步前的整库快照"负责（那是必然正确的语义，反向操作不是）。
    */
@@ -379,6 +400,7 @@ export class GroupKBEngine {
       case 'createGroup': return this.createGroup(op.name, op.parentId ?? undefined);
       case 'renameGroup': return this.renameGroup(op.id, op.name);
       case 'moveGroup': this.moveGroup(op.id, op.parentId); return null;
+      case 'copyGroup': return this.copyGroup(op.id, op.parentId, { name: op.name });
       case 'mergeGroups': return this.mergeGroups(op.from, op.into);
       case 'updateMemory': {
         const partial: { title?: string; content?: string } = {};
