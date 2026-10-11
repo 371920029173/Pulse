@@ -951,6 +951,19 @@ export class KBStore {
    * or copy a directory that holds a live sqlite handle, and the handle has to come back the
    * moment its session needs it again.
    */
+  /** 这个库实际落在哪个文件上（回滚要按它做"关→覆盖→重挂"）。 */
+  get path(): string {
+    return this.dbPath;
+  }
+
+  /**
+   * 整库快照：SQLite 的**在线备份** API —— 库正被本进程打开时也能拿到一致副本
+   * （直接拷文件在 WAL 下可能拿到半套内容）。返回目标路径。
+   */
+  snapshotTo(destPath: string): Promise<string> {
+    return this.db.backup(destPath).then(() => destPath);
+  }
+
   close(): void {
     this.conn.close();
   }

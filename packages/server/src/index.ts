@@ -6071,6 +6071,66 @@ router.post('/api/sessions/:id/move', async (req, res, params) => {
     sendJSON(res, { group, children, memories });
   });
 
+  /* ── 知识图谱：人也能做的组操作（与 kb_* 工具同源，只是给人用）────────────────── */
+
+  /** 改组名（这个 Router 没有 patch，用 put —— 与 PUT /api/kb/link、memories/:id 一致）。 */
+  router.put('/api/kb/groups/:id', async (req, res, params) => {
+    const body = await parseBody<{ name?: string }>(req);
+    sendJSON(res, engine.renameGroup(params.id, String(body.name ?? '')));
+  });
+
+  /** 移动组；parentId 为 null 表示移到根。环检测在引擎里。 */
+  router.post('/api/kb/groups/:id/move', async (req, res, params) => {
+    const body = await parseBody<{ parentId?: string | null }>(req);
+    engine.moveGroup(params.id, body.parentId ?? null);
+    sendJSON(res, { ok: true });
+  });
+
+  /** 合并两个组：from 的记忆与子组并入 into，from 随之消失。 */
+  router.post('/api/kb/groups/:id/merge', async (req, res, params) => {
+    const body = await parseBody<{ into?: string }>(req);
+    if (!body.into) throw new HttpError(400, 'Missing required field: into');
+    sendJSON(res, engine.mergeGroups(params.id, body.into));
+  });
+
+  /**
+   * 白板上的批量同步：**先落整库快照，再按顺序应用**。
+   * 快照即回滚点，所以必须在应用之前 —— 这就是"即使点了同步也能回滚到同步前"的实现方式。
+   * 失败时不回退（调用方拿着 snapshot 自己决定），并把失败位置如实报出。
+   */
+  router.post('/api/kb/batch', async (req, res) => {
+    const body = await parseBody<{ ops?: unknown[] }>(req);
+    const ops = Array.isArray(body.ops) ? body.ops : [];
+    if (!ops.length) throw new HttpError(400, 'Missing required field: ops');
+    const dir = join(config.workspace.root, '.she', 'kb-snapshots');
+    mkdirSync(dir, { recursive: true });
+    const snapshot = join(dir, new Date().toISOString().replace(/[:.]/g, '-') + '.sqlite');
+    await store.snapshotTo(snapshot);
+    const result = engine.applyOps(ops as Parameters<typeof engine.applyOps>[0]);
+    sendJSON(res, { snapshot, ...result });
+  });
+
+  /**
+   * 回滚到某份快照：关句柄 → 覆盖文件 → 重新挂载。
+   * 顺序不能反：Windows 上活句柄会挡住复制（remountKnowledgeBase 的注释记的就是这件事）。
+   * 只接受 kb-snapshots 目录里的文件名，其余一律拒绝 —— 否则它就是一个"用任意文件覆盖知识库"的口子。
+   */
+  router.post('/api/kb/rollback', async (req, res) => {
+    const body = await parseBody<{ snapshot?: string }>(req);
+    const name = String(body.snapshot ?? '').split(/[\\/]/).pop() ?? '';
+    const abs = join(config.workspace.root, '.she', 'kb-snapshots', name);
+    if (!name || !existsSync(abs)) throw new HttpError(404, 'Snapshot not found: ' + body.snapshot);
+    const live = store.path;
+    remountKnowledgeBase(live, { closeCurrent: true });
+    copyFileSync(abs, live);
+    for (const suffix of ['-wal', '-shm']) {
+      try { rmSync(live + suffix); } catch { /* 没有伴生文件就算了 */ }
+    }
+    remountKnowledgeBase(live);
+    sendJSON(res, { ok: true, restored: name });
+  });
+
+
   router.post('/api/kb/groups', async (req, res) => {
     const body = await parseBody<{ name: string; parentId?: string }>(req);
     if (!body.name) throw new HttpError(400, 'Missing required field: name');

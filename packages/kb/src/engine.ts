@@ -183,6 +183,14 @@ function tokenize(text: string): string[] {
 }
 
 
+/** 白板上人能做的那些操作（与 kb_* 工具同源，只是给人用）。 */
+export type KbOp =
+  | { kind: 'createGroup'; name: string; parentId?: string | null }
+  | { kind: 'renameGroup'; id: string; name: string }
+  | { kind: 'moveGroup'; id: string; parentId: string | null }
+  | { kind: 'mergeGroups'; from: string; into: string }
+  | { kind: 'updateMemory'; id: string; title?: string; content?: string };
+
 export class GroupKBEngine {
   private store: KBStore;
   private config: SheConfig['kb'];
@@ -277,6 +285,110 @@ export class GroupKBEngine {
       }
       this.store.updateGroup(childId, { parentGroupId: parentId });
     });
+  }
+
+  /**
+   * 改组名。名字允许重名（树里位置才是身份），但必须是"有内容的短字符串"。
+   */
+  renameGroup(id: string, name: string): Group {
+    const trimmed = String(name ?? '').trim();
+    if (!trimmed) throw new Error('组名不能为空');
+    if (trimmed.length > 120) throw new Error('组名过长（上限 120 字）');
+    const group = this.store.getGroup(id);
+    if (!group) throw new Error(`Group not found: ${id}`);
+    return this.store.updateGroup(id, { name: trimmed });
+  }
+
+  /**
+   * 把组移到别处（parentId 为 null 表示移到根）。
+   *
+   * 环检测不在这里重复实现：addChildGroup 自带 wouldCreateCycle，正是"把祖先挂到后代下面"要挡的那件事。
+   */
+  moveGroup(id: string, parentId: string | null): void {
+    const group = this.store.getGroup(id);
+    if (!group) throw new Error(`Group not found: ${id}`);
+    if (parentId === null) {
+      if (group.parentGroupId) this.removeChildGroup(group.parentGroupId, id);
+      this.store.updateGroup(id, { parentGroupId: null });
+      return;
+    }
+    if (parentId === id) throw new Error('不能把组移到自己下面');
+    if (parentId === group.parentGroupId) return;   // 已经在那儿，省一次写
+    this.addChildGroup(parentId, id);
+  }
+
+  /**
+   * 合并两个组：from 的记忆与子组全部并入 into，from 随之消失。
+   *
+   * 记忆是"多归属"的（groupIds 是数组），所以这里做的是**去掉 from、加上 into**，
+   * 而不是把它从别处摘走；子组走 addChildGroup（含环检测）。from 变空之后才删除。
+   */
+  mergeGroups(fromId: string, intoId: string): { movedMemories: number; movedGroups: number } {
+    if (fromId === intoId) throw new Error('不能把组合并到自己');
+    return this.store.transaction(() => {
+      const from = this.store.getGroup(fromId);
+      const into = this.store.getGroup(intoId);
+      if (!from || !into) throw new Error('组不存在');
+
+      /*
+       * 记忆的权威关系是 `memory.groupIds`；组上的 `memoryIds` 只是一份便利镜像（createMemory 不维护它）。
+       * 两个方向都取、去重 —— 只信一边就会漏（实测：只信 from.memoryIds 时 movedMemories=0）。
+       */
+      const memIds = new Set<string>([
+        ...this.store.getMemoriesByGroup(fromId).map((m) => m.id),
+        ...from.memoryIds,
+      ]);
+      let movedMemories = 0;
+      for (const memId of memIds) {
+        const mem = this.store.getMemory(memId);
+        if (!mem) continue;
+        const groupIds = [...new Set([...mem.groupIds.filter((g) => g !== fromId), intoId])];
+        this.store.updateMemory(memId, { groupIds });
+        movedMemories++;
+      }
+      const intoNow = this.store.getGroup(intoId)!;
+      this.store.updateGroup(intoId, { memoryIds: [...new Set([...intoNow.memoryIds, ...memIds])] });
+      this.store.updateGroup(fromId, { memoryIds: [] });
+
+      const children = [...from.childGroupIds];
+      for (const childId of children) this.addChildGroup(intoId, childId);
+
+      this.deleteGroup(fromId);
+      return { movedMemories, movedGroups: children.length };
+    });
+  }
+
+  /**
+   * 按顺序应用一批操作。任一条失败就**停在它那里**并如实报出进度 —— 已应用的不在这里回退，
+   * 回滚由调用方用"同步前的整库快照"负责（那是必然正确的语义，反向操作不是）。
+   */
+  applyOps(ops: KbOp[]): { applied: number; failedAt: number | null; error: string | null; results: unknown[] } {
+    const results: unknown[] = [];
+    for (let i = 0; i < ops.length; i++) {
+      try {
+        results.push(this.applyOne(ops[i]));
+      } catch (e) {
+        return { applied: i, failedAt: i, error: (e as Error).message, results };
+      }
+    }
+    return { applied: ops.length, failedAt: null, error: null, results };
+  }
+
+  private applyOne(op: KbOp): unknown {
+    switch (op.kind) {
+      case 'createGroup': return this.createGroup(op.name, op.parentId ?? undefined);
+      case 'renameGroup': return this.renameGroup(op.id, op.name);
+      case 'moveGroup': this.moveGroup(op.id, op.parentId); return null;
+      case 'mergeGroups': return this.mergeGroups(op.from, op.into);
+      case 'updateMemory': {
+        const partial: { title?: string; content?: string } = {};
+        if (typeof op.title === 'string') partial.title = op.title;
+        if (typeof op.content === 'string') partial.content = op.content;
+        if (!Object.keys(partial).length) throw new Error('updateMemory 既没给 title 也没给 content');
+        return this.store.updateMemory(op.id, partial);
+      }
+      default: throw new Error(`未知操作：${JSON.stringify(op)}`);
+    }
   }
 
   removeChildGroup(parentId: string, childId: string): void {
