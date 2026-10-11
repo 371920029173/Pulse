@@ -1,4 +1,7 @@
-/* 知识图谱白板。整屏铺开（白板要地方），配色全走 token，亮/暗自动跟随。 */
+/*
+ * 知识图谱白板（VOSviewer 那种读法的简化版）。
+ * 整屏铺开（白板要地方），配色全走 token，亮/暗自动跟随。
+ */
 
 .panel {
   position: fixed;
@@ -68,133 +71,6 @@
 
 .chip:disabled { opacity: 0.45; cursor: default; }
 
-.hint {
-  margin: 8px 16px;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.error {
-  margin: 0 16px 8px;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-tertiary);
-  color: var(--danger, var(--text-primary));
-  font-size: 12px;
-}
-
-/* 白板本体：能滚、能拖。用绝对像素坐标（不缩放），拖动的数学才是 1:1。 */
-.board {
-  position: relative;
-  flex: 1 1 auto;
-  overflow: auto;
-  background: var(--bg-primary);
-  touch-action: none;
-}
-
-.canvas {
-  position: absolute;
-  inset: 0;
-  width: 2400px;
-  height: 1600px;
-}
-
-.edge {
-  stroke: var(--border);
-  stroke-width: 1.5;
-}
-
-.node { cursor: grab; outline: none; }
-
-.node:active { cursor: grabbing; }
-
-.node:focus-visible .rect { stroke: var(--accent); stroke-width: 2; }
-
-.rect {
-  fill: var(--bg-tertiary);
-  stroke: var(--border);
-  stroke-width: 1;
-}
-
-.label {
-  font-size: 13px;
-  fill: var(--text-primary);
-  pointer-events: none;
-}
-
-.sub {
-  font-size: 10px;
-  fill: var(--text-muted);
-  pointer-events: none;
-}
-
-/* 当前组：亮 */
-.current .rect { fill: var(--accent); stroke: var(--accent); }
-
-.current .label { fill: var(--on-accent, var(--bg-primary)); }
-
-/* 当前层的孩子：正常 */
-.scope .rect { fill: var(--bg-secondary); }
-
-/* 祖先：能点着返回，但它不在当前层 */
-.ancestor .rect { fill: var(--bg-secondary); stroke-dasharray: 4 3; }
-
-/* 其余：灰，且不进交互（但保留键盘可达性，方便屏幕阅读器了解全貌） */
-.dim { opacity: 0.38; }
-
-.memory .rect { fill: var(--bg-secondary); stroke-dasharray: 2 2; }
-
-.selected .rect { stroke: var(--accent); stroke-width: 2; }
-
-.more {
-  position: sticky;
-  left: 12px;
-  bottom: 12px;
-  display: inline-block;
-  margin: 8px 12px;
-  padding: 4px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-tertiary);
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.empty { padding: 24px; color: var(--text-muted); font-size: 13px; }
-
-/* ── 节点操作与待同步（s3）────────────────────────────────────────────── */
-
-.ops {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border);
-}
-
-.opsLabel { font-size: 12px; color: var(--text-muted); }
-
-.input {
-  height: 26px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  font-size: 12px;
-}
-
-.textarea {
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  font-size: 12px;
-  font-family: inherit;
-  resize: vertical;
-}
-
 .pending { font-size: 12px; color: var(--text-muted); display: inline-flex; align-items: center; gap: 6px; }
 
 .linkBtn {
@@ -224,11 +100,47 @@
 
 .opItem { font-size: 12px; color: var(--text-secondary); }
 
+.hint {
+  margin: 8px 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.error {
+  margin: 0 16px 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--danger, var(--text-primary));
+  font-size: 12px;
+}
+
 .notice {
   margin: 0 16px 8px;
   padding: 8px 10px;
   border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.ops {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.opsLabel { font-size: 12px; color: var(--text-muted); }
+
+.input {
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
   color: var(--text-primary);
   font-size: 12px;
 }
@@ -245,3 +157,96 @@
 }
 
 .editorLabel { font-size: 11px; color: var(--text-muted); }
+
+.textarea {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+/* 白板本体：滚轮缩放、空白处拖动平移；世界坐标写在里面那层 <g> 上 */
+.board {
+  position: relative;
+  flex: 1 1 auto;
+  overflow: hidden;
+  background: var(--bg-primary);
+  touch-action: none;
+  cursor: grab;
+}
+
+.board:active { cursor: grabbing; }
+
+.canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.edge {
+  stroke: var(--border);
+  stroke-width: 1.25;
+}
+
+.node { cursor: grab; outline: none; }
+
+.node:active { cursor: grabbing; }
+
+.node:focus-visible .circle { stroke: var(--accent); stroke-width: 2.5; }
+
+.circle {
+  fill: var(--bg-tertiary);
+  stroke: var(--border);
+  stroke-width: 1.5;
+}
+
+/* 当前节点多一道外环：一眼看出「我在哪」 */
+.ring {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  opacity: 0.65;
+}
+
+.label {
+  font-size: 12px;
+  fill: var(--text-secondary);
+  pointer-events: none;
+}
+
+/* 当前组：亮 */
+.current .circle { fill: var(--accent); stroke: var(--accent); }
+
+.current .label { fill: var(--text-primary); font-weight: 600; }
+
+/* 当前层的孩子：正常 */
+.scope .circle { fill: var(--bg-secondary); }
+
+/* 祖先：能点着返回，但它不在当前层 —— 虚线边 */
+.ancestor .circle { fill: var(--bg-secondary); stroke-dasharray: 4 3; }
+
+/* 其他分支：没有标签的小点（这就是"看得清"的关键） */
+.dim .circle { fill: var(--text-muted); stroke: none; opacity: 0.5; }
+
+.memory .circle { fill: var(--bg-secondary); stroke-dasharray: 2 2; }
+
+.selected .circle { stroke: var(--accent); stroke-width: 2.5; }
+
+.more {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.empty { padding: 24px; color: var(--text-muted); font-size: 13px; }

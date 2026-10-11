@@ -1,16 +1,15 @@
 /**
- * 知识图谱（实验功能）：把 KB 的组树摊成一张白板。
- *
- * 这一版（s2）只管**看与走**：节点与连线、拖动、双击进层、上一级、左上角路线图。
- * 节点上的**改动**（改名/移动/合并/编辑正文……）走 s3 的"操作序列 + 保存并确认"，
- * 所以这里双击记忆只是选中它 —— 不做没有落点的假动作。
+ * 知识图谱（实验功能）：把 KB 的组树摊成一张网络图（VOSviewer 的读法，比它简单）。
  *
  * 视口语义（与用户给的 A/B/C/D/E/F 例子一致）：
  *   · 当前层 = 当前组本身 + 它的直接子组 + 它这一层的记忆
- *   · 当前组**标亮**；它的子组与记忆是**正常色**；其余（兄弟分支、更深的层）**变灰**且不进交互
- *   · 根视图（current = null）= 所有顶层组；组树的上层用"祖先链"表示，双击祖先即返回那一层
+ *   · 当前组**标亮**（圆更大 + 外环）；子组与记忆正常色并带标签；祖先虚线边（可点着返回）
+ *   · 其余（兄弟分支及其子组）画成**没有标签的小点** —— 一眼能看出"那边还有东西"，
+ *     但不会抢走注意力（上一版把它们画成带标签的方块，一屏糊成一片，用户说"不好看也不易观看"）
  *
- * 数据来源：结构来自 /api/kb/tree（嵌套 GroupTreeNode，树里**不含记忆**），
+ * 读法（VOSviewer 式）：滚轮缩放、空白处拖拽平移、拖动节点改位置；缩放时光标下的点不动。
+ *
+ * 数据来源：结构来自 /api/kb/tree（返回 { tree: […] }，树里**不含记忆**），
  * 某一层的记忆来自 /api/kb/groups/:id（返回 { group, children, memories }）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -43,9 +42,10 @@ interface NodeView {
   id: string;
   kind: 'group' | 'memory';
   name: string;
-  /** current=当前组；scope=当前层的孩子（正常色）；ancestor=祖先（可点着返回）；dim=其他（灰）。 */
+  /** current=当前组；scope=当前层的孩子；ancestor=祖先（可返回）；dim=其他（小点）。 */
   state: 'current' | 'scope' | 'ancestor' | 'dim';
-  depth: number;
+  /** 内容量：组用 memoryCount，记忆固定 1 —— 决定圆的半径（越大越重）。 */
+  weight: number;
 }
 
 /** 与 server 的 KbOp 同形（界面不 import @she/kb —— 那是后端的包）。 */
@@ -57,7 +57,6 @@ type PendingOp =
   | { kind: 'createGroup'; name: string; parentId: string | null }
   | { kind: 'updateMemory'; id: string; title?: string; content?: string };
 
-/** 把一条待同步操作描述成人话（列表里逐条给用户看）。 */
 function describeOp(op: PendingOp, nameOf: (id: string) => string): string {
   switch (op.kind) {
     case 'renameGroup': return t('改名：{name}', { name: nameOf(op.id) });
@@ -72,31 +71,26 @@ function describeOp(op: PendingOp, nameOf: (id: string) => string): string {
 
 interface Props {
   onClose: () => void;
-  /** 双击记忆时交给上级（s3 里打开编辑面板）。 */
+  /** 双击记忆时交给上级（现在的编辑器就在本组件里，这个回调留给外部联动）。 */
   onOpenMemory?: (id: string) => void;
 }
 
-const NODE_W = 168;
-const NODE_H = 46;
+const CENTER = { x: 700, y: 460 };
+/** 灰色小点的上限：多了画不下，也读不出信息。 */
+const MAX_DIM = 60;
 
-/** 把嵌套树摊平成 id → 父 id 的映射，顺便记住每个节点在第几层。 */
-function indexTree(roots: TreeNode[]): { parent: Map<string, string | null>; depth: Map<string, number> } {
+function indexTree(roots: TreeNode[]): { parent: Map<string, string | null> } {
   const parent = new Map<string, string | null>();
-  const depth = new Map<string, number>();
-  const walk = (nodes: TreeNode[], p: string | null, d: number) => {
-    for (const n of nodes) {
-      parent.set(n.id, p);
-      depth.set(n.id, d);
-      walk(n.children ?? [], n.id, d + 1);
-    }
+  const walk = (nodes: TreeNode[], p: string | null) => {
+    for (const n of nodes) { parent.set(n.id, p); walk(n.children ?? [], n.id); }
   };
-  walk(roots, null, 0);
-  return { parent, depth };
+  walk(roots, null);
+  return { parent };
 }
 
 /*
  * 类名走**静态查表**而不是 styles[state]：动态拼的类名死 CSS 棘轮看不见，
- * 会把 .current/.scope/.ancestor/.dim 报成没人用的类（仓库为这类误判吃过一次亏）。
+ * 会把状态类报成没人用的类（仓库为这类误判吃过一次亏）。
  */
 const STATE_CLASS: Record<NodeView['state'], string> = {
   current: styles.current,
@@ -114,9 +108,14 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   const [level, setLevel] = useState<LevelData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
-  /** 用户拖过的位置；没拖过的按布局算。拖动只改这里，不落库（s3 的改动才落库）。 */
+  /** 用户拖过的位置；没拖过的按布局算。拖动只改这里，不落库。 */
   const [moved, setMoved] = useState<Record<string, { x: number; y: number }>>({});
+  /** 视图变换：平移 + 缩放（滚轮缩放、空白处拖拽平移）。 */
+  const [view, setView] = useState({ x: 0, y: 0, k: 1 });
   const dragRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
+  const panRef = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
+  const boardRef = useRef<HTMLDivElement | null>(null);
+
   /** 待同步的操作序列 —— 在点「确认同步」之前，一条都不落库。 */
   const [ops, setOps] = useState<PendingOp[]>([]);
   const [clipboard, setClipboard] = useState<{ mode: 'copy' | 'cut'; id: string } | null>(null);
@@ -128,15 +127,12 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   const [notice, setNotice] = useState<string | null>(null);
   /** 最近一次同步落下的快照路径 —— 有它才有"回滚到同步前"。 */
   const [lastSnapshot, setLastSnapshot] = useState<string | null>(null);
-  const boardRef = useRef<HTMLDivElement | null>(null);
 
   const loadTree = useCallback(() => {
     /*
      * 形状是**服务端说了算**：GET /api/kb/tree 返回 { tree: buildGroupTree() }。
-     *
-     * 这里踩过一次：组件读的是自己想出来的 `r.roots`，而测试 stub 也用了同一个想出来的形状 ——
-     * 于是"测试全绿、真机空板"（界面上只有「还没有组。」）。所以除了读对字段，还加一条**形状断言**：
-     * 既不是数组也没有 tree 就报错，同类错误下次当场可见。
+     * 这里踩过一次：组件读的是自己想出来的 `r.roots`（测试 stub 也用了同一个想出来的形状），
+     * 于是"测试全绿、真机空板"。所以除了读对字段，还加一条**形状断言**。
      */
     fetchJSON<{ tree?: TreeNode[] } | TreeNode[]>('/api/kb/tree')
       .then((r) => {
@@ -148,7 +144,6 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   }, []);
   useEffect(() => { loadTree(); }, [loadTree]);
 
-  // 当前层的详细信息（含记忆）；根视图不需要
   useEffect(() => {
     if (!current) { setLevel(null); return; }
     let alive = true;
@@ -158,17 +153,17 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
     return () => { alive = false; };
   }, [current]);
 
-  const { parent, depth } = useMemo(() => indexTree(tree ?? []), [tree]);
+  const { parent } = useMemo(() => indexTree(tree ?? []), [tree]);
 
   /** 这一层要画哪些节点，各自什么状态。 */
   const views = useMemo<NodeView[]>(() => {
     if (!tree) return [];
     const out: NodeView[] = [];
     const seen = new Set<string>();
-    const push = (id: string, name: string, state: NodeView['state'], d: number) => {
+    const push = (id: string, name: string, state: NodeView['state'], weight = 1) => {
       if (seen.has(id)) return;
       seen.add(id);
-      out.push({ id, kind: 'group', name, state, depth: d });
+      out.push({ id, kind: 'group', name, state, weight });
     };
 
     const all = new Map<string, TreeNode>();
@@ -176,78 +171,103 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
     collect(tree);
 
     if (!current) {
-      /*
-       * 根视图：顶层组各自都是"当前"，**并把它们的直接子组也画出来**。
-       * 用户给的例子是「根组下有 A、B，那此时白板上就只展示根组、A、B 三个节点」——
-       * 即比顶层多一层；只画顶层的话，双击进层之前什么都看不到。
-       */
+      // 根视图：顶层组 + 它们的直接子组（用户例子：白板上就展示根组、A、B）
       for (const n of tree) {
-        push(n.id, n.name, 'current', 0);
-        for (const c of n.children ?? []) push(c.id, c.name, 'scope', 1);
+        push(n.id, n.name, 'scope', 1 + (n.memoryCount ?? 0));
+        for (const c of n.children ?? []) push(c.id, c.name, 'scope', 1 + (c.memoryCount ?? 0));
       }
     } else {
-      // 祖先链（含当前组）：当前标亮，其余祖先可点着返回
+      // 祖先链（含当前组）
       const chain: string[] = [];
       let walkId: string | null = current;
       while (walkId) { chain.unshift(walkId); walkId = parent.get(walkId) ?? null; }
       for (const id of chain) {
         const n = all.get(id);
-        if (n) push(id, n.name, id === current ? 'current' : 'ancestor', depth.get(id) ?? 0);
+        if (n) push(id, n.name, id === current ? 'current' : 'ancestor', 1 + (n.memoryCount ?? 0));
       }
       // 当前层的子组 + 记忆
-      for (const c of level?.children ?? []) push(c.id, c.name ?? '?', 'scope', (depth.get(current) ?? 0) + 1);
+      for (const c of level?.children ?? []) push(c.id, c.name ?? '?', 'scope', 1 + (all.get(c.id)?.memoryCount ?? 0));
       for (const m of level?.memories ?? []) {
         if (m.isRetired) continue;
-        out.push({ id: m.id, kind: 'memory', name: m.title, state: 'scope', depth: (depth.get(current) ?? 0) + 1 });
+        out.push({ id: m.id, kind: 'memory', name: m.title, state: 'scope', weight: 1 });
       }
-      // 兄弟分支：只画它们的根，灰色的"这里还有别的东西"
+      // 兄弟分支及其子组：**只当小点**（不写标签），这是"看得清"的关键
       const parentId = parent.get(current) ?? null;
       const siblings = parentId ? (all.get(parentId)?.children ?? []) : tree;
       for (const s of siblings) {
         if (s.id === current) continue;
-        // 兄弟分支：连它的直接子组一起画成灰的（用户例子里的 B/E/F 就是这三位）
-        push(s.id, s.name, 'dim', depth.get(s.id) ?? 0);
-        for (const c of s.children ?? []) push(c.id, c.name, 'dim', (depth.get(s.id) ?? 0) + 1);
+        push(s.id, s.name, 'dim', 1 + (s.memoryCount ?? 0));
+        for (const c of s.children ?? []) push(c.id, c.name, 'dim', 1 + (c.memoryCount ?? 0));
       }
     }
-
-    // 算不完的部分只报个数（灰节点太多会糊成一片）
-    const MAX_DIM = 40;
     const dims = out.filter((v) => v.state === 'dim');
-    if (dims.length > MAX_DIM) {
-      const keep = new Set(dims.slice(0, MAX_DIM).map((v) => v.id));
-      return out.filter((v) => v.state !== 'dim' || keep.has(v.id));
-    }
-    return out;
-  }, [tree, current, level, parent, depth]);
+    return dims.length > MAX_DIM ? out.filter((v) => v.state !== 'dim' || dims.slice(0, MAX_DIM).includes(v)) : out;
+  }, [tree, current, level, parent]);
 
-  const hiddenDimCount = useMemo(() => {
-    if (!tree) return 0;
-    const total = (() => { let n = 0; const walk = (nodes: TreeNode[]) => { for (const x of nodes) { n++; walk(x.children ?? []); } }; walk(tree); return n; })();
-    return Math.max(0, total - views.length);
-  }, [tree, views.length]);
+  /** 半径：内容越多越大（对数压缩，免得一个巨大的组把别的都盖住）；小点固定很小。 */
+  const radiusOf = (v: NodeView) => {
+    if (v.state === 'dim') return 6;
+    if (v.kind === 'memory') return 14;
+    return Math.round(18 + Math.log2(Math.max(1, v.weight)) * 3.4);
+  };
 
-  /** 自动布局：当前/祖先走一条竖线，孩子铺一排，记忆再一排。拖过的用拖过的位置。 */
+  /**
+   * 径向布局（确定性，不用力导向 —— 力导向每帧都在动，既写不出稳定判据，用户也没法建立空间记忆）。
+   * 环半径按节点数自适应，免得几十个子组挤成一团。
+   */
   const layout = useMemo(() => {
     const pos: Record<string, { x: number; y: number }> = {};
-    const cur = views.filter((v) => v.state === 'current' || v.state === 'ancestor');
-    cur.forEach((v, i) => { pos[v.id] = { x: 40, y: 40 + i * (NODE_H + 16) }; });
+    const cur = views.find((v) => v.state === 'current');
+    const ancestors = views.filter((v) => v.state === 'ancestor');
     const scopeGroups = views.filter((v) => v.state === 'scope' && v.kind === 'group');
     const scopeMems = views.filter((v) => v.state === 'scope' && v.kind === 'memory');
-    scopeGroups.forEach((v, i) => { pos[v.id] = { x: 260 + i * (NODE_W + 20), y: 40 }; });
-    scopeMems.forEach((v, i) => { pos[v.id] = { x: 260 + i * (NODE_W + 20), y: 40 + NODE_H + 24 }; });
     const dims = views.filter((v) => v.state === 'dim');
-    dims.forEach((v, i) => { pos[v.id] = { x: 260 + (i % 6) * (NODE_W + 20), y: 40 + 2 * (NODE_H + 40) + Math.floor(i / 6) * (NODE_H + 20) }; });
+
+    if (cur) pos[cur.id] = { x: CENTER.x, y: CENTER.y };
+    ancestors.slice().reverse().forEach((v, i) => { pos[v.id] = { x: CENTER.x, y: CENTER.y - 150 - i * 80 }; });
+
+    /** 环半径：按周长够不够放（每个节点留 2r+间隔）。 */
+    const ringRadius = (n: number, r: number, min: number) => Math.max(min, Math.ceil((n * (2 * r + 30)) / (2 * Math.PI)));
+
+    if (!cur) {
+      // 根视图：顶层组与它们的子组各占一环
+      const first = views.filter((v) => v.state === 'scope').slice(0, Math.ceil(views.length / 2));
+      const rest = views.filter((v) => !first.includes(v));
+      const put = (list: NodeView[], radius: number) => {
+        list.forEach((v, i) => {
+          const a = -Math.PI / 2 + (i / Math.max(1, list.length)) * Math.PI * 2;
+          pos[v.id] = { x: CENTER.x + Math.cos(a) * radius, y: CENTER.y + Math.sin(a) * radius };
+        });
+      };
+      put(first, ringRadius(first.length, 30, 220));
+      put(rest, ringRadius(rest.length, 26, 380));
+    } else {
+      const dr = ringRadius(scopeGroups.length, 30, 200);
+      scopeGroups.forEach((v, i) => {
+        const a = -Math.PI / 2 + (i / Math.max(1, scopeGroups.length)) * Math.PI * 2;
+        pos[v.id] = { x: CENTER.x + Math.cos(a) * dr, y: CENTER.y + Math.sin(a) * dr };
+      });
+      // 记忆再外一圈（错开半个格，免得和子组叠在同一条射线上）
+      const mr = ringRadius(scopeMems.length, 20, dr + 130);
+      scopeMems.forEach((v, i) => {
+        const a = -Math.PI / 2 + Math.PI / Math.max(2, scopeMems.length + 1) + (i / Math.max(1, scopeMems.length)) * Math.PI * 2;
+        pos[v.id] = { x: CENTER.x + Math.cos(a) * mr, y: CENTER.y + Math.sin(a) * mr };
+      });
+      const dimR = ringRadius(dims.length, 10, Math.max(mr, dr) + 150);
+      dims.forEach((v, i) => {
+        const a = -Math.PI / 2 + (i / Math.max(1, dims.length)) * Math.PI * 2;
+        pos[v.id] = { x: CENTER.x + Math.cos(a) * dimR, y: CENTER.y + Math.sin(a) * dimR };
+      });
+    }
     return pos;
   }, [views]);
 
-  const posOf = (id: string) => moved[id] ?? layout[id] ?? { x: 40, y: 40 };
+  const posOf = (id: string) => moved[id] ?? layout[id] ?? { x: CENTER.x, y: CENTER.y };
 
-  /** 连线：谁连着谁（当前组→它的孩子；祖先→下一个祖先；根视图不画线）。 */
+  /** 连线：当前组→孩子、祖先→下一个祖先；根视图画顶层→子组。 */
   const edges = useMemo(() => {
     const out: Array<{ a: string; b: string }> = [];
     if (!current) {
-      // 根视图的连线：顶层组 → 它的直接子组（与上面多画的那一层对应）
       for (const n of tree ?? []) for (const c of n.children ?? []) out.push({ a: n.id, b: c.id });
       return out;
     }
@@ -259,24 +279,37 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
       }
     }
     return out;
-  }, [views, current, parent]);
+  }, [views, current, parent, tree]);
 
-  const onPointerDown = (v: NodeView, e: React.PointerEvent) => {
-    const board = boardRef.current;
-    if (!board) return;
-    const rect = board.getBoundingClientRect();
+  const onNodePointerDown = (v: NodeView, e: React.PointerEvent) => {
+    const rect = boardRef.current?.getBoundingClientRect();
+    if (!rect) return;
     const p = posOf(v.id);
-    dragRef.current = { id: v.id, dx: e.clientX - rect.left - p.x, dy: e.clientY - rect.top - p.y };
+    // 屏幕坐标 → 画布坐标要**除以缩放比**，否则放大之后拖不动、缩小之后一拖飞老远
+    dragRef.current = {
+      id: v.id,
+      dx: e.clientX - rect.left - (p.x * view.k + view.x),
+      dy: e.clientY - rect.top - (p.y * view.k + view.y),
+    };
     (e.target as Element).setPointerCapture?.(e.pointerId);
+    e.stopPropagation();   // 别把画布的平移也带上
   };
-  const onPointerMove = (e: React.PointerEvent) => {
+  const onBoardPointerMove = (e: React.PointerEvent) => {
+    const rect = boardRef.current?.getBoundingClientRect();
+    if (!rect) return;
     const d = dragRef.current;
-    const board = boardRef.current;
-    if (!d || !board) return;
-    const rect = board.getBoundingClientRect();
-    setMoved((m) => ({ ...m, [d.id]: { x: Math.max(0, e.clientX - rect.left - d.dx), y: Math.max(0, e.clientY - rect.top - d.dy) } }));
+    if (d) {
+      const nx = (e.clientX - rect.left - d.dx - view.x) / view.k;
+      const ny = (e.clientY - rect.top - d.dy - view.y) / view.k;
+      setMoved((m) => ({ ...m, [d.id]: { x: nx, y: ny } }));
+      return;
+    }
+    const p = panRef.current;
+    if (p) {
+      setView((v) => ({ ...v, x: p.vx + (e.clientX - rect.left - p.x), y: p.vy + (e.clientY - rect.top - p.y) }));
+    }
   };
-  const endDrag = () => { dragRef.current = null; };
+  const endPointer = () => { dragRef.current = null; panRef.current = null; };
 
   const nameOf = (id: string) => views.find((v) => v.id === id)?.name ?? '';
   const targetParent = current ?? null;
@@ -325,7 +358,7 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   const enter = (v: NodeView) => {
     setSelected(v.id);
     if (v.kind === 'memory') {
-      // 树里的记忆只有标题，正文要另取（/api/kb/memories/:id 返回完整节点）
+      // 树里的记忆只有标题，正文要另取
       void fetchJSON<{ id: string; title?: string; content?: string }>(`/api/kb/memories/${encodeURIComponent(v.id)}`)
         .then((m) => setEditing({ id: m.id, title: m.title ?? '', content: m.content ?? '' }))
         .catch((e: Error) => setNotice(t('打不开这条记忆：{message}', { message: e.message })));
@@ -337,8 +370,8 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   const goUp = () => setCurrent((c) => (c ? (parent.get(c) ?? null) : null));
 
   const crumb = useMemo(() => {
-    if (!current) return [];
     const chain: Array<{ id: string | null; name: string }> = [{ id: null, name: t('目录根') }];
+    if (!current) return chain;
     const ids: string[] = [];
     let walkId: string | null = current;
     while (walkId) { ids.unshift(walkId); walkId = parent.get(walkId) ?? null; }
@@ -370,6 +403,9 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
         <button type="button" className={styles.chip} onClick={goUp} disabled={!current}>
           {t('上一级')}
         </button>
+        <button type="button" className={styles.chip} onClick={() => { setView({ x: 0, y: 0, k: 1 }); setMoved({}); }}>
+          {t('重置视图')}
+        </button>
         <span className={styles.pending}>
           {ops.length ? t('待同步 {n} 项', { n: ops.length }) : t('没有待同步的改动')}
           {ops.length ? <button type="button" className={styles.linkBtn} onClick={() => setOps([])}>{t('清空')}</button> : null}
@@ -395,10 +431,9 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
       ) : null}
 
       <p className={styles.hint}>
-        {t('拖动节点可移动位置；双击组进入它，双击祖先（或左上角的层级）返回那一层；灰色的节点不在当前层。')}
+        {t('滚轮缩放、空白处拖动平移；双击组进入它，双击祖先返回那一层；灰点是别的分支（不在当前层）。')}
       </p>
       {error ? <div className={styles.error}>{t('加载失败：{message}', { message: error })}</div> : null}
-
       {notice ? <div className={styles.notice}>{notice}</div> : null}
 
       <div className={styles.ops}>
@@ -458,42 +493,69 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
         </div>
       ) : null}
 
-      <div className={styles.board} ref={boardRef} onPointerMove={onPointerMove} onPointerUp={endDrag} onPointerLeave={endDrag}>
+      <div
+        className={styles.board}
+        ref={boardRef}
+        onPointerMove={onBoardPointerMove}
+        onPointerUp={endPointer}
+        onPointerLeave={endPointer}
+        onPointerDown={(e) => {
+          const r = boardRef.current?.getBoundingClientRect();
+          panRef.current = { x: e.clientX - (r?.left ?? 0), y: e.clientY - (r?.top ?? 0), vx: view.x, vy: view.y };
+        }}
+        onWheel={(e) => {
+          const r = boardRef.current?.getBoundingClientRect();
+          const px = e.clientX - (r?.left ?? 0); const py = e.clientY - (r?.top ?? 0);
+          setView((v) => {
+            const k = Math.min(2.5, Math.max(0.25, v.k * Math.exp(-e.deltaY * 0.0012)));
+            const ratio = k / v.k;
+            return { k, x: px - (px - v.x) * ratio, y: py - (py - v.y) * ratio };
+          });
+        }}
+      >
         {!tree ? <div className={styles.empty}>{t('读取中…')}</div> : null}
         {tree && views.length === 0 ? <div className={styles.empty}>{t('还没有组。')}</div> : null}
 
         <svg className={styles.canvas}>
-          {edges.map((e) => {
-            const a = posOf(e.a); const b = posOf(e.b);
-            return <line key={`${e.a}->${e.b}`} className={styles.edge}
-              x1={a.x + NODE_W / 2} y1={a.y + NODE_H / 2} x2={b.x + NODE_W / 2} y2={b.y + NODE_H / 2} />;
-          })}
-          {views.map((v) => {
-            const p = posOf(v.id);
-            const cls = [styles.node, STATE_CLASS[v.state], KIND_CLASS[v.kind]].filter(Boolean).join(' ');
-            return (
-              <g key={v.id} className={`${cls} ${selected === v.id ? styles.selected : ''}`}
-                transform={`translate(${p.x},${p.y})`}
-                role="button" tabIndex={0}
-                aria-label={`${v.kind === 'group' ? t('组') : t('记忆')}：${v.name}`}
-                onPointerDown={(e) => onPointerDown(v, e)}
-                onDoubleClick={() => enter(v)}
-                onClick={() => setSelected(v.id)}
-                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); enter(v); } }}
-              >
-                <rect className={styles.rect} width={NODE_W} height={NODE_H} rx={10} />
-                <text className={styles.label} x={12} y={v.kind === 'memory' ? 20 : 28}>{v.name.length > 18 ? `${v.name.slice(0, 18)}…` : v.name}</text>
-                {v.kind === 'memory'
-                  ? <text className={styles.sub} x={12} y={36}>{t('记忆')}</text>
-                  : null}
-              </g>
-            );
-          })}
+          {/* 视图变换：世界坐标写在这里面；平移与缩放都只改这一个 transform */}
+          <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
+            {edges.map((e) => {
+              const a = posOf(e.a); const b = posOf(e.b);
+              return <line key={`${e.a}->${e.b}`} className={styles.edge} x1={a.x} y1={a.y} x2={b.x} y2={b.y} />;
+            })}
+            {views.map((v) => {
+              const p = posOf(v.id);
+              const r = radiusOf(v);
+              const cls = [styles.node, STATE_CLASS[v.state], KIND_CLASS[v.kind]].filter(Boolean).join(' ');
+              return (
+                <g
+                  key={v.id}
+                  className={`${cls} ${selected === v.id ? styles.selected : ''}`}
+                  transform={`translate(${p.x},${p.y})`}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${v.kind === 'group' ? t('组') : t('记忆')}：${v.name}`}
+                  onPointerDown={(e) => onNodePointerDown(v, e)}
+                  onDoubleClick={() => enter(v)}
+                  onClick={() => setSelected(v.id)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); enter(v); } }}
+                >
+                  {v.state === 'current' ? <circle className={styles.ring} r={r + 6} /> : null}
+                  <circle className={styles.circle} r={r} />
+                  {v.state !== 'dim' ? (
+                    <text className={styles.label} y={r + 15} textAnchor="middle">
+                      {v.name.length > 18 ? `${v.name.slice(0, 18)}…` : v.name}
+                    </text>
+                  ) : null}
+                </g>
+              );
+            })}
+          </g>
         </svg>
 
-        {hiddenDimCount > 0
-          ? <div className={styles.more}>{t('另有 {n} 个灰色节点未画出（不在当前层）', { n: hiddenDimCount })}</div>
-          : null}
+        {views.some((v) => v.state === 'dim') ? (
+          <div className={styles.more}>{t('灰点是其他分支（每个 6 像素，最多画 {n} 个）', { n: MAX_DIM })}</div>
+        ) : null}
       </div>
     </div>
   );
