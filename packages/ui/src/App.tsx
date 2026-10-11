@@ -9,6 +9,7 @@ import { Chat, type SkillProfileId, type ThinkingLevel } from './components/Chat
 import { Sidebar, type SessionMeta } from './components/Sidebar';
 import { PulseTracePanel } from './components/PulseTracePanel';
 import { GroupBrowser } from './components/GroupBrowser';
+import { KnowledgeGraph } from './components/KnowledgeGraph';
 import { Settings } from './components/Settings';
 import { ContextCostPanel } from './components/ContextCostPanel';
 import { KbImport } from './components/KbImport';
@@ -192,6 +193,7 @@ export function App() {
   const [filePreview, setFilePreview] = useState<{ path: string; content: string } | null>(null);
   const [draftInsert, setDraftInsert] = useState<string | null>(null);
   const [showCheckpoints, setShowCheckpoints] = useState(false);
+  const [showGraph, setShowGraph] = useState(false);
   const [showPalette, setShowPalette] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showKnowledge, setShowKnowledge] = useState(false);
@@ -1046,6 +1048,8 @@ export function App() {
       )}
       {showTheme && <ThemeStudio onClose={() => setShowTheme(false)} userTheme={userTheme} />}
       {showCost && <ContextCostPanel onClose={() => setShowCost(false)} />}
+      {/* 知识图谱：实验功能，与「导入对话 / 计划 / 时间线」同排打开 */}
+      {showGraph && <KnowledgeGraph onClose={() => setShowGraph(false)} />}
 
       {/*
         * The panels below are reachable from a GLOBAL entry point — Ctrl+K, a palette
@@ -1274,6 +1278,7 @@ export function App() {
               onOpenCache={() => setShowCost(true)}
               onImportContext={() => setShowSources(true)}
               onOpenPlans={() => setShowPlans(true)}
+              onOpenGraph={() => setShowGraph(true)}
               onOpenTimeline={() => setShowCheckpoints(true)}
               focusChat={focusChat}
               onToggleFocus={() => setFocusChat((v) => !v)}

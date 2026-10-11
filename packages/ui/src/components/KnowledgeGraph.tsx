@@ -341,7 +341,7 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   return (
     <div className={styles.panel} role="dialog" aria-label={t('知识图谱')}>
       <div className={styles.head}>
-        <h2 className={styles.title}>{t('知识图谱')}</h2>
+        <h2 className={styles.title}>{t('知识图谱（实验）')}</h2>
         <div className={styles.crumb} aria-label={t('当前位置')}>
           {crumb.map((c, i) => (
             <span key={c.id ?? 'root'} className={styles.crumbItem}>
