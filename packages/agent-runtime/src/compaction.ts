@@ -56,6 +56,8 @@ export interface CompactionState {
   covered: number;
   /** 压掉的是哪一段（0 … coveredTo）、压的那一刻还留了多少条 —— 供"压缩日志"读。 */
   coveredFrom?: number;
+  /** 被折叠那一段里「像该记住的」候选（压缩时算一次、冻在这里随记录落盘；digestMessage 只印不重算）。 */
+  kbCandidates?: KbCandidate[];
   coveredTo?: number;
   keptCount?: number;
   /**
@@ -351,7 +353,7 @@ export function userLinesExcerpt(head: readonly LLMMessage[], perRow = 120, maxC
 
 /** 粘进请求的那条摘要消息。**角色是 user**：见 `chooseCutIndex()` 里关于交替的说明。 */
 export function digestMessage(
-  state: Pick<CompactionState, 'digest' | 'covered' | 'source' | 'at' | 'sourcePath' | 'anchors'>,
+  state: Pick<CompactionState, 'digest' | 'covered' | 'source' | 'at' | 'sourcePath' | 'anchors' | 'kbCandidates'>,
 ): LLMMessage {
   const who = state.source === 'model' ? '模型总结' : '机械折叠';
   /*
@@ -374,11 +376,25 @@ export function digestMessage(
     ? `\n要找细节时，这些串在原文里真的出现过：${state.anchors.map((a) => `\`${a}\``).join('、')}`
       + (state.anchors.some((a) => a.includes('/')) ? '（带路径的可以直接 kb_query 按组查）。' : '。')
     : '';
+  /*
+   * 候选块：**只在抽到了才印**（同锚点那条纪律 —— 空表会被读成"有线索"）。
+   * 它说的是"这几行现在只活在这份摘要与原文里"，并要求先查证再补记 —— 不替模型写库，
+   * 因为自动写进 KB 是不可逆的（要 retire 才能撤），而"该不该记"只有模型看着上下文能判。
+   */
+  const harvest = state.kbCandidates?.length
+    ? `\n\n另外：被折叠的那一段里，下面这几行看着是"该记住的"（决定 / 约定 / 踩坑 / 环境），`
+      + `现在只活在这份摘要与原文里。请**先逐条 \`kb_query\` 查证**，查不到的用 \`kb_upsert\` 补记`
+      + `（一条一个节点，写清出处与出处那条的下标）：\n`
+      + state.kbCandidates
+        .map((c) => `- [${c.why} · 第 ${c.at + 1} 条 ${c.role}] ${c.title}`)
+        .join('\n')
+    : '';
   return {
     role: 'user',
     content:
       `[压缩记录] 本次对话较早的 ${state.covered} 条记录因为上下文接近模型上限，已被压缩成下面这份摘要`
       + `（${who}，${state.at}）。${where}${anchors}\n\n`
+      + harvest
       + state.digest,
   };
 }
@@ -452,6 +468,58 @@ export function breakdownRequest(
  * 几条，最可能就是下一步要引用的东西；最后按字典序兜底）—— 摘要要冻结进前缀，一个每次重排的锚点表
  * 等于每轮改前缀。
  */
+/** 一条「该记住的」候选：在被折叠那一段里的位置 + 一行摘要 + 为什么被挑中。 */
+export interface KbCandidate {
+  /** 在被折叠的那一段里的下标（0 起），用来回原文核对。 */
+  at: number;
+  role: string;
+  title: string;
+  /** 命中了哪几类标记（决定 / 约定 / 踩坑 / 环境）。 */
+  why: string;
+}
+
+/**
+ * 词表刻意短：宁可漏，也不要噪声。压缩记录里塞一堆误报，模型就会连真的那条一起忽略。
+ * 四类对应"丢了最疼"的东西：决定（会反复用到）、约定（下次必须照做）、踩坑（会再踩）、
+ * 环境（端口 / 路径 / 命令，重查成本高）。
+ */
+const KB_MARKERS: Array<[RegExp, string]> = [
+  [/决定|结论|定下来|就这么办/, '决定'],
+  [/约定|规范|一律|必须|不要|禁止|口径|规则/, '约定'],
+  [/踩坑|坑|注意|小心|别再/, '踩坑'],
+  [/端口|路径|默认|环境变量|目录|命令/, '环境'],
+];
+
+/**
+ * 从被折叠的那一段里挑出"该记住的"候选。
+ *
+ * 取舍写在代码里，而不是让模型猜：结构化正文（工具回执那种 JSON）是**数据**不是结论，先排除；
+ * 太短的（"好的""收到"）排除；同一条只留一份；有上限 —— 候选块是要被模型读的，不是归档。
+ * 排序用「命中类别数 × 100 + 下标」：越靠后说的越可能是当前口径，同分时后出现的优先。
+ */
+export function kbCandidates(history: readonly LLMMessage[], limit = 6): KbCandidate[] {
+  const scored: Array<{ at: number; role: string; title: string; why: string; score: number }> = [];
+  history.forEach((m, at) => {
+    const content = String(m.content ?? '').trim();
+    if (!content) return;
+    // 结构化正文是数据，不是"该记住的"。
+    if (content.startsWith('{') || content.startsWith('[')) return;
+    const hits = KB_MARKERS.filter(([re]) => re.test(content)).map(([, name]) => name);
+    if (!hits.length) return;
+    const title = content.replace(/\s+/g, ' ').trim();
+    if (title.length < 12) return;
+    scored.push({
+      at, role: m.role, title: title.slice(0, 120), why: [...new Set(hits)].join('/'),
+      score: hits.length * 100 + at,
+    });
+  });
+  return scored
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .sort((a, b) => a.at - b.at)
+    .map(({ at, role, title, why }) => ({ at, role, title, why }));
+}
+
 export function retrievalAnchors(head: readonly LLMMessage[], max = 10): string[] {
   const seen = new Map<string, { n: number; at: number }>();
   const bump = (raw: unknown, at: number) => {

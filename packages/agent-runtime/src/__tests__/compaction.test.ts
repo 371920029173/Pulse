@@ -68,7 +68,9 @@ describe('a long session is sent whole', () => {
     fillBulk(a, 14);
     await a.chat('hello');
     const last = p.sent[p.sent.length - 1];
-    assert.ok(!last.some((m) => /压缩记录/.test(m.content)));
+    // 精确到「摘要消息本身」：系统提示词里按功能需要写着 [压缩记录] 这个标记名，
+    // 子串匹配会把它也算成"压缩发生了"（这条断言的本意是"没有摘要替代早期轮次"）。
+    assert.ok(!last.some((m) => m.content.startsWith('[压缩记录]')));
     assert.ok(last.some((m) => m.content.startsWith('block 0 ')), '最早的一轮必须还在请求里');
     assert.ok(last.some((m) => m.content === 'hello'));
   });

@@ -96,6 +96,7 @@ import {
   DIGEST_SOURCE_MAX_CHARS,
   MIN_DIGEST_CHARS,
   type CompactionState,
+  kbCandidates,
 } from './compaction.js';
 
 /** Tool calls one plan step may take before the reflection check calls the plan over budget. */
@@ -3610,6 +3611,8 @@ export class Agent {
         coveredFrom: 0,
         coveredTo: cut - 1,
         keptCount: history.length - cut,
+        // 压缩那一刻算一次（之后只重印，不重算）：候选块要跟抬头一样逐字节不变。
+        kbCandidates: kbCandidates(history.slice(0, cut)),
         nextFingerprint: fingerprint(history[cut]),
         digest: digest.text,
         source: digest.source,

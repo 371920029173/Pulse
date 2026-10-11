@@ -428,7 +428,15 @@ console.log('\n10. 真压一次：跑的是用户实际会跑的那份 dist（�
 
     // ── 10.1 开关关掉：到阈值也不压，历史完整发出 ──
     const sidOff = await newSession('ctx-off');
-    await send('PUT', '/api/chat/history', { session_id: sidOff, messages: bulk(12) });
+    await send('PUT', '/api/chat/history', {
+      session_id: sidOff,
+      // 前面两条是**真决定**：被折叠那一段里必须有一条「该记住的」，下面的候选断言才有意义。
+      messages: [
+        { role: 'user', content: '约定：界面文案一律走 t()，i18n 棘轮基线只许降不许升。' },
+        { role: 'assistant', content: '记下了：文案走 t()，基线只降不升。' },
+        ...bulk(12),
+      ],
+    });
     stub.requests.length = 0;
     const offReply = await chat(sidOff, '关掉开关的这一轮');
     const offReq = stub.requests.at(-1) ?? [];
@@ -445,6 +453,10 @@ console.log('\n10. 真压一次：跑的是用户实际会跑的那份 dist（�
       && Number(manual.afterTokens) < Number(manual.beforeTokens),
       JSON.stringify({ ok: manual.ok, before: manual.beforeTokens, after: manual.afterTokens, reason: manual.reason }));
     const manualRecord = compactionRecords().find((r) => r.reason === 'manual');
+    check('被折叠那一段里的「该记住的」进了压缩记录（候选 + 条号）',
+      Array.isArray(manualRecord?.kbCandidates) && manualRecord.kbCandidates.length > 0
+        && manualRecord.kbCandidates.every((c) => typeof c.at === 'number' && typeof c.title === 'string'),
+      JSON.stringify(manualRecord?.kbCandidates ?? null).slice(0, 300));
     check('日志能读出被压范围（压了哪一段）',
       Boolean(manualRecord) && manualRecord.coveredFrom === 0 && manualRecord.coveredTo === manualRecord.covered - 1,
       JSON.stringify({ covered: manualRecord?.covered, from: manualRecord?.coveredFrom, to: manualRecord?.coveredTo }));
@@ -459,6 +471,10 @@ console.log('\n10. 真压一次：跑的是用户实际会跑的那份 dist（�
 
     const afterManual = await chat(sidOff, '压完之后再问一句');
     const afterReq = stub.requests.at(-1) ?? [];
+    check('候选清单真的随 [压缩记录] 发给了模型（连查证要求一起）',
+      afterReq.some((m) => m.content.startsWith('[压缩记录]')
+        && /kb_query/.test(m.content) && /kb_upsert/.test(m.content)),
+      JSON.stringify(afterReq.map((m) => String(m.content).slice(0, 40))).slice(0, 300));
     check('压完之后每一轮都带同一份冻结摘要', afterReq.some((m) => m.content.startsWith('[压缩记录]')),
       `请求 ${afterReq.length} 条`);
     check('压完之后最早的轮次不再发出去', !afterReq.some((m) => m.content.startsWith('block 0 ')),
