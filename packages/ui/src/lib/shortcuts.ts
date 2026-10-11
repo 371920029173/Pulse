@@ -5,7 +5,15 @@ import { t } from './i18n';
  * Bindings are user-editable and persisted locally. The model is a flat list of
  * actions, each with a default chord, so the settings UI can render and rebind
  * them generically.
+ *
+ * `scope` decides who listens: `composer` bindings belong to the textarea,
+ * `global` ones to the app, and `graph` ones to the knowledge-graph whiteboard
+ * (active only while that panel is open). Two actions may share a chord across
+ * scopes — Enter sends in the composer and opens a node on the whiteboard — and
+ * `findConflicts` only reports clashes *within* a scope for that reason.
  */
+
+export type ShortcutScope = 'composer' | 'global' | 'graph';
 
 export type ShortcutActionId =
   | 'chat.send'
@@ -21,7 +29,14 @@ export type ShortcutActionId =
   | 'plan.rejectTop'
   | 'think.cycle'
   | 'think.up'
-  | 'think.down';
+  | 'think.down'
+  | 'graph.open'
+  | 'graph.up'
+  | 'graph.rename'
+  | 'graph.copy'
+  | 'graph.cut'
+  | 'graph.paste'
+  | 'graph.resetView';
 
 export interface ShortcutAction {
   id: ShortcutActionId;
@@ -32,7 +47,7 @@ export interface ShortcutAction {
   /** Default chord, e.g. "Enter" or "Shift+Enter". */
   defaultChord: string;
   /** Contexts where the binding is active. */
-  scope: 'composer' | 'global';
+  scope: ShortcutScope;
 }
 
 export const SHORTCUT_ACTIONS: ShortcutAction[] = [
@@ -59,6 +74,15 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   { id: 'app.palette', group: t('应用'), label: t('命令面板'), hint: t('打开命令面板'), defaultChord: 'Ctrl+K', scope: 'global' },
   { id: 'app.focusChat', group: t('应用'), label: t('专注对话'), hint: t('隐藏两侧面板放大对话区'), defaultChord: 'Ctrl+\\', scope: 'global' },
   { id: 'app.toggleTheme', group: t('应用'), label: t('切换明暗主题'), hint: t('在深色 / 浅色之间切换'), defaultChord: 'Ctrl+Shift+L', scope: 'global' },
+
+  // ── 知识图谱白板（用户要的"像 Windows 一样"：Ctrl+C/X/V + F2 改名 + Enter 打开）──
+  { id: 'graph.open', group: t('知识图谱'), label: t('打开 / 进入'), hint: t('进入选中的组，或打开选中的记忆'), defaultChord: 'Enter', scope: 'graph' },
+  { id: 'graph.up', group: t('知识图谱'), label: t('上一级'), hint: t('回到父组（Backspace，和资源管理器一致）'), defaultChord: 'Backspace', scope: 'graph' },
+  { id: 'graph.rename', group: t('知识图谱'), label: t('改名'), hint: t('给选中的组改名'), defaultChord: 'F2', scope: 'graph' },
+  { id: 'graph.copy', group: t('知识图谱'), label: t('复制'), hint: t('复制选中的组（到待同步序列里粘贴）'), defaultChord: 'Ctrl+C', scope: 'graph' },
+  { id: 'graph.cut', group: t('知识图谱'), label: t('剪切'), hint: t('剪切选中的组'), defaultChord: 'Ctrl+X', scope: 'graph' },
+  { id: 'graph.paste', group: t('知识图谱'), label: t('粘贴'), hint: t('把剪贴板里的组粘贴到当前组下'), defaultChord: 'Ctrl+V', scope: 'graph' },
+  { id: 'graph.resetView', group: t('知识图谱'), label: t('重置视图'), hint: t('缩放与平移回到初始位置'), defaultChord: 'Ctrl+0', scope: 'graph' },
 ];
 
 const STORAGE_KEY = 'she.shortcuts';
@@ -162,7 +186,7 @@ export function matchesChord(e: KeyboardEvent | React.KeyboardEvent, chord: stri
 export function actionForChord(
   map: ShortcutMap,
   chord: string,
-  scope: 'composer' | 'global',
+  scope: ShortcutScope,
 ): ShortcutAction | null {
   const target = normalize(chord);
   for (const a of SHORTCUT_ACTIONS) {

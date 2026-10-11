@@ -3,6 +3,10 @@
  *
  * 重点在"走"的语义（用户给的 A/B/C/D/E/F 例子）：进入 A 之后，A 是当前层、C/D 是正常色、
  * B/E/F 变灰；双击祖先回到那一层；"上一级"回到父层。拖动只改视图位置，不碰任何数据。
+ *
+ * s3 追加的判据：操作序列（改名/复制/剪切/粘贴/新建/并入）在确认之前一个字节都不落库；
+ * 右键菜单与 Ctrl+C/X/V、F2、Enter、Backspace 都作用在**选中的节点**上，
+ * 且 Escape 分两级（先关菜单，再关面板）。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, fireEvent, act } from '@testing-library/react';
@@ -49,6 +53,16 @@ function installFetch() {
 
 const node = (c: HTMLElement, name: string) =>
   Array.from(c.querySelectorAll('g[role="button"]')).find((g) => (g.getAttribute('aria-label') ?? '').includes(name));
+
+/** 菜单里的按钮：菜单项 = 标签 + 快捷键提示两个 span，所以用 includes 找。 */
+const menuBtn = (c: HTMLElement, label: string) => {
+  const menu = c.querySelector('[role="menu"]');
+  if (!menu) return undefined;
+  return Array.from(menu.querySelectorAll('button')).find((b) => (b.textContent ?? '').includes(label));
+};
+
+const btn = (c: HTMLElement, label: string) =>
+  Array.from(c.querySelectorAll('button')).find((b) => b.textContent === label);
 
 const flush = async () => {
   // 两拍：fetchJSON 链上有 fetch → res.ok → res.json() 几个 await，一拍不一定够
@@ -133,10 +147,10 @@ describe('知识图谱（s3：操作序列 / 保存并确认 / 回滚）', () =>
     const view = render(<KnowledgeGraph onClose={() => {}} />);
     await flush();
     await act(async () => { fireEvent.click(node(view.container, 'A')!); });
-    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '改名')!); });
+    await act(async () => { fireEvent.click(btn(view.container, '改名')!); });
     const input = view.container.querySelector('#kg-rename') as HTMLInputElement;
     await act(async () => { fireEvent.change(input, { target: { value: 'A改过' } }); });
-    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '加入待同步')!); });
+    await act(async () => { fireEvent.click(btn(view.container, '加入待同步')!); });
     expect(view.container.textContent).toContain('待同步 1 项');
     expect(writes.length).toBe(0);
   });
@@ -146,15 +160,15 @@ describe('知识图谱（s3：操作序列 / 保存并确认 / 回滚）', () =>
     const view = render(<KnowledgeGraph onClose={() => {}} />);
     await flush();
     await act(async () => { fireEvent.click(node(view.container, 'A')!); });
-    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '复制')!); });
-    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '粘贴到这里')!); });
+    await act(async () => { fireEvent.click(btn(view.container, '复制')!); });
+    await act(async () => { fireEvent.click(btn(view.container, '粘贴到这里')!); });
     expect(view.container.textContent).toContain('待同步 1 项');
 
-    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '保存并确认')!); });
+    await act(async () => { fireEvent.click(btn(view.container, '保存并确认')!); });
     expect(view.container.textContent).toContain('将按顺序应用 1 项改动');
     expect(writes.length).toBe(0);            // 确认条摊开时仍然不许落库
 
-    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '确认同步')!); });
+    await act(async () => { fireEvent.click(btn(view.container, '确认同步')!); });
     await flush();
     expect(writes.length).toBe(1);
     expect(writes[0].url).toContain('/api/kb/batch');
@@ -169,13 +183,13 @@ describe('知识图谱（s3：操作序列 / 保存并确认 / 回滚）', () =>
     const view = render(<KnowledgeGraph onClose={() => {}} />);
     await flush();
     await act(async () => { fireEvent.click(node(view.container, 'A')!); });
-    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '剪切')!); });
-    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '粘贴到这里')!); });
-    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '保存并确认')!); });
-    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '确认同步')!); });
+    await act(async () => { fireEvent.click(btn(view.container, '剪切')!); });
+    await act(async () => { fireEvent.click(btn(view.container, '粘贴到这里')!); });
+    await act(async () => { fireEvent.click(btn(view.container, '保存并确认')!); });
+    await act(async () => { fireEvent.click(btn(view.container, '确认同步')!); });
     await flush();
 
-    const rb = Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '回滚到同步前') as HTMLButtonElement;
+    const rb = btn(view.container, '回滚到同步前') as HTMLButtonElement;
     expect(rb.disabled).toBe(false);
     await act(async () => { fireEvent.click(rb); });
     await flush();
@@ -197,12 +211,99 @@ describe('知识图谱（s3：操作序列 / 保存并确认 / 回滚）', () =>
     expect(ta).toBeTruthy();
     expect(ta.value).toBe('正文原文');
     await act(async () => { fireEvent.change(ta, { target: { value: '改过的正文' } }); });
-    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '加入待同步')!); });
-    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '保存并确认')!); });
-    await act(async () => { fireEvent.click(Array.from(view.container.querySelectorAll('button')).find((b) => b.textContent === '确认同步')!); });
+    await act(async () => { fireEvent.click(btn(view.container, '加入待同步')!); });
+    await act(async () => { fireEvent.click(btn(view.container, '保存并确认')!); });
+    await act(async () => { fireEvent.click(btn(view.container, '确认同步')!); });
     await flush();
     const batch = writes.find((w) => w.url.includes('/api/kb/batch'));
     expect((batch!.body as { ops: Array<{ kind: string; content?: string }> }).ops[0]).toMatchObject({ kind: 'updateMemory', content: '改过的正文' });
+  });
+});
+
+describe('知识图谱（s3：Windows 式右键菜单与快捷键）', () => {
+  it('右键节点弹出菜单；菜单里点「复制」再「粘贴」只进待同步，不发写请求', async () => {
+    const { writes } = installFetch();
+    const view = render(<KnowledgeGraph onClose={() => {}} />);
+    await flush();
+
+    await act(async () => { fireEvent.contextMenu(node(view.container, 'A')!); });
+    expect(view.container.querySelector('[role="menu"]')).toBeTruthy();
+    // 菜单里那一项带着快捷键提示（Ctrl+C），这正是"像 Windows"的那部分
+    expect(menuBtn(view.container, '复制')!.textContent).toContain('Ctrl+C');
+
+    await act(async () => { fireEvent.click(menuBtn(view.container, '复制')!); });
+    expect(view.container.querySelector('[role="menu"]')).toBeNull();   // 点过就收
+    await act(async () => { fireEvent.contextMenu(node(view.container, 'A')!); });
+    await act(async () => { fireEvent.click(menuBtn(view.container, '粘贴')!); });
+
+    expect(view.container.textContent).toContain('待同步 1 项');
+    expect(writes.length).toBe(0);
+  });
+
+  it('F2 改名、Ctrl+X 剪切 + Ctrl+V 粘贴：作用于选中的节点，且 Enter 能进入它', async () => {
+    const { writes } = installFetch();
+    const view = render(<KnowledgeGraph onClose={() => {}} />);
+    await flush();
+    await act(async () => { fireEvent.click(node(view.container, 'A')!); });
+
+    // F2 → 改名框
+    await act(async () => { fireEvent.keyDown(window, { key: 'F2' }); });
+    expect(view.container.querySelector('#kg-rename')).toBeTruthy();
+    await act(async () => { fireEvent.click(btn(view.container, '取消')!); });
+    expect(view.container.querySelector('#kg-rename')).toBeNull();
+
+    // Ctrl+X → 选中项进剪贴板（界面上有提示），Ctrl+V → 进待同步
+    await act(async () => { fireEvent.keyDown(window, { key: 'x', ctrlKey: true }); });
+    expect(view.container.textContent).toContain('剪贴板：A');
+    await act(async () => { fireEvent.keyDown(window, { key: 'v', ctrlKey: true }); });
+    expect(view.container.textContent).toContain('待同步 1 项');
+    expect(writes.length).toBe(0);
+
+    // 确认之后落库的是移动（剪切 + 粘贴 = moveGroup），且 id 是选中的 A
+    await act(async () => { fireEvent.click(btn(view.container, '保存并确认')!); });
+    await act(async () => { fireEvent.click(btn(view.container, '确认同步')!); });
+    await flush();
+    const batch = writes.find((w) => w.url.includes('/api/kb/batch'));
+    expect((batch!.body as { ops: Array<{ kind: string; id: string }> }).ops[0]).toMatchObject({ kind: 'moveGroup', id: 'A' });
+  });
+
+  it('Escape 分两级：菜单开着时第一下只关菜单、面板还在，第二下才关面板', async () => {
+    installFetch();
+    const onClose = vi.fn();
+    const view = render(<KnowledgeGraph onClose={onClose} />);
+    await flush();
+
+    await act(async () => { fireEvent.contextMenu(node(view.container, 'A')!); });
+    expect(view.container.querySelector('[role="menu"]')).toBeTruthy();
+
+    // 派发到 body：这才是真实事件的路径（window 捕获 → document 冒泡），
+    // useEscapeToClose 挂在 document 上、靠 defaultPrevented 让路，这条断言正是在验那个约定
+    await act(async () => { fireEvent.keyDown(document.body, { key: 'Escape' }); });
+    expect(view.container.querySelector('[role="menu"]')).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(view.container.querySelector('[role="dialog"]')).toBeTruthy();
+
+    await act(async () => { fireEvent.keyDown(document.body, { key: 'Escape' }); });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('在输入框里打字时白板快捷键让路（F2 不抢文字编辑）', async () => {
+    installFetch();
+    const view = render(<KnowledgeGraph onClose={() => {}} />);
+    await flush();
+    await act(async () => { fireEvent.click(node(view.container, 'A')!); });
+    await act(async () => { fireEvent.click(btn(view.container, '新建子组')!); });
+    const input = view.container.querySelector('#kg-newgroup') as HTMLInputElement;
+    expect(input).toBeTruthy();
+
+    // 焦点在输入框里：F2 应该什么都不做（否则改名框会顶掉正在输入的内容）
+    await act(async () => { fireEvent.keyDown(input, { key: 'F2' }); });
+    expect(view.container.querySelector('#kg-rename')).toBeNull();
+
+    // 名字照样能进待同步
+    await act(async () => { fireEvent.change(input, { target: { value: '新组' } }); });
+    await act(async () => { fireEvent.click(btn(view.container, '加入待同步')!); });
+    expect(view.container.textContent).toContain('待同步 1 项');
   });
 });
 

@@ -9,6 +9,11 @@
  *
  * 读法（VOSviewer 式）：滚轮缩放、空白处拖拽平移、拖动节点改位置；缩放时光标下的点不动。
  *
+ * 操作（Windows 资源管理器式，用户明确要求"像 Windows 一样"）：
+ *   · 单击选中、双击进入 / 打开、**右键出上下文菜单**（菜单里带快捷键提示）
+ *   · Ctrl+C / Ctrl+X / Ctrl+V 复制 / 剪切 / 粘贴到当前组，F2 改名，Enter 打开，Backspace 上一级
+ *   · 快捷键全部取自 lib/shortcuts 的 **graph** scope，所以**可以在设置页改**
+ *
  * 数据来源：结构来自 /api/kb/tree（返回 { tree: […] }，树里**不含记忆**），
  * 某一层的记忆来自 /api/kb/groups/:id（返回 { group, children, memories }）。
  */
@@ -16,6 +21,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchJSON } from '../lib/api';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { t } from '../lib/i18n';
+import { actionForChord, chordFromEvent, loadShortcuts, SHORTCUT_ACTIONS } from '../lib/shortcuts';
 import styles from '../styles/KnowledgeGraph.module.css';
 
 /** 与 server 的 GroupTreeNode 对齐（树里只有计数，没有记忆本身）。 */
@@ -67,6 +73,13 @@ function describeOp(op: PendingOp, nameOf: (id: string) => string): string {
     case 'updateMemory': return t('改正文');
     default: return t('操作');
   }
+}
+
+/** 右键菜单里的一项。id 对应 shortcuts 里的 graph.*，用来取标签与快捷键提示。 */
+interface MenuItem {
+  id: string;
+  disabled?: boolean;
+  run?: () => void;
 }
 
 interface Props {
@@ -121,12 +134,16 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   const [clipboard, setClipboard] = useState<{ mode: 'copy' | 'cut'; id: string } | null>(null);
   const [editing, setEditing] = useState<{ id: string; title: string; content: string } | null>(null);
   const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
-  const [newGroupName, setNewGroupName] = useState('');
+  const [newGroup, setNewGroup] = useState<{ parentId: string | null; name: string } | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   /** 最近一次同步落下的快照路径 —— 有它才有"回滚到同步前"。 */
   const [lastSnapshot, setLastSnapshot] = useState<string | null>(null);
+  /** 右键菜单：node=右键点到的节点，null=点在空白处（那时菜单里是"粘贴 / 新建子组"）。 */
+  const [menu, setMenu] = useState<{ x: number; y: number; node: NodeView | null } | null>(null);
+  /** 快捷键表：用户改过的绑定存在 localStorage，面板打开时读一次。 */
+  const shortcuts = useMemo(() => loadShortcuts(), []);
 
   const loadTree = useCallback(() => {
     /*
@@ -369,6 +386,88 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   };
   const goUp = () => setCurrent((c) => (c ? (parent.get(c) ?? null) : null));
 
+  const beginRename = (v: NodeView | null) => { if (v?.kind === 'group') setRenaming({ id: v.id, name: v.name }); };
+  const beginCopy = (v: NodeView | null) => { if (v?.kind === 'group') setClipboard({ mode: 'copy', id: v.id }); };
+  const beginCut = (v: NodeView | null) => { if (v?.kind === 'group') setClipboard({ mode: 'cut', id: v.id }); };
+  const beginCreate = (parentId: string | null) => setNewGroup({ parentId, name: '' });
+  const resetView = () => { setView({ x: 0, y: 0, k: 1 }); setMoved({}); };
+
+  /**
+   * 快捷键动作的分发：作用对象是**当前选中的节点**（和资源管理器一致 —— 先选，再按）。
+   * 绑定值可能被用户在设置页改过，所以走 id 而不是写死键。
+   */
+  const runAction = (id: string) => {
+    const v = views.find((x) => x.id === selected) ?? null;
+    switch (id) {
+      case 'graph.open': if (v) enter(v); break;
+      case 'graph.up': goUp(); break;
+      case 'graph.rename': beginRename(v); break;
+      case 'graph.copy': beginCopy(v); break;
+      case 'graph.cut': beginCut(v); break;
+      case 'graph.paste': paste(); break;
+      case 'graph.resetView': resetView(); break;
+      default: break;
+    }
+    setMenu(null);
+  };
+
+  /*
+   * 白板快捷键：注册在 **window 的捕获阶段**，理由是一个真实的顺序陷阱 ——
+   * useEscapeToClose 把监听挂在 document 的冒泡阶段；真实事件冒泡是
+   * target → … → document → window，所以 window 上的**冒泡**监听反而最后跑，
+   * 想"菜单开着时 Escape 只关菜单、不动面板"就来不及了（它的 handler 已经关掉了面板）。
+   * 捕获阶段是 window → document → target，先跑就有机会 preventDefault，
+   * 而 useEscapeToClose 明确写着"defaultPrevented 就放手"。
+   */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // 在输入框里打字时白板让路：F2 / Ctrl+C 在文本框里属于文字编辑
+      const tgt = e.target as HTMLElement | null;
+      if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+      if (e.key === 'Escape' && menu) { e.preventDefault(); setMenu(null); return; }
+      const action = actionForChord(shortcuts, chordFromEvent(e), 'graph');
+      if (!action) return;
+      e.preventDefault();
+      runAction(action.id);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  });
+
+  /** 菜单项：标签与快捷键提示都取自快捷键表，和设置页里显示的完全一致。 */
+  const labelOf = (id: string) => {
+    const a = SHORTCUT_ACTIONS.find((x) => x.id === id);
+    return a?.label ?? id;
+  };
+  const chordOf = (id: string) => shortcuts[id as keyof typeof shortcuts] ?? SHORTCUT_ACTIONS.find((a) => a.id === id)?.defaultChord ?? '';
+
+  const menuItems = (node: NodeView | null): MenuItem[] => {
+    if (!node) {
+      return [
+        { id: 'graph.paste', disabled: !clipboard, run: paste },
+        { id: 'graph.newGroup', run: () => beginCreate(current) },
+        { id: 'graph.resetView', run: resetView },
+      ];
+    }
+    if (node.kind === 'memory') {
+      return [{ id: 'graph.open', run: () => enter(node) }];
+    }
+    return [
+      { id: 'graph.open', run: () => enter(node) },
+      { id: 'graph.rename', run: () => beginRename(node) },
+      { id: 'graph.copy', run: () => beginCopy(node) },
+      { id: 'graph.cut', run: () => beginCut(node) },
+      { id: 'graph.paste', disabled: !clipboard, run: paste },
+      { id: 'graph.merge', disabled: !current || node.id === current, run: () => addOp({ kind: 'mergeGroups', from: node.id, into: current! }) },
+      { id: 'graph.newGroup', run: () => beginCreate(node.id) },
+    ];
+  };
+  /** 菜单里那些**没有**默认快捷键的项 —— 单独给中文标签（不进快捷键表，免得占键位）。 */
+  const extraLabel: Record<string, string> = {
+    'graph.newGroup': t('新建子组'),
+    'graph.merge': t('并入当前组'),
+  };
+
   const crumb = useMemo(() => {
     const chain: Array<{ id: string | null; name: string }> = [{ id: null, name: t('目录根') }];
     if (!current) return chain;
@@ -383,7 +482,7 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   }, [current, parent, views]);
 
   return (
-    <div className={styles.panel} role="dialog" aria-label={t('知识图谱')}>
+    <div className={styles.panel} role="dialog" aria-label={t('知识图谱')} onClick={() => setMenu(null)}>
       <div className={styles.head}>
         <h2 className={styles.title}>{t('知识图谱（实验）')}</h2>
         <div className={styles.crumb} aria-label={t('当前位置')}>
@@ -403,7 +502,7 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
         <button type="button" className={styles.chip} onClick={goUp} disabled={!current}>
           {t('上一级')}
         </button>
-        <button type="button" className={styles.chip} onClick={() => { setView({ x: 0, y: 0, k: 1 }); setMoved({}); }}>
+        <button type="button" className={styles.chip} onClick={resetView}>
           {t('重置视图')}
         </button>
         <span className={styles.pending}>
@@ -431,36 +530,22 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
       ) : null}
 
       <p className={styles.hint}>
-        {t('滚轮缩放、空白处拖动平移；双击组进入它，双击祖先返回那一层；灰点是别的分支（不在当前层）。')}
+        {t('滚轮缩放、空白处拖动平移；双击组进入它；右键出菜单；Ctrl+C/X/V、F2、Enter、Backspace 都可用（设置页可改）。')}
       </p>
       {error ? <div className={styles.error}>{t('加载失败：{message}', { message: error })}</div> : null}
       {notice ? <div className={styles.notice}>{notice}</div> : null}
 
       <div className={styles.ops}>
         <span className={styles.opsLabel}>{t('操作')}</span>
-        <button type="button" className={styles.chip} disabled={!selected} onClick={() => {
-          const v = views.find((x) => x.id === selected);
-          if (v?.kind === 'group') setRenaming({ id: v.id, name: v.name });
-        }}>{t('改名')}</button>
-        <button type="button" className={styles.chip} disabled={!selected} onClick={() => {
-          const v = views.find((x) => x.id === selected);
-          if (v?.kind === 'group') setClipboard({ mode: 'copy', id: v.id });
-        }}>{t('复制')}</button>
-        <button type="button" className={styles.chip} disabled={!selected} onClick={() => {
-          const v = views.find((x) => x.id === selected);
-          if (v?.kind === 'group') setClipboard({ mode: 'cut', id: v.id });
-        }}>{t('剪切')}</button>
+        <button type="button" className={styles.chip} disabled={!selected} onClick={() => beginRename(views.find((x) => x.id === selected) ?? null)}>{t('改名')}</button>
+        <button type="button" className={styles.chip} disabled={!selected} onClick={() => beginCopy(views.find((x) => x.id === selected) ?? null)}>{t('复制')}</button>
+        <button type="button" className={styles.chip} disabled={!selected} onClick={() => beginCut(views.find((x) => x.id === selected) ?? null)}>{t('剪切')}</button>
         <button type="button" className={styles.chip} disabled={!clipboard} onClick={paste}>{t('粘贴到这里')}</button>
         <button type="button" className={styles.chip} disabled={!selected || !current} onClick={() => {
           const v = views.find((x) => x.id === selected);
           if (v?.kind === 'group' && current && v.id !== current) addOp({ kind: 'mergeGroups', from: v.id, into: current });
         }}>{t('并入当前组')}</button>
-        <input className={styles.input} value={newGroupName} placeholder={t('新组名…')}
-          onChange={(e) => setNewGroupName(e.target.value)} />
-        <button type="button" className={styles.chip} disabled={!newGroupName.trim()} onClick={() => {
-          addOp({ kind: 'createGroup', name: newGroupName.trim(), parentId: targetParent });
-          setNewGroupName('');
-        }}>{t('新建子组')}</button>
+        <button type="button" className={styles.chip} onClick={() => beginCreate(current)}>{t('新建子组')}</button>
         {clipboard ? <span className={styles.opsLabel}>{t('剪贴板：{name}（{mode}）', { name: nameOf(clipboard.id), mode: clipboard.mode === 'copy' ? t('复制') : t('剪切') })}</span> : null}
       </div>
 
@@ -474,6 +559,21 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
             setRenaming(null);
           }}>{t('加入待同步')}</button>
           <button type="button" className={styles.chip} onClick={() => setRenaming(null)}>{t('取消')}</button>
+        </div>
+      ) : null}
+
+      {newGroup ? (
+        <div className={styles.editor}>
+          <label className={styles.editorLabel} htmlFor="kg-newgroup">
+            {t('在「{name}」下新建组', { name: newGroup.parentId ? nameOf(newGroup.parentId) : t('目录根') })}
+          </label>
+          <input id="kg-newgroup" className={styles.input} value={newGroup.name} autoFocus
+            onChange={(e) => setNewGroup({ ...newGroup, name: e.target.value })} />
+          <button type="button" className={styles.chip} disabled={!newGroup.name.trim()} onClick={() => {
+            addOp({ kind: 'createGroup', name: newGroup.name.trim(), parentId: newGroup.parentId });
+            setNewGroup(null);
+          }}>{t('加入待同步')}</button>
+          <button type="button" className={styles.chip} onClick={() => setNewGroup(null)}>{t('取消')}</button>
         </div>
       ) : null}
 
@@ -502,6 +602,11 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
         onPointerDown={(e) => {
           const r = boardRef.current?.getBoundingClientRect();
           panRef.current = { x: e.clientX - (r?.left ?? 0), y: e.clientY - (r?.top ?? 0), vx: view.x, vy: view.y };
+        }}
+        onContextMenu={(e) => {
+          // 空白处右键：菜单里是"粘贴 / 新建子组 / 重置视图"（Windows 的桌面菜单就是这个意思）
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY, node: null });
         }}
         onWheel={(e) => {
           const r = boardRef.current?.getBoundingClientRect();
@@ -538,7 +643,14 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
                   onPointerDown={(e) => onNodePointerDown(v, e)}
                   onDoubleClick={() => enter(v)}
                   onClick={() => setSelected(v.id)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); enter(v); } }}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();   // 别让画布的空白菜单也冒出来
+                    setSelected(v.id);
+                    setMenu({ x: e.clientX, y: e.clientY, node: v });
+                  }}
+                  /* 只留 Space：Enter 已经由白板快捷键（graph.open）统一处理，两边都做会开两次 */
+                  onKeyDown={(e) => { if (e.key === ' ') { e.preventDefault(); enter(v); } }}
                 >
                   {v.state === 'current' ? <circle className={styles.ring} r={r + 6} /> : null}
                   <circle className={styles.circle} r={r} />
@@ -557,6 +669,24 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
           <div className={styles.more}>{t('灰点是其他分支（每个 6 像素，最多画 {n} 个）', { n: MAX_DIM })}</div>
         ) : null}
       </div>
+
+      {menu ? (
+        <div className={styles.menu} style={{ left: menu.x, top: menu.y }} role="menu" aria-label={t('操作菜单')}>
+          {menuItems(menu.node).map((it) => (
+            <button
+              key={it.id}
+              type="button"
+              role="menuitem"
+              className={styles.menuItem}
+              disabled={it.disabled}
+              onClick={() => { it.run?.(); setMenu(null); }}
+            >
+              <span className={styles.menuLabel}>{extraLabel[it.id] ?? labelOf(it.id)}</span>
+              <span className={styles.menuChord}>{chordOf(it.id)}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

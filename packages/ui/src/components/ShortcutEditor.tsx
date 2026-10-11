@@ -8,6 +8,7 @@ import {
   findConflicts,
   type ShortcutActionId,
   type ShortcutMap,
+  type ShortcutScope,
 } from '../lib/shortcuts';
 import styles from '../styles/Shortcuts.module.css';
 import { t } from '../lib/i18n';
@@ -15,6 +16,13 @@ import { t } from '../lib/i18n';
 /** Tell the rest of the app the bindings changed. */
 function broadcast(): void {
   window.dispatchEvent(new Event('she:shortcuts-changed'));
+}
+
+/** 作用域的中文名 —— 三个 scope 各有各的监听者，标签不能混（graph 曾显示成"全局"）。 */
+function scopeLabel(scope: ShortcutScope): string {
+  if (scope === 'composer') return t('输入框');
+  if (scope === 'graph') return t('知识图谱');
+  return t('全局');
 }
 
 /**
@@ -116,7 +124,7 @@ export function ShortcutEditor() {
                   <div className={styles.rowHint}>{a.hint}</div>
                 </div>
                 <div className={styles.rowScope}>
-                  {a.scope === 'composer' ? t('输入框') : t('全局')}
+                  {scopeLabel(a.scope)}
                 </div>
                 <button
                   type="button"
