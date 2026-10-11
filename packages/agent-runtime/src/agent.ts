@@ -213,7 +213,7 @@ export class Agent {
    * conversation at the next tool-loop iteration so the user can add context
    * without stopping the agent.
    */
-  private pendingInterjections: string[] = [];
+  private pendingInterjections: Array<{ text: string; images?: Array<{ path: string; mime: string }> }> = [];
 
   /** This conversation's plan store, read by the plan autopilot at the end of each model reply. */
   private planStore?: ReturnType<typeof createPlanTools>['store'];
@@ -904,9 +904,10 @@ export class Agent {
    * even if no turn is running); `pendingInterjections` only controls when it
    * is injected into the in-flight request array.
    */
-  interject(text: string): void {
+  interject(text: string, images?: Array<{ path: string; mime: string }>): void {
     const t = String(text ?? '').trim();
-    if (!t) return;
+    // 附件可以单独成一条（与 /api/chat 同一条语义：一张图不说一个字也是话）。
+    if (!t && !images?.length) return;
     /*
      * A running turn must not write this into history yet.
      *
@@ -921,10 +922,10 @@ export class Agent {
      * into the transcript.
      */
     if (!this.turnActive) {
-      this.history.push({ role: 'user', content: `[用户补充] ${t}` });
+      this.history.push({ role: 'user', content: `[用户补充] ${t}`.trim(), ...(images?.length ? { images } : {}) });
       return;
     }
-    this.pendingInterjections.push(t);
+    this.pendingInterjections.push({ text: t, images });
   }
 
   /** Move queued interjections into history and the live request, once. */
@@ -934,11 +935,14 @@ export class Agent {
     // message pushed after it. Wait for the for-loop to finish.
     if (this.hasOpenToolCalls()) return;
     const pending = this.pendingInterjections.splice(0, this.pendingInterjections.length);
-    for (const text of pending) {
-      const msg: LLMMessage = { role: 'user', content: `[用户补充] ${text}` };
+    for (const item of pending) {
+      const msg: LLMMessage = {
+        role: 'user', content: `[用户补充] ${item.text}`.trim(),
+        ...(item.images?.length ? { images: item.images } : {}),
+      };
       this.history.push(msg);
       messages.push(msg);
-      onChunk?.({ type: 'status', content: `已追加补充信息：${text.slice(0, 80)}` });
+      onChunk?.({ type: 'status', content: `已追加补充信息：${item.text.slice(0, 80)}${item.images?.length ? `（附件 ${item.images.length} 个）` : ''}` });
     }
   }
 
@@ -947,8 +951,11 @@ export class Agent {
     if (this.pendingInterjections.length === 0) return;
     if (this.hasOpenToolCalls()) return;
     const pending = this.pendingInterjections.splice(0, this.pendingInterjections.length);
-    for (const text of pending) {
-      this.history.push({ role: 'user', content: `[用户补充] ${text}` });
+    for (const item of pending) {
+      this.history.push({
+        role: 'user', content: `[用户补充] ${item.text}`.trim(),
+        ...(item.images?.length ? { images: item.images } : {}),
+      });
     }
   }
 

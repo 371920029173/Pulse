@@ -283,7 +283,7 @@ export function useChat(sessionId?: string | null) {
    * `interject` 定义在 `sendMessage` 之后，而发送路径要在「服务端说在跑」时把这条字接上去。
    * 直接在 render 期引用会撞上 TDZ（依赖数组在声明之前求值），所以照 `armFollowRef` 的做法用 ref 传。
    */
-  const interjectRef = useRef<(text: string) => void>(() => {});
+  const interjectRef = useRef<(text: string, images?: ChatMessage['images']) => void>(() => {});
 
   /**
    * The session this window is bound to. Held in a ref so every callback reads
@@ -787,7 +787,10 @@ export function useChat(sessionId?: string | null) {
           if ((err as Error & { status?: number }).status === 409) {
             void fetchJSON(withSid('/api/chat/interject'), {
               method: 'POST',
-              body: { message: text, session_id: sidRef.current },
+              body: {
+                message: text, session_id: sidRef.current,
+                ...(images?.length ? { images: images.map((i) => ({ path: i.path, mime: i.mime })) } : {}),
+              },
             }).catch(() => undefined);
             setMessages((prev) => [...prev, {
               role: 'system',
@@ -844,7 +847,7 @@ export function useChat(sessionId?: string | null) {
           dispatchSend(text, images);
           return;
         }
-        interjectRef.current(text);
+        interjectRef.current(text, images);
         setMessages((prev) => [...prev, {
           role: 'system',
           content: t('这一轮还在进行：这条已作为「追加」接在当前这轮后面（按停止可立刻接手）。'),
@@ -1083,9 +1086,9 @@ export function useChat(sessionId?: string | null) {
    * Append context to the turn that is currently running, without stopping it.
    * The server queues it and the agent folds it in at the next iteration.
    */
-  const interject = useCallback(async (text: string) => {
+  const interject = useCallback(async (text: string, images?: ChatMessage['images']) => {
     const value = text.trim();
-    if (!value) return;
+    if (!value && !images?.length) return;
     /*
      * 追加只对「真的在跑」的那一轮有意义。
      *
@@ -1098,14 +1101,17 @@ export function useChat(sessionId?: string | null) {
     const running = await serverTurnRunning();
     if (running === false) {
       healStaleTurn();
-      dispatchSend(value);
+      dispatchSend(value, images);
       return;
     }
-    setMessages((prev) => [...prev, { role: 'user', content: value }]);
+    setMessages((prev) => [...prev, { role: 'user', content: value, ...(images?.length ? { images } : {}) }]);
     try {
       await fetchJSON(withSid('/api/chat/interject'), {
         method: 'POST',
-        body: { message: value, session_id: sidRef.current },
+        body: {
+          message: value, session_id: sidRef.current,
+          ...(images?.length ? { images: images.map((i) => ({ path: i.path, mime: i.mime })) } : {}),
+        },
       });
     } catch (err) {
       setMessages((prev) => [

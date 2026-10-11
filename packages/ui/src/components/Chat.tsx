@@ -64,7 +64,7 @@ interface ChatProps {
    */
   groupPeers?: { id: string; name: string; hue: number; active: boolean; done: boolean }[];
   onSend: (text: string, images?: Array<{ path: string; mime: string; name?: string; url?: string }>) => void;
-  onInterject?: (text: string) => void;
+  onInterject?: (text: string, images?: Array<{ path: string; mime: string; name?: string; url?: string }>) => void;
   onStop: () => void;
   onConfirm: () => void;
   onDismissConfirm: () => void;
@@ -1221,13 +1221,13 @@ export function Chat({
     // While a turn is running the same box appends context instead of
     // interrupting it — the agent folds it in at the next iteration.
     if (isLoading) {
-      onInterject?.(message);
+      onInterject?.(message, images);
+      setAttachments([]);
       /*
-       * The chips STAY when interjecting.
+       * The chips GO when interjecting: they really went out with it (paths in the same
        *
-       * A mid-turn addition is text only, so clearing them here would delete the attachment the
-       * user is looking at while telling them nothing — they would believe the image went out with
-       * the interjection. Leaving them in the box is the honest signal: still not sent.
+       * `[用户补充]` message the server stores), so leaving them in the box would now be the
+       * dishonest signal — it would say "still not sent" about something already sent.
        */
       setInput('');
       setMentionOpen(false);

@@ -76,16 +76,18 @@ function clipboardWithImage() {
   };
 }
 
-function mount(behaviour: 'ok' | 'fail' = 'ok') {
+function mount(behaviour: 'ok' | 'fail' = 'ok', opts: { isLoading?: boolean } = {}) {
   const sent: Array<{ text: string; images?: Array<{ path: string; mime: string }> }> = [];
+  const interjected: Array<{ text: string; images?: Array<{ path: string; mime: string }> }> = [];
   const { uploads } = installFetch(behaviour);
   const view = render(
     <Chat
       messages={[]}
-      isLoading={false}
+      isLoading={opts.isLoading ?? false}
       pendingConfirm={null}
       pendingPatch={null}
       onSend={(text, images) => { sent.push({ text, images }); }}
+      onInterject={(text, images) => { interjected.push({ text, images }); }}
       onStop={vi.fn()}
       onConfirm={vi.fn()}
       onDismissConfirm={vi.fn()}
@@ -100,7 +102,7 @@ function mount(behaviour: 'ok' | 'fail' = 'ok') {
       await new Promise((r) => setTimeout(r, 0));
     });
   };
-  return { view, textarea, sent, uploads, paste };
+  return { view, textarea, sent, interjected, uploads, paste };
 }
 
 beforeEach(() => {
@@ -183,9 +185,9 @@ describe('粘贴图片', () => {
     expect(sendBtn.disabled).toBe(true);
   });
 
-  it('回合进行中追加文字：附件留在输入框里，不会被悄悄丢掉', async () => {
+  it('回合进行中追加：附件跟着一起发，输入框随之清空', async () => {
     const sent: string[] = [];
-    const interjected: string[] = [];
+    const interjected: Array<{ text: string; images?: Array<{ path: string; mime: string }> }> = [];
     installFetch();
     const view = render(
       <Chat
@@ -194,7 +196,7 @@ describe('粘贴图片', () => {
         pendingConfirm={null}
         pendingPatch={null}
         onSend={(text) => { sent.push(text); }}
-        onInterject={(text) => { interjected.push(text); }}
+        onInterject={(text, images) => { interjected.push({ text, images }); }}
         onStop={vi.fn()}
         onConfirm={vi.fn()}
         onDismissConfirm={vi.fn()}
@@ -214,8 +216,10 @@ describe('粘贴图片', () => {
 
     expect(interjected.length).toBe(1);
     expect(sent.length).toBe(0);
-    // 中途追加只支持文字，所以附件必须还在：chip 在 = 还没发出去。
-    expect(view.container.querySelector('img[src*="/api/attachments/file"]')).toBeTruthy();
+    // 现在中途追加也把附件带上（onInterject 的第二个参数），所以 chip 必须清掉 ——
+    // 留着它反而是在说"还没发出去"。
+    expect(interjected[0].images?.[0]?.path).toBeTruthy();
+    expect(view.container.querySelector('img[src*="/api/attachments/file"]')).toBeNull();
   });
 });
 
@@ -279,3 +283,4 @@ describe('重新载入会话时的附件', () => {
     expect(view.container.textContent).toContain('b.png');
   });
 });
+

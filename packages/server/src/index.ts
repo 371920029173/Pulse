@@ -3180,11 +3180,21 @@ const STREAM_PERSIST_MS = 10_000;
    * the text in at its next tool-loop iteration.
    */
   router.post('/api/chat/interject', async (req, res) => {
-    const body = await parseBody<{ message?: string; session_id?: string }>(req);
+    const body = await parseBody<{ message?: string; session_id?: string; images?: Array<{ path?: string; mime?: string }> }>(req);
     const text = String(body.message ?? '').trim();
-    if (!text) throw new HttpError(400, 'Missing required field: message');
+    /*
+     * 与 /api/chat 同一套校验与上限：追加不是第二个更松的入口。
+     * 一张图不说一个字也是话（同 /api/chat 的语义），所以 text 为空但有附件时放行。
+     */
+    const images = Array.isArray(body.images)
+      ? body.images
+        .map((i) => ({ path: String(i?.path ?? '').trim(), mime: String(i?.mime ?? '').trim() }))
+        .filter((i) => i.path)
+        .slice(0, MAX_CHAT_IMAGES)
+      : undefined;
+    if (!text && !images?.length) throw new HttpError(400, 'Missing required field: message');
     const agent = agentFor(req, body);
-    agent.interject(text);
+    agent.interject(text, images);
     persistHistory(sessionIdOf(req, body));
     sendJSON(res, { ok: true, queued: text.length });
   });
