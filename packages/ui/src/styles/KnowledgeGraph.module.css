@@ -288,3 +288,29 @@
 .menuLabel { flex: 1 1 auto; }
 
 .menuChord { color: var(--text-muted); font-size: 11px; }
+
+/* 小地图（地铁导览图）：细线直连 + 小圆点当站 + 方框圈出当前看得见的范围 */
+.mini {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  cursor: pointer;
+}
+
+.mini:hover { border-color: var(--accent); }
+
+.miniEdge { stroke: var(--border); stroke-width: 1; }
+
+.miniNode { fill: var(--text-secondary); }
+
+.miniNodeDim { fill: var(--text-muted); opacity: 0.5; }
+
+.miniViewport {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  opacity: 0.8;
+}

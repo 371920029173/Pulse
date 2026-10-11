@@ -7,7 +7,8 @@
  *   · 其余（兄弟分支及其子组）画成**没有标签的小点** —— 一眼能看出"那边还有东西"，
  *     但不会抢走注意力（上一版把它们画成带标签的方块，一屏糊成一片，用户说"不好看也不易观看"）
  *
- * 读法（VOSviewer 式）：滚轮缩放、空白处拖拽平移、拖动节点改位置；缩放时光标下的点不动。
+ * 读法（VOSviewer 式）：滚轮缩放、空白处拖拽平移、拖动节点改位置；缩放时光标下的点不动；
+ * 右下角有一个**地铁导览图式小地图**（整层缩略 + 圈出当前视野，点一下跳过去），可折叠。
  *
  * 操作（Windows 资源管理器式，用户明确要求"像 Windows 一样"）：
  *   · 单击选中、双击进入 / 打开、**右键出上下文菜单**（菜单里带快捷键提示）
@@ -22,6 +23,7 @@ import { fetchJSON } from '../lib/api';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { t } from '../lib/i18n';
 import { actionForChord, chordFromEvent, loadShortcuts, SHORTCUT_ACTIONS } from '../lib/shortcuts';
+import { KnowledgeGraphMiniMap, type MiniNode } from './KnowledgeGraphMiniMap';
 import styles from '../styles/KnowledgeGraph.module.css';
 
 /** 与 server 的 GroupTreeNode 对齐（树里只有计数，没有记忆本身）。 */
@@ -144,6 +146,15 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   const [menu, setMenu] = useState<{ x: number; y: number; node: NodeView | null } | null>(null);
   /** 快捷键表：用户改过的绑定存在 localStorage，面板打开时读一次。 */
   const shortcuts = useMemo(() => loadShortcuts(), []);
+  /** 小地图开合：记在 sessionStorage —— 关掉白板再开还是关的，重启应用回到默认（开）。 */
+  const [showMap, setShowMap] = useState(() => {
+    try { return sessionStorage.getItem('she.graph.minimap') !== '0'; } catch { return true; }
+  });
+  const toggleMap = () => setShowMap((s) => {
+    const next = !s;
+    try { sessionStorage.setItem('she.graph.minimap', next ? '1' : '0'); } catch { /* 无痕模式等：不影响功能 */ }
+    return next;
+  });
 
   const loadTree = useCallback(() => {
     /*
@@ -468,6 +479,18 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
     'graph.merge': t('并入当前组'),
   };
 
+  /** 小地图要的：节点的世界坐标 + 半径 + 状态（小地图只做缩放，不算布局）。 */
+  const miniNodes = useMemo<MiniNode[]>(
+    () => views.map((v) => ({ id: v.id, x: posOf(v.id).x, y: posOf(v.id).y, r: radiusOf(v), state: v.state, kind: v.kind })),
+    [views, moved, layout],
+  );
+  /** 主视图此刻看得见的世界坐标范围；DOM 尺寸读不到时给个合理默认，下一帧就对了。 */
+  const worldView = useMemo(() => {
+    const w = boardRef.current?.clientWidth || 1200;
+    const h = boardRef.current?.clientHeight || 620;
+    return { x: -view.x / view.k, y: -view.y / view.k, w: w / view.k, h: h / view.k };
+  }, [view]);
+
   const crumb = useMemo(() => {
     const chain: Array<{ id: string | null; name: string }> = [{ id: null, name: t('目录根') }];
     if (!current) return chain;
@@ -504,6 +527,9 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
         </button>
         <button type="button" className={styles.chip} onClick={resetView}>
           {t('重置视图')}
+        </button>
+        <button type="button" className={styles.chip} onClick={toggleMap}>
+          {showMap ? t('隐藏小地图') : t('小地图')}
         </button>
         <span className={styles.pending}>
           {ops.length ? t('待同步 {n} 项', { n: ops.length }) : t('没有待同步的改动')}
@@ -667,6 +693,20 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
 
         {views.some((v) => v.state === 'dim') ? (
           <div className={styles.more}>{t('灰点是其他分支（每个 6 像素，最多画 {n} 个）', { n: MAX_DIM })}</div>
+        ) : null}
+
+        {showMap ? (
+          <KnowledgeGraphMiniMap
+            nodes={miniNodes}
+            edges={edges}
+            world={worldView}
+            onJump={(wx, wy) => {
+              // "把主视图中心移到这里"：世界坐标 → 平移量要按中心反算，不能直接当平移用
+              const r = boardRef.current?.getBoundingClientRect();
+              if (!r) return;
+              setView((v) => ({ ...v, x: r.width / 2 - wx * v.k, y: r.height / 2 - wy * v.k }));
+            }}
+          />
         ) : null}
       </div>
 
