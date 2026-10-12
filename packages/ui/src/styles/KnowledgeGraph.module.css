@@ -103,7 +103,7 @@
 .hint {
   margin: 8px 16px;
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
 }
 
 .error {
@@ -181,6 +181,15 @@
 
 .board:active { cursor: grabbing; }
 
+/* 视频/图片壁纸模式下，全局那套玻璃规则让内容面半透明 —— 图里的颜色是按主题 token 画的，
+   壁纸透进来（尤其深色的视频帧）就会把标签吃掉。白板给自己留一块近乎不透明的底板。 */
+:global(html[data-bg="video"]) .board,
+:global(html[data-bg="image"]) .board {
+  background-color: color-mix(in srgb, var(--bg-primary) 96%, transparent);
+  backdrop-filter: blur(14px) saturate(120%);
+  -webkit-backdrop-filter: blur(14px) saturate(120%);
+}
+
 .canvas {
   position: absolute;
   inset: 0;
@@ -188,8 +197,9 @@
   height: 100%;
 }
 
+/* 原来用 --border（透明度 0.18）：深色底上几乎看不见，线一断图的形状就散了 */
 .edge {
-  stroke: var(--border);
+  stroke: color-mix(in srgb, var(--text-muted) 42%, transparent);
   stroke-width: 1.25;
 }
 
@@ -201,7 +211,7 @@
 
 .circle {
   fill: var(--bg-tertiary);
-  stroke: var(--border);
+  stroke: color-mix(in srgb, var(--accent) 32%, var(--border));
   stroke-width: 1.5;
 }
 
@@ -215,7 +225,13 @@
 
 .label {
   font-size: 12px;
-  fill: var(--text-secondary);
+  /* 用最亮的文字色，再描一圈底色的边（paint-order: stroke 把描边压到填充下面）——
+     底是深是浅、有没有壁纸，字都读得出来。 */
+  fill: var(--text-primary);
+  paint-order: stroke;
+  stroke: var(--bg-primary);
+  stroke-width: 3px;
+  stroke-linejoin: round;
   pointer-events: none;
 }
 
@@ -225,7 +241,8 @@
 .current .label { fill: var(--text-primary); font-weight: 600; }
 
 /* 当前层的孩子：正常 */
-.scope .circle { fill: var(--bg-secondary); }
+/* 组带一点强调色 —— 和"实心的记忆节点"一眼分得开 */
+.scope .circle { fill: color-mix(in srgb, var(--accent) 16%, var(--bg-secondary)); }
 
 /* 祖先：能点着返回，但它不在当前层 —— 虚线边 */
 .ancestor .circle { fill: var(--bg-secondary); stroke-dasharray: 4 3; }
@@ -233,7 +250,7 @@
 /* 其他分支：没有标签的小点（这就是"看得清"的关键） */
 .dim .circle { fill: var(--text-muted); stroke: none; opacity: 0.5; }
 
-.memory .circle { fill: var(--bg-secondary); stroke-dasharray: 2 2; }
+.memory .circle { fill: var(--bg-tertiary); stroke-dasharray: 2 2; }
 
 .selected .circle { stroke: var(--accent); stroke-width: 2.5; }
 
@@ -244,7 +261,7 @@
   padding: 4px 10px;
   border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: 11px;
   pointer-events: none;
 }

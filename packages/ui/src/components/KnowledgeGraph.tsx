@@ -54,6 +54,8 @@ interface NodeView {
   state: 'current' | 'scope' | 'ancestor' | 'dim';
   /** 内容量：组用 memoryCount，记忆固定 1 —— 决定圆的半径（越大越重）。 */
   weight: number;
+  /** 组里装了多少条记忆（记忆节点是 0）—— 直接写在标签上，不点进去也知道里面有什么。 */
+  count: number;
 }
 
 /** 与 server 的 KbOp 同形（界面不 import @she/kb —— 那是后端的包）。 */
@@ -188,10 +190,10 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
     if (!tree) return [];
     const out: NodeView[] = [];
     const seen = new Set<string>();
-    const push = (id: string, name: string, state: NodeView['state'], weight = 1) => {
+    const push = (id: string, name: string, state: NodeView['state'], weight = 1, count = 0) => {
       if (seen.has(id)) return;
       seen.add(id);
-      out.push({ id, kind: 'group', name, state, weight });
+      out.push({ id, kind: 'group', name, state, weight, count });
     };
 
     const all = new Map<string, TreeNode>();
@@ -201,8 +203,8 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
     if (!current) {
       // 根视图：顶层组 + 它们的直接子组（用户例子：白板上就展示根组、A、B）
       for (const n of tree) {
-        push(n.id, n.name, 'scope', 1 + (n.memoryCount ?? 0));
-        for (const c of n.children ?? []) push(c.id, c.name, 'scope', 1 + (c.memoryCount ?? 0));
+        push(n.id, n.name, 'scope', 1 + (n.memoryCount ?? 0), n.memoryCount ?? 0);
+        for (const c of n.children ?? []) push(c.id, c.name, 'scope', 1 + (c.memoryCount ?? 0), c.memoryCount ?? 0);
       }
     } else {
       // 祖先链（含当前组）
@@ -211,26 +213,48 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
       while (walkId) { chain.unshift(walkId); walkId = parent.get(walkId) ?? null; }
       for (const id of chain) {
         const n = all.get(id);
-        if (n) push(id, n.name, id === current ? 'current' : 'ancestor', 1 + (n.memoryCount ?? 0));
+        if (n) push(id, n.name, id === current ? 'current' : 'ancestor', 1 + (n.memoryCount ?? 0), n.memoryCount ?? 0);
       }
       // 当前层的子组 + 记忆
-      for (const c of level?.children ?? []) push(c.id, c.name ?? '?', 'scope', 1 + (all.get(c.id)?.memoryCount ?? 0));
+      for (const c of level?.children ?? []) push(c.id, c.name ?? '?', 'scope', 1 + (all.get(c.id)?.memoryCount ?? 0), all.get(c.id)?.memoryCount ?? 0);
       for (const m of level?.memories ?? []) {
         if (m.isRetired) continue;
-        out.push({ id: m.id, kind: 'memory', name: m.title, state: 'scope', weight: 1 });
+        out.push({ id: m.id, kind: 'memory', name: m.title, state: 'scope', weight: 1, count: 0 });
       }
       // 兄弟分支及其子组：**只当小点**（不写标签），这是"看得清"的关键
       const parentId = parent.get(current) ?? null;
       const siblings = parentId ? (all.get(parentId)?.children ?? []) : tree;
       for (const s of siblings) {
         if (s.id === current) continue;
-        push(s.id, s.name, 'dim', 1 + (s.memoryCount ?? 0));
-        for (const c of s.children ?? []) push(c.id, c.name, 'dim', 1 + (c.memoryCount ?? 0));
+        push(s.id, s.name, 'dim', 1 + (s.memoryCount ?? 0), s.memoryCount ?? 0);
+        for (const c of s.children ?? []) push(c.id, c.name, 'dim', 1 + (c.memoryCount ?? 0), c.memoryCount ?? 0);
       }
     }
     const dims = out.filter((v) => v.state === 'dim');
     return dims.length > MAX_DIM ? out.filter((v) => v.state !== 'dim' || dims.slice(0, MAX_DIM).includes(v)) : out;
   }, [tree, current, level, parent]);
+
+  /**
+   * 标签怎么写才看得见（用户的第二次反馈："还是看不到内容"）。
+   *
+   * 组的名字是**整条路径**（project/digbug/findings/part-4）：按头部截断的话，同一层的标签全长成
+   * "project/digbug/fin…"，彼此一样、也看不出在哪一层 —— 等于没有信息。所以组从**尾部**取，上面的
+   * 层用 "…/" 表示；组再带上它装了多少条记忆。记忆的标题是自然语言，从头截断本来就对。
+   */
+  const labelFor = (v: NodeView): string => {
+    const LIMIT = 22;
+    let text = v.name;
+    if (text.length > LIMIT) {
+      if (v.kind === 'memory') {
+        text = `${text.slice(0, LIMIT)}…`;
+      } else {
+        const tail = text.slice(-LIMIT);
+        const cut = tail.indexOf('/');
+        text = `…/${cut > 0 && cut < tail.length - 1 ? tail.slice(cut + 1) : tail}`;
+      }
+    }
+    return v.kind === 'group' && v.count > 0 ? `${text} · ${v.count}` : text;
+  };
 
   /** 半径：内容越多越大（对数压缩，免得一个巨大的组把别的都盖住）；小点固定很小。 */
   const radiusOf = (v: NodeView) => {
@@ -681,9 +705,13 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
                   {v.state === 'current' ? <circle className={styles.ring} r={r + 6} /> : null}
                   <circle className={styles.circle} r={r} />
                   {v.state !== 'dim' ? (
-                    <text className={styles.label} y={r + 15} textAnchor="middle">
-                      {v.name.length > 18 ? `${v.name.slice(0, 18)}…` : v.name}
-                    </text>
+                    <>
+                      {/* 悬停看全名：标签放不下整条路径 */}
+                      <title>{v.kind === 'group' ? t('组：{name}（{n} 条记忆）', { name: v.name, n: v.count }) : v.name}</title>
+                      <text className={styles.label} y={r + 15} textAnchor="middle">
+                        {labelFor(v)}
+                      </text>
+                    </>
                   ) : null}
                 </g>
               );

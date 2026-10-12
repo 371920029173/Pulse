@@ -317,3 +317,30 @@ describe('知识图谱（形状对不上要说出来）', () => {
     expect(view.container.textContent).toContain('返回的形状不对');
   });
 });
+
+describe('知识图谱（标签：看得到内容）', () => {
+  it('长路径的组按尾部截断并带上记忆条数，悬停有全名', async () => {
+    /*
+     * 用的是真实那一层的形状：project/digbug/findings/part-4、12 条记忆。
+     * 旧的写法会渲染成 "project/digbug/fin…" —— 同一层每个标签都一样，等于没有信息。
+     */
+    const LONG = [{ id: 'g1', name: 'project/digbug/findings/part-4', children: [], memoryCount: 12 }];
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => {
+      const url = String(input);
+      const body = url.includes('/api/kb/tree') ? { tree: LONG }
+        : url.includes('/api/kb/groups/') ? { group: { id: 'g1', name: 'project/digbug/findings/part-4' }, children: [], memories: [] }
+        : {};
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch);
+
+    const view = render(<KnowledgeGraph onClose={() => {}} />);
+    await flush();
+    const text = view.container.textContent ?? '';
+    expect(text).toContain('…/findings/part-4');
+    expect(text).toContain('· 12');
+    expect(text).not.toContain('project/digbug/fin…');
+    // 悬停能看到全名与条数（标签放不下整条路径）
+    const g = node(view.container, 'part-4');
+    expect(g?.querySelector('title')?.textContent ?? '').toContain('project/digbug/findings/part-4');
+  });
+});
