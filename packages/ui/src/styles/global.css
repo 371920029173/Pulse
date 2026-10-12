@@ -736,6 +736,25 @@ select:focus-visible {
 }
 
 /* Theme switch crossfade (scoped — avoid lagging every transform) */
+/* ── 知识图谱白板的"纸与墨"（两种主题下同一套值）────────────────────────────
+   白板是它自己的表面 —— 一张白纸。之前它跟着界面 token 走：深色主题下画布变黑，再叠上
+   壁纸模式那层玻璃规则，标签和连线都被吃掉（用户连报两次"看不到内容"，第二次也说
+   "背景也不是白的"）。所以这组 token 描述的是纸和墨，不是界面的面料，故意不放进主题块。 */
+:root {
+  --graph-paper: #ffffff;
+  --graph-ink: #1f2328;
+  --graph-ink-soft: #5b636d;
+  --graph-edge: #c3cbd6;
+  --graph-accent: #2f6fed;
+  /* 六个分支色：饱和度接近、亮度分开（节点按分支取色，看得出"一簇一簇"） */
+  --graph-node-1: #4c8bf5;
+  --graph-node-2: #e08a3c;
+  --graph-node-3: #3fae8f;
+  --graph-node-4: #a86fd6;
+  --graph-node-5: #d5605f;
+  --graph-node-6: #7f9c3a;
+}
+
 html[data-theme] {
   transition: background-color 320ms var(--ease-sheet), color 320ms var(--ease-sheet);
 }

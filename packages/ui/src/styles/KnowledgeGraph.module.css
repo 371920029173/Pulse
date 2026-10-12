@@ -174,21 +174,13 @@
   position: relative;
   flex: 1 1 auto;
   overflow: hidden;
-  background: var(--bg-primary);
+  background: var(--graph-paper);
   touch-action: none;
   cursor: grab;
 }
 
 .board:active { cursor: grabbing; }
 
-/* 视频/图片壁纸模式下，全局那套玻璃规则让内容面半透明 —— 图里的颜色是按主题 token 画的，
-   壁纸透进来（尤其深色的视频帧）就会把标签吃掉。白板给自己留一块近乎不透明的底板。 */
-:global(html[data-bg="video"]) .board,
-:global(html[data-bg="image"]) .board {
-  background-color: color-mix(in srgb, var(--bg-primary) 96%, transparent);
-  backdrop-filter: blur(14px) saturate(120%);
-  -webkit-backdrop-filter: blur(14px) saturate(120%);
-}
 
 .canvas {
   position: absolute;
@@ -197,9 +189,8 @@
   height: 100%;
 }
 
-/* 原来用 --border（透明度 0.18）：深色底上几乎看不见，线一断图的形状就散了 */
 .edge {
-  stroke: color-mix(in srgb, var(--text-muted) 42%, transparent);
+  stroke: var(--graph-edge);
   stroke-width: 1.25;
 }
 
@@ -207,52 +198,57 @@
 
 .node:active { cursor: grabbing; }
 
-.node:focus-visible .circle { stroke: var(--accent); stroke-width: 2.5; }
+.node:focus-visible .circle { stroke: var(--graph-accent); stroke-width: 2.5; }
 
+/* 每个节点带自己的色相（--kg-hue 由组件给出）；描边比填充深一档 */
 .circle {
-  fill: var(--bg-tertiary);
-  stroke: color-mix(in srgb, var(--accent) 32%, var(--border));
+  fill: var(--kg-hue, var(--graph-node-1));
+  stroke: color-mix(in srgb, var(--kg-hue, var(--graph-node-1)) 70%, var(--graph-ink));
   stroke-width: 1.5;
 }
 
 /* 当前节点多一道外环：一眼看出「我在哪」 */
 .ring {
   fill: none;
-  stroke: var(--accent);
+  stroke: var(--graph-accent);
   stroke-width: 2;
-  opacity: 0.65;
+  opacity: 0.7;
 }
 
 .label {
   font-size: 12px;
-  /* 用最亮的文字色，再描一圈底色的边（paint-order: stroke 把描边压到填充下面）——
-     底是深是浅、有没有壁纸，字都读得出来。 */
-  fill: var(--text-primary);
+  /* 墨色 + 一圈纸色的边（paint-order: stroke 把描边压到填充下面）：
+     白纸上、压在节点上、与连线交叠处都读得出来。 */
+  fill: var(--graph-ink);
   paint-order: stroke;
-  stroke: var(--bg-primary);
+  stroke: var(--graph-paper);
   stroke-width: 3px;
   stroke-linejoin: round;
   pointer-events: none;
 }
 
 /* 当前组：亮 */
-.current .circle { fill: var(--accent); stroke: var(--accent); }
+.current .circle { stroke: var(--graph-accent); stroke-width: 2.5; }
 
-.current .label { fill: var(--text-primary); font-weight: 600; }
+.current .label { fill: var(--graph-ink); font-weight: 600; }
 
 /* 当前层的孩子：正常 */
-/* 组带一点强调色 —— 和"实心的记忆节点"一眼分得开 */
-.scope .circle { fill: color-mix(in srgb, var(--accent) 16%, var(--bg-secondary)); }
+/* 组描边更重一档 —— 和"淡洗的记忆节点"一眼分得开 */
+.scope .circle { stroke-width: 2; }
 
 /* 祖先：能点着返回，但它不在当前层 —— 虚线边 */
-.ancestor .circle { fill: var(--bg-secondary); stroke-dasharray: 4 3; }
+.ancestor .circle { opacity: 0.78; stroke-dasharray: 4 3; }
 
 /* 其他分支：没有标签的小点（这就是"看得清"的关键） */
-.dim .circle { fill: var(--text-muted); stroke: none; opacity: 0.5; }
+.dim .circle { fill: var(--graph-edge); stroke: none; opacity: 0.7; }
 
-.memory .circle { fill: var(--bg-tertiary); stroke-dasharray: 2 2; }
+/* 记忆：同一个色相的淡洗版本 + 虚线边 */
+.memory .circle {
+  fill: color-mix(in srgb, var(--kg-hue, var(--graph-node-1)) 20%, var(--graph-paper));
+  stroke-dasharray: 2 2;
+}
 
-.selected .circle { stroke: var(--accent); stroke-width: 2.5; }
+.selected .circle { stroke: var(--graph-accent); stroke-width: 2.5; }
 
 .more {
   position: absolute;
@@ -260,13 +256,13 @@
   bottom: 12px;
   padding: 4px 10px;
   border-radius: var(--radius-sm);
-  background: var(--bg-tertiary);
-  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--graph-ink) 7%, var(--graph-paper));
+  color: var(--graph-ink-soft);
   font-size: 11px;
   pointer-events: none;
 }
 
-.empty { padding: 24px; color: var(--text-muted); font-size: 13px; }
+.empty { padding: 24px; color: var(--graph-ink-soft); font-size: 13px; }
 
 /* 右键上下文菜单（Windows 式：贴着光标弹出，右侧写快捷键提示） */
 .menu {
@@ -312,23 +308,23 @@
   position: absolute;
   right: 12px;
   bottom: 12px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--graph-edge);
   border-radius: var(--radius-sm);
-  background: var(--bg-secondary);
+  background: var(--graph-paper);
   cursor: pointer;
 }
 
-.mini:hover { border-color: var(--accent); }
+.mini:hover { border-color: var(--graph-accent); }
 
-.miniEdge { stroke: var(--border); stroke-width: 1; }
+.miniEdge { stroke: var(--graph-edge); stroke-width: 1; }
 
-.miniNode { fill: var(--text-secondary); }
+.miniNode { fill: var(--graph-ink-soft); }
 
-.miniNodeDim { fill: var(--text-muted); opacity: 0.5; }
+.miniNodeDim { fill: var(--graph-edge); opacity: 0.6; }
 
 .miniViewport {
   fill: none;
-  stroke: var(--accent);
+  stroke: var(--graph-accent);
   stroke-width: 1.5;
   opacity: 0.8;
 }

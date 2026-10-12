@@ -18,7 +18,7 @@
  * 数据来源：结构来自 /api/kb/tree（返回 { tree: […] }，树里**不含记忆**），
  * 某一层的记忆来自 /api/kb/groups/:id（返回 { group, children, memories }）。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { fetchJSON } from '../lib/api';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { t } from '../lib/i18n';
@@ -56,6 +56,8 @@ interface NodeView {
   weight: number;
   /** 组里装了多少条记忆（记忆节点是 0）—— 直接写在标签上，不点进去也知道里面有什么。 */
   count: number;
+  /** 色相序号（0..5）—— 组件把它写进 --kg-hue，填充与描边都从那儿取。 */
+  slot: number;
 }
 
 /** 与 server 的 KbOp 同形（界面不 import @she/kb —— 那是后端的包）。 */
@@ -95,6 +97,38 @@ interface Props {
 const CENTER = { x: 700, y: 460 };
 /** 灰色小点的上限：多了画不下，也读不出信息。 */
 const MAX_DIM = 60;
+
+/**
+ * 取色序号（0..5）：哈希只用来定色 —— 同一个节点每次打开都是同一种颜色，换主题换壁纸都不变。
+ * 根视图里子组继承顶层分支的颜色，于是"一簇一簇"看得出来。
+ */
+function slotOf(id: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return Math.abs(h) % 6;
+}
+
+/**
+ * 把一组世界坐标点缩放到框里（留边距）。
+ * 白板重排后固定 k=1 常常只看到一角，所以进面板与"重置视图"都走这里。
+ * 框太小（jsdom 里 getBoundingClientRect 全是 0）就退回 1:1 —— 判据不受影响。
+ */
+function fitTransform(
+  box: { width: number; height: number } | undefined,
+  pts: Array<{ x: number; y: number }>,
+): { x: number; y: number; k: number } {
+  if (!box || box.width < 10 || box.height < 10 || !pts.length) return { x: 0, y: 0, k: 1 };
+  const pad = 90;
+  const xs = pts.map((p) => p.x);
+  const ys = pts.map((p) => p.y);
+  const minX = Math.min(...xs) - pad, maxX = Math.max(...xs) + pad;
+  const minY = Math.min(...ys) - pad, maxY = Math.max(...ys) + pad;
+  const k = Math.min(1.2, Math.max(0.25, Math.min(box.width / (maxX - minX), box.height / (maxY - minY))));
+  return { k, x: box.width / 2 - ((minX + maxX) / 2) * k, y: box.height / 2 - ((minY + maxY) / 2) * k };
+}
 
 function indexTree(roots: TreeNode[]): { parent: Map<string, string | null> } {
   const parent = new Map<string, string | null>();
@@ -190,10 +224,10 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
     if (!tree) return [];
     const out: NodeView[] = [];
     const seen = new Set<string>();
-    const push = (id: string, name: string, state: NodeView['state'], weight = 1, count = 0) => {
+    const push = (id: string, name: string, state: NodeView['state'], weight = 1, count = 0, slot = 0) => {
       if (seen.has(id)) return;
       seen.add(id);
-      out.push({ id, kind: 'group', name, state, weight, count });
+      out.push({ id, kind: 'group', name, state, weight, count, slot });
     };
 
     const all = new Map<string, TreeNode>();
@@ -202,10 +236,12 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
 
     if (!current) {
       // 根视图：顶层组 + 它们的直接子组（用户例子：白板上就展示根组、A、B）
-      for (const n of tree) {
-        push(n.id, n.name, 'scope', 1 + (n.memoryCount ?? 0), n.memoryCount ?? 0);
-        for (const c of n.children ?? []) push(c.id, c.name, 'scope', 1 + (c.memoryCount ?? 0), c.memoryCount ?? 0);
-      }
+      // 子组继承顶层分支的色相 —— 一圈下来是几簇颜色，不是一片同色
+      tree.forEach((n, i) => {
+        const slot = i % 6;
+        push(n.id, n.name, 'scope', 1 + (n.memoryCount ?? 0), n.memoryCount ?? 0, slot);
+        for (const c of n.children ?? []) push(c.id, c.name, 'scope', 1 + (c.memoryCount ?? 0), c.memoryCount ?? 0, slot);
+      });
     } else {
       // 祖先链（含当前组）
       const chain: string[] = [];
@@ -213,21 +249,21 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
       while (walkId) { chain.unshift(walkId); walkId = parent.get(walkId) ?? null; }
       for (const id of chain) {
         const n = all.get(id);
-        if (n) push(id, n.name, id === current ? 'current' : 'ancestor', 1 + (n.memoryCount ?? 0), n.memoryCount ?? 0);
+        if (n) push(id, n.name, id === current ? 'current' : 'ancestor', 1 + (n.memoryCount ?? 0), n.memoryCount ?? 0, slotOf(id));
       }
       // 当前层的子组 + 记忆
-      for (const c of level?.children ?? []) push(c.id, c.name ?? '?', 'scope', 1 + (all.get(c.id)?.memoryCount ?? 0), all.get(c.id)?.memoryCount ?? 0);
+      for (const c of level?.children ?? []) push(c.id, c.name ?? '?', 'scope', 1 + (all.get(c.id)?.memoryCount ?? 0), all.get(c.id)?.memoryCount ?? 0, slotOf(c.id));
       for (const m of level?.memories ?? []) {
         if (m.isRetired) continue;
-        out.push({ id: m.id, kind: 'memory', name: m.title, state: 'scope', weight: 1, count: 0 });
+        out.push({ id: m.id, kind: 'memory', name: m.title, state: 'scope', weight: 1, count: 0, slot: slotOf(m.id) });
       }
       // 兄弟分支及其子组：**只当小点**（不写标签），这是"看得清"的关键
       const parentId = parent.get(current) ?? null;
       const siblings = parentId ? (all.get(parentId)?.children ?? []) : tree;
       for (const s of siblings) {
         if (s.id === current) continue;
-        push(s.id, s.name, 'dim', 1 + (s.memoryCount ?? 0), s.memoryCount ?? 0);
-        for (const c of s.children ?? []) push(c.id, c.name, 'dim', 1 + (c.memoryCount ?? 0), c.memoryCount ?? 0);
+        push(s.id, s.name, 'dim', 1 + (s.memoryCount ?? 0), s.memoryCount ?? 0, slotOf(s.id));
+        for (const c of s.children ?? []) push(c.id, c.name, 'dim', 1 + (c.memoryCount ?? 0), c.memoryCount ?? 0, slotOf(c.id));
       }
     }
     const dims = out.filter((v) => v.state === 'dim');
@@ -256,6 +292,9 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
     return v.kind === 'group' && v.count > 0 ? `${text} · ${v.count}` : text;
   };
 
+  /** 节点的色相：写进 --kg-hue，填充/描边都从那儿取（不用动态类名 —— 死 CSS 棘轮看不见动态类名）。 */
+  const hueOf = (v: NodeView) => `var(--graph-node-${(v.slot % 6) + 1})`;
+
   /** 半径：内容越多越大（对数压缩，免得一个巨大的组把别的都盖住）；小点固定很小。 */
   const radiusOf = (v: NodeView) => {
     if (v.state === 'dim') return 6;
@@ -264,8 +303,12 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   };
 
   /**
-   * 径向布局（确定性，不用力导向 —— 力导向每帧都在动，既写不出稳定判据，用户也没法建立空间记忆）。
-   * 环半径按节点数自适应，免得几十个子组挤成一团。
+   * 径向布局（确定性；不用力导向 —— 力导向每帧都在动，写不出稳定判据，用户也没法建立空间记忆）。
+   *
+   * 2026-10-12 重写：旧算法拿**固定**半径（30/26px）估环周长，节点越多、越大，环就越不够长 ——
+   * 四十个节点挤成一圈、标签互相盖住（用户："这些点排列的有点密集"）。现在两件事做对了：
+   *   · 每个节点按**真实半径**和**标签宽度**占弧长（标签比圆宽得多，那才是拥挤的真正原因）；
+   *   · 一环装不下就按弧长预算再开一环（半径递增）；根视图还按层级分环（顶层一圈、子组一圈）。
    */
   const layout = useMemo(() => {
     const pos: Record<string, { x: number; y: number }> = {};
@@ -278,43 +321,83 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
     if (cur) pos[cur.id] = { x: CENTER.x, y: CENTER.y };
     ancestors.slice().reverse().forEach((v, i) => { pos[v.id] = { x: CENTER.x, y: CENTER.y - 150 - i * 80 }; });
 
-    /** 环半径：按周长够不够放（每个节点留 2r+间隔）。 */
-    const ringRadius = (n: number, r: number, min: number) => Math.max(min, Math.ceil((n * (2 * r + 30)) / (2 * Math.PI)));
+    const GAP = 28;         // 相邻节点之间至少留这么多像素
+    const CHAR_W = 6.8;     // 12px 字号下一个字符的近似宽度
+    const MAX_RING = 620;   // 一环的半径上限；超了就把剩下的节点放到下一环
+    const RING_STEP = 120;  // 环与环之间的半径差
+
+    /** 这个节点在环上要占多少弧长：圆的直径与标签宽度取大者。 */
+    const arcOf = (v: NodeView) => {
+      const d = 2 * radiusOf(v) + GAP;
+      if (v.state === 'dim') return d + 6;
+      return Math.max(d, Math.min(labelFor(v).length, 24) * CHAR_W + 20);
+    };
+
+    /**
+     * 把一组节点铺到环上（大节点在前，位置稳定）。返回最外圈的半径。
+     * 角度按**弧长**分配，不是按个数均分 —— 标签宽的节点自然拿到更大的张角。
+     */
+    const placeRings = (list: NodeView[], baseRadius: number): number => {
+      const queue = list.slice().sort((a, b) => (b.weight - a.weight) || a.id.localeCompare(b.id));
+      let ring = 0;
+      let outer = baseRadius;
+      while (queue.length) {
+        const budget = 2 * Math.PI * MAX_RING;
+        const take: NodeView[] = [];
+        let used = 0;
+        while (queue.length) {
+          const a = arcOf(queue[0]);
+          if (take.length && used + a > budget) break;
+          take.push(queue.shift()!);
+          used += a;
+        }
+        const radius = Math.max(baseRadius + ring * RING_STEP, used / (2 * Math.PI));
+        let cum = 0;
+        for (const v of take) {
+          const a = arcOf(v);
+          const angle = -Math.PI / 2 + ((cum + a / 2) / used) * Math.PI * 2;
+          pos[v.id] = { x: CENTER.x + Math.cos(angle) * radius, y: CENTER.y + Math.sin(angle) * radius };
+          cum += a;
+        }
+        outer = radius;
+        ring++;
+        if (ring > 8) break;   // 保险丝：真出意外也不至于转不出来
+      }
+      return outer;
+    };
+
+    /** 下一圈该从哪个半径起：给内圈最大的节点与外圈最大的节点都留出身位，两环才不会撞。 */
+    const ringAfter = (radius: number, inner: NodeView[], outer: NodeView[]) =>
+      radius
+      + (inner.length ? Math.max(...inner.map(radiusOf)) : 0)
+      + (outer.length ? Math.max(...outer.map(radiusOf)) : 0)
+      + 30;
 
     if (!cur) {
-      // 根视图：顶层组与它们的子组各占一环
-      const first = views.filter((v) => v.state === 'scope').slice(0, Math.ceil(views.length / 2));
-      const rest = views.filter((v) => !first.includes(v));
-      const put = (list: NodeView[], radius: number) => {
-        list.forEach((v, i) => {
-          const a = -Math.PI / 2 + (i / Math.max(1, list.length)) * Math.PI * 2;
-          pos[v.id] = { x: CENTER.x + Math.cos(a) * radius, y: CENTER.y + Math.sin(a) * radius };
-        });
-      };
-      put(first, ringRadius(first.length, 30, 220));
-      put(rest, ringRadius(rest.length, 26, 380));
+      // 根视图：顶层组一圈，它们的子组再外一圈（层次看得出来，也不会互相挤）
+      const topLevel = views.filter((v) => v.state === 'scope' && (parent.get(v.id) ?? null) === null);
+      const second = views.filter((v) => v.state === 'scope' && !topLevel.includes(v));
+      const r1 = placeRings(topLevel, 200);
+      if (second.length) placeRings(second, ringAfter(r1, topLevel, second));
     } else {
-      const dr = ringRadius(scopeGroups.length, 30, 200);
-      scopeGroups.forEach((v, i) => {
-        const a = -Math.PI / 2 + (i / Math.max(1, scopeGroups.length)) * Math.PI * 2;
-        pos[v.id] = { x: CENTER.x + Math.cos(a) * dr, y: CENTER.y + Math.sin(a) * dr };
-      });
-      // 记忆再外一圈（错开半个格，免得和子组叠在同一条射线上）
-      const mr = ringRadius(scopeMems.length, 20, dr + 130);
-      scopeMems.forEach((v, i) => {
-        const a = -Math.PI / 2 + Math.PI / Math.max(2, scopeMems.length + 1) + (i / Math.max(1, scopeMems.length)) * Math.PI * 2;
-        pos[v.id] = { x: CENTER.x + Math.cos(a) * mr, y: CENTER.y + Math.sin(a) * mr };
-      });
-      const dimR = ringRadius(dims.length, 10, Math.max(mr, dr) + 150);
-      dims.forEach((v, i) => {
-        const a = -Math.PI / 2 + (i / Math.max(1, dims.length)) * Math.PI * 2;
-        pos[v.id] = { x: CENTER.x + Math.cos(a) * dimR, y: CENTER.y + Math.sin(a) * dimR };
-      });
+      const rGroups = placeRings(scopeGroups, 230);
+      const rMems = scopeMems.length ? placeRings(scopeMems, ringAfter(rGroups, scopeGroups, scopeMems)) : rGroups;
+      if (dims.length) placeRings(dims, ringAfter(Math.max(rMems, rGroups), [...scopeGroups, ...scopeMems], dims));
     }
     return pos;
-  }, [views]);
+  }, [views, parent]);
 
   const posOf = (id: string) => moved[id] ?? layout[id] ?? { x: CENTER.x, y: CENTER.y };
+
+  /*
+   * 进面板 / 换层时自动"看得全"一次。
+   * 只在"这一层该画什么"变了时跑（views 的依赖就是树、当前组、层级）——用户随后的缩放与平移不受干扰。
+   */
+  useEffect(() => {
+    const box = boardRef.current?.getBoundingClientRect();
+    setView(fitTransform(box, views.map((v) => moved[v.id] ?? layout[v.id] ?? { x: CENTER.x, y: CENTER.y })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [views]);
 
   /** 连线：当前组→孩子、祖先→下一个祖先；根视图画顶层→子组。 */
   const edges = useMemo(() => {
@@ -425,7 +508,12 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   const beginCopy = (v: NodeView | null) => { if (v?.kind === 'group') setClipboard({ mode: 'copy', id: v.id }); };
   const beginCut = (v: NodeView | null) => { if (v?.kind === 'group') setClipboard({ mode: 'cut', id: v.id }); };
   const beginCreate = (parentId: string | null) => setNewGroup({ parentId, name: '' });
-  const resetView = () => { setView({ x: 0, y: 0, k: 1 }); setMoved({}); };
+  const resetView = () => {
+    setMoved({});
+    // 以布局为准（刚清掉拖动），把整张图缩放到看得全
+    const box = boardRef.current?.getBoundingClientRect();
+    setView(fitTransform(box, views.map((v) => layout[v.id] ?? { x: CENTER.x, y: CENTER.y })));
+  };
 
   /**
    * 快捷键动作的分发：作用对象是**当前选中的节点**（和资源管理器一致 —— 先选，再按）。
@@ -686,6 +774,7 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
                 <g
                   key={v.id}
                   className={`${cls} ${selected === v.id ? styles.selected : ''}`}
+                  style={{ '--kg-hue': hueOf(v) } as CSSProperties}
                   transform={`translate(${p.x},${p.y})`}
                   role="button"
                   tabIndex={0}

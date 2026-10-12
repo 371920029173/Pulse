@@ -10,6 +10,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, fireEvent, act } from '@testing-library/react';
+import { existsSync, readFileSync } from 'node:fs';
 import { KnowledgeGraph } from '../components/KnowledgeGraph';
 
 /** 根 → A(A1) , B(B1, B2)：用来验"当前层 / 可返回的祖先 / 变灰的其余"。 */
@@ -342,5 +343,93 @@ describe('知识图谱（标签：看得到内容）', () => {
     // 悬停能看到全名与条数（标签放不下整条路径）
     const g = node(view.container, 'part-4');
     expect(g?.querySelector('title')?.textContent ?? '').toContain('project/digbug/findings/part-4');
+  });
+});
+
+describe('知识图谱（白板：不挤、有颜色、白底）', () => {
+  /*
+   * 用户的原话："这些点排列的有点密集，而且没啥颜色，背景也不是白的"。
+   * 这三条守的就是这三件事 —— 旧算法拿固定半径估环周长，节点一多就挤成一圈、标签互相盖。
+   */
+  const WIDE = [{
+    id: 'top', name: '顶层', memoryCount: 5, children: [
+      { id: 'c1', name: 'project/alpha/findings/part-1', memoryCount: 40, children: [] },
+      { id: 'c2', name: 'project/alpha/findings/part-2', memoryCount: 33, children: [] },
+      { id: 'c3', name: 'project/alpha/lessons/part-1', memoryCount: 27, children: [] },
+      { id: 'c4', name: 'project/alpha/lessons/part-2', memoryCount: 21, children: [] },
+      { id: 'c5', name: 'project/beta/accounts', memoryCount: 18, children: [] },
+      { id: 'c6', name: 'project/beta/measurements', memoryCount: 15, children: [] },
+      { id: 'c7', name: 'architecture/testing', memoryCount: 12, children: [] },
+      { id: 'c8', name: 'architecture/ui', memoryCount: 9, children: [] },
+      { id: 'c9', name: 'host/windows', memoryCount: 6, children: [] },
+      { id: 'c10', name: 'errors/shell', memoryCount: 3, children: [] },
+    ],
+  },
+  /* 再来两支顶层：根视图里子组继承所在分支的颜色，一条分支只有一种色 —— fixture 得有好几支，
+     才验得出"有颜色"。真库的顶层本来就分好几支。 */
+  {
+    id: 'top2', name: '第二支', memoryCount: 4, children: [
+      { id: 'd1', name: '第二支/子组一', memoryCount: 8, children: [] },
+      { id: 'd2', name: '第二支/子组二', memoryCount: 5, children: [] },
+    ],
+  },
+  { id: 'top3', name: '第三支', memoryCount: 2, children: [
+    { id: 'e1', name: '第三支/子组', memoryCount: 2, children: [] },
+  ] }];
+
+  function installWide() {
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => {
+      const url = String(input);
+      const body = url.includes('/api/kb/tree') ? { tree: WIDE }
+        : url.includes('/api/kb/groups/') ? { group: { id: 'top', name: '顶层' }, children: [], memories: [] }
+        : {};
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch);
+  }
+
+  /** 从 DOM 里读每个可见节点的圆心、半径与色相。 */
+  const circles = (c: HTMLElement) =>
+    Array.from(c.querySelectorAll('g[role="button"]')).map((g) => {
+      const m = /translate\((-?[\d.]+),(-?[\d.]+)\)/.exec(g.getAttribute('transform') ?? '');
+      const all = g.querySelectorAll('circle');
+      const node = all[all.length - 1];            // 当前节点会先画外环再画本体，取最后一个
+      const hue = /--kg-hue:\s*([^;]+)/.exec(g.getAttribute('style') ?? '')?.[1]?.trim() ?? '';
+      return { x: Number(m?.[1] ?? 0), y: Number(m?.[2] ?? 0), r: Number(node?.getAttribute('r') ?? 0), hue };
+    });
+
+  it('【关键】不挤：任意两个节点的圆心距 ≥ 两个半径之和', async () => {
+    installWide();
+    const view = render(<KnowledgeGraph onClose={() => {}} />);
+    await flush();
+    const ns = circles(view.container);
+    expect(ns.length).toBeGreaterThan(8);
+    const bad: string[] = [];
+    for (let i = 0; i < ns.length; i++) {
+      for (let j = i + 1; j < ns.length; j++) {
+        const d = Math.hypot(ns[i].x - ns[j].x, ns[i].y - ns[j].y);
+        if (d < ns[i].r + ns[j].r) bad.push('#' + i + '(' + ns[i].r + ') 与 #' + j + '(' + ns[j].r + ') 相距 ' + d.toFixed(1) + ' < ' + (ns[i].r + ns[j].r));
+      }
+    }
+    expect(bad).toEqual([]);
+  });
+
+  it('有颜色：每个节点都拿到调色板色相，且不止一种', async () => {
+    installWide();
+    const view = render(<KnowledgeGraph onClose={() => {}} />);
+    await flush();
+    const ns = circles(view.container);
+    expect(ns.length).toBeGreaterThan(8);
+    expect(ns.every((n) => /^var\(--graph-node-[1-6]\)$/.test(n.hue))).toBe(true);
+    expect(new Set(ns.map((n) => n.hue)).size).toBeGreaterThan(1);
+  });
+
+  it('白底：.board 用 --graph-paper，不再跟随会被壁纸吃掉的界面 token', () => {
+    // 包内 cwd（pnpm --filter @she/ui test 与 pnpm -r test 都是它），再加一层仓库根兜底
+    const candidates = ['src/styles/KnowledgeGraph.module.css', 'packages/ui/src/styles/KnowledgeGraph.module.css'];
+    const file = candidates.find((c) => existsSync(c));
+    expect(file, '找不到 KnowledgeGraph.module.css').toBeTruthy();
+    const css = readFileSync(file as string, 'utf8');
+    expect(css).toMatch(/\.board\s*\{[^}]*background:\s*var\(--graph-paper\)/);
+    expect(css).not.toMatch(/\.board\s*\{[^}]*background:\s*var\(--bg-/);
   });
 });
