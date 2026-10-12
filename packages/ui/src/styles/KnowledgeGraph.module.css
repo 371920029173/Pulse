@@ -260,7 +260,8 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-secondary);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 25%);
+  /* 阴影走 token：--shadow-md 在浅色主题下换成浅色投影，写死黑色会在浅色下压脏悬浮菜单。 */
+  box-shadow: var(--shadow-md);
   display: flex;
   flex-direction: column;
 }
