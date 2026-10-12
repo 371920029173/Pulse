@@ -38,8 +38,10 @@ function installFetch() {
     if (url.includes('/api/kb/rollback')) {
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
+    /* 形状抄服务端：GET /api/kb/memories/:id → { memory: { id, title, content }, retired, version, history }
+       （以前这里是编的 { id, title, content }，把真机上的空白编辑器放过去了） */
     if (/\/api\/kb\/memories\//.test(url)) {
-      return new Response(JSON.stringify({ id: 'm1', title: '一条记忆', content: '正文原文' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ memory: { id: 'm1', title: '一条记忆', content: '正文原文' }, retired: null, version: 1, history: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
     // 用 includes：无论 fetchJSON 有没有给路径加前缀都能命中
     // 真形状来自服务端：GET /api/kb/tree → { tree: […] }（不是 roots —— 那个字段是我编的）
@@ -210,7 +212,9 @@ describe('知识图谱（s3：操作序列 / 保存并确认 / 回滚）', () =>
     await flush();
     const ta = view.container.querySelector('#kg-content') as HTMLTextAreaElement;
     expect(ta).toBeTruthy();
+    // 【关键】打开就要看得见**原本的内容**（标题与正文都是），不然等于盲改
     expect(ta.value).toBe('正文原文');
+    expect((view.container.querySelector('#kg-title') as HTMLInputElement).value).toBe('一条记忆');
     await act(async () => { fireEvent.change(ta, { target: { value: '改过的正文' } }); });
     await act(async () => { fireEvent.click(btn(view.container, '加入待同步')!); });
     await act(async () => { fireEvent.click(btn(view.container, '保存并确认')!); });
@@ -431,5 +435,35 @@ describe('知识图谱（白板：不挤、有颜色、白底）', () => {
     const css = readFileSync(file as string, 'utf8');
     expect(css).toMatch(/\.board\s*\{[^}]*background:\s*var\(--graph-paper\)/);
     expect(css).not.toMatch(/\.board\s*\{[^}]*background:\s*var\(--bg-/);
+  });
+});
+
+describe('知识图谱（打开记忆要看得见原本的内容）', () => {
+  it('服务端返回的形状不对时：出提示，而不是开一个空编辑器', async () => {
+    /*
+     * 真实事故：组件按想当然的形状（平铺 title/content）读，服务端返回的却是 { memory: {…} } ——
+     * 编辑器永远空白，用户看不到原本的内容。这条判据守"形状不对要说出来"，不许静默给空表单。
+     */
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => {
+      const url = String(input);
+      if (/\/api\/kb\/memories\//.test(url)) {
+        // 故意给错形状（旧代码就是按这个读的）
+        return new Response(JSON.stringify({ id: 'm1', title: '一条记忆', content: '正文原文' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      const body = url.includes('/api/kb/tree') ? { tree: TREE }
+        : url.includes('/api/kb/groups/A') ? LEVEL_A
+        : url.includes('/api/kb/groups/root1') ? { group: { id: 'root1', name: '项目甲' }, children: [{ id: 'A', name: 'A' }, { id: 'B', name: 'B' }], memories: [] }
+        : {};
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch);
+
+    const view = render(<KnowledgeGraph onClose={() => {}} />);
+    await flush();
+    await act(async () => { fireEvent.doubleClick(node(view.container, 'A')!); });
+    await flush();
+    await act(async () => { fireEvent.doubleClick(node(view.container, '一条记忆')!); });
+    await flush();
+    expect(view.container.textContent ?? '').toContain('形状不对');
+    expect(view.container.querySelector('#kg-content')).toBeNull();
   });
 });

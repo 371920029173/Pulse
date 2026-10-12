@@ -493,9 +493,24 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   const enter = (v: NodeView) => {
     setSelected(v.id);
     if (v.kind === 'memory') {
-      // 树里的记忆只有标题，正文要另取
-      void fetchJSON<{ id: string; title?: string; content?: string }>(`/api/kb/memories/${encodeURIComponent(v.id)}`)
-        .then((m) => setEditing({ id: m.id, title: m.title ?? '', content: m.content ?? '' }))
+      /*
+       * 树里的记忆只有标题，正文要另取。
+       *
+       * 形状**来自服务端**：GET /api/kb/memories/:id → { memory: { id, title, content, … }, retired, version, history }。
+       * 2026-10-12 之前这里按想当然的形状读（平铺的 title/content），于是编辑器永远空白 —— 而测试里的 stub
+       * 也是编的，两边一起绿。和当年"空树"（读 r.roots）是同一类坑：stub 的形状必须抄服务端。
+       *
+       * 读回形状不对时**不出空编辑器**，直说 —— 否则用户一保存就把空内容写回去了。
+       */
+      void fetchJSON<{ memory?: { id: string; title?: string; content?: string } }>(`/api/kb/memories/${encodeURIComponent(v.id)}`)
+        .then((r) => {
+          const m = r?.memory;
+          if (!m || typeof m.content !== 'string') {
+            setNotice(t('这条记忆读回来的形状不对（缺 memory.content），先不改它，免得把空内容写回去'));
+            return;
+          }
+          setEditing({ id: m.id, title: m.title ?? '', content: m.content });
+        })
         .catch((e: Error) => setNotice(t('打不开这条记忆：{message}', { message: e.message })));
       onOpenMemory?.(v.id);
       return;
