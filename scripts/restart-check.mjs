@@ -478,12 +478,17 @@ await boot('第三次启动（状态文件已损坏）');
    * 于是"有会话"成立。那个补会话的行为在 2026-10-01 被去掉了（用户点一次 `+` 会得到两条），
    * 这条断言就露出了它真正在测的东西 —— 一个和"损坏文件能不能起来"无关的副作用。
    *
-   * 隔离后的状态**本来就该是空的**，这正是下一段注释说的"recovered state is empty, not broken"。
+   * 隔离后的状态不再是从空开始：能证明完整的部分会被读回来（见 state-file.ts 的 salvageJsonPrefix），
+   * 读不回来的只剩被物理写坏的那一段。
    * 所以这里要求：应答是一个合法的列表，且里面没有凭空出现的东西。
    */
-  check('损坏的状态文件不会让服务起不来（隔离损坏文件后照常应答）',
-    Array.isArray(list?.sessions) && ids.length === 0,
-    `${ids.length} 个会话`);
+  check('损坏的状态文件不会让服务起不来，且完好部分被救回',
+    Array.isArray(list?.sessions) && ids.length > 0
+      && ids.length <= 2 && new Set(ids).size === ids.length,   // 夹具里一共两条会话，救回来的只能是它们的子集，且不许重复
+    `${ids.length} 个会话：${ids.join(', ')}`);
+  check('恢复详情如实报告（原因里说明已尽力恢复）',
+    /已尽力恢复/.test(String(list?.recovery?.reason ?? '')),
+    JSON.stringify(list?.recovery ?? null));
 
   /*
    * The data must be kept, not discarded.
@@ -502,9 +507,32 @@ await boot('第三次启动（状态文件已损坏）');
   check('留底的文件里有原始内容（不是空壳）', withData.length > 0,
     backups.map((n) => `${n}:${readFileSync(join(dir, n), 'utf8').length}B`).join(', '));
 
-  // And the app must still be usable: the recovered state is empty, not broken.
+  // And what was recovered must be usable: the salvaged store works, it is not broken.
   const created = await raw('/api/sessions', { method: 'POST', body: { title: '损坏后新建' } });
   check('损坏恢复后仍能新建会话', created.status === 201, `status=${created.status}`);
+}
+
+/*
+ * 提示必须**跨进程**还在。
+ *
+ * 内存里的通知会随进程蒸发：用户重启一次应用，横幅就没了 —— 而这条消息存在的全部意义，
+ * 就是「过一阵子回来问我的对话去哪了」时它还答得上来。所以这里再启动一次，判据是它仍然被报出来：
+ * 来源不再是内存，而是磁盘上那份 .unusable-… 备份本身。
+ *
+ * 前面那句 kill() 不能省：boot() 的就绪判据是 /api/health 200，而它分不出那是**哪一个**进程 ——
+ * 上一个还在听同一个端口时，探针立刻成功，新进程连不上端口就悄悄退出了，后面的断言全打在旧进程上。
+ * 实测：漏掉 kill() 时"壁纸副本被清掉"那条会红，而红的原因与壁纸毫无关系。
+ */
+await kill();
+await boot('第四次启动（损坏文件已隔离之后）');
+{
+  const r = json(await raw('/api/conversations'));
+  const rec = Array.isArray(r?.recoveries) ? r.recoveries : [];
+  check('重启之后仍然报告被隔离的文件（提示不随进程蒸发）',
+    rec.length > 0
+      && rec.every((x) => typeof x.backup === 'string' && x.backup.length > 0
+        && (x.kind === 'sessions' || x.kind === 'cluster' || x.kind === 'schedule')),
+    JSON.stringify(rec).slice(0, 220));
 }
 
 // ── 4. 【关键】遗留的工作区壁纸副本会被清理，但不是重复的绝不动 ──

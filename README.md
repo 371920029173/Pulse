@@ -3,7 +3,6 @@
 **A local coding agent with a group-structure knowledge base, structural-resonance retrieval —
 **not vector RAG** — and automatic context compaction, so long sessions stay affordable. Runs on your
 machine, talks to any OpenAI-compatible endpoint or Anthropic, and sends nothing anywhere else.
-sends nothing anywhere else.
 
 > 本地编程智能体：组结构记忆 + 脉冲种子结构共振检索（不是向量 RAG）。全本地运行，只与你配置的
 > 模型接口通信。
@@ -32,6 +31,12 @@ sends nothing anywhere else.
   also counts an action as on track when it matches the current plan step, and bookkeeping calls
   (plans, reflection, error book, memos) no longer count as drifting.
 - `grep` globs are real globs: `*`, `**`, `?`, `[abc]`, `{ts,tsx}`. `*.json*` used to match nothing, silently.
+- **State files survive an unclean shutdown.** Writes now flush to disk *before* the rename that
+  publishes them — NTFS only orders metadata, so a rename can land while the bytes are still in the
+  write cache; a crash during one save (measured 2026-10-11) left a 21 MB `sessions.json` present at
+  full size with its last 43% filled with NULs. And when a file is damaged anyway, the loader now
+  **salvages everything provably complete from it** and only then moves the original aside, instead
+  of starting from an empty store. `pnpm check:durability` keeps both in place.
 
 **Automation**
 - Plans now drive the agent: while a plan has unfinished steps it keeps going on its own, and stops
@@ -169,7 +174,8 @@ config, and multiple models can be registered so you are not locked to one vendo
 - **Sandbox** — workspace jail including symlinks, destructive-command patterns, an optional
   fail-closed command allowlist, and one-shot confirmation tickets bound to their arguments
 - **Sessions** — isolated conversations, history, closed-vs-deleted, checkpoint undo, message rewind,
-  and state files that quarantine instead of clearing when unreadable
+  and state files that are flushed before their rename, salvage the intact part of a damaged file,
+  and quarantine instead of clearing when unreadable
 - **Multi-agent** — discussion rooms with configurable roles per room
 - **Skills** — Markdown playbooks under `skills/` (`_common`, `dev`, `liberal`, `general`, `custom`),
   picked by the active profile. A file with the same name in a workspace's `.she/skills/` overrides
@@ -179,6 +185,25 @@ config, and multiple models can be registered so you are not locked to one vendo
 - **Interface** — Electron desktop (multi-window) and web; syntax highlighting, diffs, collapsible
   reasoning, Chinese/English UI, and a user stylesheet
 - **Deployment** — cross-platform launcher, container image, configurable bind address and allowed hosts
+
+## If a chat or a setting looks lost
+
+Nothing is deleted when a state file cannot be read. In order:
+
+1. **The intact part is recovered.** The loader keeps everything it can prove is complete — a
+   half-written file loses its torn tail, not its contents — and carries on with that.
+2. **The original bytes are moved aside**, never overwritten: the file lands next to the original as
+   `<name>.unusable-<timestamp>`, torn tail included, and the interface shows a notice with the full path.
+3. **The backup stays** until you remove it. A conversation that "disappeared" after an unclean
+   shutdown is usually sitting in one of these files.
+4. **The notice stays with it** — for the same reason. It is derived from the backup files on disk,
+   not from a flag in the running process, so closing the app does not make it disappear: the moment
+   you come back and ask where your conversations went, the answer is still on screen. It clears
+   itself when the backup does — delete the file, or rename it back to restore by hand.
+
+To restore by hand: quit Pulse, rename the `.unusable-…` file back over the original name, start again.
+These files turn up when the machine loses power mid-write (or is force-powered-off), which is why
+saves now flush to disk before they are published — see the Reliability notes above.
 
 ## Deployment
 

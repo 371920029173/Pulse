@@ -16,7 +16,8 @@
  *
  * The rule this module enforces instead:
  *
- *   A file that cannot be used is MOVED ASIDE, never overwritten.
+ *   A file that cannot be used is MOVED ASIDE, never overwritten — and what can be
+ *   read is read, instead of starting from empty.
  *
  * Recovery is then a matter of renaming one file back, which is something a user
  * can do without us. That is why the reason and the backup path are returned
@@ -30,8 +31,11 @@
  * next start, with the file on disk looking healthy the whole time.
  *
  *   Never write a value the loader would not read back intact.
+ *
+ * And the write must reach the platter before the rename that publishes it — see
+ * the third rule on `saveStateFile`.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 /**
@@ -103,6 +107,111 @@ function versionOf(raw: unknown): string | null {
 }
 
 /**
+ * Salvage the usable prefix of a damaged JSON document.
+ *
+ * The failure this exists for (measured 2026-10-11): a power cut during a save left a
+ * 21 MB `sessions.json` present at full size with its last 43% filled with NULs. All the
+ * loader could say was "not valid JSON", so it started from an empty store — the user's
+ * whole conversation vanished from the interface even though 57% of it was sitting intact
+ * on disk. The bytes were safe; nothing could read them.
+ *
+ * The rule here: **keep everything that is provably complete.** Walk the text like a
+ * tokenizer, remembering the end of the last completed value and which containers were
+ * open at that moment; when the text stops being valid JSON (a raw control character, an
+ * unterminated string, a token that is not a literal), cut back to that remembered point
+ * and close the containers that were open there. A cut is only accepted if the *caller*
+ * can parse it back into this store's shape.
+ *
+ * This decides what is READABLE. It never touches what is KEPT: the caller still moves the
+ * original bytes aside, torn tail and all, before anything else is written.
+ *
+ * Returns null when nothing can be proven complete, or when the document is fine as-is.
+ */
+export function salvageJsonPrefix(raw: string): { text: string; kept: number; dropped: number } | null {
+  // A BOM is not part of the document; JSON.parse rejects it, and a real-world file
+  // (hand-edited, or written by an editor that adds one) should not be thrown away for it.
+  const body = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+  const n = body.length;
+  const stack: string[] = [];
+  let markText = -1;
+  let markOpen: string[] = [];
+  let i = 0;
+  const isWs = (c: string) => c === ' ' || c === '\t' || c === '\n' || c === '\r';
+
+  const finish = (end: number): { text: string; kept: number; dropped: number } | null => {
+    if (markText < 0) return null;
+    // Consumed to the end with nothing open: the document is simply fine, leave it alone.
+    if (end >= n && markOpen.length === 0) return null;
+    const closers = markOpen.slice().reverse().map((c) => (c === '{' ? '}' : ']')).join('');
+    return { text: body.slice(0, markText) + closers, kept: markText, dropped: raw.length - markText };
+  };
+
+  while (i < n) {
+    const c = body[i];
+    if (isWs(c)) { i++; continue; }
+
+    if (c === '"') {
+      let j = i + 1;
+      let closed = false;
+      while (j < n) {
+        const code = body.charCodeAt(j);
+        if (code === 0x5c) { j += 2; continue; }
+        if (code === 0x22) { closed = true; j++; break; }
+        if (code < 0x20) break;                 // raw control character inside a string: damage (the NUL tail)
+        j++;
+      }
+      if (!closed) return finish(i);
+      i = j;
+      let k = i;
+      while (k < n && isWs(body[k])) k++;
+      if (body[k] === ':') { i = k + 1; continue; }          // a key, not a completed value
+      // Only a string that is followed by something legal after a value counts as complete.
+      // At the end of the text inside a container the role is ambiguous — a key missing its
+      // value and a value are the same bytes — so keep the previous mark instead of guessing.
+      if (k < n && body[k] !== ',' && body[k] !== '}' && body[k] !== ']') return finish(i);
+      if (k >= n && stack.length > 0) return finish(i);
+      markText = i;
+      markOpen = stack.slice();
+      continue;
+    }
+
+    if (c === '{' || c === '[') { stack.push(c); i++; continue; }
+
+    if (c === '}' || c === ']') {
+      const open = stack.pop();
+      if (!open || (c === '}') !== (open === '{')) return finish(i);
+      i++;
+      markText = i;
+      markOpen = stack.slice();
+      continue;
+    }
+
+    if (c === ',' || c === ':') { i++; continue; }
+
+    let j = i;
+    while (j < n && !isWs(body[j]) && !',:]}[{'.includes(body[j])) j++;
+    if (!/^(?:true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)$/.test(body.slice(i, j))) return finish(i);
+    i = j;
+    markText = i;
+    markOpen = stack.slice();
+  }
+
+  // Ran out of text while still inside containers: truncated, not corrupted.
+  return stack.length ? finish(n) : null;
+}
+
+/** Salvage + this store's own shape check, on text already in memory. Never touches disk. */
+function trySalvage<T>(text: string, parse: (raw: unknown) => T): { data: T; kept: number; dropped: number } | null {
+  const salvaged = salvageJsonPrefix(text);
+  if (!salvaged) return null;
+  try {
+    return { data: parse(JSON.parse(salvaged.text)), kept: salvaged.kept, dropped: salvaged.dropped };
+  } catch {
+    return null;    // even the intact prefix does not pass this store's checks
+  }
+}
+
+/**
  * Move an unusable file aside.
  *
  * Deliberately not `rm`: the whole point is that the data survives. Falls back to
@@ -135,7 +244,8 @@ function quarantine(path: string, reason: string): string {
  *
  * Never throws for bad input — a malformed file is a recoverable condition, not a
  * reason to refuse to start. When the file cannot be used it is quarantined and
- * the caller receives a fresh empty value.
+ * the caller receives what could be salvaged from it (or a fresh empty value when
+ * nothing could be).
  */
 export function loadStateFile<T>(spec: StateFileSpec<T>): LoadOutcome<T> {
   const { path, version, empty, parse, migrations = {} } = spec;
@@ -149,14 +259,32 @@ export function loadStateFile<T>(spec: StateFileSpec<T>): LoadOutcome<T> {
   if (!existsSync(path)) return { data: empty() };
 
   let raw: unknown;
+  let text = '';
   try {
-    const text = readFileSync(path, 'utf8');
+    text = readFileSync(path, 'utf8');
     // A file that is present but empty is not valid JSON; treating it as "no
     // state yet" avoids quarantining a file that a crash left at zero bytes.
     if (text.trim() === '') return { data: empty() };
     raw = JSON.parse(text);
   } catch (err) {
-    return { data: empty(), recovered: { backup: quarantine(path, 'invalid JSON'), reason: `文件不是合法 JSON: ${(err as Error).message}` } };
+    /*
+     * Damaged file: salvage first, quarantine always.
+     *
+     * The order matters. Salvage runs on the text in memory, so the outcome is
+     * decided before the file is touched; `quarantine` then moves the ORIGINAL
+     * bytes aside exactly once, whatever the outcome — the torn tail included,
+     * because it is evidence and it may still be readable by a person.
+     */
+    const salvaged = trySalvage(text, parse);
+    const backup = quarantine(path, 'invalid JSON');
+    const base = `文件不是合法 JSON: ${(err as Error).message}`;
+    if (salvaged) {
+      return {
+        data: salvaged.data,
+        recovered: { backup, reason: `${base}；已尽力恢复完整部分（保留 ${salvaged.kept} 字符，丢弃尾部 ${salvaged.dropped} 字符）` },
+      };
+    }
+    return { data: empty(), recovered: { backup, reason: base } };
   }
 
   // `JSON.parse('null')` succeeds and yields null, so an explicit check is needed
@@ -240,7 +368,7 @@ export function loadStateFile<T>(spec: StateFileSpec<T>): LoadOutcome<T> {
  * the first place, so the write goes to a temporary file that is then renamed
  * over the target.
  *
- * Two further rules, both learned from failures of this store:
+ * Three rules, each learned from a failure of this store:
  *
  *   - Validation happens BEFORE the file is touched. The failure mode being
  *     prevented is "we wrote something the loader would then reject or repair",
@@ -249,6 +377,14 @@ export function loadStateFile<T>(spec: StateFileSpec<T>): LoadOutcome<T> {
  *     opened on one path (the shape of a real defect here: a workspace switch
  *     that left the old instance writing) would otherwise share a temp file and
  *     rename each other's half-written bytes into place.
+ *   - **Data reaches the platter before the rename.** NTFS — and most filesystems —
+ *     only orders metadata: `renameSync` publishes the new name immediately while
+ *     the bytes just written may still sit in the write cache. Measured
+ *     2026-10-11: a power loss left digbug's `sessions.json` present at full size
+ *     with the last 43% (8.5M chars) as NULs, the loader quarantined it, and the
+ *     conversation disappeared from the UI. `fsyncSync` before the rename is what
+ *     makes the rename mean "this content is durable", not merely "this name
+ *     exists". Without it, atomicity is a promise about the *name* only.
  *
  * A failed write removes its temp file: a stray `sessions.json.<pid>.tmp` beside
  * the real one is indistinguishable from state to anyone looking, and the next
@@ -276,6 +412,25 @@ export function saveStateFile<T>(
   const tmp = `${path}.${process.pid}.${++writeSeq}.tmp`;
   try {
     writeFileSync(tmp, text, 'utf8');
+    /*
+     * Flush before publishing the name — the ordering is the whole point.
+     *
+     * The classic way to lose a whole file here: rename lands (metadata is
+     * journaled), power goes out before the data is written back (it was still
+     * in cache), and the file exists at full size filled with NULs. That is
+     * exactly what happened to a 21 MB sessions.json on 2026-10-11, and it cost
+     * the tail of a real conversation.
+     *
+     * The flush costs a few milliseconds on a file this size. The `lastWritten`
+     * skip above already removes the saves that would have written identical
+     * bytes, so only a save that actually changes something pays for it.
+     */
+    const fd = openSync(tmp, 'r+');
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmp, path);
     try {
       const stat = statSync(path);

@@ -18,7 +18,7 @@ import styles from '../styles/App.module.css';
 
 /** One state file the server could not read and kept aside instead of discarding. */
 export interface StateRecovery {
-  kind: 'sessions' | 'cluster';
+  kind: 'sessions' | 'cluster' | 'schedule';
   /** Project the file belongs to. A quarantine is per-project, not global. */
   root: string;
   /** Absolute path of the kept-aside copy — the thing the user needs to put back. */
@@ -44,7 +44,11 @@ export function StateRecoveryNotice({ recoveries, onDismiss }: StateRecoveryNoti
         {recoveries.map((r) => (
           <span key={r.backup} className={styles.stateNoticeItem}>
             {t('{area}无法读取：{reason}。原文件保留在 {backup}', {
-              area: r.kind === 'cluster' ? t('讨论组记录') : t('会话记录'),
+              area: r.kind === 'cluster'
+                ? t('讨论组记录')
+                : r.kind === 'schedule'
+                  ? t('定时任务记录')
+                  : t('会话记录'),
               reason: r.reason,
               backup: r.backup,
             })}

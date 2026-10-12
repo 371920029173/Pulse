@@ -805,6 +805,67 @@ function visibleToTenant<T extends { id: string }>(items: T[]): T[] {
   return items.filter((s) => tenantLedger().canAccess(s.id, tenant, tenancy));
 }
 
+/** 一个被隔离的状态文件：哪个项目的、哪一类记录、备份在哪、当时为什么读不出来。 */
+type StateRecoveryInfo = { kind: 'sessions' | 'cluster' | 'schedule'; root: string; backup: string; reason: string };
+
+/**
+ * 隔离过的状态文件：按**磁盘上的事实**找，不是只看内存里的那份通知。
+ *
+ * `recoveryNotice` 是加载那一刻的产物，它随进程蒸发：用户重启一次应用，横幅就没了，屏幕上只剩
+ * 「会话少了几条」，而磁盘上那份 `.unusable-…` 备份还躺在原地。真实事故里用户看到的就是这个样子 ——
+ * 2026-10-11 两次蓝屏之后对话不见了，界面上没有一个字解释为什么。备份文件的**存在**本身就是持久证据，
+ * 所以这里不引入新的状态文件（谁来清它、什么时候清，又是一堆新的失败模式）：用户把备份改名放回去、
+ * 或者确认不需要而删掉之后，这条提示自然消失。
+ *
+ * 去重按备份路径做（见 `recoveryInfos`）：内存里有同一份时以内存那份为准 —— 它的 reason 更具体，
+ * 比如「已尽力恢复（保留 N 字符，丢弃尾部 M 字符）」。
+ */
+function quarantinedStateFiles(root: string): StateRecoveryInfo[] {
+  const where: Array<[string, string, StateRecoveryInfo['kind']]> = [
+    [join(root, '.she'), 'sessions.json', 'sessions'],
+    [join(root, '.she'), 'schedule.json', 'schedule'],
+    [join(root, '.she', 'cluster'), 'rooms.json', 'cluster'],
+  ];
+  const out: StateRecoveryInfo[] = [];
+  for (const [dir, name, kind] of where) {
+    if (!existsSync(dir)) continue;
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      continue;   // 目录读不到不是这里要报的错误：别的项目照样会走到这一段
+    }
+    for (const n of names) {
+      if (!n.startsWith(`${name}.unusable-`)) continue;
+      out.push({
+        kind,
+        root,
+        backup: join(dir, n),
+        reason: '当时无法读取，原文已原样留底（没有丢弃）；详细原因见当时的服务日志',
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * 内存里的通知 + 磁盘上的备份，合成一份；同一个备份路径只出现一次（先给的赢）。
+ */
+function recoveryInfos(...groups: StateRecoveryInfo[][]): StateRecoveryInfo[] {
+  const seen = new Set<string>();
+  const out: StateRecoveryInfo[] = [];
+  for (const group of groups) {
+    for (const item of group) {
+      const key = pathKey(item.backup);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+
 function findSession(id: string): { store: SessionStore; session: ChatSession } | null {
   /*
    * The one place every session read passes through, so the one place tenancy has to be enforced.
@@ -6462,9 +6523,17 @@ router.post('/api/sessions/:id/move', async (req, res, params) => {
     // Across every known project, for the same reason as the rail: a room filed in another
     // project's state directory is still a room the user can see and open.
     const stores = clusterStoresForRail();
-    const recoveries = stores
-      .map((c) => c.recoveryNotice)
-      .filter((n): n is { backup: string; reason: string } => n !== null);
+    /*
+     * 每一项都要能自己说清「哪个项目、哪一类记录」：以前这里只回 {backup, reason}，
+     * 界面拿不到 kind/root，讨论组的记录就只能按默认文案（「会话记录」）渲染。
+     */
+    const recoveries = recoveryInfos(
+      stores.flatMap((c) => {
+        const notice = c.recoveryNotice;
+        return notice ? [{ kind: 'cluster' as const, root: c.rootDir, ...notice }] : [];
+      }),
+      projectRoots().flatMap((root) => quarantinedStateFiles(root).filter((r) => r.kind === 'cluster')),
+    );
     sendJSON(res, { rooms: stores.flatMap((c) => c.list()), recoveries });
   });
 
@@ -6579,15 +6648,17 @@ router.post('/api/sessions/:id/move', async (req, res, params) => {
      * what a deleted conversation looks like. Each notice carries the backup path, so "where did my
      * chat go" has an answer that does not require reading a log file.
      */
-    const recoveries: Array<{ kind: 'sessions' | 'cluster'; root: string; backup: string; reason: string }> = [];
-    for (const root of roots) {
-      const notice = storeFor(root).recoveryNotice;
-      if (notice) recoveries.push({ kind: 'sessions', root, ...notice });
-    }
-    for (const c of groupStores) {
-      const notice = c.recoveryNotice;
-      if (notice) recoveries.push({ kind: 'cluster', root: c.rootDir, ...notice });
-    }
+    const recoveries = recoveryInfos(
+      roots.flatMap((root) => {
+        const notice = storeFor(root).recoveryNotice;
+        return notice ? [{ kind: 'sessions' as const, root, ...notice }] : [];
+      }),
+      groupStores.flatMap((c) => {
+        const notice = c.recoveryNotice;
+        return notice ? [{ kind: 'cluster' as const, root: c.rootDir, ...notice }] : [];
+      }),
+      roots.flatMap((root) => quarantinedStateFiles(root)),
+    );
     sendJSON(res, { items: all, active_id: activeVisible ? activeId : null, recoveries });
   });
 
