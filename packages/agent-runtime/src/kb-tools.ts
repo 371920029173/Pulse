@@ -319,6 +319,16 @@ function suggestCrossGroupNeighbour(
     {
       name: 'kb_upsert',
       description: 'Add a memory node to the Group KB. Creates the target group if it does not exist. '
+        /*
+         * 「写什么」的判据写进**工具描述**，而不是只放系统提示词：模型是在决定调这个工具的那一刻读这段
+         * 描述的。用户报过「模型不知道该把什么放进去」—— 那时这里只有去重语义，没有任何方向。
+         */
+        + 'Write what a later session needs and cannot re-derive itself: decisions and why (including the options '
+        + 'rejected), measured numbers with how they were measured, interfaces / field names / formats, pitfalls plus '
+        + 'the fix, verified procedures, incident timelines and root causes. Do NOT write: anything readable from the '
+        + "repo in seconds, per-run logs or transient state (today's PIDs, current free space), speculation, or secrets "
+        + 'of any kind (keys, tokens, passwords). The title IS the retrieval key — make it the searchable claim rather '
+        + 'than a label like "note"; put a date on anything time-bound. '
         + 'Never overwrites silently: if an active node with the same title already exists in that group (or its subgroups), '
         + 'identical content writes nothing, and different content is NOT written unless you choose: '
         + 'onExisting="update" edits that node in place (the previous version is kept in its history), '

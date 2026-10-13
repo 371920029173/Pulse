@@ -11,6 +11,7 @@ import type {
 } from '@she/shared';
 import { createLogger, resolveModel, resolveSubagentModel, describeModel, resolveContextWindow, describeContextWindow } from '@she/shared';
 import type { GroupKBEngine } from '@she/kb';
+import { renderAutoRecall, shouldAutoRecall } from './auto-recall.js';
 import { OpenAIProvider } from './providers/openai.js';
 import { AnthropicProvider } from './providers/anthropic.js';
 import { classifyLlmFailure, failureLabel } from './providers/stream-failure.js';
@@ -423,7 +424,7 @@ export class Agent {
 
   constructor(
     private config: SheConfig,
-    kbEngine: GroupKBEngine,
+    private kbEngine: GroupKBEngine,
     private sandboxTools: ToolSet,
     /** Conversation this agent serves; scopes per-chat state such as plans. */
     private sessionId: string | null = null,
@@ -2061,6 +2062,10 @@ export class Agent {
     }, limit);
   }
 
+  /** 自动召回：按"这一轮那句话"缓存一次查询结果（一轮之内不重复查库）。 */
+  private autoRecallFor: string | null = null;
+  private autoRecallBlock = '';
+
   private messagesForRequest(): { messages: LLMMessage[] } {
     this.persistFrozenSystemMessage();
     const systemMessage = this.systemMessage();
@@ -2075,7 +2080,38 @@ export class Agent {
      * 这正是 `prefix-stability.test.ts` 与 `compaction.test.ts` 钉住的东西。
      */
     const fitted = fitToolResultsToBudget(this.history);
-    return { messages: appliedMessages(fitted, this.compactionState, systemMessage).messages };
+    const { messages } = appliedMessages(fitted, this.compactionState, systemMessage);
+    return { messages: this.withAutoRecall(messages) };
+  }
+
+  /**
+   * 自动召回：把「库里可能相关的既有条目」附在本轮请求的**末尾**。
+   *
+   * 缺陷现场（2026-10-13 实测）：digbug 那条会话最近 900 条消息里 kb_* 调用 8 次全是写、一次读都没有 ——
+   * 能不能"想起来"完全取决于模型记不记得一个碎片词。用户原话：「上下文召回不是很聪明」。
+   *
+   * 位置在**末尾**：改头部会把前缀缓存打没（docs/context-and-caching.md：改头部 0% 命中，附末尾 74%）。
+   * 一轮之内同一句话只查一次；查询失败一律当"没有"（auto-recall.ts 里兜住）。
+   * 关掉：SHE_KB_AUTO_RECALL=0。
+   */
+  private withAutoRecall(messages: LLMMessage[]): LLMMessage[] {
+    if (process.env.SHE_KB_AUTO_RECALL === '0') return messages;
+    let idx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') { idx = i; break; }
+    }
+    if (idx < 0) return messages;
+    const content = messages[idx].content;
+    if (typeof content !== 'string') return messages;
+    if (!shouldAutoRecall(content)) return messages;
+    if (this.autoRecallFor !== content) {
+      this.autoRecallFor = content;
+      this.autoRecallBlock = renderAutoRecall(this.kbEngine, content);
+    }
+    if (!this.autoRecallBlock) return messages;
+    const out = messages.slice();
+    out[idx] = { ...messages[idx], content: `${content}\n\n${this.autoRecallBlock}` };
+    return out;
   }
 
   /**
