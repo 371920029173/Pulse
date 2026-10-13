@@ -55,7 +55,6 @@ interface ChatProps {
   sessionTitle?: string | null;
   /** 上一轮长时间没有进展（看门狗判定）—— 提示条据此出现。 */
   /** 刚才有一次发送被"上一轮还在进行"挡住了 —— 必须让用户看见。 */
-  sendBlocked?: boolean;
   /** 草稿按会话分键存在 localStorage；关掉窗口再回来还在。 */
   draftKey?: string | null;
   /**
@@ -939,7 +938,6 @@ export function Chat({
   draftInsert,
   onDraftConsumed,
   sessionTitle,
-  sendBlocked,
   draftKey,
   groupPeers,
   onDropPaths,
@@ -1531,24 +1529,6 @@ export function Chat({
           </div>
         </div>
       )}
-
-      {/*
-        发不出去时的提示条。
-        只有这一种情况还留着：这一轮在跑、而这次发送被拒绝了（要塞进去的字还在框里）。
-        「90 秒没新进展就算卡住」那条已经拿掉 —— 一次工具调用本来就几分钟没有新帧（长命令、
-        长思考都是），它在正常路径上就会亮，等于训练人忽略它。要停随时能停：运行中发送键
-        就是「停止」，还有连按两次 Enter 的打断快捷键。
-      */}
-      {isLoading && sendBlocked ? (
-        <div className={styles.runNotice} role="status" data-surface="run-notice">
-          <span className={styles.runNoticeText}>
-              t('上一轮还在进行 —— 先停掉它，或者等它结束')
-          </span>
-          <button type="button" className={styles.runNoticeBtn} onClick={onStop}>
-            {t('打断这一轮')}
-          </button>
-        </div>
-      ) : null}
 
       <AskCard onAnswer={(text) => onSend(text)} />
 

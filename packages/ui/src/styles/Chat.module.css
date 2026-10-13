@@ -2044,34 +2044,6 @@
   background: color-mix(in srgb, var(--bg-tertiary) 48%, transparent);
 }
 
-/* ── 卡住 / 发不出去的提示条（用户报过"敲了没反应"）── */
-.runNotice {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 6px 10px 0;
-  padding: 8px 12px;
-  border-radius: var(--radius-md);
-  border: 1px solid color-mix(in srgb, var(--warning, #d29922) 45%, transparent);
-  background: color-mix(in srgb, var(--warning, #d29922) 12%, transparent);
-  color: var(--text-primary);
-  font-size: 12.5px;
-  line-height: 1.5;
-}
-.runNoticeText { flex: 1 1 auto; min-width: 0; word-break: break-word; }
-.runNoticeBtn {
-  flex: 0 0 auto;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: var(--fill-control);
-  color: var(--text-primary);
-  font-size: 12px;
-  height: 24px;
-  padding: 0 10px;
-  cursor: pointer;
-}
-.runNoticeBtn:hover { background: var(--bg-hover); }
-
 /* ── 需要确认：有图标、有层级、有阴影的卡片（原来是一条光秃秃的横幅）── */
 .confirmHead { display: flex; align-items: center; gap: 8px; font-weight: 650; font-size: 13px; }
 .confirmHeadIcon { font-size: 15px; line-height: 1; }

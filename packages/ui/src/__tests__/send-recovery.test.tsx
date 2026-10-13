@@ -66,6 +66,8 @@ function jsonResponse(data: unknown) {
 interface StubOpts {
   /** 服务端对 /api/chat/running 的回答。 */
   running?: () => boolean;
+  /** 探测本身失败（网络抖动 / 服务端正忙）：serverTurnRunning 返回 null 的那条路。 */
+  runningFails?: boolean;
   /** 盘上的记录（loadHistory / follow 回读会拿到它）。 */
   history?: unknown[];
   /** /api/chat 的回答：正常流，或 409（这一轮已经在跑）。 */
@@ -85,7 +87,10 @@ function installFetch(opts: StubOpts = {}) {
 
   vi.mocked(fetch).mockImplementation((async (input: unknown, init?: RequestInit) => {
     const url = String(input);
-    if (url.startsWith('/api/chat/running')) return jsonResponse({ running: opts.running ? opts.running() : false });
+    if (url.startsWith('/api/chat/running')) {
+      if (opts.runningFails) throw new Error('probe failed');
+      return jsonResponse({ running: opts.running ? opts.running() : false });
+    }
     if (url.startsWith('/api/chat/history')) { seen.history++; return jsonResponse({ messages: opts.history ?? [] }); }
     if (url.startsWith('/api/chat/interject')) { seen.interject.push(msgOf(init)); return jsonResponse({ ok: true }); }
     if (url.startsWith('/api/chat/attach')) { const s = sseStream(); streams.push(s); return s.response; }
@@ -160,7 +165,7 @@ function mount(sessionId: string, opts: StubOpts = {}) {
 describe('本地那一位不能吞掉消息', () => {
   it('本地以为在跑、服务端说没在跑（流安静地死了）→ 必须真的发出去', async () => {
     const v = mount('sess_stale');
-    // 第一条的流一直不结束：isLoading 就此永远为真（聊天流的空闲超时是显式关掉的）。
+    // 第一条的流一直不结束：isLoading 就此永远为真（这条流自己不发任何帧）。
     await v.send('第一条');
     expect(v.seen.chat, '第一条就没有发出去').toEqual(['第一条']);
     expect(v.api.current!.isLoading()).toBe(true);
@@ -203,6 +208,25 @@ describe('追加落到空处：改走真发送，不往不存在的轮次里塞'
     expect(v.seen.interject, '它被塞进了不存在的轮次').toEqual([]);
     expect(v.seen.chat, '它没有被当成新消息发出去').toEqual(['第一条', '这句话不能进空队列']);
     expect(v.text()).toContain('这句话不能进空队列');
+  });
+});
+
+describe('探测失败也不许把消息卡住', () => {
+  it('问不到「在不在跑」时：这句话照发，交给 409 / 错误路径去说话', async () => {
+    /*
+     * 用户报的「chat 又无法发送消息了」：旧实现里探测失败会 setSendBlocked(true) 直接拒发 ——
+     * 字留在框里、只弹一条提示条（而那条提示条自己还把 t(...) 写成了 JSX 文本，屏幕上一行源码）。
+     * 探测失败只说明这一次探测失败，不说明服务端在忙。
+     */
+    const v = mount('sess_probe_fail', { runningFails: true });
+    await v.send('第一条');                 // 这条流不结束 → 本地以为在跑
+    expect(v.api.current!.isLoading()).toBe(true);
+
+    await v.send('探测失败时的一句话');      // 本地说忙 → 探测 → 失败 → 必须照发
+
+    expect(v.seen.chat, '句子被探测失败吞掉了').toEqual(['第一条', '探测失败时的一句话']);
+    expect(v.text()).toContain('探测失败时的一句话');
+    expect(v.text(), '出现了拒发的提示条').not.toContain('上一轮还在进行');
   });
 });
 

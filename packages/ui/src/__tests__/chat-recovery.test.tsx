@@ -75,20 +75,6 @@ describe('草稿：关掉窗口也不能丢', () => {
 });
 
 describe('发不出去的时候要说话', () => {
-  it('上一轮还在进行 → 提示条出现并给出打断入口', () => {
-    const onStop = vi.fn();
-    const { container } = render(<Chat {...chatProps({
-      isLoading: true, sendBlocked: true, onStop,
-      messages: [{ role: 'user', content: '在吗' } as ChatMessage],
-    })} />);
-    const text = container.textContent ?? '';
-    expect(text, '发送被拒绝却什么都没显示').toContain('上一轮还在进行');
-    const btn = container.querySelector('[data-surface="run-notice"] button') as HTMLButtonElement;
-    expect(btn, '提示条没有给出打断的入口').toBeTruthy();
-    btn.click();
-    expect(onStop).toHaveBeenCalled();
-  });
-
   it('长命令跑着（isLoading 但没有别的理由）→ 不许冒出提示条', () => {
     /*
      * 用户报「这个提示一直存在，但其实根本不需要」。它会亮，是因为一次工具调用本来就几分钟

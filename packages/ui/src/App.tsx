@@ -37,6 +37,7 @@ import { ThemeStudio } from './components/ThemeStudio';
 import { useUserTheme } from './hooks/useUserTheme';
 import { pickActiveSession, isSessionKnown } from './lib/sessionChoice';
 import { StateRecoveryNotice, type StateRecovery } from './components/StateRecoveryNotice';
+import { addDismissed, loadDismissed } from './lib/recoveryAck';
 import { getLocale, setLocale, t } from './lib/i18n';
 import type { Locale } from './lib/i18n';
 import { SkillManager } from './components/SkillManager';
@@ -301,14 +302,14 @@ export function App() {
    * still be there when the user comes back and asks where their conversations went.
    */
   const [stateRecoveries, setStateRecoveries] = useState<StateRecovery[]>([]);
-  /** Dismissed per backup path, so a new quarantine still shows after an old one was waved away. */
-  const [dismissedRecoveries, setDismissedRecoveries] = useState<string[]>(() => {
-    try {
-      const raw = sessionStorage.getItem('she.dismissedRecoveries');
-      const parsed: unknown = raw ? JSON.parse(raw) : [];
-      return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
-    } catch { return []; }
-  });
+  /**
+   * 「知道了」按备份路径记（新的隔离仍会出现），存在 **localStorage** 而不是 sessionStorage。
+   *
+   * 用户报过「检查状态这个玩意每次都出现」：sessionStorage 关掉窗口就忘，于是每次开应用都再看到
+   * 一遍同一句话。备份文件本身照旧留着（数据安全不变），这里只记"这条已经看过了"。
+   * （草稿也走 localStorage —— 同一个先例。）
+   */
+  const [dismissedRecoveries, setDismissedRecoveries] = useState<string[]>(() => loadDismissed());
   const layoutRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<null | { kind: 'sidebar' | 'trace' | 'terminal'; startX: number; startY: number; startW: number; startH: number }>(null);
   /** Live values during a drag; committed to state on mouseup. */
@@ -385,14 +386,7 @@ export function App() {
   const visibleRecoveries = stateRecoveries.filter((r) => !dismissedRecoveries.includes(r.backup));
 
   const dismissRecoveries = useCallback(() => {
-    const paths = stateRecoveries.map((r) => r.backup);
-    setDismissedRecoveries((cur) => {
-      const next = [...new Set([...cur, ...paths])];
-      // Per window, like the rest of this window's view state: dismissing in one window should not
-      // hide the notice in another window that is looking at a different project.
-      try { sessionStorage.setItem('she.dismissedRecoveries', JSON.stringify(next)); } catch { /* ignore */ }
-      return next;
-    });
+    setDismissedRecoveries(addDismissed(stateRecoveries.map((r) => r.backup)));
   }, [stateRecoveries]);
 
   /**
@@ -1259,7 +1253,6 @@ export function App() {
               onSkillProfile={(p) => { void handleSkillProfile(p); }}
               thinkingLevel={thinkingLevel}
               onThinkingLevel={(l) => { void handleThinkingLevel(l); }}
-              sendBlocked={chat.sendBlocked}
               draftKey={activeSessionId}
               onSend={inGroupMode ? clusterChat.send : chat.sendMessage}
               onInterject={inGroupMode ? clusterChat.send : chat.interject}

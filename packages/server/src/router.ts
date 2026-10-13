@@ -122,6 +122,34 @@ export function sendError(res: ServerResponse, message: string, status = 500): v
   sendJSON(res, { error: message, status }, status);
 }
 
+/**
+ * 心跳：每隔几秒往流里写一行 SSE 注释帧（`: ping`）。
+ *
+ * 为什么必须有：聊天流本来就是**静默**的 —— 一次工具调用几分钟不发一帧是常态，所以客户端把空闲
+ * 超时显式关掉了（idleTimeoutMs: 0）。代价是服务端进程意外死掉时，那条连接既不报错也不结束：
+ * 客户端永远停在"还在跑"，不跟流、不回读历史，用户看到的是「消息发出去了，但前端没有任何反应」
+ * （2026-10-13 实测：只在进程意外结束后出现）。有了心跳，客户端就能把"长时间没有一个字节"
+ * 判成死连接，走既有的自愈路径重新挂上。
+ *
+ * 间隔用 SHE_SSE_HEARTBEAT_MS 调（判据把它压到几十毫秒）；设 0 表示不发心跳。
+ * 注释帧以 ':' 开头，任何按规范实现的 SSE 解析器都会忽略它。
+ */
+function startHeartbeat(res: ServerResponse): void {
+  const ms = Number(process.env.SHE_SSE_HEARTBEAT_MS ?? 15000);
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  const timer = setInterval(() => {
+    if (res.writableEnded || res.destroyed || res.socket?.destroyed) { clearInterval(timer); return; }
+    try {
+      res.write(': ping\n\n');
+    } catch {
+      clearInterval(timer);
+    }
+  }, ms);
+  timer.unref?.();
+  res.once('close', () => clearInterval(timer));
+  res.once('finish', () => clearInterval(timer));
+}
+
 export function startSSE(res: ServerResponse): void {
   res.socket?.setNoDelay(true);
   res.writeHead(200, {
@@ -134,6 +162,7 @@ export function startSSE(res: ServerResponse): void {
     ...corsHeaders(),
   });
   res.flushHeaders();
+  startHeartbeat(res);
 }
 
 export function sendSSEEvent(res: ServerResponse, data: unknown): void {

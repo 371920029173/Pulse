@@ -222,16 +222,21 @@ export function normalizeHistory(raw: ServerHistoryMessage[]): ChatMessage[] {
   });
 }
 
+/**
+ * 聊天流允许多久没有**一个字节**？
+ *
+ * 以前这里是 0（不超时），因为一次工具调用几分钟不发帧是常态 —— 代价是服务端进程意外死掉后，
+ * 客户端永远发现不了：窗口停在"还在跑"，不跟流、不回读历史，用户看到「消息发出去了但前端没反应」
+ * （用户报的原话；而且**只在进程意外结束后**出现）。
+ *
+ * 现在服务端每隔几秒发一行心跳（router.ts 的 startHeartbeat），所以"长时间没有一个字节"就是
+ * 死连接。120 秒 = 8 个心跳的余量，接上之后走的还是既有的自愈路径（清掉尸体 → armFollow → attach）。
+ */
+const CHAT_IDLE_TIMEOUT_MS = 120_000;
+
 export function useChat(sessionId?: string | null) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  /**
-   * 上一轮还在进行，用户又按了发送 —— 界面上必须说出来。
-   *
-   * 原来这里是静默 return：用户敲了字、按了发送，什么都没有发生（用户报的正是
-   * "无法发送消息"）。静默的拒绝最难查，因为界面看起来一切正常。
-   */
-  const [sendBlocked, setSendBlocked] = useState(false);
   /**
    * Live progress of a tool call that has not finished yet, keyed by `tool_call_id`.
    *
@@ -683,11 +688,6 @@ export function useChat(sessionId?: string | null) {
   }, []);
 
 
-  /* 一轮结束后，之前那次"发不出去"的提示就该消失。 */
-  useEffect(() => {
-    if (!isLoading) setSendBlocked(false);
-  }, [isLoading]);
-
   /**
    * 服务端说这条会话在不在跑。
    *
@@ -809,7 +809,7 @@ export function useChat(sessionId?: string | null) {
         },
       },
       controller.signal,
-      { idleTimeoutMs: 0 },
+      { idleTimeoutMs: CHAT_IDLE_TIMEOUT_MS },
     );
   }, [attachStreamHandlers]);
 
@@ -833,8 +833,20 @@ export function useChat(sessionId?: string | null) {
     if (isLoading) {
       void (async () => {
         const running = await serverTurnRunning();
+        /*
+         * 问不到（null）**不再拒发**。
+         *
+         * 这里原来 setSendBlocked(true) 直接拒绝：字留在框里，只弹一条提示条 —— 而那条提示条自己
+         * 还把 t(...) 写成了 JSX 文本，屏幕上是一行源码。用户报的「chat 又无法发送消息了」就是它。
+         *
+         * 探测失败只说明**这一次探测**失败，不说明服务端在忙；判断交给发送本身：
+         *   · 服务端确实在跑 → POST /api/chat 回 409 → 下面 onError 把它接成「追加」；
+         *   · 服务端不可达 → 走流错误路径：界面上有报错，这句话也已经画在屏幕上（不会被吞）。
+         * 两条路都比"拒发"诚实。这里也**不** healStaleTurn —— 不知道对面在不在跑，就不该动本地
+         * 那条可能还活着的流。
+         */
         if (running === null) {
-          setSendBlocked(true);
+          dispatchSend(text, images);
           return;
         }
         /*
@@ -856,7 +868,6 @@ export function useChat(sessionId?: string | null) {
       })();
       return;
     }
-    setSendBlocked(false);
     dispatchSend(text, images);
   }, [isLoading, dispatchSend, healStaleTurn, serverTurnRunning]);
 
@@ -1308,7 +1319,7 @@ export function useChat(sessionId?: string | null) {
             },
           },
           controller.signal,
-          { idleTimeoutMs: 0 },
+          { idleTimeoutMs: CHAT_IDLE_TIMEOUT_MS },
         );
       } catch { /* server unreachable; the transcript we already loaded stands */ }
     })();
@@ -1335,7 +1346,6 @@ export function useChat(sessionId?: string | null) {
     pendingPatches,
     clearHistory,
     resetLocal,
-    sendBlocked,
     loadHistory,
     stopStreaming,
     interject,
