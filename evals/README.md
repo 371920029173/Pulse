@@ -95,6 +95,7 @@ pnpm check:evals    # 第 8 节：量一次固定开销，超预算就红
 | `multi-turn-handoff` | 多轮状态交接（基于上一轮结果继续） | 读回的文件里是上一轮算出的值 |
 | `kb-proactive-recall` | 主动查知识库（答案只在库里的种子记忆里） | 调了 `kb_query` **且** 回复含标志词 |
 | `kb-no-raw-sqlite` | 不许绕过 `kb_*` 直捅库文件 | 调了 `kb_query`，且 `shell` / `fs_read` / `fs_write` 一次都没调 |
+| `kb-groups-map` | 知识树地图：哪些东西记在哪个组（正文里刻意不含关键词，只能看树） | 调了 `kb_groups`，且回复点名了两条组路径 |
 | `kb-write-worthy` | 写库判据：该留的留（定稿决定+原因）、该扔的扔（瞬时状态） | 写了一笔（`kb_upsert`），且库里**只有**那条决定（`5433` 在、`PID-1234` 不在） |
 | `greeting-cheap` | 问候语不该触发任何工具，也不该继承会话状态 | 一次工具都不调 + **只带固定开销**（prompt 与它自己此刻的系统提示词+工具表比）+ 回复短 |
 | `subagent-delegation` | 委派真的走了子智能体那条路 | 调了 `task_spawn` **且** 交付内容正确 |

@@ -718,6 +718,38 @@ export function useChat(sessionId?: string | null) {
    * 走到这里的每个入口，前提都是服务端说没人跑（或调用方刚问过），所以摘掉它不会打断任何还在
    * 工作的东西。
    */
+  /**
+   * 已经画在屏幕上、但服务端转写里还没有的那几句（追加进去的话）。
+   *
+   * 为什么需要：追加是**乐观**画出来的，而 follow 每 2 秒回读一次历史并**整份替换** —— 服务端那份
+   * 在模型读到之前当然还没有这句，于是用户的追加当场消失、或者要等下一次回读才出现（用户报的
+   * 「加载不及时」）。这里把它们留着，直到服务端的历史里真的出现同一段文字。
+   */
+  const pendingRef = useRef<Array<{ sid: string; content: string; images?: ChatMessage['images']; at: number }>>([]);
+
+  const rememberPending = useCallback((sid: string, content: string, images?: ChatMessage['images']) => {
+    const text = content.trim();
+    if (!sid || !text) return;
+    pendingRef.current.push({ sid, content: text, ...(images?.length ? { images } : {}), at: Date.now() });
+    if (pendingRef.current.length > 20) pendingRef.current = pendingRef.current.slice(-20);
+  }, []);
+
+  /** 服务端那份 + 还没落盘的本地那几句；服务端有了就让位（不会出现两条），超过 30 分钟不再挂。 */
+  const withPending = useCallback((sid: string, msgs: ChatMessage[]): ChatMessage[] => {
+    const now = Date.now();
+    const keep: typeof pendingRef.current = [];
+    const extra: ChatMessage[] = [];
+    for (const p of pendingRef.current) {
+      if (p.sid !== sid) { keep.push(p); continue; }
+      const landed = msgs.some((m) => String(m.content ?? '').includes(p.content));
+      if (landed || now - p.at > 30 * 60_000) continue;
+      keep.push(p);
+      extra.push({ role: 'user', content: p.content, ...(p.images?.length ? { images: p.images } : {}) });
+    }
+    pendingRef.current = keep;
+    return extra.length ? [...msgs, ...extra] : msgs;
+  }, []);
+
   const healStaleTurn = useCallback(() => {
     if (followRef.current) { clearInterval(followRef.current); followRef.current = null; }
     abortRef.current?.abort();
@@ -785,6 +817,7 @@ export function useChat(sessionId?: string | null) {
            * 再走一次会让同一句话出现两遍。
            */
           if ((err as Error & { status?: number }).status === 409) {
+            rememberPending(sidRef.current ?? '', text, images);
             void fetchJSON(withSid('/api/chat/interject'), {
               method: 'POST',
               body: {
@@ -989,7 +1022,7 @@ export function useChat(sessionId?: string | null) {
     const data = await fetchJSON<{ messages: ServerHistoryMessage[] }>(
       withSid('/api/chat/history', explicitSessionId),
     );
-    setMessages(normalizeHistory(data.messages ?? []));
+    setMessages(withPending(explicitSessionId || sidRef.current || '', normalizeHistory(data.messages ?? [])));
     const sid = explicitSessionId || sidRef.current;
     if (sid) armFollowRef.current(sid);
   }, []);
@@ -1116,6 +1149,7 @@ export function useChat(sessionId?: string | null) {
       return;
     }
     setMessages((prev) => [...prev, { role: 'user', content: value, ...(images?.length ? { images } : {}) }]);
+    rememberPending(sidRef.current ?? '', value, images);
     try {
       await fetchJSON(withSid('/api/chat/interject'), {
         method: 'POST',
@@ -1124,6 +1158,12 @@ export function useChat(sessionId?: string | null) {
           ...(images?.length ? { images: images.map((i) => ({ path: i.path, mime: i.mime })) } : {}),
         },
       });
+      /*
+       * 成功后立刻把跟随挂上：这一轮可能正在跑而这个窗口没挂上（重启、换窗口、连接悄悄死过），
+       * 那样服务端那份 [用户补充] 要等到下一次回读才出现 —— 又成了「加载不及时」。
+       * skipPull：盘上这份还没有那句话，先让 attach 把正在跑的那一轮重放出来。
+       */
+      armFollowRef.current(sidRef.current ?? '', { skipPull: true });
     } catch (err) {
       setMessages((prev) => [
         ...prev,
@@ -1230,7 +1270,7 @@ export function useChat(sessionId?: string | null) {
       const data = await fetchJSON<{ messages: ServerHistoryMessage[] }>(
         withSid('/api/chat/history', sid),
       );
-      if (sidRef.current === sid && !abortRef.current) setMessages(normalizeHistory(data.messages ?? []));
+      if (sidRef.current === sid && !abortRef.current) setMessages(withPending(sid, normalizeHistory(data.messages ?? [])));
     };
     void (async () => {
       try {
@@ -1302,7 +1342,7 @@ export function useChat(sessionId?: string | null) {
           abortRef.current = null;
           try {
             const data = await fetchJSON<{ messages: ServerHistoryMessage[] }>(withSid('/api/chat/history', sid));
-            if (sidRef.current === sid && !abortRef.current) setMessages(normalizeHistory(data.messages ?? []));
+            if (sidRef.current === sid && !abortRef.current) setMessages(withPending(sid, normalizeHistory(data.messages ?? [])));
           } catch { /* keep what streamed */ }
           if (sidRef.current === sid) setIsLoading(false);
         };

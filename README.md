@@ -96,7 +96,7 @@ Node.js is **not** required for the packaged build — the runtime bundles its o
 | Platform | Status |
 |---|---|
 | Windows 10 | Developed and run on it daily |
-| Linux | **Verified** — CI runs the full offline gate on `ubuntu-latest` |
+| Linux | **Verified** — CI runs the full offline gate on `ubuntu-latest`, and `check:wsl` runs the POSIX launcher (`./she.sh status`) plus the dependency-free checks inside WSL on this machine |
 | Windows 11 | Expected to work, **never run.** No version-specific code, and the font stacks prefer Win11's own fonts before falling back to bundled ones |
 | macOS | **Never run.** Portable code and a static audit only |
 
@@ -170,7 +170,9 @@ config, and multiple models can be registered so you are not locked to one vendo
   prompt cache keeps hitting; the folded range is written to disk with retrieval anchors and can be read
   back with `fs_read`. The window itself can be learned from the provider's own overflow message.
 - **Knowledge base** — group-structure memory with activation traces; every result explains *which
-  groups and edges* produced it
+  groups and edges* produced it. The agent can read the tree itself (`kb_groups`: groups, counts,
+  last-write dates), and every request carries a small automatic recall — at most 5 possibly-relevant
+  memories, appended at the END so the cache prefix survives
 - **Sandbox** — workspace jail including symlinks, destructive-command patterns, an optional
   fail-closed command allowlist, and one-shot confirmation tickets bound to their arguments
 - **Sessions** — isolated conversations, history, closed-vs-deleted, checkpoint undo, message rewind,
@@ -185,6 +187,9 @@ config, and multiple models can be registered so you are not locked to one vendo
 - **Interface** — Electron desktop (multi-window) and web; syntax highlighting, diffs, collapsible
   reasoning, Chinese/English UI, and a user stylesheet
 - **Deployment** — cross-platform launcher, container image, configurable bind address and allowed hosts
+- **Localisation** — the interface is written in Chinese and ships a complete English dictionary (1,067
+  entries, 100% of the source strings). `pnpm check:i18n` ratchets both ways: hardcoded Chinese may fall
+  and never rise, translated entries may rise and never fall
 
 ## If a chat or a setting looks lost
 
@@ -238,7 +243,7 @@ us. Nothing here is from a benchmark suite.
 
 | Reading | Value | Produced by |
 |---|---|---|
-| Fixed cost of every request (system prompt + 36 tool schemas) | ≈ 12,958 prompt tokens | printed by each `evals/agent` run; measured offline by `pnpm check:evals` |
+| Fixed cost of every request (system prompt + 37 tool schemas) | 47,374 characters ≈ 13.7k prompt tokens | printed by `pnpm check:evals`; the character→token ratio is the measured one in [docs/context-and-caching.md](docs/context-and-caching.md) |
 | Prompt-cache hit rate over one 15-task eval run | 88% (923,392 hit / 129,560 miss) | the summary line of that run |
 | Prompt-cache behaviour (5,475-token prompt, DeepSeek) | re-sending it identically: 96% cached · appending to the end: 74% · **trimming from the head: 0%** | `docs/context-and-caching.md` — the probe was one-shot and deliberately deleted after its conclusion (it spends ~24k prompt tokens per run); the numbers stay in that document |
 | Planted facts surviving one compaction | 8/8 alive, 6/8 verbatim in the summary | `scripts/context-survival-probe.mjs` |

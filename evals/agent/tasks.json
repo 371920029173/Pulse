@@ -339,6 +339,45 @@
         ]
       },
       "note": "写库判据的端到端判据（用户报过「模型不知道该把什么放进去」）：一个该留的（定稿决定：端口 5433 与原因）＋一个该扔的（今天的 PID）。两项都要过 —— 只写不筛（把 PID 也塞进去）是最常见的失败。命令是在检查侧只读地 grep 那个 sqlite 的字节（ASCII 标记在 SQLite 里就是明文），不是让 agent 去直读库：agent 那一侧仍必须走 kb_upsert（toolCallsInclude 钉着）。"
+    },
+    {
+      "id": "kb-groups-map",
+      "prompt": "这个知识库里都记了哪些方面的东西？把大类列出来，一行一个，不要展开细节。",
+      "fixtures": {},
+      "kb": [
+        {
+          "groupName": "ops/deploy",
+          "title": "部署：端口与回滚约定",
+          "content": "MARKER-DEPLOY：部署走 5433 端口；回滚用上一个 tag。"
+        },
+        {
+          "groupName": "host/windows",
+          "title": "本机：蓝屏与磁盘画像",
+          "content": "MARKER-HOST：0xEF 是关掉关键进程导致的；C 盘紧张时先清驱动缓存。"
+        },
+        {
+          "groupName": "project/alpha/lessons",
+          "title": "教训：写状态文件要先 fsync",
+          "content": "MARKER-LESSON：rename 之前要 fsync，否则掉电写出 NUL。"
+        }
+      ],
+      "check": {
+        "all": [
+          {
+            "type": "toolCallsInclude",
+            "tool": "kb_groups"
+          },
+          {
+            "type": "replyContains",
+            "expect": "ops"
+          },
+          {
+            "type": "replyContains",
+            "expect": "host"
+          }
+        ]
+      },
+      "note": "知识树地图（kb_groups）的端到端判据：问\"都记了哪些方面\"，种子记忆的正文刻意不含\"类/方面\"这类词，靠一次词法查询蒙不出来 —— 要答对就得先看树。两项都要过：调了 kb_groups（工具真的在表里、模型真的会用它）+ 回复里点名了两条组路径。用户 2026-10-13 的原话是「告诉它什么东西可能在哪里」；此前模型的 KB 工具没有任何\"看树\"的办法，这条任务守的就是那个缺口。"
     }
   ]
 }

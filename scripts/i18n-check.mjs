@@ -176,17 +176,22 @@ if (process.argv.includes('--verbose')) {
 if (process.argv.includes('--update')) {
   writeFileSync(BASELINE_FILE, JSON.stringify({
     baseline: total,
+    translated: translatedCount(),
     updatedAt: new Date().toISOString(),
-    note: 'Hardcoded user-facing Chinese strings. Lower this as components are converted; never raise it.',
+    note: 'Hardcoded user-facing Chinese strings (lower it, never raise it) and translated dictionary entries (raise it, never lower it).',
   }, null, 2) + '\n', 'utf8');
-  console.log(`  已记录基线：${total}\n`);
+  console.log(`  已记录基线：硬编码 ${total} · 已翻译 ${translatedCount()}\n`);
   process.exit(0);
 }
 
 let baseline = null;
+/** 已翻译条数的下限：翻译只能加、不能减（改了源串就同时改 en.ts）。 */
+let translatedBaseline = null;
 if (existsSync(BASELINE_FILE)) {
   try {
-    baseline = JSON.parse(readFileSync(BASELINE_FILE, 'utf8')).baseline;
+    const parsed = JSON.parse(readFileSync(BASELINE_FILE, 'utf8'));
+    baseline = parsed.baseline;
+    translatedBaseline = typeof parsed.translated === 'number' ? parsed.translated : null;
   } catch { /* a malformed baseline is treated as absent */ }
 }
 
@@ -198,6 +203,20 @@ console.log('');
 if (baseline === null) {
   console.log(`  没有基线文件。用 --update 记录当前值（${total}）作为上限。\n`);
   process.exit(0);
+}
+
+/*
+   * 反方向的棘轮：硬编码只减不增，已翻译只增不减。
+   * 少了说明有人改了源串却没改 en.ts（或者删了译文）—— 界面上就是一句话突然变回中文。
+   */
+const translated = translatedCount();
+if (translatedBaseline !== null && translated < translatedBaseline) {
+  console.log(`  FAIL  已翻译条目回落了：${translatedBaseline} → ${translated}`);
+  console.log('        改了源串就要同时改 en.ts；翻译只能加、不能减。\n');
+  process.exit(1);
+}
+if (translatedBaseline !== null && translated > translatedBaseline) {
+  console.log(`  PASS  已翻译条目增加了 ${translated - translatedBaseline} 条（${translatedBaseline} → ${translated}）。用 --update 收紧基线。`);
 }
 
 if (total > baseline) {

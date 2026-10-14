@@ -346,6 +346,22 @@ if (process.platform !== 'win32') {
           check(`WSL 里 node scripts/${script}`, ok, detail);
         }
   
+        /*
+         * POSIX 启动器真的能跑吗？
+         *
+         * 跨平台这件事，静态检查只能证明"没有明显的平台专有代码"；用户走的那条路是**把它跑起来**。
+         * `status` 不改任何状态，输出里那行「Pulse 状态」是它的稳定标记。
+         * 这是本机唯一能执行、又确实走 Linux 路的一条判据（macOS 上没有机器可跑，README 里如实写着）。
+         */
+        try {
+          const out2 = wslSh('bash ./she.sh status 2>&1 || true');
+          check('WSL 里 ./she.sh status 能跑（POSIX 启动器这条路是通的）', out2.includes('Pulse 状态'),
+            out2.split('\n').slice(-6).join('\n        '));
+        } catch (e) {
+          check('WSL 里 ./she.sh status 能跑（POSIX 启动器这条路是通的）', false,
+            timedOut(e) ? `wsl 超过 ${WSL_TIMEOUT_MS / 1000} 秒没返回` : String(e.stdout ?? e.message).split('\n').slice(-8).join('\n        '));
+        }
+
         let nativeUsable = false;
         try {
           nativeUsable = wslSh('node -e "require(\'better-sqlite3\')" >/dev/null 2>&1 && echo yes || echo no').includes('yes');

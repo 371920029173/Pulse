@@ -242,3 +242,31 @@ describe('发送撞上 409：这句话改送，不是丢掉', () => {
     expect(v.api.current!.isLoading()).toBe(true);
   });
 });
+
+describe('追加：立刻看得见，回读不会擦掉，落盘后不重复', () => {
+  it('服务端还没落盘时，回读盘上记录也要留住本地那条', async () => {
+    /*
+     * 用户报的原话：「我追加信息时似乎不会展示，或者似乎根本不会发送 …… 实际上是加载不及时」。
+     * 服务端是当场把 \`[用户补充]\` 推进 history 的；慢在前端：乐观画出来的那句会被 follow 每 2 秒
+     * 一次的整份替换擦掉。这条判据钉的就是那一刻。
+     */
+    const history: unknown[] = [];
+    const v = mount('sess_pending', { running: () => true, history });
+
+    await act(async () => { await v.api.current!.interject('追加的这句'); });
+    await v.flush();
+    expect(v.text(), '追加没有立刻显示').toContain('追加的这句');
+
+    // follow 的回读：盘上当然还没有它
+    await act(async () => { await v.api.current!.loadHistory(); });
+    await v.flush();
+    expect(v.text(), '回读把刚追加的那句擦掉了').toContain('追加的这句');
+
+    // 服务端落盘之后：本地那条让位，不能变成两条
+    history.push({ role: 'user', content: '[用户补充] 追加的这句' });
+    await act(async () => { await v.api.current!.loadHistory(); });
+    await v.flush();
+    const n = (v.text().match(/追加的这句/g) ?? []).length;
+    expect(n, '本地那条与服务端那条叠成了两条').toBe(1);
+  });
+});

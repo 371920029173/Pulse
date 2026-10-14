@@ -276,11 +276,16 @@ console.log('\n=== 源码里的 Error: 文案全部可分类 ===');
    * classification for `${chunk.error ?? ...}` — a fragment of a frame the CLI was relaying,
    * not a message any tool can produce. Excluded by name rather than by a heuristic, so the
    * scope of the ratchet is explicit.
+   *
+   * `ui/src/locales` is excluded for the same reason one level up: it holds the ENGLISH TRANSLATIONS of
+   * interface strings (keyed by the Chinese source). A value like `'Error: {message}'` is a label the
+   * user reads, not something a tool returns — demanding a classification and a remedy for it asks the
+   * dictionary to satisfy a rule that only applies to tool results.
    */
   const NOT_TOOL_RESULTS = new Set(['she-cli']);
   const walk = (d) => {
     for (const e of readdirSync(d)) {
-      if (e === 'node_modules' || e === 'dist' || e === '__tests__' || e.startsWith('.')) continue;
+      if (e === 'node_modules' || e === 'dist' || e === '__tests__' || e === 'locales' || e.startsWith('.')) continue;
       const p = join(d, e);
       if (statSync(p).isDirectory()) walk(p);
       else if (p.endsWith('.ts') || p.endsWith('.tsx')) files.push(p);

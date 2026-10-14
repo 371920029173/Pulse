@@ -1,5 +1,6 @@
 {
   "baseline": 0,
-  "updatedAt": "2026-10-10T18:09:18.908Z",
-  "note": "Hardcoded user-facing Chinese strings. Lower this as components are converted; never raise it."
+  "translated": 1064,
+  "updatedAt": "2026-10-14T13:49:45.013Z",
+  "note": "Hardcoded user-facing Chinese strings (lower it, never raise it) and translated dictionary entries (raise it, never lower it)."
 }
