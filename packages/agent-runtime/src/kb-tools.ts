@@ -554,6 +554,121 @@ function suggestCrossGroupNeighbour(
     },
   );
 
+  /**
+   * 知识树的**地图**：组 + 条数 + 最近写入。
+   *
+   * 用户提议（2026-10-13）：「告诉它什么东西可能在哪里」。查证：在这之前模型的 KB 工具只有
+   * query/get/upsert/link/edit/retire —— **没有任何办法看到树**，于是"这事以前记过吗、在哪个组"
+   * 只能靠一次查询蒙中，写库时也不知道该复用哪个组（知识树碎片化就是这么来的）。
+   * 时间那一半不另记流水账：节点自带 created/updated，这里按组聚合（派生 → 不会腐坏、不用维护）。
+   */
+  reg(
+    {
+      name: 'kb_groups',
+      description: 'The map of the knowledge tree: groups with memory counts and the most recent write date — '
+        + 'what kind of thing lives where. Call it BEFORE writing (reuse an existing group instead of making a new '
+        + 'one) and after a query came back empty (to see what exists at all). No arguments = overview; '
+        + 'path="project/x" drills into one group (its children + its most recently written memories).',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Optional: group path to drill into, e.g. "project/digbug/lessons"' },
+          limit: { type: 'number', description: 'Optional: how many rows to list (default 24, max 80)' },
+        },
+      },
+    },
+    async (args) => {
+      interface G { id: string; name: string; parentGroupId: string | null; childGroupIds: string[]; stats?: { totalMemories?: number; directMemories?: number } }
+      const store = engine['store'] as unknown as {
+        getAllGroups(): G[];
+        getMemoriesByGroup(id: string): MemoryNode[];
+      };
+      const all = store.getAllGroups();
+      if (!all.length) return '知识树还是空的（还没有任何组）：用 kb_upsert 写下第一条记忆就会自动建组。';
+
+      const n = Number(args.limit);
+      const limit = Number.isFinite(n) && n >= 1 ? Math.min(Math.floor(n), 80) : 24;
+      const when = (t: number) => (t ? new Date(t).toISOString().slice(5, 10) : '—');
+      const directOf = (g: G) => store.getMemoriesByGroup(g.id) ?? [];
+      const lastOf = (ms: MemoryNode[]) => ms.reduce((m, x) => Math.max(m, x.updatedAt ?? x.createdAt ?? 0), 0);
+
+      /*
+       * 树按**名字里的斜杠**拼出来（不只按 parentGroupId）：库里两种形状都有 —— kb_upsert 写的组
+       * 是一条扁平的 "project/alpha/lessons"，导入/组操作建的组才有真父子关系。用户想的是路径，
+       * 所以按路径聚合，顺带统一两种形状；下面再把真父子关系也并进来。
+       */
+      interface N { path: string; real: G[]; total: number; direct: number; last: number; kids: Set<string> }
+      const nodes = new Map<string, N>();
+      const ensure = (p: string): N => {
+        let v = nodes.get(p);
+        if (!v) { v = { path: p, real: [], total: 0, direct: 0, last: 0, kids: new Set() }; nodes.set(p, v); }
+        return v;
+      };
+      for (const g of all) {
+        const segs = g.name.split('/').filter(Boolean);
+        const ms = directOf(g);
+        const last = lastOf(ms);
+        const total = g.stats?.totalMemories ?? ms.length;
+        for (let k = 1; k <= segs.length; k++) {
+          const p = segs.slice(0, k).join('/');
+          const v = ensure(p);
+          v.total += total;                 // 这条路径上的每一层前缀都算上它
+          if (k === segs.length) { v.real.push(g); v.direct += g.stats?.directMemories ?? ms.length; }
+          if (k > 1) ensure(segs.slice(0, k - 1).join('/')).kids.add(p);
+          v.last = Math.max(v.last, last);
+        }
+      }
+      for (const g of all) {
+        const parentName = g.parentGroupId ? all.find((x) => x.id === g.parentGroupId)?.name : null;
+        if (parentName && nodes.has(parentName) && nodes.has(g.name)) nodes.get(parentName)!.kids.add(g.name);
+      }
+
+      const line = (v: N, depth: number) =>
+        `${'  '.repeat(depth)}- ${v.path}  ${v.total} 条${v.direct ? `（本组 ${v.direct}）` : ''}（最近 ${when(v.last)}）`;
+
+      const path = typeof args.path === 'string' ? args.path.trim().replace(/\/+$/, '') : '';
+      if (path) {
+        const v = nodes.get(path);
+        if (!v) {
+          const near = [...nodes.keys()].filter((k) => k.includes(path)).slice(0, 5);
+          return `没有叫「${path}」的组。`
+            + (near.length ? `名字里带它的有：${near.join(' | ')}` : '不带参数调 kb_groups 可以看到顶层有哪些组。');
+        }
+        const lines = [`${v.path}：${v.total} 条（含子组）${v.real.length ? '' : '（这是一层隐含的路径，本身没有直接挂记忆）'}，${v.kids.size} 个子组，最近写入 ${when(v.last)}`];
+        const kids = [...v.kids].sort();
+        if (kids.length) {
+          lines.push('子组：');
+          for (const k of kids.slice(0, limit)) lines.push(line(nodes.get(k)!, 1));
+          if (kids.length > limit) lines.push(`  … 还有 ${kids.length - limit} 个子组`);
+        }
+        const mine = v.real.flatMap((g) => directOf(g)).sort((a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0));
+        if (mine.length) {
+          lines.push(`本组直接挂的记忆（最近 ${Math.min(mine.length, 10)} 条）：`);
+          for (const m of mine.slice(0, 10)) lines.push(`  · ${preview(m.title)}（${when(m.updatedAt ?? m.createdAt)}）[Node: ${m.id}]`);
+        } else if (!kids.length) {
+          lines.push('（本组和它的子组都是空的。）');
+        }
+        return lines.join('\n');
+      }
+
+      const tops = [...nodes.keys()].filter((k) => !k.includes('/')).sort();
+      const lines = [`知识树：${nodes.size} 条路径 / ${all.length} 个组（列到第二层；用 kb_groups path="<路径>" 钻进去）：`];
+      let shown = 0;
+      for (const t of tops) {
+        if (shown >= limit) break;
+        lines.push(line(nodes.get(t)!, 0));
+        shown++;
+        for (const k of [...nodes.get(t)!.kids].sort()) {
+          if (shown >= limit) break;
+          lines.push(line(nodes.get(k)!, 1));
+          shown++;
+        }
+      }
+      if (shown < nodes.size) lines.push(`（还有 ${nodes.size - shown} 条更深的路径没列出，钻进去看）`);
+      return lines.join('\n');
+    },
+  );
+
   const definitions = Array.from(toolMap.values()).map(t => t.def);
 
   async function execute(name: string, args: Record<string, unknown>): Promise<string> {
