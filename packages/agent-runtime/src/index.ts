@@ -71,6 +71,9 @@ export {
   DIGEST_SOURCE_MAX_CHARS,
   DIGEST_SOURCE_MIN_CHARS,
   digestSourceBudget,
+  digestInstruction,
+  digestMaxChars,
+  digestOutputTokens,
   MIN_DIGEST_CHARS,
   MIN_KEEP_TOKENS,
 } from './compaction.js';

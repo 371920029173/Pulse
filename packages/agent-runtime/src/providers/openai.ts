@@ -267,7 +267,16 @@ export class OpenAIProvider implements LLMProvider {
     tools?: ToolDefinition[],
     onChunk?: (chunk: StreamChunk) => void,
     signal?: AbortSignal,
+    opts?: { maxTokens?: number; level?: OpenAIProvider['thinkingLevel'] },
   ): Promise<LLMMessage> {
+    /*
+     * 这一次请求的输出上限与思考深度（见 ChatOptions 的注释：摘要调用靠它把预算全留给正文）。
+     * 思考级别只在这一次请求内改：applyThinking 把它写进 body 之后立刻还回去，
+     * 所以后面那一次普通请求拿到的还是原来的级别。
+     */
+    const maxTokens = opts?.maxTokens ?? this.maxTokens;
+    const levelBefore = this.thinkingLevel;
+    if (opts?.level) this.thinkingLevel = opts.level;
     const openaiMessages = repairApiMessages(messages).map(m => this.toOpenAIMessage(m));
     const openaiTools = tools?.length ? tools.map(t => this.toOpenAITool(t)) : undefined;
     /*
@@ -285,7 +294,7 @@ export class OpenAIProvider implements LLMProvider {
       // 0 means "no cap we invented". Still send a high ceiling: several
       // endpoints otherwise default max_tokens to 4096, and thinking tokens
       // are counted against it, so the chain is cut off with no answer.
-      max_tokens: this.maxTokens > 0 ? this.maxTokens : 131072,
+      max_tokens: maxTokens > 0 ? maxTokens : 131072,
       temperature: this.temperature,
       stream,
     };
@@ -294,6 +303,7 @@ export class OpenAIProvider implements LLMProvider {
     }
 
     this.applyThinking(body, openaiMessages);
+    this.thinkingLevel = levelBefore;
     if (stream) (body as any).stream_options = { include_usage: true };
 
     /*

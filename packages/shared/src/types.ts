@@ -320,9 +320,25 @@ export interface StreamChunk {
   };
 }
 
+/**
+ * 单次调用的覆盖项。
+ *
+ * 摘要那次调用用它："不思考、多写字"—— 推理模型的思考 token 与正文**共享**输出预算：
+ * 2026-10-15 实测（.she/tmp/digest-ab.mjs），8192 的预算被思考吃光，摘要当次返回 0 字符
+ * （finish_reason=length），另一次只写出 3027 字符就被截断。
+ *
+ * 留在调用参数上而不是做成 setter：它只应影响这一次请求，调用方不该有机会忘掉还回去。
+ */
+export interface ChatOptions {
+  /** 这一次请求的输出上限（token）。不给就用 provider 构造时的值。 */
+  maxTokens?: number;
+  /** 这一次请求的思考深度。不给就用 provider 当前的级别。 */
+  level?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+}
+
 export interface LLMProvider {
   name: string;
-  chat(messages: LLMMessage[], tools?: ToolDefinition[], onChunk?: (chunk: StreamChunk) => void, signal?: AbortSignal): Promise<LLMMessage>;
+  chat(messages: LLMMessage[], tools?: ToolDefinition[], onChunk?: (chunk: StreamChunk) => void, signal?: AbortSignal, opts?: ChatOptions): Promise<LLMMessage>;
 }
 
 // ─── Sandbox Types ───

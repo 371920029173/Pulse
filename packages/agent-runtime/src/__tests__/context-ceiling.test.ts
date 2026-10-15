@@ -36,6 +36,9 @@ import {
   retrievalAnchors,
   toolResultBudgetChars,
   digestSourceBudget,
+  digestInstruction,
+  digestMaxChars,
+  digestOutputTokens,
   DIGEST_SOURCE_MIN_CHARS,
   userLinesExcerpt,
   windowFromOverflowError,
@@ -908,5 +911,19 @@ describe('压缩不狠：保留量与摘要取样都跟着窗口走', () => {
     assert.ok(digestSourceBudget(1_000_000) > DIGEST_SOURCE_MIN_CHARS, '1M 窗口还只读 48k 就等于没改');
     assert.equal(digestSourceBudget(1_000_000), 173_500);
     assert.equal(digestSourceBudget(100_000_000), 400_000, '再大也不能把摘要调用自己撑溢出');
+  });
+
+  it('摘要上限也跟窗口走，并且指令里写的上限就是它（两者不许再打架）', () => {
+    assert.equal(digestMaxChars(128_000), 8_000, '128k 窗口应与旧行为一致');
+    assert.equal(digestMaxChars(1_000_000), 34_700);
+    assert.equal(digestMaxChars(100_000_000), 40_000, '再大也不能让摘要长成新的问题');
+    assert.ok(digestInstruction(digestMaxChars(1_000_000)).includes('34700'), '指令里的上限与实际上限不一致');
+    assert.ok(!/800 字/.test(digestInstruction(34_700)), '旧的"不超过 800 字"又回来了');
+  });
+
+  it('摘要输出预算跟着正文上限走（思考 token 与正文共享预算，别让思考把它吃光）', () => {
+    assert.equal(digestOutputTokens(8_000), 4_096);
+    assert.equal(digestOutputTokens(34_700), 13_880);
+    assert.equal(digestOutputTokens(40_000), 16_000, '再大也不超过 16000（输出 token 是真金白银）');
   });
 });

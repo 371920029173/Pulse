@@ -93,7 +93,9 @@ import {
   userLinesExcerpt,
   toolResultBudgetChars,
   windowFromOverflowError,
-  DIGEST_MAX_CHARS,
+  digestInstruction,
+  digestMaxChars,
+  digestOutputTokens,
   DIGEST_SOURCE_MAX_CHARS,
   DIGEST_SOURCE_MIN_CHARS,
   digestSourceBudget,
@@ -114,17 +116,10 @@ export const TOOL_CALLS_PER_PLAN_STEP = 8;
 
 const log = createLogger('agent');
 
-/**
- * 让模型写摘要时给它的指令。
- *
- * 逐条点名"必须保留什么"而不是笼统地说"总结一下"：这份摘要要在原文离开上下文之后替原文说话，
- * 而对话继续下去最需要的是决定、约束、文件路径、坑与没用完的下一步 —— 一份写成读后感的中文摘要
- * 恰好把这些都丢掉。
+/*
+ * 摘要指令与它的字符上限都定义在 compaction.ts（digestInstruction / digestMaxChars）——
+ * 两者必须同一处定义：2026-10-15 之前指令写"不超过 800 字"、上限写 8000，两边打架，谁都拦不住。
  */
-const DIGEST_INSTRUCTION = `把下面这段对话记录压缩成一份摘要，供之后继续这场对话时使用。
-必须保留：用户的要求、约束与偏好；已经做出的决定和它们的理由；动过或读过的重要文件路径与命令；
-发现的坑与失败；还没做完的事和下一步。不要加入原文里没有的信息，不要评价，不要写成"我建议"。
-用紧凑的条目写，长度不超过 800 字。`;
 
 /**
  * A turn is already running for this conversation.
@@ -3578,17 +3573,22 @@ export class Agent {
     head: readonly LLMMessage[],
     track?: (c: StreamChunk) => void,
   ): Promise<{ text: string; source: 'model' | 'extractive' }> {
-    const fallback = () => ({ text: summarizeExtractively(head, DIGEST_MAX_CHARS), source: 'extractive' as const });
+    const cap = digestMaxChars(this.contextWindow.tokens);
+    const fallback = () => ({ text: summarizeExtractively(head, cap), source: 'extractive' as const });
     const ask: LLMMessage[] = [
-      { role: 'system', content: DIGEST_INSTRUCTION },
+      { role: 'system', content: digestInstruction(cap) },
       { role: 'user', content: digestSourceText(head, digestSourceBudget(this.contextWindow.tokens)) },
     ];
     // 摘要这一次调用也观测：它**不带工具表**，所以固定开销是 0，别把工具表的字符算进去。
     this.pendingRequestChars = estimateRequest(ask, 0, this.charsPerToken).chars;
     try {
-      const reply = await this.provider.chat(ask, [], track);
+      /*
+       * 不思考 + 按正文上限给足输出预算：思考 token 与正文共享预算，而摘要的价值全在正文里
+       * （2026-10-15 实测：带着思考时 8192 的预算能写出 0 字符）。
+       */
+      const reply = await this.provider.chat(ask, [], track, undefined, { maxTokens: digestOutputTokens(cap), level: 'none' });
       const text = (reply.content ?? '').trim();
-      if (text.length >= MIN_DIGEST_CHARS) return { text: text.slice(0, DIGEST_MAX_CHARS), source: 'model' };
+      if (text.length >= MIN_DIGEST_CHARS) return { text: text.slice(0, cap), source: 'model' };
       log.warn(`摘要太短（${text.length} 字符），改用机械提取`);
       return fallback();
     } catch (err) {

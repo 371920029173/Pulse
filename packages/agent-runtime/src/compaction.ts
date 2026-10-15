@@ -44,8 +44,50 @@ export function digestSourceBudget(windowTokens: number): number {
   );
 }
 
-/** 摘要正文上限。它是新前缀的一部分，不能长成新的问题。 */
+/**
+ * 摘要正文的字符上限：**跟着窗口走**（窗口的 1%，夹在 DIGEST_MAX_CHARS 与 DIGEST_HARD_MAX_CHARS 之间）。
+ *
+ * 底下这个 8000 是"小窗口下就是它"：128k 窗口算出来 4442 → 取 8000，与从前逐字节相同。
+ * 2026-10-15 之前这里是硬上限 8000，而指令里又写着"长度不超过 800 字"——两边一起把摘要压成
+ * 1467 字（原文 14,192,101 字节），用户的原话是"压缩的是不是太狠了"。
+ */
 export const DIGEST_MAX_CHARS = 8_000;
+export const DIGEST_HARD_MAX_CHARS = 40_000;
+export const DIGEST_WINDOW_SHARE = 0.01;
+
+/**
+ * 摘要那次调用的**输出**预算（token）：正文上限按 2.5 字符/token 折算，夹在 4096 与 16000 之间。
+ *
+ * 为什么单独给：推理模型的思考 token 与正文共享这一份预算（实测见 ChatOptions 注释），
+ * 而摘要的价值全在正文里 —— 所以这次调用既不思考，也把预算按正文上限给足。
+ */
+export function digestOutputTokens(maxChars: number): number {
+  return Math.min(16_000, Math.max(4_096, Math.round(maxChars / 2.5)));
+}
+
+/** 摘要正文的字符上限（见上面三个常量的说明）。 */
+export function digestMaxChars(windowTokens: number): number {
+  return Math.min(
+    DIGEST_HARD_MAX_CHARS,
+    Math.max(DIGEST_MAX_CHARS, Math.round(windowTokens * DIGEST_WINDOW_SHARE * CHARS_PER_TOKEN)),
+  );
+}
+
+/**
+ * 让模型写摘要时给它的指令。上限是参数 —— 这份摘要要在原文离开上下文之后替原文说话，
+ * 上限决定它能说多少。
+ *
+ * 逐条点名"必须保留什么"而不是笼统地说"总结一下"，并且要求**原样保留标识符**：那些路径、命令、
+ * 数字、报错原文是之后 grep 与 kb_query 唯一的入口，摘要写成读后感就再也找不回来了。
+ */
+export function digestInstruction(maxChars: number): string {
+  return `把下面这段对话记录压缩成一份摘要，供之后继续这场对话时使用。
+必须保留，并尽量原样保留标识符（文件路径、命令、函数名、数字、报错原文 —— 它们之后要被搜索到）：
+用户的要求、约束与偏好；已经做出的决定和它们的理由；动过或读过的重要文件（带行号更好）；
+跑过的命令与结论（exit code）；发现的坑与失败；还没做完的事和下一步。
+不要加入原文里没有的信息，不要评价，不要写成"我建议"。
+用紧凑的条目写，尽量写满 ${maxChars} 字符（宁可长一点，不要漏）。`;
+}
 
 /** 摘要短于这个长度就不算数，退回机械提取。 */
 export const MIN_DIGEST_CHARS = 40;
