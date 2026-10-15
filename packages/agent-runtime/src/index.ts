@@ -69,9 +69,10 @@ export {
   CHARS_PER_TOKEN,
   DIGEST_MAX_CHARS,
   DIGEST_SOURCE_MAX_CHARS,
+  DIGEST_SOURCE_MIN_CHARS,
+  digestSourceBudget,
   MIN_DIGEST_CHARS,
   MIN_KEEP_TOKENS,
-  MAX_KEEP_TOKENS,
 } from './compaction.js';
 export type { CompactionState, TokenEstimate } from './compaction.js';
 export type { BudgetedToolResult, BudgetableMessage } from './tool-output.js';

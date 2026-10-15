@@ -35,6 +35,8 @@ import {
   keepTokensFor,
   retrievalAnchors,
   toolResultBudgetChars,
+  digestSourceBudget,
+  DIGEST_SOURCE_MIN_CHARS,
   userLinesExcerpt,
   windowFromOverflowError,
   MIN_KEEP_TOKENS,
@@ -875,5 +877,36 @@ describe('盘上那份记录不会被悄悄换掉', () => {
     const backups = (await import('node:fs')).readdirSync(dir2).filter((f) => f.includes('unusable-'));
     assert.equal(backups.length, 1, '坏文件要留下来，而不是被覆盖');
     assert.equal(readFileSync(join(dir2, backups[0]), 'utf8'), '{ 这不是 JSON');
+  });
+});
+
+/*
+ * 「压缩太狠了」的判据（2026-10-15 用户原话）。
+ *
+ * 实测背景：窗口 1M、一次压缩 covered 4536 条、before 911970 → after 31493，而摘要正文只有
+ * 1467 字符 —— 保留量被绝对值上限 8000 token 钉死（0.8% 的窗口），摘要取样也只读到 48k 字符
+ * （14,192,101 字节原文的 0.3%）。这两条现在都必须跟着窗口走。
+ */
+describe('压缩不狠：保留量与摘要取样都跟着窗口走', () => {
+  it('1M 窗口要留住 5%（不再是 8000 的绝对值上限）', () => {
+    assert.equal(keepTokensFor(1_000_000), 50_000);
+    assert.ok(keepTokensFor(1_000_000) > 8_000, '又被绝对上限钉回 8000 了');
+  });
+
+  it('小窗口一个字都没变（128k → 6400；40k 走地板 4000）', () => {
+    assert.equal(keepTokensFor(128_000), 6_400);
+    assert.equal(keepTokensFor(40_000), MIN_KEEP_TOKENS);
+  });
+
+  it('撞墙那两次仍然保留得更少（keepScale 语义没被这次改动破坏）', () => {
+    assert.ok(keepTokensFor(1_000_000, 0.25) < keepTokensFor(1_000_000, 1));
+    assert.equal(keepTokensFor(1_000_000, 0.25), 12_500);
+  });
+
+  it('摘要取样预算：跟着窗口长，但有上下限', () => {
+    assert.equal(digestSourceBudget(128_000), DIGEST_SOURCE_MIN_CHARS, '128k 窗口应与旧行为一致（48k）');
+    assert.ok(digestSourceBudget(1_000_000) > DIGEST_SOURCE_MIN_CHARS, '1M 窗口还只读 48k 就等于没改');
+    assert.equal(digestSourceBudget(1_000_000), 173_500);
+    assert.equal(digestSourceBudget(100_000_000), 400_000, '再大也不能把摘要调用自己撑溢出');
   });
 });

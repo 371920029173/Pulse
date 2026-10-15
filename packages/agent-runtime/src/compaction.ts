@@ -26,8 +26,23 @@ import type { LLMMessage } from '@she/shared';
  */
 export const CHARS_PER_TOKEN = 3.47;
 
-/** 摘要取样最多读多少字符原文。摘要是**有界的**，否则生成摘要的那次调用自己会溢出。 */
-export const DIGEST_SOURCE_MAX_CHARS = 48_000;
+/**
+ * 摘要取样最多读多少字符原文：**跟着窗口走**（窗口的 5%，下限 48k、上限 400k）。
+ *
+ * 以前固定 48k。对 128k 窗口够用，对 1M 窗口就是"14MB 的原文里只读 0.3%"——摘要只能瞎猜，
+ * 2026-10-15 实测那次折叠（covered 4536 条、原文 14,192,101 字节）只写出 1467 字的摘要。
+ * 生成摘要的那次调用自己不能溢出，所以这里按窗口比例给预算：任何窗口下都只占 5%。
+ */
+export const DIGEST_SOURCE_MIN_CHARS = 48_000;
+export const DIGEST_SOURCE_MAX_CHARS = 400_000;
+
+/** 摘要取样的字符预算（窗口 token 的 5%，夹在上下限之间）。 */
+export function digestSourceBudget(windowTokens: number): number {
+  return Math.min(
+    DIGEST_SOURCE_MAX_CHARS,
+    Math.max(DIGEST_SOURCE_MIN_CHARS, Math.round(windowTokens * KEEP_WINDOW_SHARE * CHARS_PER_TOKEN)),
+  );
+}
 
 /** 摘要正文上限。它是新前缀的一部分，不能长成新的问题。 */
 export const DIGEST_MAX_CHARS = 8_000;
@@ -35,10 +50,15 @@ export const DIGEST_MAX_CHARS = 8_000;
 /** 摘要短于这个长度就不算数，退回机械提取。 */
 export const MIN_DIGEST_CHARS = 40;
 
-/** 压缩后希望留在上下文里的最近对话量（token），按窗口的 5% 取，夹在下面两个数之间。 */
+/**
+ * 压缩后希望留在上下文里的最近对话量（token）：窗口的 5%，不低于 MIN_KEEP_TOKENS。
+ *
+ * 这里曾经有个绝对值上限 8000（按 128k 窗口定的）。窗口换成 1M 之后，它就成了"只留 0.8%"：
+ * 2026-10-15 实测，一次压缩把 14,192,101 字节的原文换成 1467 字的摘要 + 8k token 的尾巴 ——
+ * 用户的原话是「压缩的是不是太狠了」。现在比例跟着窗口走，小窗口（≤160k）的取值逐字节不变。
+ */
 export const KEEP_WINDOW_SHARE = 0.05;
 export const MIN_KEEP_TOKENS = 4_000;
-export const MAX_KEEP_TOKENS = 8_000;
 
 /**
  * 压缩摘要那条消息的开头。导出成常量是因为**分类账要用它**：一眼看出"这一条是摘要，不是对话"，
@@ -228,7 +248,7 @@ export function isContextOverflowError(err: unknown): boolean {
 
 /** 压缩后要保留的最近对话量（token）。`keepScale` 让"压过一次还是超"的那一次保留更少。 */
 export function keepTokensFor(windowTokens: number, keepScale = 1): number {
-  const base = Math.min(MAX_KEEP_TOKENS, Math.max(MIN_KEEP_TOKENS, Math.round(windowTokens * KEEP_WINDOW_SHARE)));
+  const base = Math.max(MIN_KEEP_TOKENS, Math.round(windowTokens * KEEP_WINDOW_SHARE));
   return Math.max(MIN_KEEP_TOKENS / 2, Math.round(base * keepScale));
 }
 

@@ -95,6 +95,8 @@ import {
   windowFromOverflowError,
   DIGEST_MAX_CHARS,
   DIGEST_SOURCE_MAX_CHARS,
+  DIGEST_SOURCE_MIN_CHARS,
+  digestSourceBudget,
   MIN_DIGEST_CHARS,
   type CompactionState,
   kbCandidates,
@@ -3568,7 +3570,8 @@ export class Agent {
    * 交回一份可用摘要，这次压缩就算成立；`source` 跟着摘要一起存下来并显示给用户，机械摘要不会
    * 看起来像模型总结。
    *
-   * 取样有界（DIGEST_SOURCE_MAX_CHARS）：生成摘要的这次调用自己不能溢出，否则救援代码会先撞墙。
+   * 取样有界（digestSourceBudget = 窗口的 5%，下限 48k / 上限 400k）：生成摘要的这次调用自己不能溢出，
+   * 否则救援代码会先撞墙。
    * `track` 是这一轮的用量漏斗：这次调用真的花了钱，就该记在账上，而它也真的是一次模型请求。
    */
   private async writeDigest(
@@ -3578,7 +3581,7 @@ export class Agent {
     const fallback = () => ({ text: summarizeExtractively(head, DIGEST_MAX_CHARS), source: 'extractive' as const });
     const ask: LLMMessage[] = [
       { role: 'system', content: DIGEST_INSTRUCTION },
-      { role: 'user', content: digestSourceText(head, DIGEST_SOURCE_MAX_CHARS) },
+      { role: 'user', content: digestSourceText(head, digestSourceBudget(this.contextWindow.tokens)) },
     ];
     // 摘要这一次调用也观测：它**不带工具表**，所以固定开销是 0，别把工具表的字符算进去。
     this.pendingRequestChars = estimateRequest(ask, 0, this.charsPerToken).chars;
