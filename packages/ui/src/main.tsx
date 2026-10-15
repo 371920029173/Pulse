@@ -16,13 +16,24 @@ import './styles/highlight.css';
  */
 import './locales';
 import { initLocale } from './lib/i18n';
+import { hydrateUiState, startUiStateSync } from './lib/uiState';
 
-initLocale();
+/*
+ * 界面状态（草稿、推理档位、技能档、快捷键、"知道了"…）跟着**工作区**走，不跟着端口走：
+ * 先把上一次的快照灌回 localStorage，再渲染 —— 各处都是在 useState 初始化里同步读的，
+ * 晚一步就会先闪一下默认值。为什么不能只放 localStorage：每次启动的端口都可能不同，
+ * 而 localStorage 按 origin 隔离（见 lib/uiState.ts）。
+ */
+void (async () => {
+  await hydrateUiState();
+  initLocale();                 // 语言也可能在上次那份状态里：灌完再定
+  startUiStateSync();
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
-  </React.StrictMode>
-);
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <React.StrictMode>
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
+    </React.StrictMode>
+  );
+})();

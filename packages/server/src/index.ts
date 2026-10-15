@@ -14,7 +14,7 @@ import { KBStore, GroupKBEngine, mergeKnowledgeBases, activationReport } from '@
 import type { KBMemoryPatch } from '@she/kb';
 import { resolveWorkspaceKbPath, writeKbLink, clearKbLink, copyKbFile, readKbLink } from './kb-link.js';
 import { SandboxShell, createTools, ConfirmTicketStore, describeIsolation, isolationNotice } from '@she/sandbox';
-import { Agent, TurnInProgressError, isSafeSessionId, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, resolveSubagentLlm, armSubagentWrapUp, selectHarvestNotes, allocateContext, pricingConfigured, pricingNote } from '@she/agent-runtime';
+import { Agent, TurnInProgressError, isSafeSessionId, readSkillProfile, writeSkillProfile, guardrailPolicy, summariseFindings, composeHandoffPrompt, shouldIsolate, readChildProgress, formatTimeoutReport, resolveSubagentTimeoutMs, resolveSubagentLlm, armSubagentWrapUp, selectHarvestNotes, allocateContext, pricingConfigured, pricingNote, workspaceStateFile } from '@she/agent-runtime';
 import type { SubagentRunner, SubagentResult, SubagentKbHarvest, UsageLike } from '@she/agent-runtime';
 import {
   PlanStore,
@@ -5095,6 +5095,57 @@ router.get('/api/fs/tree', (req, res) => {
   router.delete('/api/memo/:id', (_req, res, params) => {
     if (!memoStore().remove(params.id)) throw new HttpError(404, 'Memo not found');
     sendJSON(res, { ok: true });
+  });
+
+  // ── UI state that must survive an app restart (drafts, thinking level, shortcuts, dismissals) ──
+  /*
+   * 为什么在服务端：桌面端每个窗口的后端端口**每次启动都可能变**（这台机器的 Hyper-V 保留端口段让
+   * "猜一个空闲端口"四十次全败，于是改成向系统要一个 —— 见 packages/desktop/backend-pool.cjs），
+   * 而 localStorage 按「协议://主机:端口」隔离 —— 端口一变就全空。用户报的正是这两件事：
+   * 「这个玩意还是每次重启都弹」（横幅的"知道了"）、「推理设置为高、输入框里的字，下次打开希望还在」。
+   *
+   * 形态：`.she/ui-state.json` = { key: value } 的字符串表。键名由客户端给（`she.` 前缀、形状校验），
+   * 合并语义（null = 删除），整份有 512KB 上限。坏文件当空 —— 和 memo 同一条规矩。
+   * **凭据不在这里**：客户端不送 `she.authToken`（它只活在那一扇窗口的 localStorage 里）。
+   */
+  const uiStateFile = () => workspaceStateFile(config.workspace.root, 'ui-state.json');
+  const readUiState = (): Record<string, string> => {
+    try {
+      const p = uiStateFile();
+      if (!existsSync(p)) return {};
+      const parsed = JSON.parse(readFileSync(p, 'utf8').replace(/^\uFEFF/, '')) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) if (typeof v === 'string') out[k] = v;
+      return out;
+    } catch {
+      return {};
+    }
+  };
+
+  router.get('/api/ui-state', (_req, res) => {
+    sendJSON(res, { state: readUiState() });
+  });
+
+  router.put('/api/ui-state', async (req, res) => {
+    const body = await parseBody<{ entries?: Record<string, string | null> }>(req);
+    const incoming = body.entries && typeof body.entries === 'object' && !Array.isArray(body.entries) ? body.entries : {};
+    const merged = { ...readUiState() };
+    for (const [k, v] of Object.entries(incoming)) {
+      // 键名形状由服务端定：客户端将来加了新键也不用改这里，但别的形状一律拒收。
+      // 凭据不落盘，两端都拦：客户端不送（ui-state.ts 的 EXCLUDE），这里也拒收。
+      if (k === 'she.authToken' || !/^she\.[A-Za-z0-9._-]{1,64}$/.test(k)) continue;
+      if (v === null) delete merged[k];
+      else if (typeof v === 'string' && v.length <= 200_000) merged[k] = v;
+    }
+    const text = JSON.stringify(merged, null, 2);
+    if (Buffer.byteLength(text, 'utf8') > 512 * 1024) throw new HttpError(413, 'UI state too large (512KB limit)');
+    const p = uiStateFile();
+    mkdirSync(dirname(p), { recursive: true });
+    const tmp = `${p}.${process.pid}.tmp`;
+    writeFileSync(tmp, text, 'utf8');
+    renameSync(tmp, p);
+    sendJSON(res, { ok: true, keys: Object.keys(merged).length });
   });
 
   // ── plugin dock: manifest of extension points ──

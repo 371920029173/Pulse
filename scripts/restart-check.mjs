@@ -306,6 +306,18 @@ const created = {};
 }
 
 // Give the writer a moment, then kill HARD.
+/*
+ * 界面状态：草稿、推理档位、"知道了"…用户报它们"每次重启都没了"。
+ * 桌面端每个窗口的后端端口每次启动都可能变，而 localStorage 按 origin 隔离 —— 所以它必须落在工作区里。
+ */
+{
+  const res = await raw('/api/ui-state', {
+    method: 'PUT',
+    body: { entries: { 'she.draft.sess_x': '重启后这句还要在', 'she.thinkingLevel': 'high' } },
+  });
+  check('界面状态能写入', res.status === 200, `status=${res.status} ${res.text.slice(0, 120)}`);
+}
+
 await sleep(600);
 await kill();
 
@@ -450,6 +462,27 @@ await boot('第二次启动');
 {
   const t = json(await raw('/api/theme'));
   check('自定义样式保留', t?.css === ':root { --accent: #abcdef; }', JSON.stringify(t?.css));
+}
+
+{
+  const st = json(await raw('/api/ui-state'))?.state ?? {};
+  check('重启后草稿还在（用户："输入框里没发出去的字"）',
+    st['she.draft.sess_x'] === '重启后这句还要在', `she.draft.sess_x=${JSON.stringify(st['she.draft.sess_x'])}`);
+  check('重启后推理档位还在（用户："推理设置为高"）', st['she.thinkingLevel'] === 'high', `she.thinkingLevel=${st['she.thinkingLevel']}`);
+  check('状态落在工作区里，不是端口本地的 localStorage',
+    existsSync(join(workspace, '.she', 'ui-state.json')), join(workspace, '.she', 'ui-state.json'));
+
+  await raw('/api/ui-state', { method: 'PUT', body: { entries: { 'she.thinkingLevel': null } } });
+  const after = json(await raw('/api/ui-state'))?.state ?? {};
+  check('删除走 null，且只删一个键',
+    after['she.thinkingLevel'] === undefined && after['she.draft.sess_x'] === '重启后这句还要在',
+    `thinkingLevel=${after['she.thinkingLevel']} draft=${JSON.stringify(after['she.draft.sess_x'])}`);
+
+  await raw('/api/ui-state', { method: 'PUT', body: { entries: { 'evil/../path': 'x', 'she.authToken': 'sk-should-not-stick' } } });
+  const badAfter = json(await raw('/api/ui-state'))?.state ?? {};
+  check('坏键名与凭据都进不来',
+    !('evil/../path' in badAfter) && badAfter['she.authToken'] === undefined,
+    `keys=${Object.keys(badAfter).join(',')}`);
 }
 
 /* ─────────────── Third boot: a corrupted state file must not lose data ─────────────── */

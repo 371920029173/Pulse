@@ -187,6 +187,11 @@ config, and multiple models can be registered so you are not locked to one vendo
 - **Interface** — Electron desktop (multi-window) and web; syntax highlighting, diffs, collapsible
   reasoning, Chinese/English UI, and a user stylesheet
 - **Deployment** — cross-platform launcher, container image, configurable bind address and allowed hosts
+- **State that survives a restart** — drafts, the thinking level, the skill profile, shortcuts and
+  dismissed notices live in `.she/ui-state.json` (workspace-level) and are hydrated back into the page
+  before the first render. They are *not* in `localStorage` alone: the desktop opens each window on a
+  fresh OS-assigned port (this machine's Hyper-V reserved ranges make picking one unreliable), and
+  `localStorage` is isolated per origin — the port, and with it the state, used to change every launch
 - **Localisation** — the interface is written in Chinese and ships a complete English dictionary (1,067
   entries, 100% of the source strings). `pnpm check:i18n` ratchets both ways: hardcoded Chinese may fall
   and never rise, translated entries may rise and never fall
