@@ -232,7 +232,18 @@ export function normalizeHistory(raw: ServerHistoryMessage[]): ChatMessage[] {
  * 现在服务端每隔几秒发一行心跳（router.ts 的 startHeartbeat），所以"长时间没有一个字节"就是
  * 死连接。120 秒 = 8 个心跳的余量，接上之后走的还是既有的自愈路径（清掉尸体 → armFollow → attach）。
  */
-const CHAT_IDLE_TIMEOUT_MS = 120_000;
+/*
+ * 聊天流**不设**客户端空闲超时（0 = 不限时空闲）。
+ *
+ * 这里原来是 120_000：只要 120 秒收不到任何 SSE chunk，本地就把这一轮的请求掐掉 —— 而服务端
+ * 还在跑。于是一次很长时间的思考、一次大压缩（摘要那次模型调用）、一个慢工具，都会表现为
+ * 「对话莫名中断」，而且界面显示发送、服务端却还在干活（用户报的正是这两件事）。
+ *
+ * 长静默是正常的：服务端每 15 秒有 SSE 心跳，真断的 socket 会以错误浮现；流真的断了，useChat
+ * 里那条"窗口可见时每 8 秒问一次 /api/chat/running"也会把界面接回去。所以"猜一个上限"在这里
+ * 只会帮倒忙。（讨论群那条流本来就用 0，见 useClusterChat.ts:251。）
+ */
+const CHAT_IDLE_TIMEOUT_MS = 0;
 
 export function useChat(sessionId?: string | null) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
