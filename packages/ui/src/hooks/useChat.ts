@@ -1269,6 +1269,38 @@ export function useChat(sessionId?: string | null) {
    * user comes back, poll until the turn finishes and then load the result.
    * A local stream (abortRef set) is the live view — don't overwrite it.
    */
+  /*
+   * 「服务端在跑，界面却显示发送」的第二半。
+   *
+   * 第一半修的是"流结束了但这轮还没完"（onDone 向服务端确认）。可截图里那个场景压根没有流：
+   * 这一轮是**服务端自己发起的**（看护 / 定时任务在后台会话里跑），这扇窗口从头到尾没挂过流，
+   * 于是 isLoading 一直是 false —— 右下角永远是发送键，而那一轮按不动也停不了。
+   *
+   * 所以再补一条"只信服务端"的兜底：窗口可见时每 8 秒问一次 /api/chat/running。
+   * 只在**没有本地流**的时候问（abortRef 为空）：有流的时候它自己就是权威，一次都不用问，
+   * 于是正常流式期间这条轮询是零请求。
+   */
+  useEffect(() => {
+    const tick = async () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (abortRef.current) return;
+      const sid = sidRef.current;
+      if (!sid) return;
+      const running = await serverTurnRunning();
+      if (running !== true) return;
+      if (sidRef.current !== sid || abortRef.current) return;
+      setIsLoading(true);
+      armFollowRef.current(sid, { skipPull: true });
+    };
+    const timer = window.setInterval(() => { void tick(); }, 8_000);
+    const onFocus = () => { void tick(); };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [serverTurnRunning]);
+
   const armFollow = useCallback((sid: string, opts?: { skipPull?: boolean }) => {
     if (followRef.current) { clearInterval(followRef.current); followRef.current = null; }
     if (!sid || abortRef.current) return;

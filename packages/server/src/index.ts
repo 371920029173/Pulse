@@ -1881,6 +1881,15 @@ function workingWindow(): WorkingWindow | null {
  */
 const runningTaskSessions = new Map<string, string>();
 
+/*
+ * 哪个会话里正在跑的那一轮是**定时任务**开的。
+ *
+ * 停止是按会话走的（agent.stop()），而任务常常跑在用户正在看的那个会话里 —— 于是"从面板按停止"
+ * 与"用户按停止"看起来撞在一起。这个集合让两条路都能说清自己停的是谁的那一轮，也让面板的停止
+ * 能在"那一轮不是它开的"时拒绝，而不是顺手停掉别人的。
+ */
+const scheduledTurnSessions = new Set<string>();
+
 async function runScheduledTask(task: ScheduledTask): Promise<void> {
   let sid = task.sessionId;
   if (!sid || !sessions.get(sid)) {
@@ -1904,6 +1913,7 @@ async function runScheduledTask(task: ScheduledTask): Promise<void> {
   // A busy conversation queues the task rather than failing it (see SessionBusyError).
   if (agent.isRunning()) throw new SessionBusyError();
   runningTaskSessions.set(task.id, sid);
+  scheduledTurnSessions.add(sid);
   const turnStart = Date.now();
   const usageBefore = agent.getTokenUsage();
   try {
@@ -1942,6 +1952,7 @@ async function runScheduledTask(task: ScheduledTask): Promise<void> {
     throw err;
   } finally {
     runningTaskSessions.delete(task.id);
+    scheduledTurnSessions.delete(sid);
     persistHistory(sid);
   }
 }
@@ -2812,8 +2823,17 @@ function reloadTenancy(): void {
     if (!sid || !agent?.isRunning()) {
       throw new HttpError(409, '这个任务当前没有在执行。');
     }
+    /*
+     * 闸门：那个会话里跑的必须是**这个任务**开的那一轮。
+     *
+     * 少了这一句，删除/停止就只是"按会话停" —— 会话里跑着的是别的轮次（用户自己刚发的、
+     * 或另一个任务）时也会被顺手停掉。这正是用户报的「在定时任务那里打断，可能打断别的窗口」。
+     */
+    if (!scheduledTurnSessions.has(sid)) {
+      throw new HttpError(409, '那个会话里正在跑的这一轮不是这个任务开的，已拒绝（避免停掉别人的一轮）。');
+    }
     agent.stop();
-    sendJSON(res, { ok: true, stopped: true, sessionId: sid });
+    sendJSON(res, { ok: true, stopped: true, sessionId: sid, owner: 'schedule' });
   });
 
   /**
@@ -3301,9 +3321,16 @@ const STREAM_PERSIST_MS = 10_000;
   router.post('/api/chat/stop', async (req, res) => {
     const body = await parseBody<{ session_id?: string }>(req).catch(() => ({ session_id: undefined }));
     const agent = agentFor(req, body);
+    const sid = sessionIdOf(req, body);
+    /*
+     * 停是按会话走的，所以这里必须回答"停掉的是谁的那一轮"：这一轮可能是定时任务开的
+     * （任务常常就跑在用户正在看的这段对话里）。界面据此告诉用户他刚停下的是哪一个 ——
+     * 否则一句"已停止"会让人以为停的是自己的、而实际停掉的是任务。
+     */
+    const owner = scheduledTurnSessions.has(sid) ? 'schedule' : 'user';
     const stopped = agent.stop();
-    persistHistory(sessionIdOf(req, body));
-    sendJSON(res, { ok: true, stopped });
+    persistHistory(sid);
+    sendJSON(res, { ok: true, stopped, owner });
   });
 
   router.get('/api/chat/running', (req, res) => {
