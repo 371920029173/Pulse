@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useCallback, useMemo, memo } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo, memo } from 'react';
 import type { ChatMessage, ToolCallData, ConfirmTicket, PendingPatch } from '../hooks/useChat';
 import { continuePrompt } from '../hooks/useChat';
 import { DiffPanel } from './DiffPanel';
@@ -1078,7 +1078,11 @@ export function Chat({
     land();
   }, []);
 
-  useEffect(() => {
+  /*
+   * useLayoutEffect 而不是 useEffect：流式内容一变，滚动要在**同一帧的 paint 之前**落到位，
+   * 否则先按新的 scrollHeight 画一帧、再跳回去 —— 那一帧就是闪烁（用户报的"抽搐"里的一层）。
+   */
+  useLayoutEffect(() => {
     if (!stickToBottomRef.current) return;
     landAtLatest();
   }, [messages, pendingConfirm, pendingPatch, landAtLatest]);
@@ -1651,10 +1655,11 @@ export function Chat({
 
           <textarea
             ref={textareaRef}
-            className={styles.textarea}
+            className={isLoading ? `${styles.textarea} ${styles.textareaAppend}` : styles.textarea}
+            title={t('补充信息…（Enter 追加 · 连按两次 Enter 打断 · Shift+Enter 换行）')}
             placeholder={
               isLoading
-                ? t('补充信息…（Enter 追加 · 连按两次 Enter 打断 · Shift+Enter 换行）')
+                ? t('补充信息…（Enter 追加 · 连按两次 Enter 打断）')
                 : t('@file: / @folder: / @symbol: · 用 📎 添加文件、拖进来或粘贴（Enter 发送 · Shift+Enter 换行）')
             }
             value={input}

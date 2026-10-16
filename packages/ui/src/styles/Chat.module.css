@@ -63,9 +63,24 @@
 }
 
 .messages {
-  scroll-behavior: smooth;
+  /*
+   * 这里**不能**有 scroll-behavior: smooth。
+   *
+   * landAtLatest()（Chat.tsx）的设计是瞬时赋值 —— 它自己的注释写着「No smooth: an animation
+   * cannot chase a target that moves under it」。样式一开平滑，每次赋值都变成 ~300ms 动画，
+   * 而流式每来一个 chunk 就重跑一次 → 动画被下一次打断、重新定目标，用户看到的就是「内容抽搐」
+   * （2026-10-15 报的）。瞬时滚动 + 我们自己重试几帧才是对的。
+   */
   flex: 1;
   overflow-y: auto;
+  /*
+   * 关掉浏览器的 scroll anchoring（默认 auto）。
+   *
+   * 列表项用 content-visibility:auto，屏外的行先按 contain-intrinsic-size 的 96px 占位，
+   * 滚到附近才换成真实高度 —— 那一刻浏览器会"帮"我们调整 scrollTop 来保持视野稳定，
+   * 和每 chunk 的显式滚动互相抢控制权（往上滑时表现为视口跳）。显式滚动的一方赢：关掉它。
+   */
+  overflow-anchor: none;
   /* Horizontal padding matches the 12px inset of .header / .inputArea so the
      bubbles line up with the floating bars above and below them. */
   padding: 14px 12px 8px;
@@ -602,6 +617,13 @@
 
 /* The real input is invisible: the button above is the control, and a native file input
    cannot be styled to match the rest of the row. */
+/*
+ * 运行中（占位符变成"补充信息…"那一串）时给输入框两行的高度。
+ * 原因：.textarea 的 min-height:20px 恰好等于一行（line-height 1.5 × 13.5px ≈ 20px），
+ * 长提示被压进单行框看起来"像被硬塞进去"（2026-10-15 报的）。两行 = 40.5px，给 42px。
+ */
+.textareaAppend { min-height: 42px; }
+
 .attachInput { display: none; }
 
 .textarea {

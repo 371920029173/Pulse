@@ -139,7 +139,10 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
         + `Node text is summarised to the first ${KB_PREVIEW_CHARS} characters by default — enough for a convention, a port or a command, and short of the whole of an ingested document. `
         + 'Pass `full: true` when the exact wording is the point: quoting a memory, or checking a command, a number or a path character by character. '
         + `Lists the top ${KB_DEFAULT_LIMIT} hits by default (\`limit\` up to ${KB_MAX_LIMIT} for more); the reply says how many were left out. `
-        + 'To read one node in full, use `kb_get` with its id (the [Node: …] line).',
+        + 'To read one node in full, use `kb_get` with its id (the [Node: …] line). '
+        + 'An empty result is not the end of the search: the ranker needs FEWER, more structural words — '
+        + 're-query with a shorter phrase (a group name, a file name, a module) before concluding that '
+        + 'the memory is not there.',
       parameters: {
         type: 'object',
         properties: {

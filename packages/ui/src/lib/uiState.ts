@@ -93,7 +93,14 @@ export async function flushUiState(): Promise<boolean> {
 export function startUiStateSync(): void {
   if (timer) return;
   lastSent = snapshotUiState();
-  timer = setInterval(() => { void flushUiState(); }, SYNC_MS);
+  /*
+   * 定时那次只在窗口可见时跑：页面 hidden 本来就会触发一次 flush（下面的 visibilitychange），
+   * 所以藏着的时候不需要这 1.5 秒一次的心跳 —— 它每个窗口都有，多开几个就是常驻负载。
+   */
+  timer = setInterval(() => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    void flushUiState();
+  }, SYNC_MS);
   try {
     window.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') void flushUiState(); });
     window.addEventListener('beforeunload', () => { void flushUiState(); });

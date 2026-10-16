@@ -75,7 +75,7 @@ function statusLabel(task: ScheduledTask, running: boolean): { text: string; ton
  * broken, so the state is stated outright ("当前可开工" / "顺延到 …") instead of
  * leaving the user to infer it from timestamps.
  */
-export function SchedulePanel({ onClose }: { onClose?: () => void }) {
+export function SchedulePanel({ onClose, onOpenSession }: { onClose?: () => void; onOpenSession?: (sessionId: string) => void }) {
   // Escape closes this dialog: the backdrop click is a mouse convenience, not a keyboard path.
   useEscapeToClose(onClose);
 
@@ -94,7 +94,15 @@ export function SchedulePanel({ onClose }: { onClose?: () => void }) {
     }
   }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  /*
+   * 挂载时拉一次，之后每 5 秒再对一次：模型在你聊天时建的/改的任务会当场出现在列表里，
+   * 不用关掉面板再打开。（App 那边还有一条 10 秒的全局轮询，管的是面板关着时的 toast。）
+   */
+  useEffect(() => {
+    void load();
+    const timer = setInterval(() => { void load(); }, 5_000);
+    return () => clearInterval(timer);
+  }, [load]);
 
   const create = useCallback(async () => {
     if (busy) return;
@@ -119,7 +127,7 @@ export function SchedulePanel({ onClose }: { onClose?: () => void }) {
     }
   }, [busy, draft, load]);
 
-  const act = useCallback(async (id: string, action: 'toggle' | 'run' | 'delete', enabled?: boolean) => {
+  const act = useCallback(async (id: string, action: 'toggle' | 'run' | 'delete' | 'stop', enabled?: boolean) => {
     if (busy) return;
     setBusy(id + action);
     try {
@@ -128,6 +136,10 @@ export function SchedulePanel({ onClose }: { onClose?: () => void }) {
       } else if (action === 'run') {
         await fetchJSON(`/api/schedule/${id}/run`, { method: 'POST', body: {} });
         toast(t('已开始执行，结果会写进对应会话'));
+      } else if (action === 'stop') {
+        // 停的是"这一次执行"，任务本身还在（要取消任务用删除）。
+        await fetchJSON(`/api/schedule/${id}/stop`, { method: 'POST', body: {} });
+        toast(t('已停止这一次执行'));
       } else {
         await fetchJSON(`/api/schedule/${id}`, { method: 'DELETE' });
         toast(t('已删除'));
@@ -332,6 +344,29 @@ export function SchedulePanel({ onClose }: { onClose?: () => void }) {
                       >
                         {task.enabled ? t('停用') : t('启用')}
                       </button>
+                      {/*
+                        任务跑在**后台会话**里（不进工作列表，避免抢 active_id），所以"后端在跑、
+                        前端看不到"是必然的 —— 除非这里给一条直接进去的路。跑完也能回去看结果。
+                      */}
+                      {task.sessionId ? (
+                        <button
+                          type="button"
+                          className={styles.ghost}
+                          onClick={() => onOpenSession?.(task.sessionId as string)}
+                        >
+                          {t('打开执行会话')}
+                        </button>
+                      ) : null}
+                      {running.has(task.id) ? (
+                        <button
+                          type="button"
+                          className={styles.danger}
+                          disabled={busy === task.id + 'stop'}
+                          onClick={() => void act(task.id, 'stop')}
+                        >
+                          {t('停止这一次')}
+                        </button>
+                      ) : null}
                       <button
                         type="button"
                         className={styles.ghost}
@@ -358,6 +393,13 @@ export function SchedulePanel({ onClose }: { onClose?: () => void }) {
               })}
             </ul>
           )}
+        </div>
+        {/*
+          底部再放一个关闭：头部那个 × 在长列表里容易被忽略（用户的原话是「又难关」）。
+          键盘路径本来就有（本面板自己的 useEscapeToClose），这里补的是「看得见的那条」。
+        */}
+        <div className={styles.footer}>
+          <button type="button" className={styles.ghost} onClick={onClose}>{t('关闭')}</button>
         </div>
       </section>
     </div>

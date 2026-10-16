@@ -478,7 +478,14 @@ export function App() {
       } catch { /* ignore */ }
     };
     void adopt();
-    const timer = window.setInterval(adopt, 2500);
+    /*
+     * 只在窗口可见时轮询。这条 2.5 秒的轮询每个窗口都开着，4 个窗口就是 1.6 req/s 的常驻负载，
+     * 而后台窗口里的结果用户根本看不到（下次可见时那一次 adopt 会把状态补齐）。
+     */
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') return;
+      void adopt();
+    }, 2_500);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [activeSessionId, clusterRoomId]);
 
@@ -978,7 +985,48 @@ export function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [selectedGroupId, showSettings, showImport, showKnowledge, filePreview, showCheckpoints, showPalette, showTerminal, showTrace, showCluster, showPlans, showAudit, showRuns, showWorktrees, showCost, chat, handleNewSession, focusChat, theme]);
+  /*
+   * 依赖数组必须列全 handler 里读到的每一个开关。
+   *
+   * 这里漏过 showSchedule / showSkills / showHistory / showTheme / showMemo —— 闭包里读到的是
+   * 注册那一刻的旧值（false），于是「Escape 关掉定时任务面板」这条路径对这几个面板等于不存在：
+   * 用户的原话是「又难关」。数组短了不会报错，只会静默失效，所以宁可写长。
+   */
+  }, [selectedGroupId, showSettings, showImport, showKnowledge, showSkills, showHistory, showTheme, showSchedule, showMemo, filePreview, showCheckpoints, showPalette, showTerminal, showTrace, showCluster, showPlans, showAudit, showRuns, showWorktrees, showCost, chat, handleNewSession, focusChat, theme]);
+
+  /*
+   * 模型（agent）建/改定时任务时，用户是**在聊天里**看着的：面板只在挂载时拉一次，也没有任何提示，
+   * 于是"刚安排的任务"要等用户下次打开面板才看得见 —— 用户的原话是「模型开了没提示」。
+   *
+   * 这里每 10 秒对一次任务表：第一次只做基线（不吵），之后出现没见过的 id 就提示一声。
+   * 面板开着的时候不提示：面板自己 5 秒拉一次，任务会当场出现在列表里，再来一句 toast 是噪音。
+   */
+  const scheduleSeenRef = useRef<Set<string> | null>(null);
+  const showScheduleRef = useRef(false);
+  useEffect(() => { showScheduleRef.current = !!showSchedule; }, [showSchedule]);
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const snap = await fetchJSON<{ tasks?: Array<{ id: string; name: string }> }>('/api/schedule');
+        if (!alive) return;
+        const tasks = snap?.tasks ?? [];
+        const ids = tasks.map((x) => x.id);
+        if (!scheduleSeenRef.current) { scheduleSeenRef.current = new Set(ids); return; }
+        const fresh = tasks.filter((x) => !scheduleSeenRef.current!.has(x.id));
+        scheduleSeenRef.current = new Set(ids);
+        if (fresh.length && !showScheduleRef.current) {
+          const names = fresh.map((x) => x.name).join('、');
+          toast(t('模型安排了定时任务：{name}（可在「定时任务」里查看或修改）', { name: names }));
+        }
+      } catch {
+        /* 服务没起来 / 接口不存在：静默，下一轮再试。提示不是关键路径。 */
+      }
+    };
+    void tick();
+    const timer = setInterval(() => { void tick(); }, 10_000);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
 
   /**
    * The wallpaper layer.
@@ -1030,7 +1078,18 @@ export function App() {
       )}
       {showSkills && <SkillManager onClose={() => setShowSkills(false)} />}
       {showPlans && <PlanPanel onClose={() => setShowPlans(false)} sessionId={activeSessionId} />}
-      {showSchedule && <SchedulePanel onClose={() => setShowSchedule(false)} />}
+      {showSchedule && (
+        <SchedulePanel
+          onClose={() => setShowSchedule(false)}
+          /*
+           * 打开"这次执行"的那场对话。先收面板，否则它正好盖住刚打开的那场对话。
+           */
+          onOpenSession={(sid) => {
+            setShowSchedule(false);
+            void handleSelectSession(sid);
+          }}
+        />
+      )}
       {showAudit && <AuditPanel onClose={() => setShowAudit(false)} />}
       {showRuns && <RunTracePanel onClose={() => setShowRuns(false)} sessionId={activeSessionId} />}
       {showWorktrees && (

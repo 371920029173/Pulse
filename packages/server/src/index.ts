@@ -1872,6 +1872,15 @@ function workingWindow(): WorkingWindow | null {
  * Headless runs still honour permissions — a schedule must not be a way to
  * escalate: it does not temporarily flip `allowAllCommands`.
  */
+/*
+ * 哪个任务正在哪个会话里跑。
+ *
+ * 之前没有这张表，于是"打断运行中的任务"根本无从下手：任务列表只给 id，而停止要的是会话
+ * （任务跑的就是那个会话里的一轮对话）。第一次运行时会话还是在这里面创建的，所以只能在
+ * 运行期记，不能从任务本身读。
+ */
+const runningTaskSessions = new Map<string, string>();
+
 async function runScheduledTask(task: ScheduledTask): Promise<void> {
   let sid = task.sessionId;
   if (!sid || !sessions.get(sid)) {
@@ -1894,6 +1903,7 @@ async function runScheduledTask(task: ScheduledTask): Promise<void> {
   const agent = agentForSession(sid);
   // A busy conversation queues the task rather than failing it (see SessionBusyError).
   if (agent.isRunning()) throw new SessionBusyError();
+  runningTaskSessions.set(task.id, sid);
   const turnStart = Date.now();
   const usageBefore = agent.getTokenUsage();
   try {
@@ -1931,6 +1941,7 @@ async function runScheduledTask(task: ScheduledTask): Promise<void> {
     recordTurnMetrics(agent, turnStart, usageBefore, false);
     throw err;
   } finally {
+    runningTaskSessions.delete(task.id);
     persistHistory(sid);
   }
 }
@@ -2736,7 +2747,7 @@ function reloadTenancy(): void {
     // Refuse to drop a task that is mid-run: it would vanish from the list while
     // still executing, leaving no way to see what it did.
     if (schedulerInstance?.running().includes(params.id)) {
-      throw new HttpError(409, '该任务正在执行，请先停用并等它结束后再删除');
+      throw new HttpError(409, '该任务正在执行。先「停止这一次」再删除：POST /api/schedule/:id/stop');
     }
     sendJSON(res, { ok: schedule.remove(params.id) });
   });
@@ -2781,6 +2792,28 @@ function reloadTenancy(): void {
       throw new HttpError(409, result.reason ?? '无法启动');
     }
     sendJSON(res, { ok: true, started: true, ...(result.reason ? { queued: true, note: result.reason } : {}) });
+  });
+
+  /**
+   * Stop the CURRENT run of a task; the task itself stays scheduled.
+   *
+   * Separate from DELETE on purpose: "把这一次停下来" and "这个任务别要了" are different wants,
+   * and the old behaviour (refuse everything while running) answered neither. Stopping goes through
+   * `agent.stop()` — the same path as `/api/chat/stop` — so the round ends the way an interrupted
+   * round always does: the transcript keeps what arrived, and `runScheduledTask` records the run as
+   * `aborted` (not finished, and deliberately NOT retried — restarting work the user just stopped is
+   * worse than doing nothing).
+   */
+  router.post('/api/schedule/:id/stop', (_req, res, params) => {
+    const task = schedule.get(params.id);
+    if (!task) throw new HttpError(404, `定时任务不存在: ${params.id}`);
+    const sid = runningTaskSessions.get(params.id);
+    const agent = sid ? agents.get(sid) : undefined;
+    if (!sid || !agent?.isRunning()) {
+      throw new HttpError(409, '这个任务当前没有在执行。');
+    }
+    agent.stop();
+    sendJSON(res, { ok: true, stopped: true, sessionId: sid });
   });
 
   /**
