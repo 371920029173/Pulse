@@ -164,10 +164,20 @@ export function Sidebar({
   useEffect(() => { localStorage.setItem('she.side.mcp', showMcp ? '1' : '0'); }, [showMcp]);
   useEffect(() => { localStorage.setItem('she.side.kb', showKb ? '1' : '0'); }, [showKb]);
   useEffect(() => { localStorage.setItem('she.side.files', showFiles ? '1' : '0'); }, [showFiles]);
+  /*
+   * 子代理会话（有 parent_id 的那些）默认**不进**会话列表。
+   *
+   * 它们是 task_spawn / 后台任务开出来的工作会话，一次能刷好几条（用户的原话：「子代理默认折叠
+   * 也没做」）—— 会话列表该放的是"你自己在聊的那几条"。要它们时点一下展开；历史记录里一直能翻到。
+   */
+  const [showSubagents, setShowSubagents] = useState(() => localStorage.getItem('she.side.subagents') === '1');
+  useEffect(() => { localStorage.setItem('she.side.subagents', showSubagents ? '1' : '0'); }, [showSubagents]);
+  const subagentSessions = sessions.filter((x) => !!x.parent_id);
+  const topSessions = showSubagents ? sessions : sessions.filter((x) => !x.parent_id);
   const q = sessionQuery.trim().toLowerCase();
   const visibleSessions = !q
-    ? sessions
-    : sessions.filter((x) => x.title.toLowerCase().includes(q) || x.id.toLowerCase().includes(q));
+    ? topSessions
+    : topSessions.filter((x) => x.title.toLowerCase().includes(q) || x.id.toLowerCase().includes(q));
   const foldedCount = visibleSessions.length - COLLAPSED_COUNT;
   const isFolded = !q && !showAllSessions && foldedCount > 0;
   const renderedSessions = isFolded ? visibleSessions.slice(0, COLLAPSED_COUNT) : visibleSessions;
@@ -247,6 +257,18 @@ export function Sidebar({
           </button>
         </div>
       </div>
+      {subagentSessions.length > 0 ? (
+        <button
+          type="button"
+          className={styles.subagentsRow}
+          onClick={() => setShowSubagents((v) => !v)}
+          title={t('子代理会话默认收起；历史记录里一直能翻到')}
+        >
+          {showSubagents
+            ? t('收起子代理会话（{n}）', { n: subagentSessions.length })
+            : t('显示子代理会话（{n}）', { n: subagentSessions.length })}
+        </button>
+      ) : null}
       {!workspaceLoading && sessions.length > 0 ? (
         <div className={styles.sessionFilterWrap}>
           <input
