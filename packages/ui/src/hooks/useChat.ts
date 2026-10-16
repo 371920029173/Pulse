@@ -839,6 +839,22 @@ export function useChat(sessionId?: string | null) {
           // The turn is over: stop claiming to be the live view, so a later history load for
           // this session is no longer skipped and the transcript can be reconciled with disk.
           if (abortRef.current === controller) abortRef.current = null;
+          /*
+           * 流结束 ≠ 这一轮结束 —— 所以要向服务端确认一次再决定"进行中"要不要收。
+           *
+           * 最典型的是「追加」：那句话被服务端收下之后这一轮会**继续跑**（新一轮迭代），而窗口手上
+           * 这条流可能先到终帧。此前终帧就是终局：isLoading 归 false、停止按钮变回发送，而服务端还在
+           * 干活；追加成功后挂的那次 armFollow 又被 abortRef 挡掉（本地流还活着），所以没有任何东西
+           * 会把"进行中"恢复回来。用户看到的就是「停止键几乎瞬间就消失了，变回了发送」。
+           *
+           * 确认还在跑就保持进行中，并把跟随重新挂上（它每 2 秒接着确认，直到服务端说结束）。
+           */
+          void (async () => {
+            const stillRunning = await serverTurnRunning();
+            if (stillRunning !== true) return;
+            setIsLoading(true);
+            if (!abortRef.current) armFollowRef.current(sidRef.current, { skipPull: true });
+          })();
         },
       },
       controller.signal,
