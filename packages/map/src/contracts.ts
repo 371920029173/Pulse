@@ -39,6 +39,11 @@ export function normalizePath(raw: string): string {
   let p = raw.trim().replace(/^['"`]|['"`]$/g, '');
   p = p.replace(/\$\{[^}]*\}/g, ':param');
   /* 查询串不是路径的一部分：'/api/fs/tree?path=x' 与 '/api/fs/tree' 是同一条路由。 */
+  /*
+   * 紧贴的占位符不是路径段：'/api/audit${q}' 里的 ${q} 是查询串的一部分，
+   * 规范化后会变成 '/api/audit:param'，必须在这里丢掉，否则永远对不上 '/api/audit'。
+   */
+  p = p.replace(/([^/]):param/g, '$1');
   p = p.split('?')[0]!;
   p = p.replace(/\/+$/, '');
   return p;
@@ -47,6 +52,22 @@ export function normalizePath(raw: string): string {
 /** 路由里的 `:id` 与 fetch 里的 `:param` 都视作同一个占位符。 */
 function canonical(path: string): string {
   return path.replace(/:[A-Za-z_][\w]*/g, ':x');
+}
+
+/**
+ * 逐段比较：路由段以 ':' 开头可匹配任意一段；调用点末尾多出的 ':param' 段忽略
+ * （那种段来自模板串里的 ${q}，其实是查询串，不该参与路径对齐）。
+ */
+export function segmentsMatch(routePath: string, callPath: string): boolean {
+  const r = routePath.split('/').filter((s) => s.length > 0);
+  const c = callPath.split('/').filter((s) => s.length > 0);
+  while (c.length > r.length && c[c.length - 1]!.startsWith(':')) c.pop();
+  if (r.length !== c.length) return false;
+  for (let i = 0; i < r.length; i += 1) {
+    if (r[i]!.startsWith(':')) continue;
+    if (r[i] !== c[i]) return false;
+  }
+  return true;
 }
 
 export function extractRoutes(text: string, file: string): RouteDef[] {
@@ -104,18 +125,19 @@ export function scanHttpContracts(
     if (text.includes('fetch')) fetches.push(...extractFetches(text, f.path));
   }
 
-  const byMethod = new Map<string, RouteDef[]>();
-  const byPathOnly = new Map<string, RouteDef[]>();
-  for (const r of routes) {
-    const key = `${r.method} ${canonical(r.path)}`;
-    const list = byMethod.get(key);
-    if (list) list.push(r);
-    else byMethod.set(key, [r]);
-    const pkey = canonical(r.path);
-    const plist = byPathOnly.get(pkey);
-    if (plist) plist.push(r);
-    else byPathOnly.set(pkey, [r]);
-  }
+  /*
+   * 不做哈希索引：路由是几百量级，逐段比较在这个规模上是常数级，
+   * 换来的是"参数位能被具体值填上"这条语义——那才是准确率的关键。
+   */
+  const findRoute = (c: FetchCall): RouteDef | undefined => {
+    let fallback: RouteDef | undefined;
+    for (const r of routes) {
+      if (!segmentsMatch(r.path, c.path)) continue;
+      if (r.method === c.method) return r;
+      if (!c.methodExplicit && !fallback) fallback = r;
+    }
+    return fallback;
+  };
 
   const edges: Array<{ from: string; edge: MapEdge }> = [];
   const usedRoutes = new Set<string>();
@@ -123,14 +145,10 @@ export function scanHttpContracts(
   let threats = 0;
 
   for (const c of fetches) {
-    const key = `${c.method} ${canonical(c.path)}`;
-    /*
-     * 方法精确匹配优先；调用点没显式写方法时，允许按路径匹配任意动词
-     * （多行写法很常见，硬按 GET 会对不上 PUT/DELETE 的路由）。
-     */
-    const match = byMethod.get(key)?.[0] ?? (c.methodExplicit ? undefined : byPathOnly.get(canonical(c.path))?.[0]);
+    /* 方法精确优先；调用点没显式写方法时按路径匹配任意动词。 */
+    const match = findRoute(c);
     if (match) {
-      usedRoutes.add(key);
+      usedRoutes.add(`${match.method} ${canonical(match.path)}`);
       certain += 1;
       edges.push({
         from: c.file,
