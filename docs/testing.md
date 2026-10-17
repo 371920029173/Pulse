@@ -7,7 +7,7 @@ pnpm check:all       # 上面这些 + 自我验证评测（调模型，需要 ke
 
 `check:all` 只是 `check:offline && eval:verify`，所以两条链不会漂移。
 
-单测：`pnpm -r test`（6 个包，2070 项）。除 `eval:agent` / `eval:verify` 外**全部离线、不花钱**。
+单测：`pnpm -r test`（7 个包，2119 项）。除 `eval:agent` / `eval:verify` 外**全部离线、不花钱**。
 
 两个评测的判分都是**确定性断言**（文件系统、命令输出、回复字符串、以及「这次跑了哪些工具」），不调用 LLM 判分 ——
 那会让成本翻倍并引入不确定性。它们按**通过率**判定而不是要求满分，因为测的是模型行为：
@@ -172,3 +172,18 @@ pnpm pack:win         # 打 Windows 安装包；结尾自动跑 check:packaged
 
 动手前读 [AGENTS.md](../AGENTS.md)：里面有约定（注释解释**为什么**）、已知陷阱
 （PowerShell 编码、状态文件覆盖、沙箱控件、棘轮、提示缓存），以及新加检查的写法。
+
+## 项目地图（`@she/map`）
+
+给**模型**用的代码地图：整仓一眼看到底、每个文件一句话标签、改一处能算出影响面与要跑的闸门。
+设计契约见 `docs/project-map-schema.md`；判据分两层——单测在 `packages/map/src/__tests__`，
+存储契约在 `scripts/map-check.mjs`（已进 `check:offline`）。
+
+| 脚本 | 作用 |
+|---|---|
+| `scripts/map-build.mjs` | 建/重建地图（git ls-files 建索引、分片落盘、符号表、import 边、HTTP 契约对账） |
+| `scripts/map-check.mjs` | 存储判据：schema、悬空节点/边、标签长度、候选边必须带证据与反证、敏感文件零索引、闸门表是否过期 |
+| `scripts/map-query.mjs` | 查询面：tree / lookup / whereis / scope / impact / contracts / verify / note / diff |
+| `scripts/map-groups.mjs` | 看一个路径属于哪些组、挂着哪些组结构知识（含祖先冒泡） |
+| `scripts/map-symbols.mjs` | 查符号定义与引用数，或列某个文件的符号大纲 |
+| `scripts/map-revert.mjs` | 局部回退两步走：出计划→出票→拍快照→执行（脏文件与删除型回退一律阻断） |
