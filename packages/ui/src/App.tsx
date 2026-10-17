@@ -32,6 +32,7 @@ import { SessionHistory } from './components/SessionHistory';
 import { SchedulePanel } from './components/SchedulePanel';
 import { AuditPanel } from './components/AuditPanel';
 import { RunTracePanel } from './components/RunTracePanel';
+import { MapPanel } from './components/MapPanel';
 import { WorktreePanel } from './components/WorktreePanel';
 import { ThemeStudio } from './components/ThemeStudio';
 import { useUserTheme } from './hooks/useUserTheme';
@@ -202,6 +203,7 @@ export function App() {
   const [showPlans, setShowPlans] = useState(false);
   const [showSources, setShowSources] = useState(false);
   const [showMemo, setShowMemo] = useState(false);
+  const [showMap, setShowMap] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [showSkills, setShowSkills] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
@@ -931,6 +933,7 @@ export function App() {
     { id: 'import', title: t('导入知识到 KB'), group: t('知识库'), run: () => setShowKnowledge(true) },
     { id: 'terminal', title: showTerminal ? t('折叠终端') : t('展开终端'), group: t('导航'), hint: '`', run: () => setShowTerminal((v) => !v) },
     { id: 'trace', title: showTrace ? t('隐藏组结构轨迹') : t('显示组结构轨迹'), group: t('导航'), run: () => setShowTrace((v) => !v) },
+    { id: 'map', title: t('项目地图（只读）'), group: t('导航'), run: () => setShowMap(true) },
     { id: 'cp', title: t('打开检查点时间线'), group: t('工作区'), run: () => setShowCheckpoints(true) },
     { id: 'focus', title: focusChat ? t('退出专注对话') : t('专注对话（放大聊天区）'), group: t('外观'), hint: '\\', run: () => setFocusChat((v) => !v) },
     { id: 'theme', title: theme === 'dark' ? t('切换到浅色主题') : t('切换到深色主题'), group: t('外观'), hint: 'T', run: () => setTheme((v) => (v === 'dark' ? 'light' : 'dark')) },
@@ -992,7 +995,7 @@ export function App() {
    * 注册那一刻的旧值（false），于是「Escape 关掉定时任务面板」这条路径对这几个面板等于不存在：
    * 用户的原话是「又难关」。数组短了不会报错，只会静默失效，所以宁可写长。
    */
-  }, [selectedGroupId, showSettings, showImport, showKnowledge, showSkills, showHistory, showTheme, showSchedule, showMemo, filePreview, showCheckpoints, showPalette, showTerminal, showTrace, showCluster, showPlans, showAudit, showRuns, showWorktrees, showCost, chat, handleNewSession, focusChat, theme]);
+  }, [selectedGroupId, showSettings, showImport, showKnowledge, showSkills, showHistory, showTheme, showSchedule, showMemo, filePreview, showCheckpoints, showPalette, showTerminal, showTrace, showCluster, showPlans, showAudit, showRuns, showWorktrees, showCost, showMap, chat, handleNewSession, focusChat, theme]);
 
   /*
    * 模型（agent）建/改定时任务时，用户是**在聊天里**看着的：面板只在挂载时拉一次，也没有任何提示，
@@ -1132,6 +1135,7 @@ export function App() {
           onReopened={(id) => { void handleReopened(id); }}
         />
       )}
+      {showMap && <MapPanel onClose={() => setShowMap(false)} />}
       {showMemo && (
         <div className={styles.overlay} onClick={() => setShowMemo(false)}>
           <div

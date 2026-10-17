@@ -114,6 +114,9 @@ importers:
       '@she/kb':
         specifier: workspace:*
         version: link:../kb
+      '@she/map':
+        specifier: workspace:*
+        version: link:../map
       '@she/sandbox':
         specifier: workspace:*
         version: link:../sandbox

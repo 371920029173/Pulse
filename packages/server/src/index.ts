@@ -1,3 +1,4 @@
+import { mapTree, mapVerify } from '@she/map';
 import { createServer } from 'node:http';
 import os from 'node:os';
 import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, rmSync, copyFileSync, cpSync, renameSync, openSync, readSync, closeSync } from 'node:fs';
@@ -6535,6 +6536,43 @@ router.post('/api/sessions/:id/move', async (req, res, params) => {
     const agent = agentFor(req);
     const result = await agent.forceCompact('manual');
     sendJSON(res, { ...result, status: agent.getContextStatus() });
+  });
+
+  /*
+   * 项目地图（只读）。给人看的那份渲染走这里，给模型用的是 map_* 工具面。
+   * 没有地图 → ok:false 并说清怎么建；有地图 → 树文本 + 可信度读数。
+   */
+  router.get('/api/map/tree', (_req, res) => {
+    try {
+      const ws = config.workspace as unknown;
+      const root = typeof ws === 'string' ? ws : (ws as { root?: string })?.root;
+      if (!root) {
+        sendJSON(res, { ok: false, error: '工作区路径不可用' }, 500);
+        return;
+      }
+      const tree = mapTree(root, { budgetTokens: 2000, depth: 6 });
+      if (!tree.files) {
+        sendJSON(res, {
+          ok: false,
+          error: '还没有地图：先跑 pnpm map:build（或 node scripts/map-build.mjs）',
+        });
+        return;
+      }
+      const verify = mapVerify(root);
+      sendJSON(res, {
+        ok: true,
+        text: tree.text,
+        tokens: tree.tokens,
+        collapsed: tree.collapsed,
+        files: tree.files,
+        score: verify.score,
+        stale: verify.staleLabels,
+        dark: verify.darkFiles,
+        threats: verify.contractThreats,
+      });
+    } catch (err) {
+      sendJSON(res, { ok: false, error: err instanceof Error ? err.message : String(err) }, 500);
+    }
   });
 
   router.post('/api/usage/reset', (req, res) => {
