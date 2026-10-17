@@ -1050,16 +1050,31 @@ export function Chat({
   useEffect(() => {
     const el = messagesRef.current;
     if (!el) return;
+    /** 「在底部」= 离底 < 80px（按用户要求保留的宽容距离）。 */
+    const nearBottom = () => el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    let settle: ReturnType<typeof setTimeout> | null = null;
+
+    /*
+     * 一滑就解除。并且滑完停手 220ms 后再判一次：停在底部 → 恢复跟随（"回到最新"的语义）；
+     * 没停在底部 → 保持解除。停手之前的 scroll 事件一律不参与判定（否则滚动过程中的中间帧会
+     * 把跟随翻回来 —— 那正是"还是跳"）。
+     */
     const release = () => {
       stickToBottomRef.current = false;
       setAtBottom(false);
+      if (settle !== null) clearTimeout(settle);
+      settle = setTimeout(() => {
+        settle = null;
+        const near = nearBottom();
+        stickToBottomRef.current = near;
+        setAtBottom(near);
+      }, 220);
     };
     const onScroll = () => {
-      const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
-      // 到底了（含亚像素误差）就重新跟随；一旦离开就解除 —— 不做任何"宽容距离"。
-      const atBottomNow = gap <= 8;
-      stickToBottomRef.current = atBottomNow;
-      setAtBottom(atBottomNow);
+      if (settle !== null) return;
+      const near = nearBottom();
+      stickToBottomRef.current = near;
+      setAtBottom(near);
     };
     const onWheel = (ev: WheelEvent) => { if (ev.deltaY < 0) release(); };
     const onTouch = () => release();
@@ -1070,6 +1085,7 @@ export function Chat({
       el.removeEventListener('scroll', onScroll);
       el.removeEventListener('wheel', onWheel);
       el.removeEventListener('touchmove', onTouch);
+      if (settle !== null) clearTimeout(settle);
     };
   }, []);
 
