@@ -18,6 +18,7 @@ import { emptyShard, readShard, shardKeyFor, shardPath, writeJsonAtomic, indexPa
 import { detectViews } from './views.js';
 import { deriveGroups } from './groups.js';
 import { buildSymbols, writeSymbols } from './symbols.js';
+import { scanImports } from './imports.js';
 
 export const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -140,6 +141,18 @@ export function buildMap(opts: BuildOptions): BuildResult {
     });
   }
 
+  /*
+   * import 边在分片之前算：inDegree 要写回文件节点（"被多少人引用"是模型判断
+   * 一个重要性的第一手信号），而节点是直接放进分片数组的同一批对象。
+   */
+  const { edges: importEdges } = scanImports(root, files.map((f) => ({ path: f.path, lang: f.lang })), views.packages.map((p) => ({ name: p.name, root: p.root })));
+  const inDegree = new Map<string, number>();
+  for (const { edge } of importEdges) inDegree.set(edge.to, (inDegree.get(edge.to) ?? 0) + 1);
+  for (const f of files) {
+    const deg = inDegree.get(f.path);
+    if (deg) f.inDegree = deg;
+  }
+
   const shards = new Map<string, MapShard>();
   for (const node of files) {
     const key = shardKeyFor(node.path);
@@ -187,6 +200,21 @@ export function buildMap(opts: BuildOptions): BuildResult {
    * 一次全量扫在这个仓库是百毫秒级；10 万文件时它是最贵的一步（两遍读），
    * 所以将来要按 ROI 队列增量更新，而不是每次全建。
    */
+  /*
+   * 边必须在"保留旧 edges"的合并之后挂：合并那一步会用旧分片的 edges 覆盖当前值，
+   * 先挂就白挂了（这类顺序错误不会报错，只会让影响面永远算空）。
+   */
+  const touchedShards = new Set<string>();
+  for (const { from, edge } of importEdges) {
+    const key = shardKeyFor(from);
+    const shard = shards.get(key);
+    if (!shard) continue;
+    shard.edges.push(edge);
+    touchedShards.add(key);
+  }
+  /* 见上：挂边发生在写盘之后，这里必须补一次落盘。 */
+  for (const key of touchedShards) writeJsonAtomic(shardPath(root, key), shards.get(key)!);
+
   const symbolTable = buildSymbols({ root, files: files.map((f) => ({ path: f.path, lang: f.lang })) });
   writeSymbols(root, symbolTable);
 
@@ -205,7 +233,7 @@ export function buildMap(opts: BuildOptions): BuildResult {
       files: files.length,
       dirs: [...shards.values()].reduce((n, s) => n + s.nodes.filter((x) => x.kind === 'dir').length, 0),
       symbols: symbolTable.names.length,
-      edges: edgeCount,
+      edges: [...shards.values()].reduce((n, s) => n + s.edges.length, 0),
       notes: noteCount,
     },
     views,
