@@ -59,6 +59,8 @@ function trackedSet() {
 const SECRET = /(^|\/)(\.env(\..*)?|.*\.(pem|key|pfx|p12)|id_rsa|id_ed25519|credentials(\.json)?)$/i;
 
 const nodeKeys = new Set();
+/** 边的两端存的是纯路径（不带分支前缀），所以悬空边必须按路径判。 */
+const nodePaths = new Set();
 const files = [];
 
 for (const shard of index.shards ?? []) {
@@ -73,6 +75,7 @@ for (const shard of index.shards ?? []) {
     const key = `${node.branch}:${node.path}`;
     if (nodeKeys.has(key)) fail(`节点唯一: ${key}`, '同一分支同一路径出现两次（孪生体应跨分支，不是同分支重复）');
     nodeKeys.add(key);
+    nodePaths.add(node.path);
     if (node.kind === 'file') files.push(node);
   }
 }
@@ -99,7 +102,7 @@ for (const shard of index.shards ?? []) {
   if (!existsSync(file)) continue;
   /** @type {any} */
   const data = JSON.parse(readFileSync(file, 'utf8'));
-  const danglingEdges = (data.edges ?? []).filter((e) => !nodeKeys.has(e.from) || !nodeKeys.has(e.to));
+  const danglingEdges = (data.edges ?? []).filter((e) => !nodePaths.has(e.from) || !nodePaths.has(e.to));
   if (danglingEdges.length === 0) ok(`分片 ${shard.key} 无悬空边`, `${(data.edges ?? []).length} 条`);
   else fail(`分片 ${shard.key} 无悬空边`, `${danglingEdges.length} 条悬空，例如 ${danglingEdges[0].from} → ${danglingEdges[0].to}`);
 
@@ -113,6 +116,21 @@ for (const shard of index.shards ?? []) {
 const shardFiles = existsSync(STORE) ? readdirSync(STORE).filter((f) => f.startsWith('shard-')) : [];
 if (shardFiles.length === (index.shards ?? []).length) ok('index 与分片文件数一致', `${shardFiles.length}`);
 else fail('index 与分片文件数一致', `index ${(index.shards ?? []).length} 个，磁盘 ${shardFiles.length} 个`);
+
+/*
+ * 闸门表守卫：表里写的 check 必须在本仓 package.json 里存在。
+ * 表过期比没有表更坏——模型会去跑一个不存在的命令。
+ */
+try {
+  const { GATE_RULES } = await import('../packages/map/dist/index.js');
+  const scripts = JSON.parse(readFileSync('package.json', 'utf8')).scripts ?? {};
+  const missing = new Set();
+  for (const rule of GATE_RULES) for (const c of rule.checks) if (!(c in scripts)) missing.add(c);
+  if (missing.size === 0) ok('闸门表里的 check 都存在', `${GATE_RULES.length} 条规则`);
+  else fail('闸门表里的 check 都存在', `不存在的: ${[...missing].join(', ')}`);
+} catch {
+  ok('闸门表守卫（跳过）', 'packages/map/dist 尚未构建');
+}
 
 if (failures > 0) {
   console.log(`\n${failures} 项失败`);

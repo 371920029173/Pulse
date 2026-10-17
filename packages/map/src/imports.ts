@@ -18,6 +18,9 @@ const DYNAMIC = /\bimport\(\s*['"]([^'"]+)['"]\s*\)/;
 
 const CANDIDATE_EXT = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.json', '/index.ts', '/index.tsx', '/index.js'];
 
+/** 构建产物不是源码：地图不索引 dist/build，指向它们的 import 一律不建边。 */
+const ARTIFACT = /(^|\/)(node_modules|dist|build|out|coverage|\.git|\.she|vendor|target)(\/|$)/;
+
 /**
  * TS ESM 的源码里写的是 `./b.js`，磁盘上是 `b.ts`。
  * 不做这个映射，仓里一条边都建不出来——而"没有边"看起来像"没人依赖它"，
@@ -110,6 +113,7 @@ export function scanImports(
         continue;
       }
       if (target === f.path) continue;
+      if (ARTIFACT.test(target)) { unresolved += 1; continue; }
       edges.push({
         from: f.path,
         edge: {

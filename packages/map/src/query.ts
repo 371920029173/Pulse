@@ -410,6 +410,99 @@ export function mapImpact(root: string, paths: string[]): ImpactResult {
   return { text: lines.join('\n'), reverse, gates, tests: [...new Set(tests)] };
 }
 
+// ── map_scope ───────────────────────────────────────────────────────────────
+
+export interface ScopeResult {
+  text: string;
+  files: string[];
+  seeds: WhereisHit[];
+  gates: GateHit[];
+  tokens: number;
+  ms: number;
+}
+
+export interface ScopeOptions {
+  /** 最多给多少个文件（默认 60；100k 仓里"起点"不该超过一两百）。 */
+  maxFiles?: number;
+  /** 锚点扩几跳反向 import（默认 1：改它的直接调用方）。 */
+  hops?: number;
+  budgetTokens?: number;
+}
+
+/**
+ * 工作集：给一个任务描述，圈出"从哪开始 + 改谁会被波及 + 要跑什么"。
+ *
+ * 顺序是刻意的：**锚点（意图命中）→ 反向依赖（谁会被改坏）→ 闸门（怎么验）**。
+ * 三者缺一，模型就会要么在错误的文件里打转，要么改完不知道怎么验。
+ */
+export function mapScope(root: string, task: string, opts: ScopeOptions = {}): ScopeResult {
+  const started = Date.now();
+  const maxFiles = opts.maxFiles ?? 60;
+  const hops = opts.hops ?? 1;
+  const budget = opts.budgetTokens ?? 2500;
+
+  const found = mapWhereis(root, task, { limit: 8 });
+  const seeds = found.hits;
+  const loaded = loadAll(root);
+  const reverseEdges = new Map<string, string[]>();
+  for (const e of loaded.edges) {
+    if (e.kind !== 'import') continue;
+    const list = reverseEdges.get(e.to);
+    if (list) list.push(e.from);
+    else reverseEdges.set(e.to, [e.from]);
+  }
+
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const push = (p: string) => {
+    const clean = p.replace(/（包级）$/, '');
+    if (seen.has(clean) || ordered.length >= maxFiles) return;
+    seen.add(clean);
+    ordered.push(clean);
+  };
+
+  for (const seed of seeds) push(seed.path);
+
+  let frontier = seeds.map((s) => s.path);
+  for (let hop = 0; hop < hops; hop += 1) {
+    const next: string[] = [];
+    for (const cur of frontier) {
+      for (const from of reverseEdges.get(cur) ?? []) {
+        push(from);
+        next.push(from);
+      }
+    }
+    frontier = next;
+  }
+
+  const gates = gateFor(root, seeds.map((s) => s.path));
+  const lines: string[] = [];
+  lines.push(`工作集：「${task}」`);
+  lines.push(`  锚点（意图命中）：${seeds.length ? '' : '（没有命中——标签密度还低，先把相关文件标注掉）'}`);
+  for (const s of seeds) lines.push(`    ${s.score.toFixed(1).padStart(5)}  ${s.path}  ${s.label ?? ''}`);
+  const dependents = ordered.slice(seeds.length);
+  if (dependents.length) {
+    lines.push(`  会被波及（反向 import，${dependents.length}）：`);
+    for (const d of dependents.slice(0, 12)) lines.push(`    ${d}`);
+    if (dependents.length > 12) lines.push(`    …共 ${dependents.length}`);
+  }
+  lines.push(`  要跑：${gates.map((g) => `${g.check}${g.exists ? '' : '(不存在?)'}`).join(', ') || '(未命中规则)'}`);
+
+  let text = lines.join('\n');
+  let tokens = estimateTokens(text);
+  if (tokens > budget) {
+    /* 超预算先砍"会被波及"的尾巴——锚点和闸门是结论，砍了就失去意义。 */
+    const keep = dependents.slice(0, Math.max(0, 4));
+    lines.splice(lines.indexOf('  会被波及（反向 import，' + dependents.length + '）：'), lines.length - 1,
+      `  会被波及（反向 import，${dependents.length}）：${keep.join(', ')}${dependents.length > keep.length ? ' …' : ''}`,
+      lines[lines.length - 1]!);
+    text = lines.join('\n');
+    tokens = estimateTokens(text);
+  }
+
+  return { text, files: ordered, seeds, gates, tokens, ms: Date.now() - started };
+}
+
 // ── map_note / map_diff ─────────────────────────────────────────────────────
 
 export function mapNote(

@@ -188,7 +188,11 @@ export function buildMap(opts: BuildOptions): BuildResult {
         if (old.lastSeen) node.lastSeen = old.lastSeen;
       }
       shard.notes = prev.notes ?? [];
-      shard.edges = prev.edges ?? [];
+      /*
+       * 边不保留旧值：它完全由当前源码派生。保留的话，改掉的依赖会永远留在图上
+       * （悬空边判据会一直红，而模型会照着错的图去判断影响面）。
+       */
+      shard.edges = [];
     }
     noteCount += shard.notes.length;
     edgeCount += shard.edges.length;
