@@ -83,7 +83,8 @@
     "map:build": "node scripts/map-build.mjs",
     "check:map": "node scripts/map-check.mjs",
     "map:groups": "node scripts/map-groups.mjs",
-    "map:symbols": "node scripts/map-symbols.mjs"
+    "map:symbols": "node scripts/map-symbols.mjs",
+    "map:revert": "node scripts/map-revert.mjs"
   },
   "engines": {
     "node": ">=20"

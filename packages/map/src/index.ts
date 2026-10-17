@@ -4,6 +4,7 @@ export * from './views.js';
 export * from './groups.js';
 export * from './bind.js';
 export * from './symbols.js';
+export * from './gitlayer.js';
 export type {
   MapIndex,
   MapShard,
