@@ -17,6 +17,7 @@ import { MAP_SCHEMA_VERSION } from '@she/shared';
 import { emptyShard, readShard, shardKeyFor, shardPath, writeJsonAtomic, indexPath } from './store.js';
 import { detectViews } from './views.js';
 import { deriveGroups } from './groups.js';
+import { buildSymbols, writeSymbols } from './symbols.js';
 
 export const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -181,6 +182,14 @@ export function buildMap(opts: BuildOptions): BuildResult {
     writeJsonAtomic(shardPath(root, key), shard);
   }
 
+  /*
+   * 符号表在分片之后建：它要读文件正文，跟分片的 path 列表对齐。
+   * 一次全量扫在这个仓库是百毫秒级；10 万文件时它是最贵的一步（两遍读），
+   * 所以将来要按 ROI 队列增量更新，而不是每次全建。
+   */
+  const symbolTable = buildSymbols({ root, files: files.map((f) => ({ path: f.path, lang: f.lang })) });
+  writeSymbols(root, symbolTable);
+
   const index: MapIndex = {
     schemaVersion: MAP_SCHEMA_VERSION,
     root,
@@ -195,7 +204,7 @@ export function buildMap(opts: BuildOptions): BuildResult {
     counts: {
       files: files.length,
       dirs: [...shards.values()].reduce((n, s) => n + s.nodes.filter((x) => x.kind === 'dir').length, 0),
-      symbols: 0,
+      symbols: symbolTable.names.length,
       edges: edgeCount,
       notes: noteCount,
     },
