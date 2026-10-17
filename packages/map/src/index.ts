@@ -7,6 +7,7 @@ export * from './symbols.js';
 export * from './gitlayer.js';
 export * from './gate.js';
 export * from './contracts.js';
+export * from './verify.js';
 export * from './imports.js';
 export * from './query.js';
 export type {

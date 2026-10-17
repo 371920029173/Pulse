@@ -113,6 +113,18 @@ for (const shard of index.shards ?? []) {
   else fail(`分片 ${shard.key} 的 candidate 边都有证据与反证条件`, `${badCandidates.length} 条缺失`);
 }
 
+/*
+ * 可信度是可观测的：把它打出来，但不设门槛判红 —— 新仓第一天必然全是未标注，
+ * 一个第一天就红的检查会在第二天被人关掉。结构性错误（过期率异常、坏分片）这里已单独判。
+ */
+try {
+  const { mapVerify } = await import('../packages/map/dist/index.js');
+  const rep = mapVerify(process.cwd());
+  console.log(`INFO  可信度 ${rep.score}/100（过期 ${rep.staleLabels}｜黑暗角落 ${rep.darkFiles}｜悬空边 ${rep.danglingEdges}｜坏分片 ${rep.brokenShards}）`);
+} catch {
+  /* dist 未构建时跳过，不因此判红 */
+}
+
 const shardFiles = existsSync(STORE) ? readdirSync(STORE).filter((f) => f.startsWith('shard-')) : [];
 if (shardFiles.length === (index.shards ?? []).length) ok('index 与分片文件数一致', `${shardFiles.length}`);
 else fail('index 与分片文件数一致', `index ${(index.shards ?? []).length} 个，磁盘 ${shardFiles.length} 个`);

@@ -9,7 +9,7 @@
  *   node scripts/map-query.mjs note <路径> <pitfall|invariant|why|todo|deadend> <文字>
  *   node scripts/map-query.mjs diff [路径…]
  */
-import { mapTree, mapLookup, mapWhereis, mapImpact, mapNote, mapDiff, mapScope, mapContracts } from '../packages/map/dist/index.js';
+import { mapTree, mapLookup, mapWhereis, mapImpact, mapNote, mapDiff, mapScope, mapContracts, mapVerify } from '../packages/map/dist/index.js';
 
 const [cmd, ...rest] = process.argv.slice(2);
 const root = process.cwd();
@@ -46,6 +46,12 @@ switch (cmd) {
     const res = mapScope(root, positional.join(' '), { maxFiles: flag('max', 60), hops: flag('hops', 1) });
     console.log(res.text);
     console.log(`\n(${res.files.length} 个文件｜${res.tokens} token｜${res.ms}ms)`);
+    break;
+  }
+  case 'verify': {
+    const r = mapVerify(root);
+    console.log(r.text);
+    process.exitCode = r.score >= 60 ? 0 : 1;
     break;
   }
   case 'contracts': {
