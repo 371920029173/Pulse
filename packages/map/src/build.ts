@@ -19,6 +19,7 @@ import { detectViews } from './views.js';
 import { deriveGroups } from './groups.js';
 import { buildSymbols, writeSymbols } from './symbols.js';
 import { scanImports } from './imports.js';
+import { scanHttpContracts } from './contracts.js';
 
 export const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -216,6 +217,19 @@ export function buildMap(opts: BuildOptions): BuildResult {
     shard.edges.push(edge);
     touchedShards.add(key);
   }
+  /*
+   * 契约图：服务端注册的每条路由都是"创建时记录的潜在依赖"，与前端 fetch 对账后
+   * 分成确定边与潜在威胁两类。威胁也是边（confidence=candidate），只是要带 falsifiers。
+   */
+  const contracts = scanHttpContracts(root, files.map((f) => ({ path: f.path })));
+  for (const { from, edge } of contracts.edges) {
+    const key = shardKeyFor(from);
+    const shard = shards.get(key);
+    if (!shard) continue;
+    shard.edges.push(edge);
+    touchedShards.add(key);
+  }
+
   /* 见上：挂边发生在写盘之后，这里必须补一次落盘。 */
   for (const key of touchedShards) writeJsonAtomic(shardPath(root, key), shards.get(key)!);
 

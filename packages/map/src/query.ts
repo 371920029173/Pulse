@@ -503,6 +503,41 @@ export function mapScope(root: string, task: string, opts: ScopeOptions = {}): S
   return { text, files: ordered, seeds, gates, tokens, ms: Date.now() - started };
 }
 
+// ── map_contracts ───────────────────────────────────────────────────────────
+
+export interface ContractsResult {
+  text: string;
+  certain: MapEdge[];
+  threats: MapEdge[];
+}
+
+/**
+ * 契约图：确定的一条条写出来，不确定的单列成「潜在威胁」。
+ *
+ * 分开列是刻意的：把两者混在一起，模型会把"可能 404"当成"一定 404"，
+ * 或者反过来把确定契约当成猜测，两种都会让它改错地方。
+ */
+export function mapContracts(root: string): ContractsResult {
+  const loaded = loadAll(root);
+  const edges = loaded.edges.filter((e) => e.kind === 'contract');
+  const certain = edges.filter((e) => e.confidence === 'certain');
+  const threats = edges.filter((e) => e.confidence !== 'certain');
+
+  const lines: string[] = [];
+  lines.push(`契约（HTTP）：确定 ${certain.length} 条｜潜在威胁 ${threats.length} 条`);
+  if (certain.length) {
+    lines.push('  确定（两端都定位到）：');
+    for (const e of certain.slice(0, 20)) lines.push(`    ${e.from} → ${e.to}  ${e.evidence[0] ?? ''}`);
+    if (certain.length > 20) lines.push(`    …共 ${certain.length}`);
+  }
+  if (threats.length) {
+    lines.push('  潜在威胁（只有一端，或抽取器没对上）：');
+    for (const e of threats.slice(0, 20)) lines.push(`    ${e.evidence[0] ?? e.from}`);
+    if (threats.length > 20) lines.push(`    …共 ${threats.length}`);
+  }
+  return { text: lines.join('\n'), certain, threats };
+}
+
 // ── map_note / map_diff ─────────────────────────────────────────────────────
 
 export function mapNote(
