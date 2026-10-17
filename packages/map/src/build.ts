@@ -16,6 +16,7 @@ import type { MapIndex, MapNode, MapShard } from '@she/shared';
 import { MAP_SCHEMA_VERSION } from '@she/shared';
 import { emptyShard, readShard, shardKeyFor, shardPath, writeJsonAtomic, indexPath } from './store.js';
 import { detectViews } from './views.js';
+import { deriveGroups } from './groups.js';
 
 export const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -97,6 +98,7 @@ export function buildMap(opts: BuildOptions): BuildResult {
   if (opts.scope) args.push('--', opts.scope);
   const raw = exec(args);
 
+  const views = detectViews(root);
   const skipped = { excluded: 0, secret: 0, binary: 0, large: 0 };
   const files: MapNode[] = [];
 
@@ -131,6 +133,7 @@ export function buildMap(opts: BuildOptions): BuildResult {
       rev,
       lang: langOf(path),
       size,
+      groups: deriveGroups(path, views),
       generated: GENERATED.test(path) || undefined,
       lastSeen: now,
     });
@@ -145,7 +148,7 @@ export function buildMap(opts: BuildOptions): BuildResult {
   for (const dir of dirsOf(files.map((f) => f.path))) {
     const key = shardKeyFor(dir);
     if (!shards.has(key)) shards.set(key, emptyShard(key, branch));
-    shards.get(key)!.nodes.push({ kind: 'dir', branch, path: dir, rev, lastSeen: now });
+    shards.get(key)!.nodes.push({ kind: 'dir', branch, path: dir, rev, lastSeen: now, groups: deriveGroups(dir, views) });
   }
 
   /*
@@ -167,7 +170,7 @@ export function buildMap(opts: BuildOptions): BuildResult {
         }
         if (old.what !== undefined) node.what = old.what;
         if (old.when !== undefined) node.when = old.when;
-        if (old.groups) node.groups = old.groups;
+        if (old.groups) node.groups = [...new Set([...(node.groups ?? []), ...old.groups])];
         if (old.lastSeen) node.lastSeen = old.lastSeen;
       }
       shard.notes = prev.notes ?? [];
@@ -196,7 +199,7 @@ export function buildMap(opts: BuildOptions): BuildResult {
       edges: edgeCount,
       notes: noteCount,
     },
-    views: detectViews(root),
+    views,
     excludes: { patterns: [EXCLUDE_DIR.source, SECRET.source], maxFileBytes: MAX_FILE_BYTES },
     updatedAt: now,
   };
