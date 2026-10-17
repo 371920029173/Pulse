@@ -122,6 +122,20 @@
   opacity: 0.6;
 }
 
+/*
+ * 新消息进入：只给最后一条做 120ms 淡入。
+ * 给整列表做会有两个毛病：重开一个长会话时几十条一起闪；以及每来一个 chunk 都重放。
+ * :last-child 只在"最末一条是新出现的"时才有意义 —— 正好是想要的那一刻。
+ */
+.messageRow:last-child {
+  animation: she-row-in 120ms ease-out;
+}
+
+@keyframes she-row-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
+}
+
 .messageRow {
   display: flex;
   animation: sheBubbleIn 380ms var(--ease-sheet) both;
@@ -644,7 +658,29 @@
   color: var(--text-tertiary);
 }
 
+/*
+ * 发送 ⇄ 停止：React 在这两个状态之间换的是不同元素，所以 each swap 会重新挂载，
+ * 这里的动画就是"按一下、图标落位一次"。只用 scale+opacity，不碰布局。
+ */
+@keyframes she-tool-body-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toolResultBody,
+  .messageRow:last-child {
+    animation: none;
+  }
+}
+
+@keyframes she-btn-in {
+  from { opacity: 0; transform: scale(0.9); }
+  to { opacity: 1; transform: none; }
+}
+
 .sendBtn {
+  animation: she-btn-in 120ms ease-out;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1697,7 +1733,17 @@
   font-size: 11px;
 }
 
+/*
+ * 展开/收起：只动 opacity + transform。
+ * 高度过渡（max-height/height）会在每一帧触发布局重算 —— 流式长会话里就是掉帧的那一类，
+ * 这里明确不做。内容出现时轻微上移 4px、120ms 落位。
+ */
 .toolResultBody {
+  animation: she-tool-body-in 120ms ease-out;
+}
+
+.toolResultBody > * {
+  will-change: opacity, transform;
   margin: 0;
   padding: 0 12px 10px;
   overflow: visible;

@@ -161,7 +161,7 @@ export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, fo
           <span className={styles.sep}>·</span>
           <span className={styles.item} title={`prompt ${usage.prompt_tokens} / completion ${usage.completion_tokens}`}>
             <span className={styles.label}>tokens</span>
-            <span className={styles.value}>{usage.total_tokens}</span>
+            <span key={usage.total_tokens} className={`${styles.value} ${styles.valuePulse}`}>{usage.total_tokens}</span>
           </span>
           {/* Reasoning budget — the one number that proves the thinking-level
               slider is doing something. Hidden until the model actually thinks. */}
@@ -170,7 +170,7 @@ export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, fo
               <span className={styles.sep}>·</span>
               <span className={styles.item} title={t('思维链消耗的 tokens（由思考强度决定）')}>
                 <span className={styles.label}>{t('思考')}</span>
-                <span className={styles.value}>{usage.reasoning_tokens}</span>
+                <span key={usage.reasoning_tokens} className={`${styles.value} ${styles.valuePulse}`}>{usage.reasoning_tokens}</span>
               </span>
             </>
           ) : null}
@@ -191,7 +191,7 @@ export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, fo
                 title={t('提示缓存命中 {v1} / 未命中 {v2}；越低说明每轮重发的提示前缀在变，成本越高', { v1: (usage.cache_hit_tokens ?? 0), v2: (usage.cache_miss_tokens ?? 0) })}
               >
                 <span className={styles.label}>{t('缓存')}</span>
-                <span className={styles.value}>{cacheHitRate}%</span>
+                <span key={cacheHitRate} className={`${styles.value} ${styles.valuePulse}`}>{cacheHitRate}%</span>
               </span>
             </>
           ) : null}

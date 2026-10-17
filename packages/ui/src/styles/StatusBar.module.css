@@ -32,6 +32,21 @@
  */
 .bar::-webkit-scrollbar { height: 0; }
 
+/*
+ * 读数变化：值一变就重挂（React 的 key），动画跟着重跑一次 —— 短促高亮，不占版面、不持续闪。
+ * 比"一直动"更像仪表盘：人眼只捕捉"它变了"这一下。
+ */
+@keyframes she-value-pulse {
+  from { color: var(--text-primary); text-shadow: 0 0 6px currentColor; }
+  to { color: var(--text-primary); text-shadow: none; }
+}
+
+.valuePulse { animation: she-value-pulse 380ms ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .valuePulse { animation: none; }
+}
+
 .item { display: inline-flex; gap: 6px; align-items: center; min-width: 0; }
 .label { color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.4px; font-size: 10px; }
 .value { font-family: var(--font-mono); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 360px; }
