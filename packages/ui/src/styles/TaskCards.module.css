@@ -22,6 +22,25 @@
   color: var(--text-secondary);
   letter-spacing: 0.02em;
 }
+/*
+ * 收起态那枚胶囊：**必须脱离文档流**。
+ * 它是 App 根容器的直接子节点，用 .ghost 的话就是一个普通按钮 —— 有任务时出现、结束时消失，
+ * 每次都让根布局重排一次，用户看到的就是底部那条"一跳一跳"。面板（.wrap）早就是 fixed 了，
+ * 只有这枚胶囊漏了。
+ */
+.pill {
+  position: fixed;
+  right: 16px;
+  bottom: 56px;
+  z-index: 40;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.pill:hover { color: var(--text-primary); }
 .ghost {
   border: none;
   background: transparent;

@@ -100,7 +100,7 @@ export function TaskCards() {
     return (
       <button
         type="button"
-        className={styles.ghost}
+        className={styles.pill}
         onClick={() => setOpen(true)}
         title={t('展开后台任务')}
       >
