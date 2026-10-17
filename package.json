@@ -79,7 +79,9 @@
     "check:session": "node scripts/session-isolation-check.mjs",
     "check:window": "node scripts/window-isolation-check.mjs",
     "check:evals": "node scripts/evals-check.mjs",
-    "check:retrieval": "node scripts/kb-retrieval-check.mjs"
+    "check:retrieval": "node scripts/kb-retrieval-check.mjs",
+    "map:build": "node scripts/map-build.mjs",
+    "check:map": "node scripts/map-check.mjs"
   },
   "engines": {
     "node": ">=20"

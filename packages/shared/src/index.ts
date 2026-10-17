@@ -1,4 +1,5 @@
 export * from './types.js';
+export * from './map-schema.js';
 export * from './config.js';
 export * from './models.js';
 export * from './context-window.js';

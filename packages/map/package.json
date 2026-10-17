@@ -1,0 +1,22 @@
+{
+  "name": "@she/map",
+  "version": "0.3.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --import tsx --test-timeout=300000 --test src/__tests__/*.test.ts",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0",
+    "@types/node": "^22.0.0"
+  },
+  "dependencies": {
+    "@she/shared": "workspace:*"
+  }
+}
