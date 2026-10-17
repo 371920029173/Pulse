@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, readdir, stat } from 'node:fs/promises';
+﻿import { readFile, writeFile, mkdir, readdir, stat } from 'node:fs/promises';
 import { resolve, relative, join, dirname } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -677,13 +677,20 @@ export function createTools(
   reg(
     {
       name: 'grep',
-      description: 'Search files for a regex pattern within the workspace.',
+      description:
+        'Search files for a regex pattern within the workspace. Reads files as UTF-8 and strips a BOM, '
+        + 'so Chinese (and any non-ASCII) matches correctly. Pure Node walk, cross-platform. '
+        + 'Prefer this over `shell` findstr/grep: on Windows findstr is NOT UTF-8 safe and silently '
+        + 'returns false negatives for Chinese — exactly the "I searched and it isn\'t there" trap.',
       parameters: {
         type: 'object',
         properties: {
           pattern: { type: 'string', description: 'Regex pattern to search for' },
           path: { type: 'string', description: 'Directory or file path relative to workspace root (default: root)' },
           glob: { type: 'string', description: 'File glob filter (e.g. "*.ts")' },
+          ignoreCase: { type: 'boolean', description: 'Case-insensitive match (default: false)' },
+          context: { type: 'number', description: 'Lines of context around each match, like grep -C (default: 0, max: 5)' },
+          maxMatches: { type: 'number', description: 'Stop after this many matching lines (default: 200, max: 2000)' },
         },
         required: ['pattern'],
       },
@@ -692,9 +699,17 @@ export function createTools(
       const pattern = args.pattern as string;
       const searchPath = shell.validatePath((args.path as string) ?? '.');
       const globFilter = args.glob as string | undefined;
+      /*
+       * 三个为"模型真的会用"而加的参数：忽略大小写、上下文、结果上限。
+       * 上限是防止一次搜索把上下文预算吃光（这个仓库里一条大 grep 输出就是几万字符）。
+       */
+      const ignoreCase = args.ignoreCase === true;
+      const contextLines = Math.max(0, Math.min(5, Math.floor(Number(args.context ?? 0) || 0)));
+      const maxMatches = Math.max(1, Math.min(2000, Math.floor(Number(args.maxMatches ?? 200) || 200)));
+      let truncated = false;
 
       // Cross-platform: pure Node walk (Windows has no grep; findstr is unreliable on dirs)
-      const re = new RegExp(pattern);
+      const re = new RegExp(pattern, ignoreCase ? 'i' : '');
       const matches: string[] = [];
       const skipDir = new Set(['node_modules', '.git', 'dist', '.she']);
       /*
@@ -705,6 +720,25 @@ export function createTools(
        */
       const globRe = globFilter ? globToRegExp(globFilter) : null;
       const globOnPath = !!globFilter && globFilter.includes('/');
+
+      /**
+       * 收集一个文件里的命中（带上限与上下文）。
+       * 命中行用 `path:line:text`，上下文行用 `path:line-text` —— 与 grep -C 的输出形状一致，
+       * 这样模型和我自己都能一眼看出哪几行是"为什么匹配"。
+       */
+      function collect(rel: string, text: string): void {
+        if (truncated) return;
+        const lines = text.split(/\r?\n/);
+        for (let i = 0; i < lines.length; i++) {
+          if (!re.test(lines[i]!)) continue;
+          if (matches.length >= maxMatches) { truncated = true; return; }
+          const from = contextLines ? Math.max(0, i - contextLines) : i;
+          const to = contextLines ? Math.min(lines.length - 1, i + contextLines) : i;
+          for (let j = from; j <= to; j++) {
+            matches.push(`${rel}:${j + 1}${j === i ? ':' : '-'}${lines[j]}`);
+          }
+        }
+      }
 
       async function walk(dir: string): Promise<void> {
         let entries;
@@ -728,28 +762,24 @@ export function createTools(
           } catch {
             continue;
           }
-          const lines = text.split(/\r?\n/);
-          for (let i = 0; i < lines.length; i++) {
-            if (re.test(lines[i]!)) {
-              matches.push(`${relative(root, full)}:${i + 1}:${lines[i]}`);
-            }
-          }
+          collect(relative(root, full), text);
         }
       }
 
       const st = await stat(searchPath);
       if (st.isFile()) {
         const text = withoutBom(await readFile(searchPath, 'utf8'));
-        const lines = text.split(/\r?\n/);
-        for (let i = 0; i < lines.length; i++) {
-          if (re.test(lines[i]!)) matches.push(`${relative(root, searchPath)}:${i + 1}:${lines[i]}`);
-        }
+        collect(relative(root, searchPath), text);
       } else {
         await walk(searchPath);
       }
 
-      if (matches.length === 0) return 'No matches found';
-      return matches.join('\n');
+      if (matches.length === 0) {
+        return 'No matches found';
+      }
+      return truncated
+        ? `${matches.join('\n')}\n… 命中超过 ${maxMatches} 行，已截断（调大 maxMatches 或收窄 pattern/glob）`
+        : matches.join('\n');
     },
   );
 

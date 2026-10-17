@@ -74,13 +74,13 @@
   flex: 1;
   overflow-y: auto;
   /*
-   * 关掉浏览器的 scroll anchoring（默认 auto）。
+   * **不要**在这里写 overflow-anchor: none。
    *
-   * 列表项用 content-visibility:auto，屏外的行先按 contain-intrinsic-size 的 96px 占位，
-   * 滚到附近才换成真实高度 —— 那一刻浏览器会"帮"我们调整 scrollTop 来保持视野稳定，
-   * 和每 chunk 的显式滚动互相抢控制权（往上滑时表现为视口跳）。显式滚动的一方赢：关掉它。
-   */
-  overflow-anchor: none;
+   * 曾经为了治"抽搐"加过，结果换来一个更坏的病：列表项是 content-visibility:auto，屏外的行先按
+   * 96px 占位、滚到眼前才换成真实高度；关掉浏览器锚定之后，上方内容一变高、scrollTop 不变 ——
+   * 视口整段往下错位，用户看到的就是"划一下蹦到三轮以前"（2026-10-16 报的）。那时 scrollTop
+   * 还是数值不变的，所以"显式滚动和它抢控制权"这个担心是多余的：真正抢的只有一条，就是滚动本身。
+   * 抽搐的根因是 .messages 上的 scroll-behavior:smooth（已删，见文件顶部那条注释）。
   /* Horizontal padding matches the 12px inset of .header / .inputArea so the
      bubbles line up with the floating bars above and below them. */
   padding: 14px 12px 8px;

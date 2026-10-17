@@ -787,6 +787,12 @@ Prefer the LSP tools over guessing when the question is structural:
 - After editing a file whose language has a server, call \`lsp_diagnostics\` to confirm you did not introduce a type error. "It looks right" is not the same as "it compiles".
 - When unsure what a value's type actually is, call \`lsp_hover\` instead of inferring it from how it is used.
 
+**找文本一律用 「grep」 工具，不要用 「shell」 里的 findstr / grep / Select-String。**
+Why: Windows 的 findstr **不按 UTF-8 处理**，中文与任何非 ASCII 都会**静默假阴性** ——
+"我搜了，没有"经常是工具在骗你（本仓库 2026-10-15/16 因此白跑过多次）。「grep」 工具是纯 Node 遍历 +
+UTF-8 读取（去 BOM），中文可靠，还支持 「ignoreCase」 / 「context」（±5 行）/ 「maxMatches」。
+需要"语义/跨文档"找东西时，用 「kb_query」（组结构共振）而不是文本搜索。
+
 If a language has no server installed, the tool says so — fall back to \`read\`/\`grep\` and say that type information was unavailable.
 
 ## Verifying Your Own Work

@@ -1037,11 +1037,26 @@ export function Chat({
     return s;
   }, [messages]);
 
-  /** Follow the transcript only when the reader is already at the bottom. */
+  /**
+   * 只有读的人在底部时才跟随 —— 而且**用防抖判决**。
+   *
+   * 原来每个 scroll 事件都直接算一次 gap 并写 stick：一甩手，滚动过程中的中间帧会瞬间把 gap 撑大，
+   * 如果这一刻正好有流式 chunk 到达，跟随状态就翻掉、再翻回来 —— 手感像"界面在跟我抢滚动条"。
+   * 现在滚动过程中只记录时间戳（lastUserScrollAt），真正判决推迟到用户停手 120ms 之后。
+   */
+  /*
+   * 判定（stick/atBottom）**即时**：用户要马上知道自己离底部多远，也需要那一刻的「回到最新」入口
+   * —— 把它拖到防抖之后，等于界面对滚动反应迟钝（chat-recovery.test.tsx 就是这么抓到的）。
+   *
+   * 真正会跟用户抢的是**动作**（自动落底），那个才推迟：见下面 useLayoutEffect 里
+   * "用户刚滚过 400ms 内不动"的冷静期。防抖用在动作上，不用在状态上。
+   */
+  const lastUserScrollAt = useRef(0);
   useEffect(() => {
     const el = messagesRef.current;
     if (!el) return;
     const onScroll = () => {
+      lastUserScrollAt.current = Date.now();
       const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
       const near = gap < 80;
       stickToBottomRef.current = near;
@@ -1084,6 +1099,11 @@ export function Chat({
    */
   useLayoutEffect(() => {
     if (!stickToBottomRef.current) return;
+    /*
+     * 手还在滚动时一律不落底（400ms 冷静期）：这是"别跟用户抢"的另一半。
+     * 不这么做的话，用户往上看历史、手指还在滚，来一个 chunk 就被拽回底部。
+     */
+    if (Date.now() - lastUserScrollAt.current < 400) return;
     landAtLatest();
   }, [messages, pendingConfirm, pendingPatch, landAtLatest]);
 
