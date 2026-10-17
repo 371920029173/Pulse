@@ -58,7 +58,15 @@ export function writeJsonAtomic(file: string, value: unknown): void {
 export function readIndex(root: string): MapIndex | null {
   const p = indexPath(root);
   if (!existsSync(p)) return null;
-  return JSON.parse(readFileSync(p, 'utf8')) as MapIndex;
+  /*
+   * 坏 index.json 原来会让**每条命令**抛 SyntaxError（分片有 readShardSafe，index 没有）。
+   * 这里当成"没有地图"返回 null，由调用方统一说"先跑 map:build"，而不是把栈抛给用户。
+   */
+  try {
+    return JSON.parse(readFileSync(p, 'utf8')) as MapIndex;
+  } catch {
+    return null;
+  }
 }
 
 export function readShard(root: string, key: string): MapShard | null {

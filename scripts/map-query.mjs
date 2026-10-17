@@ -32,7 +32,7 @@ switch (cmd) {
     break;
   }
   case 'whereis': {
-    const res = mapWhereis(root, positional.join(' '));
+    const res = mapWhereis(root, positional.join(' '), { limit: flag('limit', 5) });
     console.log(`查询「${positional.join(' ')}」｜扫描 ${res.scanned} 节点｜展开 ${res.shardsExpanded} 分片｜${res.ms}ms`);
     for (const h of res.hits) console.log(`  ${h.score.toFixed(1).padStart(5)}  ${h.path}  ${h.label ?? ''}  ${h.reasons.slice(0, 2).join('；')}`);
     if (!res.hits.length) console.log('  (没有命中：标签密度还低，先跑 map:build 或补标注)');
@@ -73,6 +73,6 @@ switch (cmd) {
     break;
   }
   default:
-    console.log('用法: node scripts/map-query.mjs <tree|lookup|whereis|impact|note|diff> …');
+    console.log('用法: node scripts/map-query.mjs <tree|lookup|whereis|scope|impact|contracts|verify|note|diff> …');
     process.exit(2);
 }

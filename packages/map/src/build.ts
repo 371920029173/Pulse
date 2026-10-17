@@ -10,11 +10,11 @@
  * 后者的排除是硬规则，和 KB 的禁忌一致：地图绝不索引凭据。
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync, statSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import type { MapIndex, MapNode, MapShard } from '@she/shared';
 import { MAP_SCHEMA_VERSION } from '@she/shared';
-import { emptyShard, readShard, shardKeyFor, shardPath, writeJsonAtomic, indexPath } from './store.js';
+import { emptyShard, mapDir, readIndex, readShard, shardKeyFor, shardPath, writeJsonAtomic, indexPath } from './store.js';
 import { detectViews } from './views.js';
 import { deriveGroups } from './groups.js';
 import { buildSymbols, writeSymbols } from './symbols.js';
@@ -211,6 +211,19 @@ export function buildMap(opts: BuildOptions): BuildResult {
   }
 
   /*
+   * 清理孤儿分片：换过分片键、或文件被删之后，旧 shard-*.json 会一直躺在磁盘上，
+   * 被 check:map 数进去、被 verify 当成文件——看起来像"地图里有不存在的分片"。
+   */
+  try {
+    const keep = new Set([...shards.keys()].map((k) => `shard-${k}.json`));
+    for (const f of readdirSync(mapDir(root))) {
+      if (f.startsWith('shard-') && f.endsWith('.json') && !keep.has(f)) unlinkSync(join(mapDir(root), f));
+    }
+  } catch {
+    /* 清理失败不影响建图结果 */
+  }
+
+  /*
    * 符号表在分片之后建：它要读文件正文，跟分片的 path 列表对齐。
    * 一次全量扫在这个仓库是百毫秒级；10 万文件时它是最贵的一步（两遍读），
    * 所以将来要按 ROI 队列增量更新，而不是每次全建。
@@ -250,7 +263,8 @@ export function buildMap(opts: BuildOptions): BuildResult {
     schemaVersion: MAP_SCHEMA_VERSION,
     root,
     branch,
-    branches: [branch],
+    /* 分支取并集：孪生分支不能因为重建一次就消失。 */
+    branches: [...new Set([branch, ...(readIndex(root)?.branches ?? [])])],
     shards: [...shards.values()].map((s) => ({
       key: s.key,
       paths: s.nodes.length,

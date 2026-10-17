@@ -92,7 +92,11 @@ export function scanImports(
       continue;
     }
     if (text.length > 512 * 1024) continue;
+    const lines = text.split(/\r?\n/);
     for (const { spec, line } of extractImports(text)) {
+      /* 纯类型导入：行内有 import type，或该项写成 { type X }。只影响重编译，不影响运行时。 */
+      const srcLine = lines[line - 1] ?? '';
+      const typeOnly = /\bimport\s+type\b/.test(srcLine) || /\{[^}]*\btype\s+[A-Za-z_$]/.test(srcLine);
       const target = resolveSpecifier(f.path, spec, exists);
       if (!target) {
         const pkg = packages.find((p) => spec === p.name || spec.startsWith(p.name + '/'));
@@ -105,6 +109,7 @@ export function scanImports(
               kind: 'import',
               confidence: 'certain',
               evidence: [`${f.path}:${line} import '${spec}'（workspace 包 ${pkg.name}）`],
+              typeOnly,
             },
           });
         } else if (spec.startsWith('.')) {
@@ -122,6 +127,7 @@ export function scanImports(
           kind: 'import',
           confidence: 'certain',
           evidence: [`${f.path}:${line} import '${spec}'`],
+          typeOnly,
         },
       });
     }

@@ -89,6 +89,11 @@ export interface MapEdge {
   evidence: string[];
   /** 什么情况下这条边就不成立了（candidate 必填）。 */
   falsifiers?: string[];
+  /**
+   * 纯类型导入（`import type` / `import { type X }`）。
+   * 它只影响"要不要重编译"，不影响运行时会不会炸 —— 影响面必须把两者分开报。
+   */
+  typeOnly?: boolean;
 }
 
 /** 契约种类：跨语言故障全在这几类里。 */

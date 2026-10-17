@@ -33,6 +33,15 @@ export interface FetchCall extends RouteDef {
 const ROUTE_RE = /\brouter\.(get|post|put|delete|patch)\(\s*['"`]([^'"`]+)['"`]/;
 const FETCH_RE = /\bfetch(?:JSON)?\s*(?:<[^>]*>)?\(\s*(`[^`]+`|'[^']+'|"[^"]+")/;
 const METHOD_HINT = /method:\s*['"](\w+)['"]/;
+/** 方法常写在下一行：向后看 3 行。 */
+const METHOD_LOOKAHEAD = 3;
+
+/*
+ * 包装函数：`withSid('/api/chat')`、`api.get('/v1/models')` 把路径交给本地 helper。
+ * 只要"某个调用"的第一个参数是以 /api/ 或 /v1/ 开头的字面量，就算一次 HTTP 调用。
+ * 宁可多认，也不能把核心 API 报成"没有调用方"（那会被读成"死路由、可以删"）。
+ */
+const WRAPPED_RE = /\b([A-Za-z_$][\w$]*)\s*\(\s*(`[^`]+`|'[^']+'|"[^"]+")/g;
 
 /** 把 `/api/sessions/${id}/move` 这类模板串规范成 `/api/sessions/:id/move`。 */
 export function normalizePath(raw: string): string {
@@ -85,13 +94,46 @@ export function extractFetches(text: string, file: string): FetchCall[] {
   const out: FetchCall[] = [];
   const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i += 1) {
-    const m = lines[i]!.match(FETCH_RE);
+    /*
+     * 用"本行 + 后两行"做窗口：URL 与方法都可能折到下一行，
+     * 逐行匹配会把这类调用整体漏掉（表现出来又是"这条路由没有调用方"）。
+     */
+    const m = lines.slice(i, i + METHOD_LOOKAHEAD).join(' ').match(FETCH_RE);
     if (!m) continue;
     const raw = m[1]!;
     const path = normalizePath(raw);
     if (!path.startsWith('/')) continue; // 相对 URL / 变量，抽取器不猜
-    const explicit = lines[i]!.match(METHOD_HINT)?.[1]?.toUpperCase();
+    const explicit = lines.slice(i, i + METHOD_LOOKAHEAD).join(' ').match(METHOD_HINT)?.[1]?.toUpperCase();
     out.push({ method: explicit ?? 'GET', path, file, line: i + 1, raw, methodExplicit: !!explicit });
+  }
+  /*
+   * 包装函数：行内任何 "某个调用(第一个参数是 /api/… 字面量)" 都补记成一次 HTTP 调用。
+   * 与上面同一套行扫描，避免两套逻辑漂移。
+   */
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    if (!line.includes('/api/') && !line.includes('/v1/')) continue;
+    /* 路由注册行整行跳过：router.get('/api/x', handler) 不是调用。 */
+    if (/^\s*(router|app|server|express)\s*\./.test(line)) continue;
+    for (const m of line.matchAll(WRAPPED_RE)) {
+      const callee = m[1]!;
+      if (callee === 'fetch' || callee === 'fetchJSON') continue; // 上面已处理
+      if (['router', 'app', 'server', 'express', 'require', 'import'].includes(callee)) continue;
+      const raw = m[2]!;
+      const path = normalizePath(raw);
+      if (!path.startsWith('/api/') && !path.startsWith('/v1/')) continue;
+      if (out.some((c) => c.line === i + 1 && c.path === path)) continue;
+      const window = lines.slice(i, i + METHOD_LOOKAHEAD).join(' ');
+      const explicit = window.match(METHOD_HINT)?.[1]?.toUpperCase();
+      out.push({
+        method: explicit ?? 'GET',
+        path,
+        file,
+        line: i + 1,
+        raw: `${callee}(${raw})`,
+        methodExplicit: !!explicit,
+      });
+    }
   }
   return out;
 }
