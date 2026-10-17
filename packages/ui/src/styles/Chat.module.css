@@ -137,6 +137,7 @@
 }
 
 .messageRow {
+  position: relative;
   display: flex;
   animation: sheBubbleIn 380ms var(--ease-sheet) both;
   will-change: transform, opacity;
@@ -1260,8 +1261,6 @@
 }
 
 .copyBtn {
-  transition: opacity var(--transition), transform var(--transition-fast), background var(--transition);
-  opacity: 0;
   align-self: flex-start;
   border: none;
   background: var(--bg-secondary);
@@ -1279,9 +1278,42 @@
   align-self: flex-end;
 }
 
-.bubbleWrap:hover .copyBtn,
-.bubbleWrap:focus-within .copyBtn {
+/*
+ * 操作按钮不进流：绝对定位贴在这一行的右下角，hover/focus 才淡入。
+ * 放在流里的话，消息从"流式"变"结束"的那一帧按钮才挂载 → 行高增加 → 下面全部被顶动。
+ * 那是"跳"的一个来源，而且和内容无关。
+ */
+.actions {
+  position: absolute;
+  right: 8px;
+  bottom: 2px;
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+
+.messageRow:hover .actions,
+.messageRow:focus-within .actions {
   opacity: 1;
+}
+
+/* 这个类原来在样式表里根本没有 —— 「撤销到此」因此是个原生按钮：常驻、占一整行。 */
+.rewindBtn {
+  border: none;
+  background: var(--bg-secondary);
+  color: var(--text-tertiary);
+  border-radius: var(--radius-sm);
+  height: var(--control-h-2xs);
+  padding: 0 8px;
+  font-size: var(--text-xs, 11px);
+  cursor: pointer;
+  transition: color var(--transition), background var(--transition);
+}
+
+.rewindBtn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
 }
 
 .copyBtn:hover {

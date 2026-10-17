@@ -817,25 +817,29 @@ const MessageBubble = memo(function MessageBubble({
           <div className={`${styles.bubble} ${styles.bubbleUser}`} data-surface="bubble">
             {body}
           </div>
-          {!msg.isStreaming && msg.content ? (
-            <button
-              type="button"
-              className={`${styles.copyBtn} ${styles.copyBtnUser}`}
-              title={t('复制')}
-              onClick={() => void copyText(msg.content)}
-            >
-              复制
-            </button>
-          ) : null}
-          {!msg.isStreaming && onRewind ? (
-            <button
-              type="button"
-              className={styles.rewindBtn}
-              title={t('从这里撤销：本条及其之后的对话都会被删除，并回到这一轮重新开始')}
-              onClick={() => onRewind(index)}
-            >
-              撤销到此
-            </button>
+          {!msg.isStreaming && (msg.content || onRewind) ? (
+            <div className={styles.actions}>
+              {msg.content ? (
+                <button
+                  type="button"
+                  className={`${styles.copyBtn} ${styles.copyBtnUser}`}
+                  title={t('复制')}
+                  onClick={() => void copyText(msg.content)}
+                >
+                  复制
+                </button>
+              ) : null}
+              {onRewind ? (
+                <button
+                  type="button"
+                  className={styles.rewindBtn}
+                  title={t('从这里撤销：本条及其之后的对话都会被删除，并回到这一轮重新开始')}
+                  onClick={() => onRewind(index)}
+                >
+                  撤销到此
+                </button>
+              ) : null}
+            </div>
           ) : null}
         </div>
       </div>
@@ -845,25 +849,29 @@ const MessageBubble = memo(function MessageBubble({
           <Markdown text={body} />
           {msg.isStreaming && <span className={styles.streamingDot} />}
         </div>
-        {!msg.isStreaming && msg.content ? (
-          <button
-            type="button"
-            className={styles.copyBtn}
-            title={t('复制')}
-            onClick={() => void copyText(msg.content)}
-          >
-            复制
-          </button>
-        ) : null}
-        {!msg.isStreaming && onRewind ? (
-          <button
-            type="button"
-            className={styles.rewindBtn}
-            title={t('从这里撤销：本条及其之后的对话都会被删除，并回到这一轮重新开始')}
-            onClick={() => onRewind(index)}
-          >
-            撤销到此
-          </button>
+        {!msg.isStreaming && (msg.content || onRewind) ? (
+          <div className={styles.actions}>
+            {msg.content ? (
+              <button
+                type="button"
+                className={styles.copyBtn}
+                title={t('复制')}
+                onClick={() => void copyText(msg.content)}
+              >
+                复制
+              </button>
+            ) : null}
+            {onRewind ? (
+              <button
+                type="button"
+                className={styles.rewindBtn}
+                title={t('从这里撤销：本条及其之后的对话都会被删除，并回到这一轮重新开始')}
+                onClick={() => onRewind(index)}
+              >
+                撤销到此
+              </button>
+            ) : null}
+          </div>
         ) : null}
       </div>
     ) : null}
