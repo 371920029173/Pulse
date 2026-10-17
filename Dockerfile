@@ -42,6 +42,7 @@ COPY packages/server/package.json ./packages/server/
 COPY packages/ui/package.json ./packages/ui/
 COPY packages/desktop/package.json ./packages/desktop/
 COPY packages/she-cli/package.json ./packages/she-cli/
+COPY packages/map/package.json ./packages/map/
 
 RUN pnpm install --frozen-lockfile
 
