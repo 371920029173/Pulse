@@ -175,9 +175,16 @@ export function buildMap(opts: BuildOptions): BuildResult {
   for (const [key, shard] of shards) {
     const prev = readShard(root, key);
     if (prev) {
-      const byPath = new Map(prev.nodes.map((n) => [n.path, n]));
+      /*
+       * 键必须是 branch:path —— 只按 path 的话，建第二条分支时新节点会继承主干那条的标签，
+       * 两条分支的描述互相踩。
+       */
+      const byKey = new Map(prev.nodes.map((n) => [`${n.branch}:${n.path}`, n]));
+      /* 其它分支的节点原样带过来：孪生体要活过每一次重建。 */
+      const otherBranches = prev.nodes.filter((n) => n.branch !== branch);
+      if (otherBranches.length) shard.nodes.push(...otherBranches);
       for (const node of shard.nodes) {
-        const old = byPath.get(node.path);
+        const old = byKey.get(`${node.branch}:${node.path}`);
         if (!old) continue;
         if (old.label !== undefined) {
           node.label = old.label;
@@ -189,6 +196,9 @@ export function buildMap(opts: BuildOptions): BuildResult {
         if (old.lastSeen) node.lastSeen = old.lastSeen;
       }
       shard.notes = prev.notes ?? [];
+      /* 知识绑定是模型资产，也必须活过重建（否则每建一次图，组结构知识就全丢）。 */
+      const prevLinks = (prev as unknown as { kbLinks?: unknown[] }).kbLinks;
+      if (prevLinks?.length) (shard as unknown as { kbLinks?: unknown[] }).kbLinks = prevLinks;
       /*
        * 边不保留旧值：它完全由当前源码派生。保留的话，改掉的依赖会永远留在图上
        * （悬空边判据会一直红，而模型会照着错的图去判断影响面）。

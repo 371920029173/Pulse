@@ -84,7 +84,7 @@ interface ChatProps {
   onImportContext?: () => void;
   /** Plans and timeline are scoped to this conversation. */
   onOpenPlans?: () => void;
-  /** 打开知识图谱白板（实验功能）。 */
+  /** 打开知识图谱白板。 */
   onOpenGraph?: () => void;
   onOpenTimeline?: () => void;
   /** Manage custom skills from the composer. */
@@ -1824,7 +1824,7 @@ export function Chat({
             </button>
           ) : null}
           {onOpenGraph ? (
-            <button type="button" className="she-btn she-btn--chip" onClick={onOpenGraph} title={t('打开知识图谱：把 KB 的组树摊成白板，可拖动、可改名/移动/合并/编辑正文（实验功能）')}>
+            <button type="button" className="she-btn she-btn--chip" onClick={onOpenGraph} title={t('打开知识图谱：把 KB 的组树摊成白板，可拖动、可改名/移动/合并/编辑正文')}>
               知识图谱
             </button>
           ) : null}

@@ -18,6 +18,8 @@ import type { MapConfidence } from '@she/shared';
 export interface MapKbLink {
   /** 地图节点路径（文件或目录）。 */
   path: string;
+  /** 绑在哪条分支上（孪生体各有各的知识绑定）。 */
+  branch?: string;
   /** KB 组路径，例如 `architecture/ui`。 */
   kbGroup: string;
   /** KB 节点 id（可空：只绑组不绑具体记忆）。 */
@@ -59,7 +61,7 @@ export function linkKb(
     throw new Error('candidate 绑定必须同时提供 evidence 与 falsifiers');
   }
   const { key, shard } = shardOf(root, branch, link.path);
-  const full: MapKbLink = { ...link, at: link.at ?? now };
+  const full: MapKbLink = { ...link, branch: link.branch ?? branch, at: link.at ?? now };
   const shardAny = shard as typeof shard & { kbLinks?: MapKbLink[] };
   shardAny.kbLinks = [...(shardAny.kbLinks ?? []).filter((l) => !(l.path === full.path && l.kbGroup === full.kbGroup && l.kbNodeId === full.kbNodeId)), full];
   writeJsonAtomic(shardPath(root, key), shardAny);
@@ -79,7 +81,9 @@ export function kbLinksFor(root: string, branch: string, path: string, opts: { i
 
   const collect = (at: string, fromAncestor: boolean) => {
     const { shard } = shardOf(root, branch, at);
-    const links = ((shard as unknown as { kbLinks?: MapKbLink[] }).kbLinks ?? []).filter((l) => l.path === at);
+    const links = ((shard as unknown as { kbLinks?: MapKbLink[] }).kbLinks ?? []).filter(
+      (l) => l.path === at && (l.branch === undefined || l.branch === branch),
+    );
     for (const l of links) {
       const id = `${l.kbGroup}:${l.kbNodeId ?? ''}:${l.title}`;
       if (seen.has(id)) continue;

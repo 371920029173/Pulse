@@ -1101,7 +1101,7 @@ export function App() {
       )}
       {showTheme && <ThemeStudio onClose={() => setShowTheme(false)} userTheme={userTheme} />}
       {showCost && <ContextCostPanel onClose={() => setShowCost(false)} />}
-      {/* 知识图谱：实验功能，与「导入对话 / 计划 / 时间线」同排打开 */}
+      {/* 知识图谱：与「导入对话 / 计划 / 时间线」同排打开 */}
       {showGraph && <KnowledgeGraph onClose={() => setShowGraph(false)} />}
 
       {/*

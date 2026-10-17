@@ -1,5 +1,5 @@
 /**
- * 知识图谱（实验功能）：把 KB 的组树摊成一张网络图（VOSviewer 的读法，比它简单）。
+ * 知识图谱：把 KB 的组树摊成一张网络图（VOSviewer 的读法，比它简单）。
  *
  * 视口语义（与用户给的 A/B/C/D/E/F 例子一致）：
  *   · 当前层 = 当前组本身 + 它的直接子组 + 它这一层的记忆
@@ -634,7 +634,7 @@ export function KnowledgeGraph({ onClose, onOpenMemory }: Props) {
   return (
     <div className={styles.panel} role="dialog" aria-label={t('知识图谱')} onClick={() => setMenu(null)}>
       <div className={styles.head}>
-        <h2 className={styles.title}>{t('知识图谱（实验）')}</h2>
+        <h2 className={styles.title}>{t('知识图谱')}</h2>
         <div className={styles.crumb} aria-label={t('当前位置')}>
           {crumb.map((c, i) => (
             <span key={c.id ?? 'root'} className={styles.crumbItem}>
