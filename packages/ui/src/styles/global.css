@@ -949,3 +949,34 @@ html[data-bg="video"][data-theme="dark"] [class*="terminal"] * {
   background-color: rgba(8, 10, 16, 0.78) !important;
   color: #e8eefc !important;
 }
+
+/* ── 动效（2026-10-16）：面板进出，一处规则覆盖全应用 ───────────────────────── */
+@keyframes she-panel-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes she-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+[data-surface="panel"] {
+  animation: she-panel-in 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  will-change: opacity, transform;
+}
+
+[data-surface="backdrop"] {
+  animation: she-fade-in 150ms ease-out;
+}
+
+/*
+ * 要求减少动效时一律不动。注意：这里必须用 same-specificity 的覆盖而不是靠 :root 变量 ——
+ * 有些用户与自动化环境会把 prefers-reduced-motion 打开，动画参数不生效才是正确的。
+ */
+@media (prefers-reduced-motion: reduce) {
+  [data-surface="panel"],
+  [data-surface="backdrop"] {
+    animation: none;
+  }
+}

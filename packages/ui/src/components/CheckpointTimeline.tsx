@@ -60,7 +60,11 @@ export function CheckpointTimeline({ onClose }: { onClose: () => void }) {
       </button>
       <div className={styles.body}>
         {list.length === 0 ? (
-          <div className={styles.empty}>{t('暂无检查点。')}<br />{t('应用补丁后会出现在这里。')}</div>
+          <div className={styles.empty}>
+            {t('暂无检查点。')}
+            <br />
+            {t('它只在「人工批准一个暂存补丁」时产生；开了「允许所有命令」时写入是直写的，不会暂存，也就不会有检查点 —— 所以这里长期为空是正常的。')}
+          </div>
         ) : (
           list.map((c) => (
             <div key={c.checkpoint_id} className={styles.item}>

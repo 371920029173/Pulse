@@ -3,10 +3,19 @@
      An earlier rounded-card treatment made it read as a floating panel, which
      is not what this bar is: it is the window's status line, so it stays
      attached to the frame. */
+  /*
+   * 高度钉死。
+   *
+   * 原来是 min-height:28px + overflow-x:auto —— 内容一变宽就会出横向滚动条，而 Chromium 的横向
+   * 滚动条占的是**盒内**高度（thin ≈ 8px），于是这条会从 ~31px 涨到 ~39px、内容缩窄又降回去：
+   * 用户看到的就是「窗口底部这一条有时候莫名其妙跳起来」，而且跳高时下面会露出壁纸（那个"缝"）。
+   * 钉死高度 + 把滚动条藏起来（仍可滚），这条就不会再动。
+   */
+  height: 32px;
   overflow-x: auto;
   overflow-y: hidden;
   flex-wrap: nowrap;
-  scrollbar-width: thin;
+  scrollbar-width: none;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -15,9 +24,13 @@
   background: var(--bg-tertiary, var(--bg-secondary));
   font-size: var(--text-xs);
   color: var(--text-secondary);
-  min-height: 28px;
   flex-shrink: 0;
 }
+
+/*
+ * Chromium 不认 scrollbar-width:none 在老版本上，还要这条；否则横向滚动条仍会把 32px 撑破。
+ */
+.bar::-webkit-scrollbar { height: 0; }
 
 .item { display: inline-flex; gap: 6px; align-items: center; min-width: 0; }
 .label { color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.4px; font-size: 10px; }

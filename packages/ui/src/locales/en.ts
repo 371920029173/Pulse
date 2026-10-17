@@ -20,6 +20,8 @@ registerDictionary('en', {
   '关闭': 'Close',
   '展开后台任务': 'Show background tasks',
   '子代理会话默认收起；历史记录里一直能翻到': 'Sub-agent sessions stay collapsed; they are always in the history',
+  '它只在「人工批准一个暂存补丁」时产生；开了「允许所有命令」时写入是直写的，不会暂存，也就不会有检查点 —— 所以这里长期为空是正常的。':
+    'They are only created when you approve a staged patch. With "allow all commands" on, writes go straight through — nothing is staged, so no checkpoints exist. An always-empty list here is expected.',
   '显示子代理会话（{n}）': 'Show sub-agent sessions ({n})',
   '收起子代理会话（{n}）': 'Hide sub-agent sessions ({n})',
   '打开执行会话': 'Open the run’s conversation',
