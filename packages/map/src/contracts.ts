@@ -102,6 +102,8 @@ export interface ContractScan {
   fetches: number;
   certain: number;
   threats: number;
+  /** 有 fetch 调用但 URL 无法解析（变量拼接）的数量：不是威胁，是"没检查到"。 */
+  unresolved: number;
 }
 
 export function scanHttpContracts(
@@ -111,6 +113,8 @@ export function scanHttpContracts(
 ): ContractScan {
   const routes: RouteDef[] = [];
   const fetches: FetchCall[] = [];
+  /** fetch/fetchJSON 的调用点总数（不管 URL 能不能解析）。 */
+  let callSites = 0;
 
   for (const f of files) {
     if (!/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f.path)) continue;
@@ -122,7 +126,10 @@ export function scanHttpContracts(
     }
     if (text.length > 512 * 1024) continue;
     if (text.includes('router.')) routes.push(...extractRoutes(text, f.path));
-    if (text.includes('fetch')) fetches.push(...extractFetches(text, f.path));
+    if (text.includes('fetch')) {
+      callSites += (text.match(/\bfetch(?:JSON)?\s*(?:<[^>]*>)?\(/g) ?? []).length;
+      fetches.push(...extractFetches(text, f.path));
+    }
   }
 
   /*
@@ -197,5 +204,7 @@ export function scanHttpContracts(
     });
   }
 
-  return { edges, routes: routes.length, fetches: fetches.length, certain, threats };
+  /* 解析不出来的那些调用点：如实计入"无法对账"。 */
+  const unresolved = Math.max(0, callSites - fetches.length);
+  return { edges, routes: routes.length, fetches: fetches.length, certain, threats, unresolved };
 }

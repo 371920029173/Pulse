@@ -132,6 +132,8 @@ export interface MapIndex {
   counts: { files: number; dirs: number; symbols: number; edges: number; notes: number };
   /** 三视角探测结果（探不到时 primary='dir'）。 */
   views?: MapViews;
+  /** 有 fetch 调用但 URL 是变量拼接、无法对账的数量（如实记账，不假装检查过）。 */
+  contractUnresolved?: number;
   /** 排除规则的快照，便于审计"为什么这个文件不在图上"。 */
   excludes: { patterns: string[]; maxFileBytes: number };
   updatedAt: string;

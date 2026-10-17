@@ -524,7 +524,15 @@ export function mapContracts(root: string): ContractsResult {
   const threats = edges.filter((e) => e.confidence !== 'certain');
 
   const lines: string[] = [];
-  lines.push(`契约（HTTP）：确定 ${certain.length} 条｜潜在威胁 ${threats.length} 条`);
+  /*
+   * 三栏而不是两栏：确定 / 潜在威胁 / **无法对账**。
+   * 第三栏是变量拼接的 URL——既不是确定也不是威胁，但必须让人看见，
+   * 否则"零威胁"会被误读成"全都检查过"。
+   */
+  const unresolved = loaded.index?.contractUnresolved ?? 0;
+  lines.push(
+    `契约（HTTP）：确定 ${certain.length} 条｜潜在威胁 ${threats.length} 条｜无法对账 ${unresolved} 处（URL 是变量拼接）`,
+  );
   if (certain.length) {
     lines.push('  确定（两端都定位到）：');
     for (const e of certain.slice(0, 20)) lines.push(`    ${e.from} → ${e.to}  ${e.evidence[0] ?? ''}`);

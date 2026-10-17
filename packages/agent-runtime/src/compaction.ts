@@ -118,6 +118,11 @@ export interface CompactionState {
   covered: number;
   /** 压掉的是哪一段（0 … coveredTo）、压的那一刻还留了多少条 —— 供"压缩日志"读。 */
   coveredFrom?: number;
+  /**
+   * 地图引用块（压缩时算一次、随记录冻结）：被折叠段涉及的文件 + 地图里的一句话标签。
+   * 与 anchors 分开：anchors 是"原文里真的出现过的串"，标签不来自原文，混一起会让抬头变成假话。
+   */
+  mapRefs?: string;
   /** 被折叠那一段里「像该记住的」候选（压缩时算一次、冻在这里随记录落盘；digestMessage 只印不重算）。 */
   kbCandidates?: KbCandidate[];
   coveredTo?: number;
@@ -415,7 +420,7 @@ export function userLinesExcerpt(head: readonly LLMMessage[], perRow = 120, maxC
 
 /** 粘进请求的那条摘要消息。**角色是 user**：见 `chooseCutIndex()` 里关于交替的说明。 */
 export function digestMessage(
-  state: Pick<CompactionState, 'digest' | 'covered' | 'source' | 'at' | 'sourcePath' | 'anchors' | 'kbCandidates'>,
+  state: Pick<CompactionState, 'digest' | 'covered' | 'source' | 'at' | 'sourcePath' | 'anchors' | 'kbCandidates' | 'mapRefs'>,
 ): LLMMessage {
   const who = state.source === 'model' ? '模型总结' : '机械折叠';
   /*
@@ -457,6 +462,7 @@ export function digestMessage(
       `[压缩记录] 本次对话较早的 ${state.covered} 条记录因为上下文接近模型上限，已被压缩成下面这份摘要`
       + `（${who}，${state.at}）。${where}${anchors}\n\n`
       + harvest
+      + (state.mapRefs ? `\n\n${state.mapRefs}` : '')
       + state.digest,
   };
 }

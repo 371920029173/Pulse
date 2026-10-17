@@ -265,6 +265,7 @@ export function buildMap(opts: BuildOptions): BuildResult {
       notes: noteCount,
     },
     views,
+    contractUnresolved: contracts.unresolved,
     excludes: { patterns: [EXCLUDE_DIR.source, SECRET.source], maxFileBytes: MAX_FILE_BYTES },
     updatedAt: now,
   };

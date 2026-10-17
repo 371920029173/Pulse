@@ -1,3 +1,4 @@
+import { mapAnchorBlock } from '@she/map';
 import type {
   SheConfig,
   LLMProvider,
