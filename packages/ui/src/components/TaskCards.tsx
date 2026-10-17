@@ -77,28 +77,6 @@ export function TaskCards() {
     };
   }, []);
 
-  /*
-   * 完成/失败的卡片停 8 秒自己消失。
-   *
-   * 用户的原话：「后台任务的提示也不要保持常驻（现在正就是不自己关就一直开着）」。计时器按
-   * "第一次看见它已经结束"起算（不是按服务端时间戳），所以哪怕 updated_at 缺失或时钟不同步，
-   * 也不会立刻消失、也不会永远留着。要留证据的话：子代理本来就是一个会话，去「历史记录」里
-   * 打开那场子对话即可（标题就是子任务的名字）。
-   */
-  const finishedAt = useRef<Map<string, number>>(new Map());
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      const now = Date.now();
-      const seen = finishedAt.current;
-      for (const task of tasks) {
-        if (task.phase !== 'running' && !seen.has(task.id)) seen.set(task.id, now);
-        if (task.phase === 'running') seen.delete(task.id);
-      }
-      setTasks((prev) => prev.filter((x) => x.phase === 'running' || now - (seen.get(x.id) ?? now) < 8_000));
-    }, 1_000);
-    return () => window.clearInterval(timer);
-  }, [tasks]);
-
   async function dismiss(id: string) {
     try {
       await fetchJSON(`/api/tasks/${id}`, { method: 'DELETE' });
@@ -108,18 +86,12 @@ export function TaskCards() {
     }
   }
 
-  async function clearFinished() {
-    try {
-      await fetchJSON('/api/tasks/clear-finished', { method: 'POST', body: {} });
-      await refresh();
-    } catch {
-      setTasks((prev) => prev.filter((t) => t.phase === 'running'));
-    }
-  }
-
-  if (!tasks.length) return null;
-
-  const running = tasks.filter((t) => t.phase === 'running').length;
+  /*
+   * 这个列表**只放正在跑的**（用户的原话：「直接把已经完成的事从提示列表里踢了不就行了」）。
+   * 结束的卡片既不显示、也不占位、也不会"清除了又跳出来"—— 没有在跑的就整块消失。
+   */
+  const running = tasks.filter((task) => task.phase === 'running');
+  if (!running.length) return null;
 
   if (!open) {
     /*
@@ -132,7 +104,7 @@ export function TaskCards() {
         onClick={() => setOpen(true)}
         title={t('展开后台任务')}
       >
-        {t('后台任务')}{running ? ` · ${running} ${t('进行中')}` : ''}
+        {t('后台任务')}{running.length ? ` · ${running.length} ${t('进行中')}` : ''}
       </button>
     );
   }
@@ -140,12 +112,9 @@ export function TaskCards() {
   return (
     <div className={styles.wrap} aria-live="polite">
       <div className={styles.head}>
-        <span className={styles.title}>{t('后台任务')}{running ? ` · ${running} ${t('进行中')}` : ''}</span>
+        <span className={styles.title}>{t('后台任务')}{running.length ? ` · ${running.length} ${t('进行中')}` : ''}</span>
         <button type="button" className={styles.ghost} onClick={() => setOpen(false)}>
           {t('收起')}
-        </button>
-        <button type="button" className={styles.ghost} onClick={() => void clearFinished()}>
-          {t('清除已结束')}
         </button>
       </div>
       <div className={styles.list}>
@@ -155,7 +124,7 @@ export function TaskCards() {
           `t('…')` inside the block fails to compile — the same collision that was fixed once before
           in `SchedulePanel`. Naming it `task` makes the shadowing impossible.
         */}
-        {tasks.slice(0, 8).map((task) => (
+        {running.slice(0, 8).map((task) => (
           <div key={task.id} className={`${styles.card} ${styles[task.phase]}`}>
             <div className={styles.row}>
               <span className={styles.kind}>{task.kind === 'subagent' ? t('子智能体') : task.kind === 'import' ? t('导入') : task.kind}</span>
