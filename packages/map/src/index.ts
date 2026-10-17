@@ -1,5 +1,6 @@
 export * from './store.js';
 export * from './build.js';
+export * from './views.js';
 export type {
   MapIndex,
   MapShard,

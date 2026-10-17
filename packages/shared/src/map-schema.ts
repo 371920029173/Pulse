@@ -110,6 +110,15 @@ export interface MapContractEdge extends MapEdge {
   threat?: boolean;
 }
 
+/** 三视角探测结果：包 / 仓 / 构建单元。探不到时 primary 为 'dir'，地图退回目录轴。 */
+export interface MapViews {
+  packages: Array<{ name: string; root: string; kind: 'npm' | 'go' | 'python' | 'rust'; manifest: string }>;
+  repos: Array<{ name: string; root: string; kind: 'git' | 'submodule' }>;
+  targets: Array<{ root: string; kind: 'bazel' | 'cmake' | 'make' | 'tsconfig'; file: string }>;
+  primary: 'package' | 'repo' | 'target' | 'dir';
+  evidence: string[];
+}
+
 /** 根分片。 */
 export interface MapIndex {
   schemaVersion: typeof MAP_SCHEMA_VERSION;
@@ -121,6 +130,8 @@ export interface MapIndex {
   branches: string[];
   shards: Array<{ key: string; paths: number; nodes: number; mtime: string }>;
   counts: { files: number; dirs: number; symbols: number; edges: number; notes: number };
+  /** 三视角探测结果（探不到时 primary='dir'）。 */
+  views?: MapViews;
   /** 排除规则的快照，便于审计"为什么这个文件不在图上"。 */
   excludes: { patterns: string[]; maxFileBytes: number };
   updatedAt: string;

@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import type { MapIndex, MapNode, MapShard } from '@she/shared';
 import { MAP_SCHEMA_VERSION } from '@she/shared';
 import { emptyShard, readShard, shardKeyFor, shardPath, writeJsonAtomic, indexPath } from './store.js';
+import { detectViews } from './views.js';
 
 export const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -195,6 +196,7 @@ export function buildMap(opts: BuildOptions): BuildResult {
       edges: edgeCount,
       notes: noteCount,
     },
+    views: detectViews(root),
     excludes: { patterns: [EXCLUDE_DIR.source, SECRET.source], maxFileBytes: MAX_FILE_BYTES },
     updatedAt: now,
   };
