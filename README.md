@@ -11,6 +11,42 @@ machine, talks to any OpenAI-compatible endpoint or Anthropic, and sends nothing
 
 ## 本次更新：修复了一些已知问题并进行大幅升级与优化
 
+**Large projects: the map the model was missing**
+
+In a big repository the hard part is not writing code — it is knowing *what is where*. `@she/map`
+indexes the workspace straight from `git ls-files` (path + blob sha, no extra dependency, no
+embedding), stores shards under `.she/map/`, and answers six questions through one surface:
+
+| | question it answers |
+|---|---|
+| `tree` | what the whole repository looks like — a full skeleton in ~380 tokens |
+| `lookup` | what one file is, which groups it belongs to, its symbol outline, local notes, and the knowledge-base groups that mention it |
+| `whereis` | "I want to change X" → where X lives (two-level narrowing: score shards, then nodes) |
+| `scope` | a working set for a task: anchors → what breaks → which gates to run |
+| `impact` | reverse import closure (file-level *and* package-level) plus the checks that will go red |
+| `contracts` | HTTP routes ↔ front-end calls, split into **certain** / **potential threats** / **not reconcilable** |
+
+- **Groups are a DAG, not a tree.** A file belongs to a directory axis, a package axis, a layer axis
+  and any number of feature groups at the same time — "which subsystem" and "which feature" are
+  different questions.
+- **Twin files are first-class.** The same path on two branches is two nodes, each keeping its own
+  labels, notes and knowledge bindings, so a feature branch does not overwrite what main knows.
+- **Labels are tied to content, not to time.** Every label records the blob sha it described; when the
+  content changes it is marked stale instead of being silently trusted, and `verify` reports the
+  stale rate, the dark corners (never labelled), dangling edges, orphan notes and broken shards.
+- **Local revert is a four-step safety shell**: plan (read-only) → single-use ticket (hash checked) →
+  snapshot → `git restore`. Files with uncommitted changes block by default; reverting a file that
+  does not exist in the target revision is refused outright.
+- **It says what it cannot see.** Contract extraction cannot resolve URLs built from variables —
+  those are counted as *not reconcilable* (120 in this repository) instead of being reported as clean.
+  With zero labels, `verify` caps its score at 30 and states that intent search is unavailable,
+  rather than showing a confident number.
+- **Use it as a process, not a tool.** `.she/skills/general/project-map.md` describes when to build,
+  when to look something up, when to annotate while working — and when not to trust the map.
+
+The storage contract lives in `docs/project-map-schema.md` and is guarded by `check:map` (part of
+`pnpm check:offline`). The interface is experimental: fields may change as it gets used.
+
 **Reliability**
 - A conversation can no longer get stuck refusing every message. The "is this chat busy" bit was
   local and could go stale for good (a quietly dead stream left it true), while the turn lock lives
@@ -275,6 +311,7 @@ command: `pnpm check:offline`. It is what CI runs, and it needs no API key.
 | [architecture.md](architecture.md) | Design and package layout |
 | [docs/retrieval.md](docs/retrieval.md) | How structural-resonance retrieval works, and its measured limits |
 | [docs/testing.md](docs/testing.md) | Test inventory, the checks that gate a change, and how to run them |
+| [docs/project-map-schema.md](docs/project-map-schema.md) | The project map: node identity (branch × path), the three views, evidence rules for contract edges, storage and budget contract |
 | [docs/custom-stylesheet.md](docs/custom-stylesheet.md) | Restyling the UI, and how a bad stylesheet is made recoverable |
 | [docs/plugins.md](docs/plugins.md) | Writing a plugin: `ctx` API, permissions, debugging |
 | [docs/feishu-remote.md](docs/feishu-remote.md) | Phone remote control in 5 minutes |
