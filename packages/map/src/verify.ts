@@ -90,6 +90,12 @@ export function mapVerify(root: string): VerifyReport {
   score -= Math.min(10, orphanNotes * 2);
   score -= brokenShards * 10;
   score = Math.max(0, Math.min(100, score));
+  /*
+   * 一条标签都没有时，分数必须封顶：这张图对"意图检索"是不可用的，
+   * 而 75/100 会让模型以为可以信。分项数字（0 标签 / 100% 黑暗角落）才是事实。
+   */
+  const retrievalUsable = labeled.length > 0;
+  if (!retrievalUsable) score = Math.min(score, 30);
 
   const worst = [
     ...stale.map((f) => ({ path: f.path, why: '标签已过期', inDegree: f.inDegree ?? 0 })),
@@ -99,7 +105,7 @@ export function mapVerify(root: string): VerifyReport {
     .slice(0, 8);
 
   const lines = [
-    `地图可信度 ${score}/100（${index.branch}）`,
+    `地图可信度 ${score}/100（${index.branch}）${retrievalUsable ? '' : ' —— 没有任何标签，意图检索（whereis/scope）当前不可用，只能按路径匹配'}`,
     `  文件 ${files.length}｜已标注 ${labeled.length}（过期 ${stale.length}，${Math.round(staleRate * 100)}%）`,
     `  黑暗角落 ${dark.length}（${Math.round(darkRate * 100)}%：没有任何标签的区域）`,
     `  悬空边 ${danglingCount}｜孤立注记 ${orphanNotes}｜坏分片 ${brokenShards}`,

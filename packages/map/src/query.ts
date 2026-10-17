@@ -143,11 +143,18 @@ export function mapTree(root: string, opts: TreeOptions = {}): TreeResult {
 
   const tree = buildDirTree(loaded.nodes.filter((n) => n.branch === branch));
   const collapsed = new Set<string>();
-  let collapsedFiles = 0;
-
   const renderNow = () => {
     const lines = render(tree, { depth, level: 0, collapsed, notesByPath });
-    if (collapsed.size) lines.push(`… 已折叠 ${collapsedFiles} 个文件（${collapsed.size} 个低活跃目录）`);
+    /*
+     * 折叠文件数 = 总数 − 实际渲染数。之前是"每折一个目录就把它的子树文件数累加一遍"，
+     * 嵌套目录被重复计数，于是出现"折叠 877 个文件 > 全仓 539 个"这种自相矛盾的数字。
+     * 总数 − 渲染数 天然把 depth 截断也算进去，不会超。
+     */
+    const rendered = lines.filter((l) => !l.trimEnd().endsWith('/') && !l.includes('已折叠')).length;
+    const hidden = Math.max(0, (loaded.index!.counts.files ?? 0) - rendered);
+    if (collapsed.size || hidden > 0) {
+      lines.push(`… 已折叠 ${hidden} 个文件（${collapsed.size} 个低活跃目录；深度上限 ${depth}）`);
+    }
     return `# 地图 ${branch}｜${loaded.index!.counts.files} 文件｜形态 ${loaded.index!.views?.primary ?? '?'}\n` + lines.join('\n');
   };
 
@@ -169,7 +176,6 @@ export function mapTree(root: string, opts: TreeOptions = {}): TreeResult {
   for (const dir of candidates) {
     if (tokens <= budget) break;
     collapsed.add(dir.path);
-    collapsedFiles += countFiles(dir);
     collapsedCount += 1;
     text = renderNow();
     tokens = estimateTokens(text);
@@ -252,6 +258,8 @@ export interface WhereisHit {
   label?: string;
   score: number;
   reasons: string[];
+  /** 引用数：只用于同分排序，不参与是否命中。 */
+  refs: number;
 }
 
 export interface WhereisResult {
@@ -314,7 +322,11 @@ export function mapWhereis(root: string, query: string, opts: { limit?: number; 
         reasons.push(`路径命中「${term}」`);
       }
     }
-    if (node.inDegree) score += Math.min(2, node.inDegree / 10);
+    /*
+     * 引用数**不**进 score：它是"重要"，不是"相关"。
+     * 之前把它当保底分，导致零命中的高引用文件也变成命中 —— 那是最坏的一类错误
+     * （任何查询都得到同一批文件，看起来还很有把握）。
+     */
     return { score, reasons };
   };
 
@@ -336,13 +348,14 @@ export function mapWhereis(root: string, query: string, opts: { limit?: number; 
     for (const node of shard.nodes.slice(0, take)) {
       scanned += 1;
       const { score, reasons } = scoreNode(node);
-      if (score <= 0) continue;
-      hits.push({ path: node.path, label: node.label, score, reasons });
+      /* 命中判据：至少真的命中一个词。reasons 为空 = 一个词都没匹配上（不管引用数多高）。 */
+      if (score <= 0 || reasons.length === 0) continue;
+      hits.push({ path: node.path, label: node.label, score, reasons, refs: node.inDegree ?? 0 });
     }
     if (shardsExpanded >= 3) break;
   }
 
-  hits.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
+  hits.sort((a, b) => b.score - a.score || b.refs - a.refs || a.path.localeCompare(b.path));
   return { hits: hits.slice(0, limit), scanned, shardsExpanded, ms: Date.now() - started };
 }
 
