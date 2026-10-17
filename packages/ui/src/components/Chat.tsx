@@ -1037,33 +1037,40 @@ export function Chat({
     return s;
   }, [messages]);
 
-  /**
-   * 只有读的人在底部时才跟随 —— 而且**用防抖判决**。
-   *
-   * 原来每个 scroll 事件都直接算一次 gap 并写 stick：一甩手，滚动过程中的中间帧会瞬间把 gap 撑大，
-   * 如果这一刻正好有流式 chunk 到达，跟随状态就翻掉、再翻回来 —— 手感像"界面在跟我抢滚动条"。
-   * 现在滚动过程中只记录时间戳（lastUserScrollAt），真正判决推迟到用户停手 120ms 之后。
-   */
+  /* 跟随规则见下面那个 effect 的注释：在底部 + 正在输出才跟随；一划滚轮/离开底部即解除。 */
   /*
-   * 判定（stick/atBottom）**即时**：用户要马上知道自己离底部多远，也需要那一刻的「回到最新」入口
-   * —— 把它拖到防抖之后，等于界面对滚动反应迟钝（chat-recovery.test.tsx 就是这么抓到的）。
+   * 跟随规则（用户定的，照做）：
+   *   · 跟随只在「**在底部** 且 **正在输出**」时成立 —— 见下面 useLayoutEffect 里的两个条件；
+   *   · 一划滚轮 / 一触摸、或者离开底部（gap > 8px）→ **立刻**解除跟随；
+   *   · 回到最底部（gap ≤ 8px）、按「回到最新」、或自己发消息 → 重新跟随。
    *
-   * 真正会跟用户抢的是**动作**（自动落底），那个才推迟：见下面 useLayoutEffect 里
-   * "用户刚滚过 400ms 内不动"的冷静期。防抖用在动作上，不用在状态上。
+   * 之前的 80px 宽容 + 400ms 冷静期是错的方向：宽容意味着"往上划一小下不算数"，于是下一个
+   * chunk 还是把人拽回去 —— 手感就是"跳"。这里没有宽容也没有冷静期：动作即解除。
    */
-  const lastUserScrollAt = useRef(0);
   useEffect(() => {
     const el = messagesRef.current;
     if (!el) return;
-    const onScroll = () => {
-      lastUserScrollAt.current = Date.now();
-      const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
-      const near = gap < 80;
-      stickToBottomRef.current = near;
-      setAtBottom(near);
+    const release = () => {
+      stickToBottomRef.current = false;
+      setAtBottom(false);
     };
+    const onScroll = () => {
+      const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+      // 到底了（含亚像素误差）就重新跟随；一旦离开就解除 —— 不做任何"宽容距离"。
+      const atBottomNow = gap <= 8;
+      stickToBottomRef.current = atBottomNow;
+      setAtBottom(atBottomNow);
+    };
+    const onWheel = (ev: WheelEvent) => { if (ev.deltaY < 0) release(); };
+    const onTouch = () => release();
     el.addEventListener('scroll', onScroll, { passive: true });
-    return () => el.removeEventListener('scroll', onScroll);
+    el.addEventListener('wheel', onWheel, { passive: true });
+    el.addEventListener('touchmove', onTouch, { passive: true });
+    return () => {
+      el.removeEventListener('scroll', onScroll);
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('touchmove', onTouch);
+    };
   }, []);
 
   /**
@@ -1098,12 +1105,11 @@ export function Chat({
    * 否则先按新的 scrollHeight 画一帧、再跳回去 —— 那一帧就是闪烁（用户报的"抽搐"里的一层）。
    */
   useLayoutEffect(() => {
-    if (!stickToBottomRef.current) return;
     /*
-     * 手还在滚动时一律不落底（400ms 冷静期）：这是"别跟用户抢"的另一半。
-     * 不这么做的话，用户往上看历史、手指还在滚，来一个 chunk 就被拽回底部。
+     * 两个条件缺一不可：**在底部**（跟随）且**正在输出**（isLoading）。
+     * 这条就是用户说的"不要求信息出现时回到底部" —— 空闲时收到回读/历史更新，滚动条一动不动。
      */
-    if (Date.now() - lastUserScrollAt.current < 400) return;
+    if (!stickToBottomRef.current || !isLoading) return;
     landAtLatest();
   }, [messages, pendingConfirm, pendingPatch, landAtLatest]);
 
