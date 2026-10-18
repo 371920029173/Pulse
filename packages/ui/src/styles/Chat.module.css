@@ -136,6 +136,17 @@
   to { opacity: 1; transform: none; }
 }
 
+/*
+ * 滚动期间把这批行的 content-visibility 恢复成 visible。
+ *
+ * 原因：`content-visibility: auto` 的行先按 contain-intrinsic-size 占位、滚到跟前才换成真实高度，
+ * 那一帧上方内容变高 → 视口跳；浏览器的滚动锚定在"刚布局的行"上不总是救得住。
+ * 手指在动的那 180ms 里不省这点布局开销，换来不跳。静止时照旧省。
+ */
+.messages[data-scrolling='1'] .messageRow {
+  content-visibility: visible;
+}
+
 .messageRow {
   position: relative;
   display: flex;

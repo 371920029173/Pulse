@@ -1078,14 +1078,29 @@ export function Chat({
         setAtBottom(near);
       }, 220);
     };
+    /*
+     * 滚动期间让行"完全布局"：见文件头注释 —— content-visibility 的行在锚定计算里是边界情况，
+     * 那一帧会跳。只在手指动的时候付这份性能，停手就恢复。
+     */
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const markScrolling = () => {
+      if (el.dataset.scrolling !== '1') el.dataset.scrolling = '1';
+      if (idleTimer !== null) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        idleTimer = null;
+        delete el.dataset.scrolling;
+      }, 180);
+    };
+
     const onScroll = () => {
+      markScrolling();
       if (settle !== null) return;
       const near = nearBottom();
       stickToBottomRef.current = near;
       setAtBottom(near);
     };
-    const onWheel = (ev: WheelEvent) => { if (ev.deltaY < 0) release(); };
-    const onTouch = () => release();
+    const onWheel = (ev: WheelEvent) => { markScrolling(); if (ev.deltaY < 0) release(); };
+    const onTouch = () => { markScrolling(); release(); };
     el.addEventListener('scroll', onScroll, { passive: true });
     el.addEventListener('wheel', onWheel, { passive: true });
     el.addEventListener('touchmove', onTouch, { passive: true });
@@ -1094,6 +1109,8 @@ export function Chat({
       el.removeEventListener('wheel', onWheel);
       el.removeEventListener('touchmove', onTouch);
       if (settle !== null) clearTimeout(settle);
+      if (idleTimer !== null) clearTimeout(idleTimer);
+      delete el.dataset.scrolling;
     };
   }, []);
 
