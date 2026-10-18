@@ -1,4 +1,5 @@
 ﻿import { readFile, writeFile, mkdir, readdir, stat } from 'node:fs/promises';
+import { mapTree, mapLookup, mapWhereis, mapScope, mapImpact, mapContracts, mapVerify, mapNote } from '@she/map';
 import { resolve, relative, join, dirname } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -780,6 +781,142 @@ export function createTools(
       return truncated
         ? `${matches.join('\n')}\n… 命中超过 ${maxMatches} 行，已截断（调大 maxMatches 或收窄 pattern/glob）`
         : matches.join('\n');
+    },
+  );
+
+  /* ── 项目地图（map_*）：给模型用的代码地图 ────────────────────────────────
+   *
+   * 地图是**一个工作区一套**（`<工作区>/.she/map`）。没建图时这些工具不会报错，
+   * 而是回一句"先跑 pnpm map:build"——模型据此就知道该先建图，而不是以为自己用错工具。
+   */
+  reg(
+    {
+      name: 'map_tree',
+      description:
+        '整仓一眼看到底：目录树 + 每个文件一行标签（没建图会提示先建图）。回答"这个仓长什么样、哪块是干什么的"。',
+      parameters: {
+        type: 'object',
+        properties: {
+          budgetTokens: { type: 'number', description: '输出的 token 上限（默认 2000；超了自动折叠冷目录）' },
+          depth: { type: 'number', description: '展开层数（默认 6）' },
+        },
+      },
+    },
+    async (args) => {
+      const r = mapTree(root, { budgetTokens: (args.budgetTokens as number) ?? 2000, depth: (args.depth as number) ?? 6 });
+      return r.files ? `${r.text}\n\n(${r.files} 文件｜${r.tokens} token｜折叠 ${r.collapsed} 个目录)` : r.text;
+    },
+  );
+
+  reg(
+    {
+      name: 'map_lookup',
+      description:
+        '一个路径是干什么的：标签 / 所属组（目录轴·包轴·层轴·功能轴）/ 符号大纲 / 本地注记 / 相关组结构知识（含祖先冒泡）/ 最近改动。比逐个读文件便宜得多。',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string', description: '工作区相对路径（文件或目录）' } },
+        required: ['path'],
+      },
+    },
+    async (args) => mapLookup(root, String(args.path ?? '')).text,
+  );
+
+  reg(
+    {
+      name: 'map_whereis',
+      description:
+        '从"我想改什么"找到文件：两级收窄（先给分片打分，只展开前 3 片）。**标签为空时只能按路径匹配**，没命中会明说。',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '一句话描述要改的东西（中文可，会自动切 bigram）' },
+          limit: { type: 'number', description: '返回条数（默认 5）' },
+        },
+        required: ['query'],
+      },
+    },
+    async (args) => {
+      const r = mapWhereis(root, String(args.query ?? ''), { limit: (args.limit as number) ?? 5 });
+      if (!r.hits.length) return '没有命中（地图没有标签时只能按路径匹配：先按路径找，或边干边标注）';
+      return `扫描 ${r.scanned} 节点｜展开 ${r.shardsExpanded} 分片｜${r.ms}ms\n` +
+        r.hits.map((h) => `${h.score.toFixed(1)}  ${h.path}  ${h.label ?? ''}  ${h.reasons.join('；')}`).join('\n');
+    },
+  );
+
+  reg(
+    {
+      name: 'map_scope',
+      description:
+        '给一个任务，圈出工作集：锚点（意图命中）→ 会被波及（反向 import）→ 要跑哪些 check。适合"从哪开始"这类问题。',
+      parameters: {
+        type: 'object',
+        properties: {
+          task: { type: 'string', description: '任务的一句话描述' },
+          maxFiles: { type: 'number', description: '文件数上限（默认 60）' },
+        },
+        required: ['task'],
+      },
+    },
+    async (args) => mapScope(root, String(args.task ?? ''), { maxFiles: (args.maxFiles as number) ?? 60 }).text,
+  );
+
+  reg(
+    {
+      name: 'map_impact',
+      description:
+        '改这些文件会波及谁：反向 import 闭包（分「值导入＝会运行出错」与「仅类型＝只需重编译」）+ 要跑哪些 check + 相关测试。',
+      parameters: {
+        type: 'object',
+        properties: { paths: { type: 'array', items: { type: 'string' }, description: '要改的路径（可多个）' } },
+        required: ['paths'],
+      },
+    },
+    async (args) => mapImpact(root, (args.paths as string[]) ?? []).text,
+  );
+
+  reg(
+    {
+      name: 'map_contracts',
+      description:
+        'HTTP 契约图：确定（两端都定位到）/ 潜在威胁（只有一端，带"什么情况下其实没问题"）/ 无法对账（URL 是变量拼接）。',
+      parameters: { type: 'object', properties: {} },
+    },
+    async () => mapContracts(root).text,
+  );
+
+  reg(
+    {
+      name: 'map_verify',
+      description:
+        '地图可信度：过期率 / 黑暗角落（从未标注）/ 悬空边 / 孤立注记 / 坏分片，以及最该补的几条。零标签时分数封顶并说明意图检索不可用。',
+      parameters: { type: 'object', properties: {} },
+    },
+    async () => mapVerify(root).text,
+  );
+
+  reg(
+    {
+      name: 'map_note',
+      description:
+        '给某个路径写一条注记（pitfall 坑 / invariant 不变量 / why 为什么 / todo / deadend 死路）。绑当前内容 sha，文件改过会标"可能已过时"。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '工作区相对路径' },
+          kind: { type: 'string', enum: ['pitfall', 'invariant', 'why', 'todo', 'deadend'] },
+          text: { type: 'string', description: '一句话（写给下次的自己看）' },
+        },
+        required: ['path', 'kind', 'text'],
+      },
+    },
+    async (args) => {
+      const note = mapNote(root, {
+        path: String(args.path ?? ''),
+        kind: (args.kind as 'pitfall') ?? 'why',
+        text: String(args.text ?? ''),
+      });
+      return `已记 [${note.kind}] ${note.path}: ${note.text}`;
     },
   );
 

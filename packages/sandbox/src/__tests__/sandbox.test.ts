@@ -384,14 +384,23 @@ describe('Confirm tickets', () => {
   });
 });
 
+const names0 = (t: ReturnType<typeof createTools>) => t.definitions.map((d) => d.name);
+
 describe('ToolSet definitions', () => {
-  it('should have all 11 tool definitions', () => {
+  it('should have all 19 tool definitions', () => {
     const tools = createTools(shell, tempDir);
     /*
      * The count is asserted so a tool cannot be added or dropped silently: the model's whole
      * vocabulary is this list, and a missing entry is a capability it will report not having.
+     *
+     * 19 = 11 原有 + 8 个项目地图工具（map_tree / map_lookup / map_whereis / map_scope /
+     * map_impact / map_contracts / map_verify / map_note）。名字在下面逐个断言：
+     * 数量对但名字错，模型同样会以为自己没有这个能力。
      */
-    assert.equal(tools.definitions.length, 11);
+    assert.equal(tools.definitions.length, 19);
+    for (const name of ['map_tree', 'map_lookup', 'map_whereis', 'map_scope', 'map_impact', 'map_contracts', 'map_verify', 'map_note']) {
+      assert.ok(names0(tools).includes(name), `缺少工具 ${name}：模型会报告"没有这个能力"`);
+    }
     const names = tools.definitions.map(d => d.name);
     assert.ok(names.includes('shell'));
     assert.ok(names.includes('fs_read'));
