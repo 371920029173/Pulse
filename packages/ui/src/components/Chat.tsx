@@ -1067,7 +1067,7 @@ export function Chat({
         for (const entry of list.getEntries()) {
           if (entry.duration < 50) continue;
           // eslint-disable-next-line no-console
-          console.warn(`[perf] 主线程长任务 ${Math.round(entry.duration)}ms（疑似布局/渲染阻塞）`);
+          console.warn(`[perf] long main-thread task ${Math.round(entry.duration)}ms (layout/render blocking)`);
         }
       });
       obs.observe({ entryTypes: ['longtask'] });
