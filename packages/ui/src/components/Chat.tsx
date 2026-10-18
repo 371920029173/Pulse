@@ -1055,6 +1055,28 @@ export function Chat({
    * 之前的 80px 宽容 + 400ms 冷静期是错的方向：宽容意味着"往上划一小下不算数"，于是下一个
    * chunk 还是把人拽回去 —— 手感就是"跳"。这里没有宽容也没有冷静期：动作即解除。
    */
+  /*
+   * 卡顿取证：主线程一次任务超过 50ms 就记一条（低频、只记时长与最近一条消息的字符数）。
+   * 下次"卡但资源没满"时先看控制台有没有这条，而不是靠猜。
+   */
+  useEffect(() => {
+    if (typeof PerformanceObserver === 'undefined') return;
+    let obs: PerformanceObserver | null = null;
+    try {
+      obs = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          if (entry.duration < 50) continue;
+          // eslint-disable-next-line no-console
+          console.warn(`[perf] 主线程长任务 ${Math.round(entry.duration)}ms（疑似布局/渲染阻塞）`);
+        }
+      });
+      obs.observe({ entryTypes: ['longtask'] });
+    } catch {
+      /* 浏览器不支持就静默跳过 */
+    }
+    return () => obs?.disconnect();
+  }, []);
+
   useEffect(() => {
     const el = messagesRef.current;
     if (!el) return;
@@ -1083,23 +1105,44 @@ export function Chat({
      * 那一帧会跳。只在手指动的时候付这份性能，停手就恢复。
      */
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearScrolling = () => {
+      if (el.dataset.scrolling === '1') delete el.dataset.scrolling;
+    };
+    /*
+     * 只在"往上找历史 + 行数不多"时放开布局。
+     *
+     * 上一版对**任何**滚动都放开，等于连续滚动时整段会话（几百行 markdown）一直在全量布局 ——
+     * 主线程被 layout 占满，就是用户说的"异常卡顿，资源还没跑满"。向下的新增内容在底部，
+     * 不会让视口跳，没必要付这份钱；长会话也不付，宁可能偶发跳一下。
+     */
     const markScrolling = () => {
+      if (el.childElementCount > 300) return;
       if (el.dataset.scrolling !== '1') el.dataset.scrolling = '1';
       if (idleTimer !== null) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
         idleTimer = null;
-        delete el.dataset.scrolling;
-      }, 180);
+        clearScrolling();
+      }, 200);
     };
+    let lastScrollTop = el.scrollTop;
 
     const onScroll = () => {
-      markScrolling();
+      const top = el.scrollTop;
+      /* 只有往上滚（找历史）才需要防跳；往下滚是新增内容在底部。 */
+      if (top < lastScrollTop) markScrolling();
+      else clearScrolling();
+      lastScrollTop = top;
       if (settle !== null) return;
       const near = nearBottom();
       stickToBottomRef.current = near;
       setAtBottom(near);
     };
-    const onWheel = (ev: WheelEvent) => { markScrolling(); if (ev.deltaY < 0) release(); };
+    const onWheel = (ev: WheelEvent) => {
+      if (ev.deltaY < 0) {
+        markScrolling();
+        release();
+      }
+    };
     const onTouch = () => { markScrolling(); release(); };
     el.addEventListener('scroll', onScroll, { passive: true });
     el.addEventListener('wheel', onWheel, { passive: true });
