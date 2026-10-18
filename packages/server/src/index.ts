@@ -5511,6 +5511,23 @@ router.get('/api/fs/tree', (req, res) => {
   router.get('/api/sessions/:id', (_req, res, params) => {
     const found = findSession(params.id);
     if (!found) throw new HttpError(404, `Session not found: ${params.id}`);
+    /*
+     * 正在跑的会话优先回内存里的那份。
+     *
+     * 落盘是每 10 秒 / 结束时一次，而"用户刚追加的话""子代理刚跑的那几步"都在 Agent 实例上；
+     * 只读落盘就会出现"子代理在干活、点开却是空白页"和"回来发现上下文少了一截"——两个都是显示
+     * 层的假象，后台其实都收到了。子代理更明显：它由 runner 直接构造，没人替它落盘。
+     */
+    const live = agents.get(params.id);
+    if (live) {
+      try {
+        const messages = live.historyForDisk();
+        sendJSON(res, { ...found.session, messages });
+        return;
+      } catch {
+        /* 拿不到就退回落盘那份，不让一个读接口把整个页面打崩 */
+      }
+    }
     sendJSON(res, found.session);
   });
 
