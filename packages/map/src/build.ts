@@ -151,7 +151,30 @@ export function buildMap(opts: BuildOptions): BuildResult {
    * import 边在分片之前算：inDegree 要写回文件节点（"被多少人引用"是模型判断
    * 一个重要性的第一手信号），而节点是直接放进分片数组的同一批对象。
    */
-  const { edges: importEdges } = scanImports(root, files.map((f) => ({ path: f.path, lang: f.lang })), views.packages.map((p) => ({ name: p.name, root: p.root })));
+  /*
+   * 一次读取、三个抽取器共用。
+   * 上限 256MB：超过就不缓存（宁可再读一遍，也不把内存吃穿）。
+   */
+  const textCache = new Map<string, string>();
+  let cacheBytes = 0;
+  const CACHE_LIMIT = 256 * 1024 * 1024;
+  const readCached = (rel: string): string => {
+    const hit = textCache.get(rel);
+    if (hit !== undefined) return hit;
+    const text = readFileSync(join(root, rel), 'utf8');
+    if (cacheBytes + text.length <= CACHE_LIMIT) {
+      textCache.set(rel, text);
+      cacheBytes += text.length;
+    }
+    return text;
+  };
+
+  const { edges: importEdges } = scanImports(
+    root,
+    files.map((f) => ({ path: f.path, lang: f.lang })),
+    views.packages.map((p) => ({ name: p.name, root: p.root })),
+    readCached,
+  );
   const inDegree = new Map<string, number>();
   for (const { edge } of importEdges) inDegree.set(edge.to, (inDegree.get(edge.to) ?? 0) + 1);
   for (const f of files) {
@@ -249,7 +272,7 @@ export function buildMap(opts: BuildOptions): BuildResult {
    * 契约图：服务端注册的每条路由都是"创建时记录的潜在依赖"，与前端 fetch 对账后
    * 分成确定边与潜在威胁两类。威胁也是边（confidence=candidate），只是要带 falsifiers。
    */
-  const contracts = scanHttpContracts(root, files.map((f) => ({ path: f.path })));
+  const contracts = scanHttpContracts(root, files.map((f) => ({ path: f.path })), readCached);
   for (const { from, edge } of contracts.edges) {
     const key = shardKeyFor(from);
     const shard = shards.get(key);
@@ -261,7 +284,11 @@ export function buildMap(opts: BuildOptions): BuildResult {
   /* 见上：挂边发生在写盘之后，这里必须补一次落盘。 */
   for (const key of touchedShards) writeJsonAtomic(shardPath(root, key), shards.get(key)!);
 
-  const symbolTable = buildSymbols({ root, files: files.map((f) => ({ path: f.path, lang: f.lang })) });
+  const symbolTable = buildSymbols({
+    root,
+    files: files.map((f) => ({ path: f.path, lang: f.lang })),
+    readFile: readCached,
+  });
   writeSymbols(root, symbolTable);
 
   const index: MapIndex = {
