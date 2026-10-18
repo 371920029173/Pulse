@@ -13,6 +13,35 @@ import { dirname, join, posix } from 'node:path';
 import type { MapEdge } from '@she/shared';
 
 const FROM = /\bfrom\s+['"]([^'"]+)['"]/;
+
+/**
+ * 从一行 import 里抽出**导入的符号名**。
+ *
+ * 别名（`b as c`）算接的是 b —— 那是源文件里真实存在的名字；default 与命名空间各有名字。
+ */
+export function importedSymbols(line: string): string[] {
+  const names: string[] = [];
+  const named = line.match(/\{([^}]*)\}/);
+  if (named) {
+    for (const raw of named[1]!.split(',')) {
+      const piece = raw.trim().replace(/^type\s+/, '');
+      if (!piece) continue;
+      const parts = piece.split(/\s+as\s+/);
+      names.push(parts[0]!.trim());
+    }
+  }
+  if (/\*\s+as\s+[A-Za-z_$][\w$]*/.test(line)) names.push('*');
+  const def = line.match(/^\s*import\s+(?:type\s+)?([A-Za-z_$][\w$]*)\s*(?:,|from)/);
+  if (def && !named) names.push(def[1]!);
+  return [...new Set(names)].filter(Boolean);
+}
+
+/** 边的可读名：最多列 3 个符号。 */
+export function wiringLabel(symbols: string[]): string {
+  if (!symbols.length) return '接线（未指名符号）';
+  const head = symbols.slice(0, 3).join('、');
+  return symbols.length > 3 ? `接线 ${head} 等 ${symbols.length} 个` : `接线 ${head}`;
+}
 const REQUIRE = /\brequire\(\s*['"]([^'"]+)['"]\s*\)/;
 const DYNAMIC = /\bimport\(\s*['"]([^'"]+)['"]\s*\)/;
 
@@ -97,6 +126,7 @@ export function scanImports(
       /* 纯类型导入：行内有 import type，或该项写成 { type X }。只影响重编译，不影响运行时。 */
       const srcLine = lines[line - 1] ?? '';
       const typeOnly = /\bimport\s+type\b/.test(srcLine) || /\{[^}]*\btype\s+[A-Za-z_$]/.test(srcLine);
+      const symbols = importedSymbols(srcLine);
       const target = resolveSpecifier(f.path, spec, exists);
       if (!target) {
         const pkg = packages.find((p) => spec === p.name || spec.startsWith(p.name + '/'));
@@ -110,6 +140,8 @@ export function scanImports(
               confidence: 'certain',
               evidence: [`${f.path}:${line} import '${spec}'（workspace 包 ${pkg.name}）`],
               typeOnly,
+              symbols,
+              label: wiringLabel(symbols),
             },
           });
         } else if (spec.startsWith('.')) {
@@ -128,6 +160,8 @@ export function scanImports(
           confidence: 'certain',
           evidence: [`${f.path}:${line} import '${spec}'`],
           typeOnly,
+          symbols,
+          label: wiringLabel(symbols),
         },
       });
     }

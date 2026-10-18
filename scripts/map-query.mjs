@@ -9,10 +9,16 @@
  *   node scripts/map-query.mjs note <路径> <pitfall|invariant|why|todo|deadend> <文字>
  *   node scripts/map-query.mjs diff [路径…]
  */
-import { mapTree, mapLookup, mapWhereis, mapImpact, mapNote, mapDiff, mapScope, mapContracts, mapVerify, adoptFrom } from '../packages/map/dist/index.js';
+import { mapTree, mapLookup, mapWhereis, mapImpact, mapNote, mapDiff, mapScope, mapContracts, mapVerify, adoptFrom, mapWiring } from '../packages/map/dist/index.js';
 
 const [cmd, ...rest] = process.argv.slice(2);
 const root = process.cwd();
+/** 取一个字符串参数（不加 -- 前缀）；没有就 undefined。 */
+const arg = (name) => {
+  const i = rest.indexOf(`--${name}`);
+  return i >= 0 ? rest[i + 1] : undefined;
+};
+
 const flag = (name, dflt) => {
   const i = rest.indexOf(`--${name}`);
   return i >= 0 ? Number(rest[i + 1]) : dflt;
@@ -73,6 +79,26 @@ switch (cmd) {
     process.exitCode = r.score >= 60 ? 0 : 1;
     break;
   }
+  case 'wiring': {
+    /*
+     * 两种用法：
+     *   wiring packages/ui/src/App.tsx   看这个文件接出去/接进来的线
+     *   wiring --symbol budgetToolResult 按符号名反查"谁用了它"
+     */
+    const symbol = arg('symbol');
+    const path = symbol ? undefined : positional[0];
+    const hits = mapWiring(root, { path, symbol, limit: flag('limit', 20) });
+    if (!hits.length) {
+      console.log(symbol ? `没有找到「接线 ${symbol}」` : '这个文件没有接线');
+      break;
+    }
+    for (const h of hits) {
+      console.log(`${h.from} --${h.label}-->${h.to}${h.typeOnly ? '（仅类型）' : ''}`);
+    }
+    console.log(`
+共 ${hits.length} 根`);
+    break;
+  }
   case 'contracts': {
     console.log(mapContracts(root).text);
     break;
@@ -92,6 +118,6 @@ switch (cmd) {
     break;
   }
   default:
-    console.log('用法: node scripts/map-query.mjs <tree|lookup|whereis|scope|impact|contracts|verify|adopt|note|diff> …');
+    console.log('用法: node scripts/map-query.mjs <tree|lookup|whereis|scope|impact|wiring|contracts|verify|adopt|note|diff> …');
     process.exit(2);
 }

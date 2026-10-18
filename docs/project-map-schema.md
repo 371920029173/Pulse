@@ -55,6 +55,14 @@
 
 一个文件可同时属于：**目录轴**（`dir:packages/kb/src`）、**功能轴**（`feat:context-compaction`）、**层轴**（`layer:infra`）。组节点本身也是地图节点，可以与 KB 的组路径一一对应。
 
+## 3.5 接线（边的符号名）
+
+import 边上除了 `from → to`，还记 **`symbols`（导入了哪些符号）** 与 `label`（"接线 c"）。
+四类导入都覆盖：命名导入（别名算源名）、default、`* as ns`、`import type`。
+裸包名导入（`@she/shared`）指向**包根**，同样带符号名。
+
+查询：`map:query wiring <文件>` / `map:query wiring --symbol <名字>`；`lookup` 里也有「接线」一节。
+
 ## 4. 边：每条都带证据与置信度
 
 ```ts

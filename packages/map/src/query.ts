@@ -297,6 +297,23 @@ export function mapLookup(root: string, path: string, opts: { branch?: string; i
     for (const n of notes.slice(0, 8)) lines.push(`    [${n.kind}] ${n.text}${n.mayBeStale ? '  ⚠ 可能已过时' : ''}`);
   }
 
+  /*
+   * 接线：这个文件接出去/接进来的每一根线，都带符号名。
+   * "A 用了 B 里的 c" 一眼能读出来，而不是只有一个 A→B。
+   */
+  const outEdges = loaded.edges.filter((e) => e.kind === 'import' && e.from === norm);
+  const inEdges = loaded.edges.filter((e) => e.kind === 'import' && e.to === norm);
+  if (outEdges.length || inEdges.length) {
+    lines.push('  接线');
+    for (const e of outEdges.slice(0, 8)) {
+      lines.push(`    → ${e.to}  ${e.label ?? '接线'}${e.typeOnly ? '（仅类型）' : ''}`);
+    }
+    for (const e of inEdges.slice(0, 8)) {
+      lines.push(`    ← ${e.from}  ${e.label ?? '接线'}${e.typeOnly ? '（仅类型）' : ''}`);
+    }
+    if (outEdges.length + inEdges.length > 16) lines.push(`    …共 ${outEdges.length + inEdges.length} 根`);
+  }
+
   const commits = logForPath(root, norm, 3);
   if (commits.length) {
     lines.push('  最近改动');
@@ -491,6 +508,14 @@ export function mapImpact(root: string, paths: string[]): ImpactResult {
   const bare = (p: string): string => p.replace(/（包级）$/, "");
   const valueCallers = reverse.filter((p) => !typeOnlyCallers.has(bare(p)));
   const onlyTypes = reverse.filter((p) => typeOnlyCallers.has(bare(p)));
+  const firstHop = loaded.edges
+    .filter((e) => e.kind === 'import' && norm.includes(e.to) && !e.typeOnly)
+    .slice(0, 6)
+    .map((e) => `${e.from} --${e.label ?? '接线'}--> ${e.to}`);
+  if (firstHop.length) {
+    lines.push('  直接接线（改它先看这些）：');
+    for (const line of firstHop) lines.push(`    ${line}`);
+  }
   lines.push(`  反向 import（值）：${valueCallers.length ? valueCallers.slice(0, 10).join(', ') + (valueCallers.length > 10 ? ` …共 ${valueCallers.length}` : '') : '(没有文件按值引用它)'}`);
   if (onlyTypes.length) {
     lines.push(`  反向 import（仅类型，只需重编译）：${onlyTypes.slice(0, 6).join(', ')}${onlyTypes.length > 6 ? ` …共 ${onlyTypes.length}` : ''}`);
@@ -617,6 +642,46 @@ export function mapDigest(root: string, budgetTokens = 40): string {
   const maxChars = budgetTokens * 3;
   if (text.length > maxChars) text = text.slice(0, maxChars) + '…';
   return text;
+}
+
+// ── map_wiring ──────────────────────────────────────────────────────────────
+
+export interface WiringHit {
+  from: string;
+  to: string;
+  label: string;
+  symbols: string[];
+  typeOnly?: boolean;
+  evidence: string[];
+}
+
+/**
+ * 接线查询：按**文件**看它接出去/接进来的线，或按**符号名**找"谁用了这个符号"。
+ * 符号用包含匹配：查 `budgetToolResult` 会命中「接线 budgetToolResult」。
+ */
+export function mapWiring(root: string, opts: { path?: string; symbol?: string; limit?: number } = {}): WiringHit[] {
+  const loaded = loadAll(root);
+  const limit = opts.limit ?? 20;
+  const hits: WiringHit[] = [];
+  for (const e of loaded.edges) {
+    if (e.kind !== 'import') continue;
+    if (opts.path && e.from !== opts.path && e.to !== opts.path) continue;
+    if (opts.symbol) {
+      const names = e.symbols ?? [];
+      const inLabel = (e.label ?? '').includes(opts.symbol);
+      if (!names.some((n) => n.includes(opts.symbol!)) && !inLabel) continue;
+    }
+    hits.push({
+      from: e.from,
+      to: e.to,
+      label: e.label ?? '接线',
+      symbols: e.symbols ?? [],
+      typeOnly: e.typeOnly,
+      evidence: e.evidence,
+    });
+    if (hits.length >= limit) break;
+  }
+  return hits;
 }
 
 // ── map_contracts ───────────────────────────────────────────────────────────

@@ -95,6 +95,13 @@ export interface MapEdge {
   /** 什么情况下这条边就不成立了（candidate 必填）。 */
   falsifiers?: string[];
   /**
+   * 这条边"接的是哪根线"：import 语句里导入的符号名。
+   * A 用了 B 里的 c，这条边就是 A→B、symbols=['c']、label='接线 c'。
+   */
+  symbols?: string[];
+  /** 给人看的边名（"接线 c"）。渲染时直接用，不用再拼。 */
+  label?: string;
+  /**
    * 纯类型导入（`import type` / `import { type X }`）。
    * 它只影响"要不要重编译"，不影响运行时会不会炸 —— 影响面必须把两者分开报。
    */
