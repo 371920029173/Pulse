@@ -1568,7 +1568,18 @@ export function Chat({
       ) : null}
 
       <div className={styles.messages} ref={messagesRef} data-surface="transcript">
-        {messages.length === 0 ? (
+        {messages.length === 0 && isLoading ? (
+          /*
+           * 正在跑但历史还没读回来：说清楚"在跑、马上有"，不要显示"开始对话"——
+           * 那个空状态会让人以为这一轮的内容丢了（用户的原话："这真的很吓人"）。
+           */
+          <div className={styles.emptyMessages}>
+            <div className={styles.emptyOrb} aria-hidden />
+            <div className={styles.emptyIcon}>⏳</div>
+            <div className={styles.emptyText}>{t('这一轮正在运行')}</div>
+            <div className={styles.emptyHint}>{t('记录马上加载出来（后台已经在跑了，没有丢）')}</div>
+          </div>
+        ) : messages.length === 0 ? (
           <div className={styles.emptyMessages}>
             <div className={styles.emptyOrb} aria-hidden />
             <div className={styles.emptyIcon}>✦</div>
