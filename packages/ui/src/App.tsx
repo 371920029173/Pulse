@@ -1417,6 +1417,7 @@ export function App() {
          * where a user looks for it.
          */
         onOpenMemo={() => setShowMemo(true)}
+        onOpenMap={() => setShowMap(true)}
         onOpenWorktrees={() => setShowWorktrees(true)}
       />
 

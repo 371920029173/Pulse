@@ -30,7 +30,7 @@ interface CheckpointMeta {
   created_at: string;
 }
 
-export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, focusChat = false, onToggleFocus, onOpenImport, onOpenCluster, onOpenPlans, onOpenSources, onOpenMemo, onOpenWorktrees }: { onOpenCheckpoints?: () => void; theme?: 'dark' | 'light'; onToggleTheme?: () => void; focusChat?: boolean; onToggleFocus?: () => void; onOpenImport?: () => void; onOpenCluster?: () => void; onOpenPlans?: () => void; onOpenSources?: () => void; onOpenMemo?: () => void; onOpenWorktrees?: () => void }) {
+export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, focusChat = false, onToggleFocus, onOpenImport, onOpenCluster, onOpenPlans, onOpenSources, onOpenMemo, onOpenMap, onOpenWorktrees }: { onOpenCheckpoints?: () => void; theme?: 'dark' | 'light'; onToggleTheme?: () => void; focusChat?: boolean; onToggleFocus?: () => void; onOpenImport?: () => void; onOpenCluster?: () => void; onOpenPlans?: () => void; onOpenSources?: () => void; onOpenMemo?: () => void; onOpenMap?: () => void; onOpenWorktrees?: () => void }) {
   const [s, setS] = useState<SettingsSnapshot | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [cps, setCps] = useState<CheckpointMeta[]>([]);
@@ -197,6 +197,16 @@ export function StatusBar({ onOpenCheckpoints, theme = 'dark', onToggleTheme, fo
           ) : null}
         </>
       ) : null}
+      {onOpenMap && (
+        <button
+          type="button"
+          className={styles.timeline}
+          onClick={onOpenMap}
+          title={t('项目地图：整仓骨架 + 每个文件一句话标签 + 影响面（只读）')}
+        >
+          {t('地图')}
+        </button>
+      )}
       {onOpenMemo && (
         <button type="button" className={styles.timeline} onClick={onOpenMemo} title={t('备忘录（你和智能体都能改）')}>{t('备忘')}</button>
       )}
