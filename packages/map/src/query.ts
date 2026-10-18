@@ -381,6 +381,8 @@ export function mapImpact(root: string, paths: string[]): ImpactResult {
   }
 
   const reverse: string[] = [];
+  /** 纯类型导入的反向依赖：只需重编译，不会在运行时炸。 */
+  const typeOnlyCallers = new Set<string>();
   const seen = new Set(norm);
 
   const bfs = (seeds: string[]) => {
@@ -396,6 +398,19 @@ export function mapImpact(root: string, paths: string[]): ImpactResult {
     }
   };
 
+  /*
+   * 先记下"只按类型引用我"的那些文件：它们属于"重编译"而不是"会炸"。
+   * 注意边可能指向**包根**（裸包名 import），所以目标集合要包含"我所属的包根"。
+   */
+  const relevantTargets = new Set<string>(norm);
+  for (const p of loaded.index?.views?.packages ?? []) {
+    if (p.root === '.') continue;
+    if (norm.some((n) => n === p.root || n.startsWith(p.root + '/'))) relevantTargets.add(p.root);
+  }
+  for (const e of loaded.edges) {
+    if (e.kind !== 'import' || !e.typeOnly) continue;
+    if (relevantTargets.has(e.to)) typeOnlyCallers.add(e.from);
+  }
   bfs(norm);
 
   /*
@@ -417,7 +432,14 @@ export function mapImpact(root: string, paths: string[]): ImpactResult {
 
   const lines: string[] = [];
   lines.push(`影响面：${norm.join(', ')}`);
-  lines.push(`  反向 import：${reverse.length ? reverse.slice(0, 10).join(', ') + (reverse.length > 10 ? ` …共 ${reverse.length}` : '') : '(没有文件 import 它)'}`);
+  /* reverse 里的条目可能带「（包级）」后缀，比较前先剥掉，否则永远是 0 条仅类型。 */
+  const bare = (p: string): string => p.replace(/（包级）$/, "");
+  const valueCallers = reverse.filter((p) => !typeOnlyCallers.has(bare(p)));
+  const onlyTypes = reverse.filter((p) => typeOnlyCallers.has(bare(p)));
+  lines.push(`  反向 import（值）：${valueCallers.length ? valueCallers.slice(0, 10).join(', ') + (valueCallers.length > 10 ? ` …共 ${valueCallers.length}` : '') : '(没有文件按值引用它)'}`);
+  if (onlyTypes.length) {
+    lines.push(`  反向 import（仅类型，只需重编译）：${onlyTypes.slice(0, 6).join(', ')}${onlyTypes.length > 6 ? ` …共 ${onlyTypes.length}` : ''}`);
+  }
   lines.push(`  要跑：${gates.map((g) => `${g.check}${g.exists ? '' : '(不存在?)'}`).join(', ') || '(未命中规则)'}`);
   lines.push(`  相关测试：${[...new Set(tests)].slice(0, 8).join(', ') || '(按路径没找到)'}`);
   return { text: lines.join('\n'), reverse, gates, tests: [...new Set(tests)] };
@@ -553,7 +575,14 @@ export function mapContracts(root: string): ContractsResult {
   }
   if (threats.length) {
     lines.push('  潜在威胁（只有一端，或抽取器没对上）：');
-    for (const e of threats.slice(0, 20)) lines.push(`    ${e.evidence[0] ?? e.from}`);
+    for (const e of threats.slice(0, 20)) {
+      lines.push(`    ${e.evidence[0] ?? e.from}`);
+      /*
+       * 反证条件必须打出来：它原来只存在边的数据里，读者看到"66 条潜在威胁"会以为有 66 个 bug，
+       * 而其中一部分只是抽取器的盲区（外部客户端、变量拼接）。一句 falsifier 就能说清。
+       */
+      if (e.falsifiers?.length) lines.push(`      ↳ 什么情况下它其实没问题：${e.falsifiers[0]}`);
+    }
     if (threats.length > 20) lines.push(`    …共 ${threats.length}`);
   }
   return { text: lines.join('\n'), certain, threats };

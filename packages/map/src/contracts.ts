@@ -115,6 +115,12 @@ export function extractFetches(text: string, file: string): FetchCall[] {
     if (!line.includes('/api/') && !line.includes('/v1/')) continue;
     /* 路由注册行整行跳过：router.get('/api/x', handler) 不是调用。 */
     if (/^\s*(router|app|server|express)\s*\./.test(line)) continue;
+    /*
+     * 断言与注释行不算调用：`it('GET /api/x')`、`expect(f).toHaveBeenCalledWith('/api/x')`
+     * 里的字符串是**断言内容**，不是真的发请求。不排除的话，"确定边"会被测试文本撑大一大截。
+     */
+    if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue;
+    if (/\b(it|test|describe|expect|assert)(\.|\s*\()/.test(line)) continue;
     for (const m of line.matchAll(WRAPPED_RE)) {
       const callee = m[1]!;
       if (callee === 'fetch' || callee === 'fetchJSON') continue; // 上面已处理

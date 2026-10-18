@@ -93,7 +93,12 @@ function dirsOf(paths: string[]): string[] {
 export function buildMap(opts: BuildOptions): BuildResult {
   const { root } = opts;
   const exec = opts.exec ?? realExec(root);
-  const branch = opts.branch ?? exec(['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+  let branch: string;
+  try {
+    branch = opts.branch ?? exec(['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+  } catch {
+    throw new Error(`这不是一个 git 仓库（${root}）：地图靠 git 拿文件清单与内容 sha，请先 git init，或换到仓库根再跑`);
+  }
   const rev = exec(['rev-parse', '--short', 'HEAD']).trim();
   const now = new Date().toISOString();
 
