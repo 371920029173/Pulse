@@ -1286,6 +1286,7 @@ export function App() {
             <Chat
               messages={inGroupMode ? clusterChat.messages : chat.messages}
               isLoading={inGroupMode ? clusterChat.isLoading : chat.isLoading}
+              viewRunning={inGroupMode ? false : chat.viewRunning}
               toolProgress={inGroupMode ? undefined : chat.toolProgress}
               pendingConfirm={inGroupMode ? null : chat.pendingConfirm}
               pendingPatch={inGroupMode ? null : chat.pendingPatch}

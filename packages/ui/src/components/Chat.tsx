@@ -44,6 +44,8 @@ const THINK_LEVELS: { id: ThinkingLevel; short: string; title: string }[] = [
 interface ChatProps {
   messages: ChatMessage[];
   isLoading: boolean;
+  /** 我正在看的这个会话在别处跑着（只用于空历史时的提示，不影响发送/停止）。 */
+  viewRunning?: boolean;
   /** tool_call_id -> progress line for a call that has not returned yet (a blocked shell_wait). */
   toolProgress?: Map<string, string>;
   pendingConfirm: ConfirmTicket | null;
@@ -923,6 +925,7 @@ function attachmentDisplayName(name: string): string {
 export function Chat({
   messages,
   isLoading,
+  viewRunning = false,
   toolProgress,
   pendingConfirm,
   pendingPatch,
@@ -1104,46 +1107,22 @@ export function Chat({
      * 滚动期间让行"完全布局"：见文件头注释 —— content-visibility 的行在锚定计算里是边界情况，
      * 那一帧会跳。只在手指动的时候付这份性能，停手就恢复。
      */
-    let idleTimer: ReturnType<typeof setTimeout> | null = null;
-    const clearScrolling = () => {
-      if (el.dataset.scrolling === '1') delete el.dataset.scrolling;
-    };
     /*
-     * 只在"往上找历史 + 行数不多"时放开布局。
-     *
-     * 上一版对**任何**滚动都放开，等于连续滚动时整段会话（几百行 markdown）一直在全量布局 ——
-     * 主线程被 layout 占满，就是用户说的"异常卡顿，资源还没跑满"。向下的新增内容在底部，
-     * 不会让视口跳，没必要付这份钱；长会话也不付，宁可能偶发跳一下。
+     * 这里曾经有一个"滚动期间把 content-visibility 临时改成 visible"的开关，撤掉了：
+     * 改回去的那一瞬整段会话塌回占位高度，scrollHeight 骤减 → 视口被"传送"。
+     * 结论写在 Chat.module.css 里：不要再加回来。
      */
-    const markScrolling = () => {
-      if (el.childElementCount > 300) return;
-      if (el.dataset.scrolling !== '1') el.dataset.scrolling = '1';
-      if (idleTimer !== null) clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => {
-        idleTimer = null;
-        clearScrolling();
-      }, 200);
-    };
     let lastScrollTop = el.scrollTop;
 
     const onScroll = () => {
-      const top = el.scrollTop;
-      /* 只有往上滚（找历史）才需要防跳；往下滚是新增内容在底部。 */
-      if (top < lastScrollTop) markScrolling();
-      else clearScrolling();
-      lastScrollTop = top;
+      lastScrollTop = el.scrollTop;
       if (settle !== null) return;
       const near = nearBottom();
       stickToBottomRef.current = near;
       setAtBottom(near);
     };
-    const onWheel = (ev: WheelEvent) => {
-      if (ev.deltaY < 0) {
-        markScrolling();
-        release();
-      }
-    };
-    const onTouch = () => { markScrolling(); release(); };
+    const onWheel = (ev: WheelEvent) => { if (ev.deltaY < 0) release(); };
+    const onTouch = () => release();
     el.addEventListener('scroll', onScroll, { passive: true });
     el.addEventListener('wheel', onWheel, { passive: true });
     el.addEventListener('touchmove', onTouch, { passive: true });
@@ -1152,8 +1131,6 @@ export function Chat({
       el.removeEventListener('wheel', onWheel);
       el.removeEventListener('touchmove', onTouch);
       if (settle !== null) clearTimeout(settle);
-      if (idleTimer !== null) clearTimeout(idleTimer);
-      delete el.dataset.scrolling;
     };
   }, []);
 
@@ -1568,7 +1545,7 @@ export function Chat({
       ) : null}
 
       <div className={styles.messages} ref={messagesRef} data-surface="transcript">
-        {messages.length === 0 && isLoading ? (
+        {messages.length === 0 && (isLoading || viewRunning) ? (
           /*
            * 正在跑但历史还没读回来：说清楚"在跑、马上有"，不要显示"开始对话"——
            * 那个空状态会让人以为这一轮的内容丢了（用户的原话："这真的很吓人"）。

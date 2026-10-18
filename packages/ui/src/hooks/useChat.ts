@@ -249,6 +249,26 @@ export function useChat(sessionId?: string | null) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   /**
+   * 「我正在看的这个会话在别处跑着」—— 和 isLoading 分开。
+   *
+   * isLoading 是**这一轮由本窗口发起**、驱动发送/停止按钮的；把它当成"会话在跑"用会误伤输入区
+   * （用户只是点开一个子代理看，结果发送被禁用）。这里单独一个只读标志，只给空页面用。
+   */
+  const [viewRunning, setViewRunning] = useState(false);
+  /**
+   * 「空历史轮询」的句柄与它所属的会话。
+   *
+   * 必须能停：切换会话后旧定时器若继续跑，会把 A 会话的消息写进 B 会话（B 刚打开是空的，
+   * 守卫放行）—— 那是"上下文展示出问题"最容易发生的样子。
+   */
+  const emptyPollRef = useRef<{ timer: number; sid: string } | null>(null);
+  const stopEmptyPoll = () => {
+    if (emptyPollRef.current) {
+      window.clearInterval(emptyPollRef.current.timer);
+      emptyPollRef.current = null;
+    }
+  };
+  /**
    * Live progress of a tool call that has not finished yet, keyed by `tool_call_id`.
    *
    * A separate map rather than a field on the tool call: a `ToolCallData` is the provider's shape
@@ -1044,6 +1064,7 @@ export function useChat(sessionId?: string | null) {
      * reload of the session this window is already streaming into is deferred.
      */
     const target = explicitSessionId || sidRef.current;
+    stopEmptyPoll();
     if (abortRef.current && target === sidRef.current) return;
 
     const data = await fetchJSON<{ messages: ServerHistoryMessage[] }>(
@@ -1061,27 +1082,41 @@ export function useChat(sessionId?: string | null) {
      *
      * 纯前端兜底：即使服务端是老进程（还没重启），这一段也能工作，页面不会再假装"没有对话"。
      */
-    if (normalized.length === 0 && sid) {
+    if (normalized.length === 0 && sid && !abortRef.current) {
       try {
         const st = await fetchJSON<{ running: boolean }>(withSid('/api/chat/running', sid));
         if (!st.running) return;
-        setIsLoading(true);
+        setViewRunning(true);
         let tries = 0;
         const timer = window.setInterval(() => {
           tries += 1;
+          /* 会话已经切走：这个轮询没有意义了，停掉，别往别的会话里写。 */
+          if (sidRef.current !== sid) {
+            stopEmptyPoll();
+            return;
+          }
+          /*
+           * 标签页不可见时不轮询：整份历史每次都要序列化一遍，后台标签页没必要付这个成本。
+           * 重新可见时下一拍会自然接上。
+           */
+          if (document.visibilityState === 'hidden') return;
           void (async () => {
             try {
               const h = await fetchJSON<{ messages: ServerHistoryMessage[] }>(withSid('/api/chat/history', sid));
               const list = normalizeHistory(h.messages ?? []);
               if (list.length) {
-                setMessages(withPending(sid, list));
-                setIsLoading(false);
+                /*
+                 * 只在"还没看到任何消息"时补一次。用函数式更新判断，绝不覆盖流式已经建立的内容 ——
+                 * 否则每 2 秒都会把实时气泡换成没有尾部的服务端快照（"上下文展示出问题"就是这么来的）。
+                 */
+                setMessages((prev) => (prev.length ? prev : withPending(sid, list)));
+                setViewRunning(false);
                 window.clearInterval(timer);
                 return;
               }
               const still = await fetchJSON<{ running: boolean }>(withSid('/api/chat/running', sid));
               if (!still.running) {
-                setIsLoading(false);
+                setViewRunning(false);
                 window.clearInterval(timer);
               }
             } catch {
@@ -1089,11 +1124,12 @@ export function useChat(sessionId?: string | null) {
             }
             if (tries > 300) {
               /* 10 分钟还没读到就放弃轮询，别在后台空转 */
-              setIsLoading(false);
+              setViewRunning(false);
               window.clearInterval(timer);
             }
           })();
         }, 2_000);
+        emptyPollRef.current = { timer, sid };
       } catch {
         /* 问不到就按原样显示 */
       }
@@ -1474,6 +1510,7 @@ export function useChat(sessionId?: string | null) {
   return {
     messages,
     isLoading,
+    viewRunning,
     latestKBResult,
     toolProgress,
     pendingConfirm,
