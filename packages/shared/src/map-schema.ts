@@ -144,6 +144,8 @@ export interface MapIndex {
   views?: MapViews;
   /** 有 fetch 调用但 URL 是变量拼接、无法对账的数量（如实记账，不假装检查过）。 */
   contractUnresolved?: number;
+  /** 真正的顶层目录名（摘要给模型看的时候用；不含根散文件）。 */
+  topDirs?: string[];
   /** 排除规则的快照，便于审计"为什么这个文件不在图上"。 */
   excludes: { patterns: string[]; maxFileBytes: number };
   updatedAt: string;

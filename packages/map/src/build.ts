@@ -312,6 +312,7 @@ export function buildMap(opts: BuildOptions): BuildResult {
     },
     views,
     contractUnresolved: contracts.unresolved,
+    topDirs: [...new Set(files.map((f) => (f.path.includes('/') ? f.path.slice(0, f.path.indexOf('/')) : '')).filter(Boolean))].sort(),
     excludes: { patterns: [EXCLUDE_DIR.source, SECRET.source], maxFileBytes: MAX_FILE_BYTES },
     updatedAt: now,
   };

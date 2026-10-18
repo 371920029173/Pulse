@@ -1,4 +1,4 @@
-import { mapAnchorBlock } from '@she/map';
+import { mapAnchorBlock, mapDigest } from '@she/map';
 import type {
   SheConfig,
   LLMProvider,
@@ -2106,9 +2106,15 @@ export class Agent {
       this.autoRecallFor = content;
       this.autoRecallBlock = renderAutoRecall(this.kbEngine, content);
     }
-    if (!this.autoRecallBlock) return messages;
+    /*
+     * 地图摘要与【自动召回】同位置（请求末尾）：不破坏前缀缓存，也不需要模型"想起来"。
+     * SHE_MAP_DIGEST=0 可关。
+     */
+    const digest = process.env.SHE_MAP_DIGEST === '0' ? '' : mapDigest(this.config.workspace.root, 40);
+    if (!this.autoRecallBlock && !digest) return messages;
     const out = messages.slice();
-    out[idx] = { ...messages[idx], content: `${content}\n\n${this.autoRecallBlock}` };
+    const tail = [this.autoRecallBlock, digest].filter(Boolean).join("\n\n");
+    out[idx] = { ...messages[idx], content: `${content}\n\n${tail}` };
     return out;
   }
 

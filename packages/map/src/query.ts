@@ -556,6 +556,32 @@ export function mapScope(root: string, task: string, opts: ScopeOptions = {}): S
   return { text, files: ordered, seeds, gates, tokens, ms: Date.now() - started };
 }
 
+// ── map_digest ──────────────────────────────────────────────────────────────
+
+/**
+ * 地图摘要：给"每轮请求末尾"用的极小一段（默认 ≤40 token）。
+ *
+ * 存在的理由和 KB 的【自动召回】一样：模型不会主动想起来用它，得在请求里放一句。
+ * 只读 index（不读分片），所以每轮都算也不心疼。
+ */
+export function mapDigest(root: string, budgetTokens = 40): string {
+  const index = readIndex(root);
+  if (!index) {
+    return '【工作区地图】还没建过（调用 map_tree 会自动建，几百毫秒）。';
+  }
+  /* 顶层用建图时记下的真目录（分片键里混着根散文件，那样列出来是噪音）。 */
+  const topDirs = (index.topDirs ?? []).slice(0, 6).join(', ') || '(根目录散文件)';
+  const parts = [
+    `【工作区地图】${index.counts.files} 文件 / ${index.shards.length} 分片（${index.views?.primary ?? 'dir'}）`,
+    `顶层：${topDirs}`,
+    '用 map_tree / map_lookup / map_whereis / map_scope / map_impact / map_contracts / map_verify（没建图时首次调用会自动建）。',
+  ];
+  let text = parts.join('｜');
+  const maxChars = budgetTokens * 3;
+  if (text.length > maxChars) text = text.slice(0, maxChars) + '…';
+  return text;
+}
+
 // ── map_contracts ───────────────────────────────────────────────────────────
 
 export interface ContractsResult {

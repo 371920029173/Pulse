@@ -16,6 +16,12 @@ export const MAP_DIR = '.she/map';
 export const INDEX_FILE = 'index.json';
 
 export function mapDir(root: string): string {
+  /*
+   * 与知识库对称：`SHE_KB_PATH` 能把 KB 指到共享库，`SHE_MAP_PATH` 能把地图指到共享目录
+   * （多个工作区共用一份、或放到别的盘）。不设时仍是"一个工作区一套"的本地 `.she/map`。
+   */
+  const override = process.env.SHE_MAP_PATH;
+  if (override && override.trim()) return override.trim();
   return join(root, MAP_DIR);
 }
 
