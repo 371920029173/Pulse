@@ -1,5 +1,5 @@
 ﻿import { readFile, writeFile, mkdir, readdir, stat } from 'node:fs/promises';
-import { mapTree, mapLookup, mapWhereis, mapScope, mapImpact, mapContracts, mapVerify, mapNote } from '@she/map';
+import { mapTree, mapLookup, mapWhereis, mapScope, mapImpact, mapContracts, mapVerify, mapNote, hasMap, buildMap } from '@she/map';
 import { resolve, relative, join, dirname } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -784,6 +784,24 @@ export function createTools(
     },
   );
 
+  /**
+   * 首次使用时自愈：没有地图就地建一份。
+   *
+   * 这是"只跟子代理说'看看地图'"也能用起来的关键 —— 否则它调工具只拿到一句"先跑 pnpm map:build"，
+   * 要么放弃、要么去翻文档。建图是几百毫秒的本地操作，比一次多余的往返便宜得多。
+   * 返回 null 表示"可以继续"，返回字符串表示"直接把这句话回给模型"。
+   */
+  function ensureMap(): string | null {
+    if (hasMap(root)) return null;
+    try {
+      buildMap({ root });
+      return null;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return `地图建不起来：${msg}（第一次调用会自动建图；这里失败说明工作区不是 git 仓库或没有读权限）`;
+    }
+  }
+
   /* ── 项目地图（map_*）：给模型用的代码地图 ────────────────────────────────
    *
    * 地图是**一个工作区一套**（`<工作区>/.she/map`）。没建图时这些工具不会报错，
@@ -803,6 +821,8 @@ export function createTools(
       },
     },
     async (args) => {
+      const blocked = ensureMap();
+      if (blocked) return blocked;
       const r = mapTree(root, { budgetTokens: (args.budgetTokens as number) ?? 2000, depth: (args.depth as number) ?? 6 });
       return r.files ? `${r.text}\n\n(${r.files} 文件｜${r.tokens} token｜折叠 ${r.collapsed} 个目录)` : r.text;
     },
@@ -819,7 +839,7 @@ export function createTools(
         required: ['path'],
       },
     },
-    async (args) => mapLookup(root, String(args.path ?? '')).text,
+    async (args) => ensureMap() ?? mapLookup(root, String(args.path ?? '')).text,
   );
 
   reg(
@@ -837,6 +857,8 @@ export function createTools(
       },
     },
     async (args) => {
+      const blocked = ensureMap();
+      if (blocked) return blocked;
       const r = mapWhereis(root, String(args.query ?? ''), { limit: (args.limit as number) ?? 5 });
       if (!r.hits.length) return '没有命中（地图没有标签时只能按路径匹配：先按路径找，或边干边标注）';
       return `扫描 ${r.scanned} 节点｜展开 ${r.shardsExpanded} 分片｜${r.ms}ms\n` +
@@ -858,7 +880,7 @@ export function createTools(
         required: ['task'],
       },
     },
-    async (args) => mapScope(root, String(args.task ?? ''), { maxFiles: (args.maxFiles as number) ?? 60 }).text,
+    async (args) => ensureMap() ?? mapScope(root, String(args.task ?? ''), { maxFiles: (args.maxFiles as number) ?? 60 }).text,
   );
 
   reg(
@@ -872,7 +894,7 @@ export function createTools(
         required: ['paths'],
       },
     },
-    async (args) => mapImpact(root, (args.paths as string[]) ?? []).text,
+    async (args) => ensureMap() ?? mapImpact(root, (args.paths as string[]) ?? []).text,
   );
 
   reg(
@@ -882,7 +904,7 @@ export function createTools(
         'HTTP 契约图：确定（两端都定位到）/ 潜在威胁（只有一端，带"什么情况下其实没问题"）/ 无法对账（URL 是变量拼接）。',
       parameters: { type: 'object', properties: {} },
     },
-    async () => mapContracts(root).text,
+    async () => ensureMap() ?? mapContracts(root).text,
   );
 
   reg(
@@ -892,7 +914,7 @@ export function createTools(
         '地图可信度：过期率 / 黑暗角落（从未标注）/ 悬空边 / 孤立注记 / 坏分片，以及最该补的几条。零标签时分数封顶并说明意图检索不可用。',
       parameters: { type: 'object', properties: {} },
     },
-    async () => mapVerify(root).text,
+    async () => ensureMap() ?? mapVerify(root).text,
   );
 
   reg(
@@ -911,6 +933,8 @@ export function createTools(
       },
     },
     async (args) => {
+      const blocked = ensureMap();
+      if (blocked) return blocked;
       const note = mapNote(root, {
         path: String(args.path ?? ''),
         kind: (args.kind as 'pitfall') ?? 'why',
