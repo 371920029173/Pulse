@@ -34,7 +34,14 @@ export function shardPath(root: string, key: string): string {
  * 非法文件名字符换成下划线（Windows 上 `:` `?` 都不能进文件名）。
  */
 export function shardKeyFor(path: string): string {
-  const seg = path.includes('/') ? path.slice(0, path.indexOf('/')) : '_root';
+  const segs = path.split('/');
+  /*
+   * 前两段：`packages/agent-runtime/…` → `packages-agent-runtime`。
+   * 只取第一段的话，monorepo 里 75% 的文件落进同一个 `packages` 分片 ——
+   * "不同分片可以并发写"就成了空话，而每次标注都要整片重写。
+   */
+  /* 只有 packages/<包> 需要再分一层：其他顶层目录本来就不大，分太细会让 shard 数量爆炸（150 个）。 */
+  const seg = segs[0] === 'packages' && segs.length >= 2 ? `packages-${segs[1]}` : (segs[0] ?? '_root');
   return seg.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40) || '_root';
 }
 
@@ -140,6 +147,26 @@ export function annotate(
   now = new Date().toISOString(),
 ): AnnotateResult {
   const key = shardKeyFor(input.path);
+  /*
+   * 乐观锁：写完回读，确认自己那条标签还在。不在说明期间被别的会话覆盖过 —— 重试。
+   * 标注本身是幂等的，重试安全。
+   */
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const res = annotateOnce(root, branch, input, git, now, key);
+    const check = readShard(root, key)?.nodes.find((n) => n.branch === branch && n.path === input.path);
+    if (check?.label === res.node.label) return res;
+  }
+  return annotateOnce(root, branch, input, git, now, key);
+}
+
+function annotateOnce(
+  root: string,
+  branch: string,
+  input: AnnotateInput,
+  git: (args: string[]) => string,
+  now: string,
+  key: string,
+): AnnotateResult {
   const shard = readShard(root, key) ?? emptyShard(key, branch);
   let node = shard.nodes.find((n) => n.branch === branch && n.path === input.path);
   if (!node) {
