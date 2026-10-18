@@ -180,6 +180,16 @@ function annotateOnce(
   if (input.what !== undefined) node.what = input.what;
   if (input.when !== undefined) node.when = input.when;
   if (input.groups !== undefined) node.groups = [...new Set([...(node.groups ?? []), ...input.groups])];
+  /*
+   * 写时复制：这个路径上如果只有"引用"（收编来的），改它的时候才把它落地，
+   * 并记下出处 —— 没被改过的条目一直用外部的原文，不占本地磁盘。
+   */
+  const shardAny = shard as unknown as { refs?: Array<{ path: string; branch: string; from: string; sha1?: string }> };
+  const ref = shardAny.refs?.find((r) => r.path === input.path && r.branch === branch);
+  if (ref) {
+    node.derivedFrom = { from: ref.from, sha1: ref.sha1, at: now };
+    shardAny.refs = shardAny.refs!.filter((r) => !(r.path === input.path && r.branch === branch));
+  }
   node.labelSha1 = node.sha1;
   node.stale = false;
   node.lastSeen = now;

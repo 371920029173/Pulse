@@ -52,6 +52,11 @@ export interface MapNode extends MapNodeKey {
   size?: number;
   /** 引用热度（被 import 的次数），用于 ROI 与塌缩顺序。 */
   inDegree?: number;
+  /**
+   * 写时复制（收编）的出处：这条本地实体是由哪个外部工作区的哪一版复制来的。
+   * 没复制、只是引用着的条目**不会**有这个字段（它们没有本地实体）。
+   */
+  derivedFrom?: { from: string; sha1?: string; at: string };
 }
 
 /** 注记：模型自己的短记忆，绑 rev；文件改过之后标 mayBeStale，不静默信任。 */

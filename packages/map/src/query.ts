@@ -9,6 +9,7 @@
  */
 import { readIndex, readShard, readShardSafe, addNote, sha1Of, labelIsStale } from './store.js';
 import { kbLinksFor, type BoundKbLink } from './bind.js';
+import { refsOf, resolveRef } from './adopt.js';
 import { deriveGroups } from './groups.js';
 import { readSymbols, symbolsInFile } from './symbols.js';
 import { logForPath, numStat, gitIn, status } from './gitlayer.js';
@@ -218,6 +219,23 @@ export function mapLookup(root: string, path: string, opts: { branch?: string; i
     lines.push(`  引用    ${node.inDegree ?? 0} 处`);
   }
   lines.push(`  组      ${groups.slice(0, 8).join('  ')}${groups.length > 8 ? ` …共 ${groups.length}` : ''}`);
+
+  /*
+   * 收编：本地没有标签时回外部取。取不回来就明说"外部不可用"，不许静默当作没有。
+   */
+  if (!node?.label) {
+    const refs = refsOf(root, branch, norm);
+    if (refs.length) {
+      const hit = resolveRef(refs[0]!, node?.sha1);
+      if ('unavailable' in hit) {
+        lines.push(`  外部收编：${hit.unavailable}（这条知识现在取不到，不是不存在）`);
+      } else {
+        const fresh = hit.fresh ? '' : '  ⚠ 外部那版已与本地内容不同，只作参考';
+        lines.push(`  外部收编（来自 ${hit.ref.from}）：${hit.node.label ?? '(无标签)'}${fresh}`);
+        if (hit.node.what) lines.push(`    ${hit.node.what}`);
+      }
+    }
+  }
 
   const symbols = readSymbols(root);
   if (symbols && node) {

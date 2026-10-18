@@ -9,7 +9,7 @@
  *   node scripts/map-query.mjs note <路径> <pitfall|invariant|why|todo|deadend> <文字>
  *   node scripts/map-query.mjs diff [路径…]
  */
-import { mapTree, mapLookup, mapWhereis, mapImpact, mapNote, mapDiff, mapScope, mapContracts, mapVerify } from '../packages/map/dist/index.js';
+import { mapTree, mapLookup, mapWhereis, mapImpact, mapNote, mapDiff, mapScope, mapContracts, mapVerify, adoptFrom } from '../packages/map/dist/index.js';
 
 const [cmd, ...rest] = process.argv.slice(2);
 const root = process.cwd();
@@ -48,6 +48,25 @@ switch (cmd) {
     console.log(`\n(${res.files.length} 个文件｜${res.tokens} token｜${res.ms}ms)`);
     break;
   }
+  case 'adopt': {
+    const external = positional[0];
+    if (!external) {
+      console.log('用法: map-query adopt <外部工作区根> [--prefix 旧路径=新路径 ...]');
+      process.exit(2);
+    }
+    /* --prefix 可以给多次：旧结构 → 新结构的显式映射，不猜。 */
+    const prefix = {};
+    for (let i = 0; i < rest.length; i += 1) {
+      if (rest[i] !== '--prefix') continue;
+      const pair = rest[i + 1] ?? '';
+      const eq = pair.indexOf('=');
+      if (eq > 0) prefix[pair.slice(0, eq)] = pair.slice(eq + 1);
+    }
+    const res = adoptFrom(root, 'main', external, { prefix });
+    console.log(`收编：${res.adopted} 条引用（不复制正文）｜未对齐 ${res.unmatched.length}｜外部分片读不到 ${res.unreadable}`);
+    for (const u of res.unmatched.slice(0, 10)) console.log(`  未对齐（需要 --prefix 映射）：${u}`);
+    break;
+  }
   case 'verify': {
     const r = mapVerify(root);
     console.log(r.text);
@@ -73,6 +92,6 @@ switch (cmd) {
     break;
   }
   default:
-    console.log('用法: node scripts/map-query.mjs <tree|lookup|whereis|scope|impact|contracts|verify|note|diff> …');
+    console.log('用法: node scripts/map-query.mjs <tree|lookup|whereis|scope|impact|contracts|verify|adopt|note|diff> …');
     process.exit(2);
 }
