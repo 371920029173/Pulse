@@ -25,6 +25,7 @@ embedding), stores shards under `.she/map/`, and answers six questions through o
 | `scope` | a working set for a task: anchors → what breaks → which gates to run |
 | `impact` | reverse import closure (file-level *and* package-level) plus the checks that will go red |
 | `contracts` | HTTP routes ↔ front-end calls, split into **certain** / **potential threats** / **not reconcilable** |
+| `wiring` | which symbol each import edge carries — "A uses `c` from B" is an edge named *接线 c*, queryable by file **or by symbol name** |
 
 - **Groups are a DAG, not a tree.** A file belongs to a directory axis, a package axis, a layer axis
   and any number of feature groups at the same time — "which subsystem" and "which feature" are
@@ -37,6 +38,15 @@ embedding), stores shards under `.she/map/`, and answers six questions through o
 - **Local revert is a four-step safety shell**: plan (read-only) → single-use ticket (hash checked) →
   snapshot → `git restore`. Files with uncommitted changes block by default; reverting a file that
   does not exist in the target revision is refused outright.
+- **The tools are always there; the map is per workspace.** `map_*` live in the built-in tool table, so every
+  workspace, session and sub-agent has them; each workspace gets its own `.she/map` (built automatically on first
+  use — or point `SHE_MAP_PATH` at a shared directory, the way `SHE_KB_PATH` does for the knowledge base).
+  A short `【工作区地图】` digest is appended to the end of every request, so the model does not have to remember
+  the map exists (append-only, so the prompt cache keeps hitting).
+- **Labelling 600 files is not a hand job.** `map:suggest` proposes candidates from the content itself (test names,
+  first heading, leading comment) and skips files with no signal; `map:note` writes them one by one or in bulk.
+  Directories without their own label are summarised from their children ("A, B 等 N 项"), so you never have to
+  hand-label 640 files to see the shape.
 - **It says what it cannot see.** Contract extraction cannot resolve URLs built from variables —
   those are counted as *not reconcilable* (120 in this repository) instead of being reported as clean.
   With zero labels, `verify` caps its score at 30 and states that intent search is unavailable,
