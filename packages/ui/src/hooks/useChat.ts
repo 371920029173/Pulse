@@ -1049,9 +1049,55 @@ export function useChat(sessionId?: string | null) {
     const data = await fetchJSON<{ messages: ServerHistoryMessage[] }>(
       withSid('/api/chat/history', explicitSessionId),
     );
-    setMessages(withPending(explicitSessionId || sidRef.current || '', normalizeHistory(data.messages ?? [])));
+    const bound = explicitSessionId || sidRef.current || '';
+    const normalized = normalizeHistory(data.messages ?? []);
+    setMessages(withPending(bound, normalized));
     const sid = explicitSessionId || sidRef.current;
     if (sid) armFollowRef.current(sid);
+
+    /*
+     * 空历史不等于"没有内容"：那一轮可能还在跑（子代理就是这样——它的每一步都在内存里）。
+     * 问一次服务端；在跑就每 2 秒重读，跑完自然停。
+     *
+     * 纯前端兜底：即使服务端是老进程（还没重启），这一段也能工作，页面不会再假装"没有对话"。
+     */
+    if (normalized.length === 0 && sid) {
+      try {
+        const st = await fetchJSON<{ running: boolean }>(withSid('/api/chat/running', sid));
+        if (!st.running) return;
+        setIsLoading(true);
+        let tries = 0;
+        const timer = window.setInterval(() => {
+          tries += 1;
+          void (async () => {
+            try {
+              const h = await fetchJSON<{ messages: ServerHistoryMessage[] }>(withSid('/api/chat/history', sid));
+              const list = normalizeHistory(h.messages ?? []);
+              if (list.length) {
+                setMessages(withPending(sid, list));
+                setIsLoading(false);
+                window.clearInterval(timer);
+                return;
+              }
+              const still = await fetchJSON<{ running: boolean }>(withSid('/api/chat/running', sid));
+              if (!still.running) {
+                setIsLoading(false);
+                window.clearInterval(timer);
+              }
+            } catch {
+              /* 读失败就下一轮再试 */
+            }
+            if (tries > 300) {
+              /* 10 分钟还没读到就放弃轮询，别在后台空转 */
+              setIsLoading(false);
+              window.clearInterval(timer);
+            }
+          })();
+        }, 2_000);
+      } catch {
+        /* 问不到就按原样显示 */
+      }
+    }
   }, []);
 
 

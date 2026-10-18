@@ -2167,7 +2167,11 @@ function agentFor(
    * 表现就是"同一个人，换个窗口才行"。重建会把历史从会话里重新载入，代价是丢一次前缀缓存。
    */
   const current = toolSignatureOf();
-  if (a && a.toolSignature() !== current) {
+  /*
+   * 只在**闲着**的时候重建。正在跑的一重建就等于把它内存里的历史扔掉：
+   * 面板上会看到"子代理在干活、点开却空白"，而且那一轮的结果也接不上。
+   */
+  if (a && !a.isRunning() && a.toolSignature() !== current) {
     dropAgent(id);
     a = undefined;
   }
