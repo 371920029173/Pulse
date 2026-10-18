@@ -811,7 +811,9 @@ export function createTools(
     {
       name: 'map_tree',
       description:
-        '整仓一眼看到底：目录树 + 每个文件一行标签（没建图会提示先建图）。回答"这个仓长什么样、哪块是干什么的"。',
+        '整仓一眼看到底：目录树 + 每个文件一行标签。回答"这个仓长什么样、哪块是干什么的"。' +
+        '没建图会**自动建**（结构：目录/文件/符号/边）。注意：标签不是建图产出的，' +
+        '是干活时用 map_note/annotate 写进去的；显示"(未标注)"表示还没人写过，不代表再建一次就有。',
       parameters: {
         type: 'object',
         properties: {
@@ -860,7 +862,10 @@ export function createTools(
       const blocked = ensureMap();
       if (blocked) return blocked;
       const r = mapWhereis(root, String(args.query ?? ''), { limit: (args.limit as number) ?? 5 });
-      if (!r.hits.length) return '没有命中（地图没有标签时只能按路径匹配：先按路径找，或边干边标注）';
+      if (!r.hits.length) {
+        return '没有命中。零标签时这里只能按**路径子串**匹配（不是语义检索）；'
+          + '再建一次图也不会长出标签——标签是干活时用 map_note 写进去的。';
+      }
       return `扫描 ${r.scanned} 节点｜展开 ${r.shardsExpanded} 分片｜${r.ms}ms\n` +
         r.hits.map((h) => `${h.score.toFixed(1)}  ${h.path}  ${h.label ?? ''}  ${h.reasons.join('；')}`).join('\n');
     },
