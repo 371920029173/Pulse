@@ -1639,6 +1639,8 @@ function makeAgent(cfg: SheConfig, sessionId?: string | null): Agent {
      */
     auditSafe({ kind: 'tool', session_id: sessionId ?? undefined, tool: name, ms, ok: !failed });
   });
+  /* 记下当前工具表签名：老会话下次取 agent 时用它判断要不要重建。 */
+  currentToolSignature = agent.toolSignature();
   return agent;
 }
 
@@ -2158,6 +2160,17 @@ function agentFor(
   if (activeAgentId !== id) activeAgentId = id;
 
   let a = agents.get(id);
+  /*
+   * 工具表变了（比如新加了 map_*）就重建这个会话的 agent。
+   *
+   * 不这么做的话，工具表在构造时冻结：**老会话永远看不到新工具**，而新会话能看到 ——
+   * 表现就是"同一个人，换个窗口才行"。重建会把历史从会话里重新载入，代价是丢一次前缀缓存。
+   */
+  const current = toolSignatureOf();
+  if (a && a.toolSignature() !== current) {
+    dropAgent(id);
+    a = undefined;
+  }
   if (!a) {
     a = makeAgent(config, id);
     const stored = findSession(id)?.session ?? sessions.get(id);
@@ -2211,6 +2224,17 @@ function disposeAllAgents(): void {
   }
   agents.clear();
   activeAgentId = null;
+}
+
+/**
+ * 当前工具表签名（工具名排序后拼接）。
+ *
+ * 取"最近一次构造的 agent"的工具表：同一进程内工具集是常量。
+ * 首个 agent 之前为空串，此时不做比较。
+ */
+let currentToolSignature = '';
+function toolSignatureOf(): string {
+  return currentToolSignature;
 }
 
 /**

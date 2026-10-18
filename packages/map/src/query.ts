@@ -68,6 +68,19 @@ export interface TreeResult {
   files: number;
 }
 
+/**
+ * 目录的"聚合标签"：没有人工标签时，用子节点拼出来。
+ *
+ * 客户模型的痛点很具体：640 个文件里只有 23 条人工标签，看树等于看不出结构。
+ * 聚合不改写任何数据（不落盘），子节点一改它立刻跟着变。
+ */
+export function aggregateDirLabel(children: Array<{ label?: string }>, total: number): string {
+  const labels = children.map((c) => c.label).filter((l): l is string => !!l);
+  if (!labels.length) return total ? `${total} 项 · 未标注` : '';
+  const uniq = [...new Set(labels)].slice(0, 3).join('、');
+  return labels.length < total ? `${uniq} 等 ${total} 项` : uniq;
+}
+
 interface TreeDir {
   path: string;
   files: MapNode[];
@@ -113,8 +126,22 @@ function render(dir: TreeDir, opts: { depth: number; level: number; collapsed: S
   for (const [name, sub] of [...dir.dirs.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     /* 折叠的目录不出行：每折一个留一行的话，60 个冷目录照样压不下预算。汇总在末尾给一行。 */
     if (opts.collapsed.has(sub.path)) continue;
-    const label = sub.files.length === 0 && sub.dirs.size === 0 ? '' : '';
-    out.push(`${pad}${name}/${label}`);
+    /* 目录行后面跟聚合标签：人工标过的摘要优先，没有就用子节点拼。 */
+    /* 只拿"真有标签"的子项去拼；"未标注"占位不能当标签用（否则会拼出一串"N 项·未标注"）。 */
+    const childCount = sub.files.length + sub.dirs.size;
+    const known = [
+      ...sub.files.map((f) => f.label).filter((l): l is string => !!l),
+      ...[...sub.dirs.values()]
+        .map((d) => aggregateDirLabel(d.files, countFiles(d)))
+        .filter((s) => s && !s.includes('未标注')),
+    ];
+    const derived = known.length
+      ? (() => {
+        const uniq = [...new Set(known)].slice(0, 3).join('、');
+        return known.length < childCount ? `${uniq} 等 ${childCount} 项` : uniq;
+      })()
+      : `${childCount} 项 · 未标注`;
+    out.push(`${pad}${name}/${derived ? `  ${derived}` : ''}`);
     if (opts.level + 1 < opts.depth) out.push(...render(sub, { ...opts, level: opts.level + 1 }));
   }
   for (const f of [...dir.files].sort((a, b) => a.path.localeCompare(b.path))) {
@@ -209,6 +236,16 @@ export function mapLookup(root: string, path: string, opts: { branch?: string; i
 
   const lines: string[] = [];
   lines.push(`${norm}`);
+  /*
+   * 查的是目录时，给出聚合标签 —— "这个目录大概是什么"不用逐条看文件。
+   */
+  if (!node || node.kind === 'dir') {
+    const prefix = norm === '.' ? '' : norm + '/';
+    const kids = loaded.nodes.filter(
+      (n) => n.branch === branch && n.kind === 'file' && n.path.startsWith(prefix) && !n.path.slice(prefix.length).includes('/'),
+    );
+    if (kids.length) lines.push(`  目录概览  ${aggregateDirLabel(kids, kids.length)}`);
+  }
   if (!node) {
     lines.push('  (地图里没有这个节点：可能是新文件，跑 pnpm map:build 或看路径是否写错)');
   } else {

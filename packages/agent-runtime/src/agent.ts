@@ -3335,6 +3335,16 @@ export class Agent {
     return chars;
   }
 
+  /**
+   * 工具表签名：工具名排序后拼接。
+   *
+   * 存在的唯一理由：**工具表在构造时冻结**，而进程内工具集可能已经变了（比如新加了 map_*）。
+   * 服务端拿它和当前工具集比一次，不一致就重建 agent —— 老会话下一条消息自动换上新工具。
+   */
+  toolSignature(): string {
+    return this.allToolDefs.map((d) => d.name).sort().join(',');
+  }
+
   /** 压缩记录落在哪。没有会话就没有可落的地方（子 agent 也走这条路，但它有自己的会话目录）。 */
   private compactionFile(): string | null {
     if (!this.sessionId) return null;

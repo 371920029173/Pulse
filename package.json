@@ -85,7 +85,9 @@
     "map:groups": "node scripts/map-groups.mjs",
     "map:symbols": "node scripts/map-symbols.mjs",
     "map:revert": "node scripts/map-revert.mjs",
-    "map:query": "node scripts/map-query.mjs"
+    "map:query": "node scripts/map-query.mjs",
+    "map:note": "node scripts/map-note.mjs",
+    "map:suggest": "node scripts/map-suggest.mjs"
   },
   "engines": {
     "node": ">=20"
