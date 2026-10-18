@@ -1,5 +1,5 @@
 ﻿import { readFile, writeFile, mkdir, readdir, stat } from 'node:fs/promises';
-import { mapTree, mapLookup, mapWhereis, mapScope, mapImpact, mapContracts, mapVerify, mapNote, hasMap, buildMap } from '@she/map';
+import { mapTree, mapLookup, mapWhereis, mapScope, mapImpact, mapContracts, mapVerify, mapNote, mapWiring, hasMap, buildMap } from '@she/map';
 import { resolve, relative, join, dirname } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -900,6 +900,36 @@ export function createTools(
       },
     },
     async (args) => ensureMap() ?? mapImpact(root, (args.paths as string[]) ?? []).text,
+  );
+
+  reg(
+    {
+      name: 'map_wiring',
+      description:
+        '看"接线"：A 用了 B 里的哪个符号，就是一条名为「接线 c」的边。' +
+        '给 path 看这个文件接出去/接进来的线；给 symbol 按名字反查"谁用了它"。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '工作区相对路径（可选；与 symbol 二选一）' },
+          symbol: { type: 'string', description: '符号名（包含匹配，如 budgetToolResult）' },
+          limit: { type: 'number', description: '最多几条（默认 20）' },
+        },
+      },
+    },
+    async (args) => {
+      const blocked = ensureMap();
+      if (blocked) return blocked;
+      const hits = mapWiring(root, {
+        path: args.path ? String(args.path) : undefined,
+        symbol: args.symbol ? String(args.symbol) : undefined,
+        limit: (args.limit as number) ?? 20,
+      });
+      if (!hits.length) return args.symbol ? `没有找到「接线 ${args.symbol}」` : '这个文件没有接线';
+      return hits
+        .map((h) => `${h.from} --${h.label}-->${h.to}${h.typeOnly ? '（仅类型）' : ''}`)
+        .join('\n') + `\n\n共 ${hits.length} 根`;
+    },
   );
 
   reg(

@@ -25,7 +25,7 @@ embedding), stores shards under `.she/map/`, and answers six questions through o
 | `scope` | a working set for a task: anchors → what breaks → which gates to run |
 | `impact` | reverse import closure (file-level *and* package-level) plus the checks that will go red |
 | `contracts` | HTTP routes ↔ front-end calls, split into **certain** / **potential threats** / **not reconcilable** |
-| `wiring` | which symbol each import edge carries — "A uses `c` from B" is an edge named *接线 c*, queryable by file **or by symbol name** |
+| `wiring` | which symbol each import edge carries — "A uses `c` from B" is an edge named *接线 c*, queryable by file **or by symbol name** (`map_wiring` tool, `map_lookup`, `map_impact`, and `pnpm map:query wiring`; the panel is tree-only for now) |
 
 - **Groups are a DAG, not a tree.** A file belongs to a directory axis, a package axis, a layer axis
   and any number of feature groups at the same time — "which subsystem" and "which feature" are
