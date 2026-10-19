@@ -531,6 +531,25 @@ export interface SubagentRunner {
    * 而不是返回一个空列表让人误以为“没有任务在跑”。
    */
   status?(): SubagentStatusEntry[];
+  /**
+   * 等这些任务离开"进行中"（可选）。超时如实返回还在跑的 id。
+   *
+   * 存在的理由：异步 spawn 之后，模型需要"发出去 → 干别的 → 回来等它"这条路；
+   * 没有它就只能反复调 status，而那正是本仓明确禁止的轮询。
+   */
+  waitFor?(ids: string[], opts?: { timeoutMs?: number; signal?: AbortSignal }): Promise<{
+    ok: boolean;
+    /** 为什么停下：全部结束 / 超时 / 被中断。 */
+    reason: "done" | "timeout" | "aborted";
+    /** 已结束（含失败）的 id。 */
+    done: string[];
+    /** 仍在跑的 id。 */
+    pending: string[];
+    /** 任务板上查不到的 id（从没 spawn，或记录已被清除）——不能当完成。 */
+    unknown: string[];
+    /** 结束但失败的 id。 */
+    failed: string[];
+  }>;
 }
 
 /**
@@ -727,6 +746,8 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
       type: "object",
       properties: {
         ids: { type: "array", items: { type: "string" }, description: "只看这些（可选）" },
+        wait: { type: "boolean", description: "true = 阻塞到这些任务结束再回答（默认 false，只看一眼）" },
+        wait_ms: { type: "number", description: "wait 的最长等待（默认 120000，上限 600000）" },
       },
     },
   };
@@ -987,6 +1008,22 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
       if (!runner.status) {
         return 'Error: 工具不可用：这个运行时没有配置 runner.status。'
           + '不要假设它们完成了 —— 改用同步模式（background: false）拿结果。';
+      }
+      if ((args as Record<string, unknown>).wait === true) {
+        if (!runner.waitFor) {
+          return "Error: 工具不可用：这个运行时没有实现 runner.waitFor，只能用 wait:false 查一眼。";
+        }
+        const rawIds = (args as Record<string, unknown>).ids;
+        const ids = Array.isArray(rawIds) ? rawIds.map((x) => String(x)) : [];
+        if (!ids.length) return "Error: 参数缺失：wait:true 时必须给 ids（要等哪些任务）。";
+        const res = await runner.waitFor(ids, { timeoutMs: Number((args as Record<string, unknown>).wait_ms) || undefined });
+        const parts: string[] = [];
+        if (res.done.length) parts.push("已结束：" + res.done.join("、"));
+        if (res.failed.length) parts.push("其中有失败：" + res.failed.join("、"));
+        if (res.pending.length) parts.push("仍在跑：" + res.pending.join("、"));
+        if (res.unknown.length) parts.push("查不到（没 spawn 或记录已清）：" + res.unknown.join("、"));
+        const why = res.reason === "timeout" ? "等到超时" : res.reason === "aborted" ? "等待被中断" : "全部结束";
+        if (!res.ok) return why + "。" + parts.join("｜");
       }
       const raw = (args as Record<string, unknown>).ids;
       const want = Array.isArray(raw) ? raw.map((x) => String(x)) : null;

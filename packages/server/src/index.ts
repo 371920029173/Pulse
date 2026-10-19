@@ -1009,6 +1009,62 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
      * 状态来自**任务板**（UI 上那排卡片就是它）：模型和人看到同一件事。
      * 只挑子代理的卡片，其余（导入、清理等）不是子任务。
      */
+    /*
+     * 等这些任务离开 running。
+     *
+     * 用**事件**（任务板变化）而不是轮询：模型不该为了等一个子代理去反复 task_status，
+     * 那既费 token 又可能拖长每一轮。超时如实回"还有谁在跑"，不假装完成。
+     */
+    waitFor(ids, opts = {}) {
+      /* 去重、去空串：调用方经常把同一个 id 写两遍。 */
+      const target = [...new Set((ids ?? []).map((x) => String(x).trim()).filter(Boolean))];
+      const timeoutMs = Math.max(1_000, Math.min(600_000, Number(opts.timeoutMs) || 120_000));
+
+      const snap = () => {
+        const byId = new Map(taskBoard.list().map((t) => [t.id, t] as const));
+        const done: string[] = [];
+        const failed: string[] = [];
+        const pending: string[] = [];
+        const unknown: string[] = [];
+        for (const id of target) {
+          const card = byId.get(id);
+          if (!card) {
+            /* 记录没了 ≠ 跑完了：可能是从没 spawn，也可能被任务板修剪/清除了。 */
+            unknown.push(id);
+            continue;
+          }
+          if (card.phase === 'running') pending.push(id);
+          else if (card.phase === 'error') failed.push(id);
+          else done.push(id);
+        }
+        return { done, failed, pending, unknown };
+      };
+
+      return new Promise<{
+        ok: boolean;
+        reason: 'done' | 'timeout' | 'aborted';
+        done: string[];
+        pending: string[];
+        unknown: string[];
+        failed: string[];
+      }>((resolve) => {
+        let off: () => void = () => {};
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const finish = (reason: 'done' | 'timeout' | 'aborted') => {
+          off();
+          if (timer) clearTimeout(timer);
+          const s = snap();
+          resolve({ ok: s.pending.length === 0, reason, ...s });
+        };
+        off = taskBoard.onChange(() => {
+          if (snap().pending.length === 0) finish('done');
+        });
+        timer = setTimeout(() => finish('timeout'), timeoutMs);
+        opts.signal?.addEventListener('abort', () => finish('aborted'), { once: true });
+        /* 开始等之前先看一眼：全都已结束的话不必挂监听。 */
+        if (snap().pending.length === 0) finish('done');
+      });
+    },
     status() {
       return taskBoard
         .list()

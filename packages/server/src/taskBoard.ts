@@ -80,6 +80,12 @@ export class TaskBoard {
     return n;
   }
 
+  /** 订阅变化：返回取消函数。给"等某个任务跑完"用的，不是给界面轮询用的。 */
+  onChange(fn: (tasks: TaskCard[]) => void): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
   private emit(): void {
     const snap = this.list();
     for (const l of this.listeners) {
