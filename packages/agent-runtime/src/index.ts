@@ -239,6 +239,7 @@ export type {
   HarvestNote,
   HarvestCandidate,
   SubagentKbHarvest,
+  SubagentStatusEntry,
 } from './subagent-tools.js';
 export { makeScheduleTools, executeScheduleTool } from './schedule-tools.js';
 export type { ScheduleBridge, ScheduledTaskView, WindowView } from './schedule-tools.js';

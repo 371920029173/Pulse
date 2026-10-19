@@ -1005,6 +1005,22 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
     : undefined;
 
   return {
+    /*
+     * 状态来自**任务板**（UI 上那排卡片就是它）：模型和人看到同一件事。
+     * 只挑子代理的卡片，其余（导入、清理等）不是子任务。
+     */
+    status() {
+      return taskBoard
+        .list()
+        .filter((t) => t.kind === "subagent")
+        .map((t) => ({
+          id: t.id,
+          description: t.label,
+          phase: t.phase,
+          detail: t.detail,
+          updatedAt: t.updated_at,
+        }));
+    },
     async run(req, _signal, hooks) {
       const budgetMs = resolveSubagentTimeoutMs(req.timeoutMs, DEFAULT_TIMEOUT_SECONDS);
       const baseDir = parentCfg.workspace.root;

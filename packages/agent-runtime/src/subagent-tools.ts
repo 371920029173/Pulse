@@ -524,6 +524,13 @@ export interface SubagentRunner {
    * one nobody supplied, must never be able to fail or slow down the subtask it describes.
    */
   run(req: SubagentRequest, signal?: AbortSignal, hooks?: SubagentRunHooks): Promise<SubagentResult>;
+  /**
+   * 已知子任务的状态（可选）。
+   *
+   * 由运行时提供——它知道哪个还在跑、哪个已经结束。不实现时「task_status」会明说“不支持”，
+   * 而不是返回一个空列表让人误以为“没有任务在跑”。
+   */
+  status?(): SubagentStatusEntry[];
 }
 
 /**
@@ -696,7 +703,33 @@ export interface SubagentToolSet {
   execute: (name: string, args: Record<string, unknown>) => Promise<string>;
 }
 
+/** 一条子任务的状态（由运行时提供，来自它自己的任务板）。 */
+export interface SubagentStatusEntry {
+  id: string;
+  description: string;
+  phase: string;
+  detail?: string;
+  updatedAt?: string;
+}
+
 export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolOptions): SubagentToolSet {
+  /**
+   * 状态查询：读运行时自己的任务板（UI 那排卡片是同一份数据），
+   * 所以"模型看到的"和"人看到的"永远一致。
+   */
+  const statusDefinition: ToolDefinition = {
+    name: "task_status",
+    description:
+      "查看子任务状态：已开始 / 进行中 / 已结束（成功或失败）+ 最近一步在干什么。"
+      + "配合 task_spawn({ background: true }) 用：发出去先干别的，再用它确认哪个跑完了。"
+      + "不给 ids 就列出全部。",
+    parameters: {
+      type: "object",
+      properties: {
+        ids: { type: "array", items: { type: "string" }, description: "只看这些（可选）" },
+      },
+    },
+  };
   const definition: ToolDefinition = {
     name: 'task_spawn',
     description: [
@@ -931,5 +964,29 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
     return lines.join('\n');
   };
 
-  return { definitions: [definition], execute };
+  return {
+    definitions: [definition, statusDefinition],
+    execute: async (name, args) => {
+      if (name !== 'task_status') return execute(name, args);
+      /*
+       * 状态一律从运行时来（服务端的任务板），不在这里另存一份 —— 否则会出现
+       * "模型看到已结束、面板还在转"这种两个真相。
+       */
+      if (!runner.status) {
+        return 'Error: 工具不可用：这个运行时没有配置 runner.status。'
+          + '不要假设它们完成了 —— 改用同步模式（background: false）拿结果。';
+      }
+      const raw = (args as Record<string, unknown>).ids;
+      const want = Array.isArray(raw) ? raw.map((x) => String(x)) : null;
+      const all = runner.status();
+      const list = want ? all.filter((e) => want.includes(e.id)) : all;
+      if (!list.length) return want ? `没有找到这些子任务：${want.join('、')}` : '目前没有子任务记录';
+      return list
+        .map((e) => {
+          const mark = e.phase === 'running' ? '进行中' : e.phase === 'done' ? '已结束' : e.phase === 'error' ? '失败' : e.phase;
+          return `${e.id}｜${mark}｜${e.description}${e.detail ? `｜${e.detail}` : ''}`;
+        })
+        .join('\n');
+    },
+  };
 }
