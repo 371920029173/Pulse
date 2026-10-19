@@ -1075,8 +1075,6 @@ export class Agent {
     const autopilotOn = this.config.automationMode !== false && process.env.SHE_PLAN_AUTOPILOT !== '0';
     const autopilotMax = Number(process.env.SHE_PLAN_AUTOPILOT_MAX) > 0 ? Number(process.env.SHE_PLAN_AUTOPILOT_MAX) : 40;
     let autopilotRounds = 0;
-    let autopilotLastSig = '';
-    let autopilotStalls = 0;
 
     while (iterations < maxIterations) {
       if (signal?.aborted) {
@@ -1320,17 +1318,18 @@ export class Agent {
           const reply = typeof response.content === 'string' ? response.content : '';
           const decision = planAutopilot(this.planStore.mine(), { turnStartedAt, reply });
           if (decision.proceed && decision.nudge) {
-            autopilotStalls = decision.signature === autopilotLastSig ? autopilotStalls + 1 : 0;
-            autopilotLastSig = decision.signature;
-            if (autopilotStalls < 2) {
-              autopilotRounds++;
-              const nudge: LLMMessage = { role: 'user', content: decision.nudge };
-              this.history.push(nudge);
-              messages.push(nudge);
-              onChunk?.({ type: 'status', content: '计划还没做完，自动继续下一步' });
-              continue;
-            }
-            onChunk?.({ type: 'status', content: '连续两次计划没有进展，自动续跑停下' });
+            /*
+             * 不再按"连续两轮签名相同"停。签名相同只说明它两轮在做同一类动作，
+             * 而"是不是真的没进展"只有模型自己判断得准（它在同一批文件里逐个改，签名当然一样）。
+             *
+             * 现在只有两种停法：计划做完了（decision.proceed 为假），或者撞到轮数上限（不得不了）。
+             */
+            autopilotRounds++;
+            const nudge: LLMMessage = { role: 'user', content: decision.nudge };
+            this.history.push(nudge);
+            messages.push(nudge);
+            onChunk?.({ type: 'status', content: '计划还没做完，自动继续下一步' });
+            continue;
           }
         }
         this.flushInterjections();
