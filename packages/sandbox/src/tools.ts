@@ -494,13 +494,58 @@ export function createTools(
             description: 'Optional regular expression: return as soon as the output matches it '
               + '(for a server: "listening on"). Still answers if the line already scrolled past.',
           },
+          ids: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '要一起等的多个任务（与 id 二选一）。配合 mode 用：等全部结束，还是任一结束。',
+          },
+          mode: {
+            type: 'string',
+            enum: ['all', 'any'],
+            description: 'ids 的等待方式：all=全部结束（默认），any=任一结束就返回，其余继续在后台跑。',
+          },
         },
-        required: ['id'],
+        required: [],
       },
     },
     async (args, ctx) => {
+      const ids = Array.isArray(args.ids) ? (args.ids as unknown[]).map((x) => String(x).trim()).filter(Boolean) : [];
       const id = String(args.id ?? '').trim();
-      if (!id) return 'Error: id 必填：shell_wait 需要 shell 返回的 job_id。';
+      /* 判据钉住了这句原文案（缺 id 要被指出）：保持它不变，ids 只是多一种选择。 */
+      if (!id && !ids.length) return 'Error: id 必填：shell_wait 需要 shell 返回的 job_id。';
+
+      /*
+       * 多个任务：按顺序等，已结束的跳过。
+       * all（默认）→ 每个都等到有结局，最后汇总；any → 只要有一个结束就返回，其余如实标"还在跑"。
+       */
+      if (ids.length) {
+        const mode = args.mode === 'any' ? 'any' : 'all';
+        const budget = typeof args.wait_ms === 'number' ? args.wait_ms : 120_000;
+        const started = Date.now();
+        const done: string[] = [];
+        const pending: string[] = [];
+        for (const jobId of ids) {
+          const left = Math.max(0, budget - (Date.now() - started));
+          const view = await shell.waitJob(jobId, {
+            waitMs: mode === 'any' && done.length === 0 ? left : Math.min(left, 600_000),
+            signal: ctx?.signal,
+            onTick: (elapsedMs) => progress?.(`等 ${ids.length} 个任务（${mode}）：${jobId} 已 ${Math.round(elapsedMs / 1000)}s`),
+          });
+          if (view.status === 'running') {
+            pending.push(jobId);
+            if (mode === 'any' && done.length === 0) break;
+          } else {
+            done.push(`${jobId}：${view.status}`);
+            if (mode === 'any') break;
+          }
+        }
+        const lines = [
+          `${ids.length} 个任务｜mode=${mode}｜用时 ${Math.round((Date.now() - started) / 1000)}s`,
+          `已结束：${done.length ? done.join('；') : '(无)'}`,
+          `仍在跑：${pending.length ? pending.join('、') + '（用 shell_jobs 或再等一次看）' : '(无)'}`,
+        ];
+        return lines.join('\n');
+      }
       const pattern = typeof args.pattern === 'string' && args.pattern ? args.pattern : undefined;
       if (pattern) {
         try {
