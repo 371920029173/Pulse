@@ -57,7 +57,8 @@ export function clusterAutoSettings(
   return {
     enabled: config.automationMode !== false && !off(env.SHE_CLUSTER_AUTO) && maxRounds > 0,
     maxRounds,
-    stallRounds: intEnv(env.SHE_CLUSTER_AUTO_STALL, 2, 1),
+    /* 默认 0 = 不按"没进展"停；显式设置才启用（与主会话的长程口径一致）。 */
+    stallRounds: intEnv(env.SHE_CLUSTER_AUTO_STALL, 0, 0),
     planTools: !off(env.SHE_CLUSTER_PLAN),
   };
 }

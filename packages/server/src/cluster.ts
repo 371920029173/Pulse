@@ -973,7 +973,14 @@ async function runRounds(
         const progressed = planSig !== planSigAtRoundStart
           || isSubstantiveRound(roundMsgs, all.slice(0, roundStartIdx), snapshot().members);
         stalls = progressed ? 0 : stalls + 1;
-        if (stalls >= settings.stallRounds) { stopReason = `连续 ${stalls} 轮没有新的实质产出`; break; }
+        /*
+         * 默认不停（stallRounds<=0）。判断"有没有进展"是模型自己的事，轮级门限只会把
+         * "正在验证、还没出结果"的那几轮掐掉。显式设了 SHE_CLUSTER_AUTO_STALL>0 才按老规矩。
+         */
+        if (settings.stallRounds > 0 && stalls >= settings.stallRounds) {
+          stopReason = `连续 ${stalls} 轮没有新的实质产出`;
+          break;
+        }
       }
       const decision = decideContinuation({
         roundMessages: roundMsgs,

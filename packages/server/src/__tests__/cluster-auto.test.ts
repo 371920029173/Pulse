@@ -332,15 +332,47 @@ describe('runClusterWave automation', () => {
     assert.match(room.messages[room.messages.length - 1].content, /自动续跑结束/);
   });
 
-  it('stops after two rounds without substantive output', async () => {
-    const { store, roomId, config } = setup();
-    const calls: Call[] = [];
-    const room = await runClusterWave({
-      config, store, roomId, goal: 'g',
-      providerFactory: fakeFactory((c) => ({ content: c.name === '领导' ? '@研发 继续' : '收到，马上做。' }), calls),
-    });
-    assert.equal(calls.filter((c) => c.name === '研发').length, 3); // wave + 2 auto rounds
-    assert.match(room.messages[room.messages.length - 1].content, /连续 2 轮没有新的实质产出/);
+  it('stops after two rounds without substantive output —— 仅在显式开启时', async () => {
+    /*
+     * 这条行为现在是**显式开启**的（SHE_CLUSTER_AUTO_STALL=2）。默认不启用：
+     * 判断"有没有进展"是模型自己的事，轮级门限会把"正在验证、还没出结果"的那几轮掐掉。
+     */
+    process.env.SHE_CLUSTER_AUTO_STALL = '2';
+    try {
+      const { store, roomId, config } = setup();
+      const calls: Call[] = [];
+      const room = await runClusterWave({
+        config, store, roomId, goal: 'g',
+        providerFactory: fakeFactory((c) => ({ content: c.name === '领导' ? '@研发 继续' : '收到，马上做。' }), calls),
+      });
+      assert.equal(calls.filter((c) => c.name === '研发').length, 3); // wave + 2 auto rounds
+      assert.match(room.messages[room.messages.length - 1].content, /连续 2 轮没有新的实质产出/);
+    } finally {
+      delete process.env.SHE_CLUSTER_AUTO_STALL;
+    }
+  });
+
+  it('默认不因为"看起来没进展"而停下（由轮数上限兜住）', async () => {
+    process.env.SHE_CLUSTER_AUTO_MAX = '3';
+    try {
+      const { store, roomId, config } = setup();
+      const calls: Call[] = [];
+      const room = await runClusterWave({
+        config, store, roomId, goal: 'g',
+        providerFactory: fakeFactory((c) => ({ content: c.name === '领导' ? '@研发 继续' : '收到，马上做。' }), calls),
+      });
+      assert.ok(
+        calls.filter((c) => c.name === '研发').length >= 3,
+        '默认应继续跑（不被 stall 门限掐掉）',
+      );
+      assert.doesNotMatch(
+        room.messages[room.messages.length - 1].content,
+        /没有新的实质产出/,
+        '默认不该出现 stall 停止原因',
+      );
+    } finally {
+      delete process.env.SHE_CLUSTER_AUTO_MAX;
+    }
   });
 
   it('respects SHE_CLUSTER_AUTO_MAX', async () => {
