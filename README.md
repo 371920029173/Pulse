@@ -47,6 +47,20 @@ embedding), stores shards under `.she/map/`, and answers six questions through o
   first heading, leading comment) and skips files with no signal; `map:note` writes them one by one or in bulk.
   Directories without their own label are summarised from their children ("A, B 等 N 项"), so you never have to
   hand-label 640 files to see the shape.
+- **Delegation is a first-class loop.** `task_spawn` can run children in the background
+  (`background: true` — it returns immediately and the child keeps going as its own session), and
+  `task_status` reports what each one is doing: running / finished / failed, straight from the same
+  task board the UI shows. Concurrency is a pool (6 by default, `SHE_SUBAGENT_CONCURRENCY`), not an
+  unbounded `Promise.all`. Before a child starts, the parent narrows the job with the map and the
+  knowledge base — which files it probably touches, what else is affected, which checks to run, and
+  the titles of the three most related memories — so a child does not re-explore the repository from
+  zero.
+- **Waits name what they wait for.** `shell_wait` takes `ids` plus `mode: "all" | "any"`, so
+  "wait until these three finish" replaces "sleep for N seconds"; anything still running is named
+  rather than silently assumed done.
+- **Long jobs stop when the model decides, not on a round counter.** The "two rounds with no
+  progress" rule is gone from both the main turn loop and the group (cluster) loop: the run continues
+  while the plan still has open steps and stops on completion or on the round ceiling.
 - **It says what it cannot see.** Contract extraction cannot resolve URLs built from variables —
   those are counted as *not reconcilable* (120 in this repository) instead of being reported as clean.
   With zero labels, `verify` caps its score at 30 and states that intent search is unavailable,
