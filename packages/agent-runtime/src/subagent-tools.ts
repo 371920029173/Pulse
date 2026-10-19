@@ -891,8 +891,19 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
 
     // Run concurrently: independent subtasks are exactly the case where waiting
     // in sequence wastes wall-clock time.
-    const results = await Promise.all(
-      tasks.map(async (t) => {
+    /*
+     * 并发池：默认 6（`SHE_SUBAGENT_CONCURRENCY` 可调，1..16）。
+     * 超出排队；结果按原索引写回，顺序与 tasks 一致。
+     */
+    const limit = Math.max(1, Math.min(16, Number(process.env.SHE_SUBAGENT_CONCURRENCY) || 6));
+    const results: Array<Awaited<ReturnType<SubagentRunner['run']>>> = new Array(tasks.length);
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const i = next;
+        next += 1;
+        if (i >= tasks.length) return;
+        const t = tasks[i]!;
         opts?.onProgress?.({ phase: 'start', description: t.description });
         try {
           /*
@@ -913,14 +924,15 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
             }),
           });
           opts?.onProgress?.({ phase: 'done', description: t.description, ok: r.ok });
-          return r;
+          results[i] = r;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           opts?.onProgress?.({ phase: 'done', description: t.description, ok: false });
-          return { description: t.description, ok: false, result: `子任务异常: ${msg}`, handoff: t.handoff };
+          results[i] = { description: t.description, ok: false, result: `子任务异常: ${msg}`, handoff: t.handoff } as Awaited<ReturnType<SubagentRunner['run']>>;
         }
-      }),
-    );
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, () => worker()));
 
     const lines: string[] = [`完成 ${results.length} 个子任务`, ''];
     for (const r of results) {

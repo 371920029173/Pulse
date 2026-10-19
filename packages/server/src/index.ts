@@ -1,4 +1,4 @@
-import { mapTree, mapVerify } from '@she/map';
+import { mapScope, mapTree, mapVerify } from '@she/map';
 import { createServer } from 'node:http';
 import os from 'node:os';
 import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, rmSync, copyFileSync, cpSync, renameSync, openSync, readSync, closeSync } from 'node:fs';
@@ -1143,7 +1143,49 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
        * it was holding at that moment is gone. Told the number, it can choose to conclude early —
        * which is the whole difference between "no result" and "a partial result with its evidence".
        */
-      const brief = composeHandoffPrompt(req, {
+      /*
+       * 定向上下文：父级用地图 + KB 把范围收窄后再交给孩子。
+       *
+       * 孩子看不到这条对话，让它从零摸一遍仓库是最大的浪费；但把整张图塞过去同样错 ——
+       * 这里只给"这个任务可能落在哪几个文件""会波及什么""该跑哪些 check"，
+       * 再附 3 条相关知识的标题（全文让它自己 kb_query）。两段都可失败，失败就少一段。
+       */
+      const focused = (() => {
+        try {
+          const scope = mapScope(directory, req.description, { maxFiles: 40 });
+          const lines: string[] = [];
+          if (scope.seeds.length) {
+            lines.push("地图定位（父级收窄的结果，未复核）:");
+            for (const s of scope.seeds.slice(0, 8)) lines.push("- " + s.path + "  " + (s.label ?? ""));
+            if (scope.files.length > scope.seeds.length) {
+              lines.push("- 会被波及：" + scope.files.slice(scope.seeds.length, 12).join("、"));
+            }
+            if (scope.gates.length) lines.push("- 要跑：" + scope.gates.map((g: { check: string }) => g.check).join(", "));
+            lines.push("以上来自地图，可能过期；以你读到的代码为准。");
+          }
+          return lines.join("\n");
+        } catch {
+          return "";
+        }
+      })();
+      const relatedKb = (() => {
+        try {
+          /* KB query 的参数是 budget（不是 limit），返回形状带包装 —— 拿不到就当没有。 */
+          const res = engineFor(childKbPath).query(req.description, { budget: 4000 }) as unknown as {
+            results?: Array<{ title?: string }>;
+            hits?: Array<{ title?: string }>;
+          };
+          const hits = (res.results ?? res.hits ?? []).slice(0, 3);
+          const titles = hits.map((h) => h.title).filter((t): t is string => !!t);
+          if (!titles.length) return "";
+          return "知识库里可能相关（只看标题，正文自己 kb_query）:\n" + titles.map((t) => "- " + t).join("\n");
+        } catch {
+          return "";
+        }
+      })();
+      const brief = composeHandoffPrompt(
+        { ...req, prompt: [req.prompt, focused, relatedKb].filter(Boolean).join("\n\n") },
+        {
         workdir: directory,
         isolated: Boolean(worktree),
         kb: kbCarry,
