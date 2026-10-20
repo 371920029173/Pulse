@@ -44,6 +44,8 @@ export function wiringLabel(symbols: string[]): string {
 }
 const REQUIRE = /\brequire\(\s*['"]([^'"]+)['"]\s*\)/;
 const DYNAMIC = /\bimport\(\s*['"]([^'"]+)['"]\s*\)/;
+/** C/C++ 的 #include "x.h"：只认引号形式，系统头 <stdio.h> 不算本仓文件。 */
+const INCLUDE = /^\s*#\s*include\s+"([^"]+)"/;
 
 const CANDIDATE_EXT = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.json', '/index.ts', '/index.tsx', '/index.js'];
 
@@ -99,6 +101,10 @@ export interface ImportScanResult {
   unresolved: number;
 }
 
+/** C/C++ 文件：走 #include 抽取，不跑 JS 的 import 解析。 */
+function isCOnly(path: string): boolean {
+  return /\.(c|h|cc|cpp|cxx|hpp|hh|ino)$/.test(path);
+}
 export function scanImports(
   root: string,
   files: Array<{ path: string; lang?: string }>,
@@ -113,7 +119,8 @@ export function scanImports(
   let unresolved = 0;
 
   for (const f of files) {
-    if (!/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f.path)) continue;
+    const isCFile = /\.(c|h|cc|cpp|cxx|hpp|hh|ino)$/.test(f.path);
+    if (!/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f.path) && !isCFile) continue;
     let text: string;
     try {
       text = readFile(f.path);
@@ -122,6 +129,36 @@ export function scanImports(
     }
     if (text.length > 512 * 1024) continue;
     const lines = text.split(/\r?\n/);
+
+    if (isCOnly(f.path)) {
+      /* C/C++：按行抽 #include "…"，在「同目录」与「仓根相对」两种解释里找一个真实存在的。 */
+      for (let i = 0; i < lines.length; i += 1) {
+        const m = (lines[i] ?? "").match(INCLUDE);
+        if (!m) continue;
+        const spec = m[1]!;
+        const candidates = [posix.normalize(posix.join(posix.dirname(f.path), spec)), spec];
+        const target = candidates.find((c) => exists(c));
+        if (!target) {
+          unresolved += 1;
+          continue;
+        }
+        const base = target.split("/").pop() ?? target;
+        edges.push({
+          from: f.path,
+          edge: {
+            from: f.path,
+            to: target,
+            kind: "import",
+            confidence: "certain",
+            evidence: [f.path + ":" + (i + 1) + " #include \"" + spec + "\""],
+            symbols: [base],
+            label: "接线 " + base,
+          },
+        });
+      }
+      continue;
+    }
+
     for (const { spec, line } of extractImports(text)) {
       /* 纯类型导入：行内有 import type，或该项写成 { type X }。只影响重编译，不影响运行时。 */
       const srcLine = lines[line - 1] ?? '';
