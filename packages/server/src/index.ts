@@ -867,6 +867,34 @@ function recoveryInfos(...groups: StateRecoveryInfo[][]): StateRecoveryInfo[] {
 }
 
 
+/**
+ * 会话 transcript 缓冲：sessionId → 最近一次快照。
+ *
+ * 补的是"跑着但还没落盘"的中间态：子代理只在结束时写会话记录，而它每 5 秒的心跳
+ * 本来就要读一次自己的历史 —— 顺手把那份存下来，页面就能看到"此刻到什么程度"。
+ * 也顺带减少重复序列化：同一会话的连续读取直接命中缓冲。
+ */
+const transcriptCache = new Map<string, { messages: unknown[]; at: number }>();
+
+/** 读一份能给出去的历史：活 agent 优先，其次缓冲，最后才是落盘记录。 */
+function historyFor(id: string): unknown[] | null {
+  const live = agents.get(id);
+  if (live) {
+    try {
+      const h = live.historyForDisk();
+      if (h.length) {
+        transcriptCache.set(id, { messages: h, at: Date.now() });
+        return h;
+      }
+    } catch {
+      /* 读不到就往下走 */
+    }
+  }
+  const cached = transcriptCache.get(id);
+  if (cached) return cached.messages;
+  return null;
+}
+
 function findSession(id: string): { store: SessionStore; session: ChatSession } | null {
   /*
    * The one place every session read passes through, so the one place tenancy has to be enforced.
@@ -1511,6 +1539,10 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
         ? setInterval(() => {
           try {
             const p = readChildProgress(child.getHistory());
+        /* 顺手把这份快照存进缓冲：跑着也能看见（见 historyFor）。 */
+        try {
+          transcriptCache.set(childSession.id, { messages: child.historyForDisk(), at: Date.now() });
+        } catch { /* 快照失败不影响进度上报 */ }
             hooks.progress?.({
               description: req.description,
               elapsedMs: Date.now() - started,
@@ -3377,7 +3409,13 @@ const STREAM_PERSIST_MS = 10_000;
    */
   router.get('/api/chat/history', (req, res) => {
     const agent = agentFor(req, undefined, { createIfMissing: false });
-    const messages = agent.getHistory();
+    const sid = sessionIdOf(req);
+    /*
+     * 活 agent 为空时（典型：子代理刚起、或已结束但内存实例被回收）用缓冲补上。
+     * 这一层就是"服务端与页面之间的缓冲"：页面读它，不必每次都重算整段历史。
+     */
+    const live = agent.getHistory();
+    const messages = live.length ? live : (sid ? historyFor(sid) ?? live : live);
     sendJSON(res, {
       session_id: sessionIdOf(req),
       messages,
@@ -5636,15 +5674,10 @@ router.get('/api/fs/tree', (req, res) => {
      * 只读落盘就会出现"子代理在干活、点开却是空白页"和"回来发现上下文少了一截"——两个都是显示
      * 层的假象，后台其实都收到了。子代理更明显：它由 runner 直接构造，没人替它落盘。
      */
-    const live = agents.get(params.id);
-    if (live) {
-      try {
-        const messages = live.historyForDisk();
-        sendJSON(res, { ...found.session, messages });
-        return;
-      } catch {
-        /* 拿不到就退回落盘那份，不让一个读接口把整个页面打崩 */
-      }
+    const fromLive = historyFor(params.id);
+    if (fromLive) {
+      sendJSON(res, { ...found.session, messages: fromLive });
+      return;
     }
     sendJSON(res, found.session);
   });
