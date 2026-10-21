@@ -336,6 +336,7 @@ command: `pnpm check:offline`. It is what CI runs, and it needs no API key.
 | [docs/retrieval.md](docs/retrieval.md) | How structural-resonance retrieval works, and its measured limits |
 | [docs/testing.md](docs/testing.md) | Test inventory, the checks that gate a change, and how to run them |
 | [docs/project-map-schema.md](docs/project-map-schema.md) | The project map: node identity (branch × path), the three views, evidence rules for contract edges, storage and budget contract |
+| [docs/project-map-manual.md](docs/project-map-manual.md) | How to use it: entries, the six queries, wiring, labelling, adopt, known gaps |
 | [docs/custom-stylesheet.md](docs/custom-stylesheet.md) | Restyling the UI, and how a bad stylesheet is made recoverable |
 | [docs/plugins.md](docs/plugins.md) | Writing a plugin: `ctx` API, permissions, debugging |
 | [docs/feishu-remote.md](docs/feishu-remote.md) | Phone remote control in 5 minutes |
