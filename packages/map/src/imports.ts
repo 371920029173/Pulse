@@ -11,6 +11,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, posix } from 'node:path';
 import type { MapEdge } from '@she/shared';
+import { extractorFor } from './langs.js';
 
 const FROM = /\bfrom\s+['"]([^'"]+)['"]/;
 
@@ -119,8 +120,9 @@ export function scanImports(
   let unresolved = 0;
 
   for (const f of files) {
-    const isCFile = /\.(c|h|cc|cpp|cxx|hpp|hh|ino)$/.test(f.path);
-    if (!/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f.path) && !isCFile) continue;
+    const isJsFile = /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f.path);
+    /* 非 JS：交给语言表判断（C/C++、Python、Go、Rust、Ruby、Java/Kotlin、C#、PHP）。 */
+    if (!isJsFile && !extractorFor(f.path)) continue;
     let text: string;
     try {
       text = readFile(f.path);
@@ -130,29 +132,42 @@ export function scanImports(
     if (text.length > 512 * 1024) continue;
     const lines = text.split(/\r?\n/);
 
-    if (isCOnly(f.path)) {
-      /* C/C++：按行抽 #include "…"，在「同目录」与「仓根相对」两种解释里找一个真实存在的。 */
-      for (let i = 0; i < lines.length; i += 1) {
-        const m = (lines[i] ?? "").match(INCLUDE);
-        if (!m) continue;
-        const spec = m[1]!;
-        const candidates = [posix.normalize(posix.join(posix.dirname(f.path), spec)), spec];
-        const target = candidates.find((c) => exists(c));
-        if (!target) {
+    /*
+     * 非 JS/TS：按扩展名查语言表（C/C++、Python、Go、Rust、Ruby、Java/Kotlin、C#、PHP）。
+     * 解析不到真实文件就不建边（计入 unresolved）—— 这一点与 JS 那条路径同一条纪律。
+     */
+    const extractor = extractorFor(f.path);
+    if (extractor) {
+      const dir = posix.dirname(f.path);
+      for (const ref of extractor.extract(f.path, text)) {
+        const target = ref.candidates
+          .map((c) => (c.endsWith('/') ? null : c))
+          .find((c) => c && exists(c)) ?? null;
+        /* Go 的 import 指向目录：退一步找同名的「目录里第一个 .go」，只认唯一一个。 */
+        const dirTarget = target ?? (() => {
+          const cand = ref.candidates.find((c) => c.endsWith('/'));
+          if (!cand) return null;
+          const d = cand.replace(/\/$/, '');
+          /* 同扩展名（.go 对 .go、.cs 对 .cs），且目录里只有一个才算确定。 */
+          const ext = f.path.slice(f.path.lastIndexOf('.'));
+          const hits = files.filter((x) => x.path.startsWith(d + '/') && x.path.endsWith(ext));
+          return hits.length === 1 ? hits[0]!.path : null;
+        })();
+        if (!dirTarget) {
           unresolved += 1;
           continue;
         }
-        const base = target.split("/").pop() ?? target;
+        const base = dirTarget.split('/').pop() ?? dirTarget;
         edges.push({
           from: f.path,
           edge: {
             from: f.path,
-            to: target,
-            kind: "import",
-            confidence: "certain",
-            evidence: [f.path + ":" + (i + 1) + " #include \"" + spec + "\""],
+            to: dirTarget,
+            kind: 'import',
+            confidence: 'certain',
+            evidence: [f.path + ':' + ref.line + ' ' + ref.spec],
             symbols: [base],
-            label: "接线 " + base,
+            label: '接线 ' + base,
           },
         });
       }
