@@ -110,6 +110,7 @@ export function mapVerify(root: string): VerifyReport {
     `  黑暗角落 ${dark.length}（${Math.round(darkRate * 100)}%：没有任何标签的区域）`,
     `  悬空边 ${danglingCount}｜孤立注记 ${orphanNotes}｜坏分片 ${brokenShards}`,
     `  契约 确定 ${contractCertain}｜潜在威胁 ${contractThreats}`,
+    `  接线 ${index.wiringEdges ?? 0} 条（带符号名）｜未解析 ${index.wiringUnresolved ?? 0} 条引用`,
   ];
   if (worst.length) {
     lines.push('  最该补（按引用数）：');

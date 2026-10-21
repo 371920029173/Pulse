@@ -153,6 +153,10 @@ export interface MapIndex {
   contractUnresolved?: number;
   /** 真正的顶层目录名（摘要给模型看的时候用；不含根散文件）。 */
   topDirs?: string[];
+  /** 接线：带符号名的 import 边数量。 */
+  wiringEdges?: number;
+  /** 接线：抽到了引用、但解析不到真实文件的条数（"没接上"要能看见）。 */
+  wiringUnresolved?: number;
   /** 排除规则的快照，便于审计"为什么这个文件不在图上"。 */
   excludes: { patterns: string[]; maxFileBytes: number };
   updatedAt: string;

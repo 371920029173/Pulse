@@ -48,12 +48,16 @@ node scripts/map-build.mjs packages   # 只建一个子树（渐进式接入）
 | `map:query impact <路径…>` | 反向依赖（**值导入**＝会运行出错 / **仅类型**＝只需重编译）+ 闸门 + 相关测试 |
 | `map:query wiring <文件>` \| `--symbol <名字>` | 接线：A 用了 B 里的哪个符号 |
 | `map:query contracts` | HTTP 契约：确定 / 潜在威胁（带反证条件）/ 无法对账 |
-| `map:query verify` | 可信度：过期率 / 黑暗角落 / 悬空边 / 坏分片 |
+| `map:query verify` | 可信度：过期率 / 黑暗角落 / 悬空边 / 坏分片；**接线 `N 条（带符号名）｜未解析 M 条引用`** |
 
 ### 接线是什么
 `import { c } from './b'` → 边 **`A --接线 c--> B`**。支持的写法：命名导入（别名算源名）、default、
 `* as ns`、`import type`；C 的 `#include "x.h"` 记 `接线 x.h`（系统头不建边）。
 还有 Python、Go、Rust、Ruby、Java/Kotlin、PHP（C# 暂缺，见 §9）。
+
+**「没接上」是可见的**：`map:query verify` 会报 `接线 N 条｜未解析 M 条引用`。
+未解析 = 抽到了引用、但按「同目录 / 仓根相对」都找不到真实文件（例如 C 的 `-I` 目录、
+跨包的绝对路径）。解析不到就不建边——**宁缺不猜**，而且这个数字能告诉你要不要补。
 
 ## 5. 标注（让它越来越有用）
 

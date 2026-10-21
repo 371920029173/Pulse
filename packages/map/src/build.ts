@@ -169,7 +169,7 @@ export function buildMap(opts: BuildOptions): BuildResult {
     return text;
   };
 
-  const { edges: importEdges } = scanImports(
+  const { edges: importEdges, unresolved: wiringUnresolved } = scanImports(
     root,
     files.map((f) => ({ path: f.path, lang: f.lang })),
     views.packages.map((p) => ({ name: p.name, root: p.root })),
@@ -312,6 +312,8 @@ export function buildMap(opts: BuildOptions): BuildResult {
     },
     views,
     contractUnresolved: contracts.unresolved,
+    wiringEdges: importEdges.filter((e) => e.edge.label).length,
+    wiringUnresolved,
     topDirs: [...new Set(files.map((f) => (f.path.includes('/') ? f.path.slice(0, f.path.indexOf('/')) : '')).filter(Boolean))].sort(),
     excludes: { patterns: [EXCLUDE_DIR.source, SECRET.source], maxFileBytes: MAX_FILE_BYTES },
     updatedAt: now,
