@@ -24,3 +24,11 @@ Use when skill profile is **dev** or the user is building/debugging software, in
 - 超过 3 步的改动先 `plan_create`，每步写清怎么验收（跑测试 / `lsp_diagnostics`）。
 - 一步验收过了就 `plan_update` 标 done，直接做下一步；不要做完一步就停下来汇报。
 - 卡住标 blocked 并写原因；需要用户拍板的步骤建计划时就标 `on_failure: ask`。
+
+## 改代码时先看地图，再决定派不派活
+
+- 接到"改某个行为"：先 `map_scope "<任务>"` 拿到工作集（锚点 → 会被波及 → 要跑哪些 check），再动手；
+- 改被多人引用的文件：先 `map_impact <路径>`（**值导入**那栏才是会运行出错，"仅类型"只是重编译）；
+- 查"谁用了这个符号"：`map_wiring --symbol <名字>`；
+- 宽而杂的活（翻很多文件、跑很多命令）可以先 `task_spawn({ background: true })`，回来 `task_status({ ids, wait: true })` 收结果；
+- 长程：计划里还有未完成步骤就继续，不要因为"看起来没进展"自己停。
