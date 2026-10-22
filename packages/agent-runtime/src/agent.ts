@@ -2109,7 +2109,19 @@ export class Agent {
      * 地图摘要与【自动召回】同位置（请求末尾）：不破坏前缀缓存，也不需要模型"想起来"。
      * SHE_MAP_DIGEST=0 可关。
      */
-    const digest = process.env.SHE_MAP_DIGEST === '0' ? '' : mapDigest(this.config.workspace.root, 40);
+    /*
+     * 地图摘要只是锦上添花，**绝不能让整轮失败**。
+     * 实测事故（2026-10-22）：地图正在重建时 index.json 被读到一半 → JSON.parse 抛错 →
+     * 每一轮都不出字，重启后自己好了。所以这里必须吞掉异常。
+     */
+    let digest = '';
+    if (process.env.SHE_MAP_DIGEST !== '0') {
+      try {
+        digest = mapDigest(this.config.workspace.root, 40);
+      } catch {
+        digest = '';
+      }
+    }
     if (!this.autoRecallBlock && !digest) return messages;
     const out = messages.slice();
     const tail = [this.autoRecallBlock, digest].filter(Boolean).join("\n\n");
