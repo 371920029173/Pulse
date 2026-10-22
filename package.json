@@ -87,7 +87,8 @@
     "map:revert": "node scripts/map-revert.mjs",
     "map:query": "node scripts/map-query.mjs",
     "map:note": "node scripts/map-note.mjs",
-    "map:suggest": "node scripts/map-suggest.mjs"
+    "map:suggest": "node scripts/map-suggest.mjs",
+    "gh": "node scripts/github.mjs"
   },
   "engines": {
     "node": ">=20"

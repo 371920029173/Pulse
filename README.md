@@ -1,381 +1,161 @@
-# Pulse (SHE v2)
+# Pulse（SHE v2）
 
-**A local coding agent with a group-structure knowledge base, structural-resonance retrieval —
-**not vector RAG** — and automatic context compaction, so long sessions stay affordable. Runs on your
-machine, talks to any OpenAI-compatible endpoint or Anthropic, and sends nothing anywhere else.
+一个**本地优先**的编码智能体：跑在你自己的机器上，用你自己的模型 key，工作区就是它的沙箱。
+它把"改代码"当作一件可验证的事——每一步有工具、有证据、有门禁，而不是一段看起来很对的文字。
 
-> 本地编程智能体：组结构记忆 + 脉冲种子结构共振检索（不是向量 RAG）。全本地运行，只与你配置的
-> 模型接口通信。
-
----
-
-## 本次更新：修复了一些已知问题并进行大幅升级与优化
-
-**Large projects: the map the model was missing**
-
-In a big repository the hard part is not writing code — it is knowing *what is where*. `@she/map`
-indexes the workspace straight from `git ls-files` (path + blob sha, no extra dependency, no
-embedding), stores shards under `.she/map/`, and answers six questions through one surface:
-
-| | question it answers |
-|---|---|
-| `tree` | what the whole repository looks like — a full skeleton in ~380 tokens |
-| `lookup` | what one file is, which groups it belongs to, its symbol outline, local notes, and the knowledge-base groups that mention it |
-| `whereis` | "I want to change X" → where X lives (two-level narrowing: score shards, then nodes) |
-| `scope` | a working set for a task: anchors → what breaks → which gates to run |
-| `impact` | reverse import closure (file-level *and* package-level) plus the checks that will go red |
-| `contracts` | HTTP routes ↔ front-end calls, split into **certain** / **potential threats** / **not reconcilable** |
-| `wiring` | which symbol each import edge carries — C/C++, TypeScript/JavaScript, Python, Go, Rust, Ruby, Java/Kotlin and PHP (`verify` reports both the wired count and the **unresolved** count) — "A uses `c` from B" is an edge named *接线 c*, queryable by file **or by symbol name** (`map_wiring` tool, `map_lookup`, `map_impact`, and `pnpm map:query wiring`; the panel is tree-only for now) |
-
-- **Groups are a DAG, not a tree.** A file belongs to a directory axis, a package axis, a layer axis
-  and any number of feature groups at the same time — "which subsystem" and "which feature" are
-  different questions.
-- **Twin files are first-class.** The same path on two branches is two nodes, each keeping its own
-  labels, notes and knowledge bindings, so a feature branch does not overwrite what main knows.
-- **Labels are tied to content, not to time.** Every label records the blob sha it described; when the
-  content changes it is marked stale instead of being silently trusted, and `verify` reports the
-  stale rate, the dark corners (never labelled), dangling edges, orphan notes and broken shards.
-- **Local revert is a four-step safety shell**: plan (read-only) → single-use ticket (hash checked) →
-  snapshot → `git restore`. Files with uncommitted changes block by default; reverting a file that
-  does not exist in the target revision is refused outright.
-- **The tools are always there; the map is per workspace.** `map_*` live in the built-in tool table, so every
-  workspace, session and sub-agent has them; each workspace gets its own `.she/map` (built automatically on first
-  use — or point `SHE_MAP_PATH` at a shared directory, the way `SHE_KB_PATH` does for the knowledge base).
-  A short `【工作区地图】` digest is appended to the end of every request, so the model does not have to remember
-  the map exists (append-only, so the prompt cache keeps hitting).
-- **Labelling 600 files is not a hand job.** `map:suggest` proposes candidates from the content itself (test names,
-  first heading, leading comment) and skips files with no signal; `map:note` writes them one by one or in bulk.
-  Directories without their own label are summarised from their children ("A, B 等 N 项"), so you never have to
-  hand-label 640 files to see the shape.
-- **Delegation is a first-class loop.** `task_spawn` can run children in the background
-  (`background: true` — it returns immediately and the child keeps going as its own session), and
-  `task_status` reports what each one is doing: running / finished / failed, straight from the same
-  task board the UI shows. Concurrency is a pool (6 by default, `SHE_SUBAGENT_CONCURRENCY`), not an
-  unbounded `Promise.all`. Before a child starts, the parent narrows the job with the map and the
-  knowledge base — which files it probably touches, what else is affected, which checks to run, and
-  the titles of the three most related memories — so a child does not re-explore the repository from
-  zero.
-- **Waits name what they wait for.** `shell_wait` takes `ids` plus `mode: "all" | "any"`, so
-  "wait until these three finish" replaces "sleep for N seconds"; anything still running is named
-  rather than silently assumed done.
-- **Long jobs stop when the model decides, not on a round counter.** The "two rounds with no
-  progress" rule is gone from both the main turn loop and the group (cluster) loop: the run continues
-  while the plan still has open steps and stops on completion or on the round ceiling.
-- **It says what it cannot see.** Contract extraction cannot resolve URLs built from variables —
-  those are counted as *not reconcilable* (120 in this repository) instead of being reported as clean.
-  With zero labels, `verify` caps its score at 30 and states that intent search is unavailable,
-  rather than showing a confident number.
-- **Use it as a process, not a tool.** `.she/skills/general/project-map.md` describes when to build,
-  when to look something up, when to annotate while working — and when not to trust the map.
-
-The storage contract lives in `docs/project-map-schema.md` and is guarded by `check:map` (part of
-`pnpm check:offline`). The interface is experimental: fields may change as it gets used.
-
-**Reliability**
-- A conversation can no longer get stuck refusing every message. The "is this chat busy" bit was
-  local and could go stale for good (a quietly dead stream left it true), while the turn lock lives
-  on the server — so the box showed Send, every attempt came back 409, and there was no Stop button
-  anywhere. Sending now asks the server first: idle heals and sends for real, busy appends your text
-  to the running turn and shows it with a Stop button.
-- Stop now interrupts a pending tool wait. `shell_wait` could hold a turn for up to ten minutes, so
-  stopping (or asking the agent to stop) did nothing until it returned. The wait ends immediately and
-  says so honestly: it is the wait that stopped, the job keeps running — `shell_kill` is how you end it.
-- The 90-second "no progress" notice is gone: it fired on the normal path (a tool call is minutes long
-  by design). The composer's Stop button and the double-Enter shortcut are the way out.
-- `lsp_diagnostics` no longer hangs for 15 s on a file that was already opened for go-to-definition
-  (the diagnostics pushed on open were cached under the wrong content). That hang used to trip the
-  stuck-loop guard and end a whole turn.
-- Go-to-definition and friends no longer land one column off on files that start with a UTF-8 BOM.
-- `reflection_check` stops flagging provenance notes ("来源：…", "see: …") as forbidden targets, and
-  its budget check now compares tool calls with tool calls (8 per active plan step). Drift detection
-  also counts an action as on track when it matches the current plan step, and bookkeeping calls
-  (plans, reflection, error book, memos) no longer count as drifting.
-- `grep` globs are real globs: `*`, `**`, `?`, `[abc]`, `{ts,tsx}`. `*.json*` used to match nothing, silently.
-- **State files survive an unclean shutdown.** Writes now flush to disk *before* the rename that
-  publishes them — NTFS only orders metadata, so a rename can land while the bytes are still in the
-  write cache; a crash during one save (measured 2026-10-11) left a 21 MB `sessions.json` present at
-  full size with its last 43% filled with NULs. And when a file is damaged anyway, the loader now
-  **salvages everything provably complete from it** and only then moves the original aside, instead
-  of starting from an empty store. `pnpm check:durability` keeps both in place.
-
-**Automation**
-- Plans now drive the agent: while a plan has unfinished steps it keeps going on its own, and stops
-  when a step needs the user, when it asks a question, or after two rounds without progress
-  (`SHE_PLAN_AUTOPILOT=0` turns this off).
-- A scheduled task that fires while its conversation is busy is queued and runs as soon as the turn
-  ends, instead of failing in 8 ms and — for a one-shot task — disabling itself.
-- "Run now" on a one-shot task no longer consumes its real scheduled fire. Finished one-shot tasks
-  are pruned after 7 days and hidden from `schedule_list` by default.
-
-**Interface and knowledge**
-- Markdown in chat renders tables (with alignment, horizontal scroll for wide ones), numbered lists,
-  block quotes, rules and all heading levels. Tables used to collapse into one line of pipes.
-- Leaving a chat mid-turn and coming back re-attaches to the live stream, so reasoning keeps
-  streaming instead of appearing all at once when the step ends.
-- Several workspaces can share one knowledge base (Settings, then the shared-KB section), and two
-  knowledge bases can be merged.
-- Importing from Cursor, Claude and Codex keeps a copy of the original context under `.she/imports/`.
-- Error book: a call made to fail on purpose can pass `"expect_failure": true` and stays out of the
-  book; the list header shows the real total ("显示 5 / 共 6"); entries blocked by policy say what to
-  do for that specific reason.
-- Knowledge base entries can be edited and retired, and upserting an existing title no longer creates
-  a silent duplicate, so an outdated conclusion stops showing up in search. For now this is available
-  through the agent tools and the API only; the interface has no buttons for it yet.
-- Writing into an auto-split `part-N` group goes to its parent group instead, and a split group that
-  fills up again gets a sibling `part` rather than another nested level. Group paths no longer repeat.
-- Shorter tool results for new calls: `plan_update` returns only the changed step, progress and the
-  next step (`plan_get` shows the whole plan), and `kb_query` lists the top 5 with short summaries
-  (`kb_get` fetches the full text by id). History is never rewritten, so the prompt cache keeps hitting.
-
-**Housekeeping**
-- State files are no longer rewritten when nothing changed, and a streaming turn persists every ten
-  seconds instead of every two. A single save used to rewrite the whole session store (5.3 MB
-  measured); on a workspace in an indexed folder that also meant continuous indexer and antivirus work.
-- Default skills now live in a version-controlled `skills/` folder. `.she/` is gitignored, so a fresh
-  clone previously had no skills at all.
-- Stale `4577` port defaults (inside a Windows excluded port range) were changed to `5577`, and
-  `env_check` no longer tells you to copy `.env.example` when your environment is already set.
-
-## Download
-
-**[Latest release →](https://github.com/371920029173/Pulse/releases/latest)**
-
-| File | What it is |
-|---|---|
-| `Pulse-<ver>-win-x64.exe` | Windows installer — Start Menu entry, clean uninstall |
-| `Pulse-Portable-<ver>.exe` | Windows, no installation — run it from anywhere |
-
-> **The installer is not code-signed, so Windows will warn you.** In the SmartScreen dialog click
-> **More info** → **Run anyway**. Windows 11 is stricter about this than Windows 10, and the browser
-> may also ask you to "Keep" the download. SHA256 checksums are in the release notes.
-
-Node.js is **not** required for the packaged build — the runtime bundles its own.
-
-## Platform status
-
-| Platform | Status |
-|---|---|
-| Windows 10 | Developed and run on it daily |
-| Linux | **Verified** — CI runs the full offline gate on `ubuntu-latest`, and `check:wsl` runs the POSIX launcher (`./she.sh status`) plus the dependency-free checks inside WSL on this machine |
-| Windows 11 | Expected to work, **never run.** No version-specific code, and the font stacks prefer Win11's own fonts before falling back to bundled ones |
-| macOS | **Never run.** Portable code and a static audit only |
-
-## Quick start
-
-**From the release:** install, launch, pick a workspace folder (that folder is the sandbox boundary
-— pick a project, not your whole disk), then paste an API key in Settings.
-
-**From source:**
-
-```bash
-git clone https://github.com/371920029173/Pulse && cd Pulse
-pnpm install && pnpm build
-cp .env.example .env        # then edit .env
-pnpm dev                    # opens at http://127.0.0.1:5577
-```
-
-Or use the one-click launcher, which checks prerequisites, builds only when artefacts are stale,
-starts the backend, waits until it actually answers, then opens the window:
-
-```bash
-SHE.bat              # Windows: start (desktop window, falls back to the browser)
-SHE-stop.bat         # Windows: stop
-./she.sh             # macOS / Linux: start, stop, restart, status, --browser
-```
-
-Requires Node.js ≥ 20, pnpm, and Git.
-
-**CLI**, for scripted use — the same engine without the interface:
-
-```bash
-pnpm she chat                 # interactive chat with the agent
-pnpm she kb ingest <path>     # ingest files into the group KB
-pnpm she kb query <text>      # query with an activation trace
-pnpm she kb stats             # KB statistics
-pnpm she doctor               # check system health
-pnpm she server               # start the API server for the web UI
-```
-
-## Configure
-
-```env
-SHE_LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-your-key-here
-OPENAI_BASE_URL=https://api.deepseek.com    # any OpenAI-compatible endpoint
-OPENAI_MODEL=deepseek-chat
-```
-
-`.env` holds secrets; `she.config.yaml` holds structured settings (model registry, KB, sandbox,
-working windows). Both are optional — every value has a default. `SHE_CONFIG_FILE` relocates the
-config, and multiple models can be registered so you are not locked to one vendor.
-
-> **Permissions:** by default the agent asks before running dangerous commands.
-> `SHE_ALLOW_ALL_COMMANDS=true` lifts that entirely — and, because that statement means "run it on
-> this machine", it also steps real isolation aside (the settings page's 勾选 +「所有」tier is the
-> same thing). Read `.env.example` before enabling it.
-> The local API is **open by default**, so the binding address is the boundary. To require a token,
-> set `SHE_AUTH_TOKEN` (one user) — or `SHE_AUTH_TOKENS` for several (`acme:tokenA,beta:tokenB`, each
-> tenant seeing only its own sessions, nothing unlisted getting in). The desktop shell hands the token
-> to its windows by itself; see [Deployment](#deployment) before exposing this beyond the machine.
-
-## What it does
-
-- **Agent loop** — tool calling with streaming reasoning, runaway-loop detection, self-verification
-  before reporting success
-- **Tools** — files, shell, grep, git, knowledge base, plans, memos, reports, `ask_user`, subagents,
-  language-server code intelligence, scheduled tasks, web search/fetch (`web_search` + `web_fetch`,
-  key-free by default; every result names which source answered), computer use (Windows, opt-in)
-- **Context management that does not grow without bound** — near the model window the transcript
-  compacts into a frozen summary at a fixed point, so the request prefix stays byte-identical and the
-  prompt cache keeps hitting; the folded range is written to disk with retrieval anchors and can be read
-  back with `fs_read`. The window itself can be learned from the provider's own overflow message.
-- **Knowledge base** — group-structure memory with activation traces; every result explains *which
-  groups and edges* produced it. The agent can read the tree itself (`kb_groups`: groups, counts,
-  last-write dates), and every request carries a small automatic recall — at most 5 possibly-relevant
-  memories, appended at the END so the cache prefix survives
-- **Sandbox** — workspace jail including symlinks, destructive-command patterns, an optional
-  fail-closed command allowlist, and one-shot confirmation tickets bound to their arguments
-- **Sessions** — isolated conversations, history, closed-vs-deleted, checkpoint undo, message rewind,
-  and state files that are flushed before their rename, salvage the intact part of a damaged file,
-  and quarantine instead of clearing when unreadable
-- **Multi-agent** — discussion rooms with configurable roles per room
-- **Skills** — Markdown playbooks under `skills/` (`_common`, `dev`, `liberal`, `general`, `custom`),
-  picked by the active profile. A file with the same name in a workspace's `.she/skills/` overrides
-  the bundled one
-- **Integrations** — MCP servers, plugins (install from a catalog, scaffold, edit source), Feishu
-  remote control over a long connection (no exposed port)
-- **Interface** — Electron desktop (multi-window) and web; syntax highlighting, diffs, collapsible
-  reasoning, Chinese/English UI, and a user stylesheet
-- **Deployment** — cross-platform launcher, container image, configurable bind address and allowed hosts
-- **State that survives a restart** — drafts, the thinking level, the skill profile, shortcuts and
-  dismissed notices live in `.she/ui-state.json` (workspace-level) and are hydrated back into the page
-  before the first render. They are *not* in `localStorage` alone: the desktop opens each window on a
-  fresh OS-assigned port (this machine's Hyper-V reserved ranges make picking one unreliable), and
-  `localStorage` is isolated per origin — the port, and with it the state, used to change every launch
-- **Localisation** — the interface is written in Chinese and ships a complete English dictionary (1,067
-  entries, 100% of the source strings). `pnpm check:i18n` ratchets both ways: hardcoded Chinese may fall
-  and never rise, translated entries may rise and never fall
-
-## If a chat or a setting looks lost
-
-Nothing is deleted when a state file cannot be read. In order:
-
-1. **The intact part is recovered.** The loader keeps everything it can prove is complete — a
-   half-written file loses its torn tail, not its contents — and carries on with that.
-2. **The original bytes are moved aside**, never overwritten: the file lands next to the original as
-   `<name>.unusable-<timestamp>`, torn tail included, and the interface shows a notice with the full path.
-3. **The backup stays** until you remove it. A conversation that "disappeared" after an unclean
-   shutdown is usually sitting in one of these files.
-4. **The notice stays with it** — for the same reason. It is derived from the backup files on disk,
-   not from a flag in the running process, so closing the app does not make it disappear: the moment
-   you come back and ask where your conversations went, the answer is still on screen. It clears
-   itself when the backup does — delete the file, or rename it back to restore by hand.
-
-To restore by hand: quit Pulse, rename the `.unusable-…` file back over the original name, start again.
-These files turn up when the machine loses power mid-write (or is force-powered-off), which is why
-saves now flush to disk before they are published — see the Reliability notes above.
-
-## Deployment
-
-The server listens on `127.0.0.1` by default. `SHE_HOST=0.0.0.0` accepts container or LAN traffic;
-for a domain, list it in `SHE_ALLOWED_HOSTS` (the request guard rejects unknown `Host` headers,
-which is what blocks DNS rebinding).
-
-```bash
-docker build -t pulse:0.3.0 .
-docker run --rm -p 127.0.0.1:5577:5577 -v "$PWD/workspace:/workspace" \
-  -e OPENAI_API_KEY=sk-... pulse:0.3.0
-```
-
-> **The API is open by default — and it can run shell commands, read and write your workspace, and
-> change its own settings, so publishing the port is equivalent to handing over the machine.**
-> `-p 127.0.0.1:5577:5577` (above) keeps it loopback-only. Before exposing it to a LAN, a container
-> network or a phone, turn the token on: `SHE_AUTH_TOKEN` for one user, `SHE_AUTH_TOKENS` for several
-> (`acme:tokenA,beta:tokenB` — each tenant sees only its own sessions, and an id that is not listed is
-> refused outright). Clients send it as `X-SHE-Token`; the desktop shell passes it to its windows on its
-> own, and a browser tab reads `localStorage['she.authToken']`. `GET /api/health` stays open — it is a
-> liveness probe and carries no workspace content. Full walkthrough: [docs/feishu-remote.md](docs/feishu-remote.md).
-
-`GET /api/metrics` reports turns, latency (avg/p95), token breakdown, tool usage and failures, and
-the prompt-cache hit rate. Watch the cache number: prompt caching is prefix-based, so a change that
-rewrites the request prefix moves every later turn from ~97% cached to full price with no visible
-symptom — see [docs/context-and-caching.md](docs/context-and-caching.md).
-
-## What it looks like in practice
-
-Every number below names the script or file that produced it, so you can re-run it and disagree with
-us. Nothing here is from a benchmark suite.
-
-| Reading | Value | Produced by |
-|---|---|---|
-| Fixed cost of every request (system prompt + 37 tool schemas) | 47,374 characters ≈ 13.7k prompt tokens | printed by `pnpm check:evals`; the character→token ratio is the measured one in [docs/context-and-caching.md](docs/context-and-caching.md) |
-| Prompt-cache hit rate over one 15-task eval run | 88% (923,392 hit / 129,560 miss) | the summary line of that run |
-| Prompt-cache behaviour (5,475-token prompt, DeepSeek) | re-sending it identically: 96% cached · appending to the end: 74% · **trimming from the head: 0%** | `docs/context-and-caching.md` — the probe was one-shot and deliberately deleted after its conclusion (it spends ~24k prompt tokens per run); the numbers stay in that document |
-| Planted facts surviving one compaction | 8/8 alive, 6/8 verbatim in the summary | `scripts/context-survival-probe.mjs` |
-| End-to-end agent tasks | 14/15, plus 5/5 self-verification tasks | `pnpm eval:agent` / `pnpm eval:verify` — one sample on `deepseek-flash`; those suites call themselves a regression detector, not a capability benchmark |
-
-Two consequences shaped the design, and both are easy to get wrong:
-
-- **The request prefix is load-bearing.** Prompt caching is prefix-based, so the compaction point is
-  frozen and the request stays byte-identical until the window is genuinely near. Anything that
-  rewrites the start of a request — re-ordering tools, regenerating a summary every turn — moves every
-  later turn to full price with no visible symptom. That measurement is why the transcript is never
-  trimmed from the head.
-- **Everything folded away is still on disk.** The summary carries retrieval anchors (file paths, error
-  strings, KB group paths) and the folded range is written to `.she/sessions/<id>/compacted/*.jsonl`,
-  so any of it can be read back by path.
-
-The whole offline gate — build, unit suites, retrieval evaluation and every regression check — is one
-command: `pnpm check:offline`. It is what CI runs, and it needs no API key.
-
-## Documentation
-
-| Doc | Contents |
-|---|---|
-| [architecture.md](architecture.md) | Design and package layout |
-| [docs/retrieval.md](docs/retrieval.md) | How structural-resonance retrieval works, and its measured limits |
-| [docs/testing.md](docs/testing.md) | Test inventory, the checks that gate a change, and how to run them |
-| [docs/project-map-schema.md](docs/project-map-schema.md) | The project map: node identity (branch × path), the three views, evidence rules for contract edges, storage and budget contract |
-| [docs/project-map-manual.md](docs/project-map-manual.md) | How to use it: entries, the six queries, wiring, labelling, adopt, known gaps |
-| [docs/custom-stylesheet.md](docs/custom-stylesheet.md) | Restyling the UI, and how a bad stylesheet is made recoverable |
-| [docs/plugins.md](docs/plugins.md) | Writing a plugin: `ctx` API, permissions, debugging |
-| [docs/feishu-remote.md](docs/feishu-remote.md) | Phone remote control in 5 minutes |
-| [docs/packaging-win.md](docs/packaging-win.md) | Building the Windows installer |
-| [SECURITY.md](SECURITY.md) | Threat model and the guards that implement it |
-| [AGENTS.md](AGENTS.md) | Conventions and traps for anyone (human or agent) changing this repo |
-| [CHANGELOG.md](CHANGELOG.md) | What changed, with the reasoning |
-
-Most docs are written in Chinese; the code and comments are English.
-
-## Project status
-
-`pnpm check:all` runs the build, the unit tests of every package, three evaluators and the check scripts, and must pass
-before a change is considered done. It is green locally and on Linux CI. See
-[docs/testing.md](docs/testing.md) for the per-check breakdown.
-
-**Known gaps, stated plainly** — this project tries to be honest about what is not proven:
-
-| Gap | What that means |
-|---|---|
-| **Windows 11 and macOS never run** | Expected to work; only Windows 10 and Linux have actually been exercised |
-| **Container image never built** | The structure is checked statically; `docker build` has not been run |
-| **Retrieval is only compared against BM25** | The configured provider has no `/embeddings` endpoint, so "better than vector search" is **not** a claim this can make |
-| **Small evaluation sets** | 16 retrieval cases, 10 agent tasks, 5 verification tasks, one model |
-| **Accessibility is only statically checked** | Focusability, keyboard dismissal and button names are verified; contrast, screen readers and tab order are not |
-| **UI localization is incomplete** | 631 user-facing strings are still hardcoded Chinese; the infrastructure and a no-regression ratchet are in place |
-| **Long-horizon evals are still small** | Long tasks and run-to-run variance are now measured, but on few cases and one model |
-| **Token cost is still high on long turns** | History is sent whole and append-only so the prompt cache keeps hitting (~90% on DeepSeek). New `plan_update` and `kb_query` results are shorter, but past context is never trimmed |
-
-Deliberately **not** planned: embeddings/vector search (a design choice, not a backlog item), and
-being a general-purpose IDE.
-
-## Feedback
-
-Issues and Discussions are open — reports of crashes, odd imports, or "this was confusing" are all
-useful, especially from platforms other than Windows 10.
-
-Sponsor the maintainer (once Sponsors is enabled): https://github.com/sponsors/371920029173
+- **本地优先**：会话、知识库、地图、日志全部落在工作区的 `.she/` 里；不经过任何中转服务。
+- **自带验证**：`pnpm check:offline` 一条命令跑完构建、单元套件、离线评测与二十余项结构检查。
+- **可换模型**：OpenAI 兼容接口 + 备选提供方；推理强度、上下文窗口按模型登记。
+- **可扩展**：工具、插件、技能（skill）、定时任务、讨论群（多角色协作）都是一等公民。
 
 ---
 
-Apache-2.0 — see [LICENSE](LICENSE)
+## 它解决什么问题
+
+多数编码助手卡在三个地方，这里都当作一等问题处理：
+
+| 问题 | 这里的做法 |
+|---|---|
+**"不知道哪里是干什么的"** | 项目地图：整仓骨架 + 每文件一句话标签 + 组结构（目录/包/层/功能四轴）+ 接线（谁用了谁的哪个符号） |
+**"改坏了才发现"** | 动手前算影响面：反向依赖（分**值导入**与**仅类型**）+ 该跑哪些 check；改完由门禁判定 |
+**"上下文一到上限就崩"** | 冻结式压缩：到阈值把早期对话折成摘要，**切点落在 assistant 上**、摘要逐字节冻结以保住前缀缓存 |
+
+## 功能一览
+
+### 智能体核心（`packages/agent-runtime`）
+
+- 回合循环、工具调用、流式输出；工具失败分类（可重试 / 权限 / 策略拒绝 / 参数错…）。
+- **长程任务**：计划是一张图（步骤 + 依赖 + 失败策略）；自动续跑持续到计划没有未完成步骤，
+  或撞到轮数/预算上限——不再用"连续两轮没进展"这种轮级门限替模型判断。
+- **压缩与缓存**：摘要冻结、`SHE_*` 预算、tool result 按剩余余量收紧并落盘全文。
+- **自省**：`reflection_check` 对照"实际目标/约束"查漂移与置信度；错题本记录并前置提示。
+- **子代理**：`task_spawn` 同步或 `background: true` 即发即走；`task_status({ ids, wait: true })`
+  等全部结束；并发池默认 6（`SHE_SUBAGENT_CONCURRENCY`）；子代理不能再派子代理。
+
+### 工具面
+
+| 组 | 工具 |
+|---|---|
+文件 | `fs_read` / `fs_write` / `fs_list` / `grep`（UTF-8 正确，中文不假阴性） |
+命令 | `shell` / `shell_wait`（`ids` + `mode: all\|any`）/ `shell_kill` / `shell_jobs` |
+版本 | `git_status` / `git_diff` / `git_log` |
+地图 | `map_tree` / `map_lookup` / `map_whereis` / `map_scope` / `map_impact` / `map_wiring` / `map_contracts` / `map_verify` / `map_note` |
+知识库 | `kb_query` / `kb_upsert` / `kb_link` / `kb_edit` / `kb_retire` … |
+协作 | `task_spawn` / `task_status`、`plan_*`、`memo_*`、`schedule_*`、`report_write`、`skill_read` |
+语言服务 | `lsp_definition` / `lsp_references` / `lsp_hover` / `lsp_diagnostics` |
+
+### 项目地图（`packages/map`，实验功能）
+
+- 从 `git ls-files` 建索引（路径 + 内容 sha），分片存 `.she/map/`，**一个工作区一套**；
+  首次调用任何 `map_*` 自动建图；`SHE_MAP_PATH` 可指向共享目录。
+- 标签绑**内容 sha**：内容一变标 `stale` 而不删（"之前什么样"留得住）。
+- **接线**：`A --接线 c--> B`。覆盖 C/C++ `#include`、TypeScript/JavaScript、Python、Go、Rust、
+  Ruby、Java/Kotlin、PHP；解析不到真实文件就不建边，并计入"未解析"。
+- **可信度**：`map_verify` 报过期率、黑暗角落、悬空边、坏分片，以及
+  `接线 N 条｜未解析 M 条`。零标签时分数封顶并明说"意图检索不可用"。
+- **收编**：`map:query adopt <别的工作区>` 只写引用、不复制正文；改过的才落地并记出处。
+- **局部回退**：计划 → 单次票据 → 快照 → `git restore`；脏文件与"删除型回退"默认阻断。
+- 详细用法见 [`docs/project-map-manual.md`](docs/project-map-manual.md)，字段与预算见
+  [`docs/project-map-schema.md`](docs/project-map-schema.md)。
+
+### 知识库（`packages/kb`）
+
+- **组结构 + 共振检索**，不引入 embedding：组路径本身就是检索键，边带类型与证据。
+- 每轮请求末尾自动附一小段【自动召回】（结构共振排序，未必对——与当前这句无关就当没看见）。
+- 节点带版本与历史：编辑保留旧版，退役保留原因与替代者。
+- 可外挂共享：`SHE_KB_PATH` 指向共享库，多工作区共用一份记忆。
+
+### 沙箱与服务（`packages/sandbox`、`packages/server`）
+
+- 文件监狱 + 命令白名单 + 确认票据：破坏性命令要票据才执行；两层控制分别是**fail-open 的黑名单**
+  与 **fail-closed 的白名单**，两者语义不同，不能互相替代。
+- HTTP API：会话、设置、工具、知识、地图、审计、运行轨迹、定时任务、插件、MCP 客户端。
+- 运行时状态一律经 `state-file.ts` 读写：读不出来的文件**搬走**而不是覆盖。
+
+### 界面（`packages/ui`）
+
+- 长对话的滚动、跟随、流式渲染；压缩记录与恢复入口；计划/时间线/地图只读面板/知识图谱白板。
+- 亮/暗主题 + 自定义样式表（有逃生通道：样式把界面弄乱可以一键回退）。
+- 支持拖拽调整分区；底部状态栏常驻「地图」「备忘」「计划」「时间线」等入口。
+
+## 快速开始
+
+```bash
+pnpm install
+cp .env.example .env          # 填 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL
+pnpm -r build
+pnpm dev                      # 或 pnpm --filter @she/server start
+```
+
+Windows 也可以直接用 `SHE.bat` / `SHE-stop.bat`。桌面端打包见 [`docs/packaging-win.md`](docs/packaging-win.md)。
+
+## 配置
+
+关键环境变量（完整列表见 `.env.example`）：
+
+| 变量 | 作用 |
+|---|---|
+`OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` | 主模型（OpenAI 兼容） |
+`OPENAI_FALLBACK_*` | 备用提供方；主接口失败时切换 |
+`SHE_WORKSPACE` | 工作区根（沙箱边界） |
+`SHE_PORT` | 服务端口（默认 5577） |
+`SHE_CONTEXT_WINDOW` | 上下文窗口（0 = 按模型名识别） |
+`SHE_CONTEXT_AUTO_COMPACT` / `SHE_CONTEXT_COMPACT_AT` | 自动压缩开关与阈值 |
+`SHE_KB_PATH` / `SHE_MAP_PATH` | 共享知识库 / 共享地图目录 |
+`SHE_SUBAGENT_CONCURRENCY` | 子代理并发池（默认 6） |
+`SHE_ALLOW_HISTORY_REDUCTION` | 是否允许裁剪历史（默认关闭；裁头会打掉前缀缓存） |
+
+## 验证
+
+```bash
+pnpm check:offline     # 不需要任何 API key：构建、单测、离线评测与全部结构检查
+pnpm check:all         # 追加 eval:verify（会调用模型，需要 key）
+```
+
+单项更快（`pnpm -r test`、`check:ui`、`check:toolresult`、`check:plan`、`check:delivery`、
+`check:i18n`、`check:map` …）。每一项都自带 `PASS/FAIL` 与实际值，失败时不需要重跑才知道原因。
+
+全套单项：build / suites / restart / encoding / wsl / data / security / shell / host / lock / theme / uistruct / dist / logs / a11y / i18n / toolresult / errorbook / reflection / budget / context / map / docker / api / plugins / mcp / durability / session / window / evals / retrieval。
+
+## 仓库结构
+
+| 路径 | 内容 |
+|---|---|
+`packages/agent-runtime` | 回合循环、工具注册、压缩与上下文、子代理、自省 |
+`packages/server` | HTTP API、会话与设置、调度、插件、MCP 客户端、审计与轨迹 |
+`packages/sandbox` | 文件监狱、shell、确认票据、工具实现 |
+`packages/kb` | 知识库存储、组结构、共振检索 |
+`packages/map` | 项目地图：建图、查询、接线、契约、回退安全壳 |
+`packages/ui` | React 界面 |
+`packages/desktop` | Electron 外壳与打包 |
+`packages/shared` | 类型、配置、模型登记、环境解析 |
+`scripts/` | 门禁与检查脚本（每个都有一条判据） |
+`evals/` | 评测器（部分调用模型） |
+`skills/` | 版本控制的默认技能（dev / liberal / general / custom / _common） |
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+[architecture.md](architecture.md) | 设计与包布局 |
+[docs/context-and-caching.md](docs/context-and-caching.md) | 上下文压缩与提示缓存（含实测读数） |
+[docs/retrieval.md](docs/retrieval.md) | 结构共振检索怎么工作、边界在哪 |
+[docs/project-map-manual.md](docs/project-map-manual.md) | 项目地图使用手册 |
+[docs/project-map-schema.md](docs/project-map-schema.md) | 地图存储契约（字段、边、预算） |
+[docs/testing.md](docs/testing.md) | 测试清单与门禁 |
+[docs/plugins.md](docs/plugins.md) | 写插件：`ctx` API、权限、调试 |
+[docs/custom-stylesheet.md](docs/custom-stylesheet.md) | 自定义样式与可恢复性 |
+[docs/feishu-remote.md](docs/feishu-remote.md) | 手机远程控制 |
+[docs/packaging-win.md](docs/packaging-win.md) | Windows 安装包 |
+[SECURITY.md](SECURITY.md) | 威胁模型与实现它的守卫 |
+[AGENTS.md](AGENTS.md) | 改这个仓库时的约定与坑 |
+[CHANGELOG.md](CHANGELOG.md) | 变更与理由 |
+
+## 状态
+
+实验性但可用：地图、收编、讨论群、插件、MCP 客户端均在持续迭代；接口可能调整，
+变更会写进 CHANGELOG 并带理由。已知缺口在各自文档里如实列出（例如地图的 C# 接线尚未支持）。
+
+## 许可
+
+见 [LICENSE](LICENSE)。

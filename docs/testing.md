@@ -187,5 +187,6 @@ pnpm pack:win         # 打 Windows 安装包；结尾自动跑 check:packaged
 | `scripts/map-groups.mjs` | 看一个路径属于哪些组、挂着哪些组结构知识（含祖先冒泡） |
 | `scripts/map-symbols.mjs` | 查符号定义与引用数，或列某个文件的符号大纲 |
 | `scripts/map-revert.mjs` | 局部回退两步走：出计划→出票→拍快照→执行（脏文件与删除型回退一律阻断） |
+| `scripts/durability-check.mjs` | 持久化与重启：设置/会话/组/定时任务在硬杀后仍然在 |
 | `scripts/map-note.mjs` | 写标签/注记：单条（`--path --label-text --what --when` / `--kind --text`）或批量（`--json`，支持 `--dry`） |
 | `scripts/map-suggest.mjs` | 批量**初筛候选标签**（测试取 describe/it、md 取一级标题、脚本取首行注释），只输出不写盘 |
