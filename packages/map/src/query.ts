@@ -644,6 +644,64 @@ export function mapDigest(root: string, budgetTokens = 40): string {
   return text;
 }
 
+// ── map_history（代码考古） ─────────────────────────────────────────────────
+
+/**
+ * 一个文件的"传记"：提交时间线 + 每次改了多少行 + 当前的标签/注记 + 谁在引用它。
+ *
+ * 用 `git log --follow --numstat`：git log 给顺序与主题，numstat 给规模，
+ * 两者一次拿到，不额外跑 N 次 git。旧标签没有存（覆盖即丢），这里不假装有。
+ */
+export function mapHistory(root: string, path: string, limit = 15): string {
+  const norm = path.replace(/\\/g, '/');
+  const git = gitIn(root);
+  let log = '';
+  try {
+    log = git(['log', '--follow', `-n${limit}`, '--date=short', '--format=%h|%ad|%s', '--numstat', '--', norm]);
+  } catch {
+    return `读不到 ${norm} 的历史（不是 git 仓库或路径不对）`;
+  }
+
+  const lines: string[] = [`# ${norm} 的传记`];
+  const loaded = loadAll(root);
+  const index = loaded.index;
+  if (index) {
+    const branch = index.branch;
+    const node = loaded.nodes.find((n) => n.branch === branch && n.path === norm);
+    if (node) {
+      if (node.label) lines.push(`当前标签：${node.label}${node.what ? `｜${node.what}` : ''}`);
+      if (node.when) lines.push(`何时读：${node.when}`);
+    }
+    const notes = loaded.notes.filter((n) => n.path === norm);
+    if (notes.length) {
+      lines.push('注记：');
+      for (const n of notes.slice(0, 8)) lines.push(`  [${n.kind}] ${n.text}${n.mayBeStale ? '（可能已过时）' : ''}`);
+    }
+    const callers = loaded.edges.filter((e) => e.kind === 'import' && e.to === norm);
+    if (callers.length) {
+      lines.push(`被 ${callers.length} 处引用：${callers.slice(0, 6).map((e) => e.from).join('、')}${callers.length > 6 ? ' …' : ''}`);
+    }
+  }
+
+  lines.push('', '提交时间线（新 → 旧）：');
+  for (const block of log.split(/\n(?=[0-9a-f]{7,}\|)/)) {
+    const [head, ...rest] = block.trim().split('\n');
+    if (!head || !head.includes('|')) continue;
+    const [sha, date, ...subject] = head.split('|');
+    let added = 0;
+    let removed = 0;
+    for (const row of rest) {
+      const m = row.match(/^(\d+|-)\t(\d+|-)\t/);
+      if (!m) continue;
+      added += m[1] === '-' ? 0 : Number(m[1]);
+      removed += m[2] === '-' ? 0 : Number(m[2]);
+    }
+    lines.push(`  ${date} ${sha}  +${added}/-${removed}  ${subject.join('|')}`);
+  }
+  if (lines[lines.length - 1] === '提交时间线（新 → 旧）：') lines.push('  （没有提交记录）');
+  return lines.join('\n');
+}
+
 // ── map_wiring ──────────────────────────────────────────────────────────────
 
 export interface WiringHit {

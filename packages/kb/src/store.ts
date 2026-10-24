@@ -222,8 +222,22 @@ function openConnection(dbPath: string): Database.Database {
   // DELETE, not WAL: the bytes live in kb.sqlite itself. WAL leaves the real
   // rows in a sidecar, so a copy or a look at the main file sees an empty base.
   db.pragma('journal_mode = DELETE');
-  db.pragma('synchronous = FULL');
+  /*
+   * 默认 FULL（掉电也不丢已提交的写）。允许通过环境变量降到 NORMAL：
+   * NORMAL 在掉电时可能丢最后几次写、但**不会损坏库**，换来明显的写吞吐。
+   * 默认不降级 —— 记忆是长期资产，宁可慢一点。
+   */
+  db.pragma(process.env.SHE_KB_SYNC === 'normal' ? 'synchronous = NORMAL' : 'synchronous = FULL');
   db.pragma('foreign_keys = ON');
+  /*
+   * 纯读/内存侧的三项，不改变持久化语义：
+   *   cache_size 默认只有 2MB —— 知识库稍大就一直在读页；
+   *   mmap_size 让读路径少一次拷贝；
+   *   temp_store=MEMORY 把排序/临时表放内存。
+   */
+  db.pragma('cache_size = -16000');
+  db.pragma('mmap_size = 268435456');
+  db.pragma('temp_store = MEMORY');
   return db;
 }
 

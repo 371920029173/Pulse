@@ -9,7 +9,7 @@
  *   node scripts/map-query.mjs note <路径> <pitfall|invariant|why|todo|deadend> <文字>
  *   node scripts/map-query.mjs diff [路径…]
  */
-import { mapTree, mapLookup, mapWhereis, mapImpact, mapNote, mapDiff, mapScope, mapContracts, mapVerify, adoptFrom, mapWiring } from '../packages/map/dist/index.js';
+import { mapTree, mapLookup, mapWhereis, mapImpact, mapNote, mapDiff, mapScope, mapContracts, mapVerify, adoptFrom, mapWiring, mapHistory } from '../packages/map/dist/index.js';
 
 const [cmd, ...rest] = process.argv.slice(2);
 const root = process.cwd();
@@ -79,6 +79,15 @@ switch (cmd) {
     process.exitCode = r.score >= 60 ? 0 : 1;
     break;
   }
+  case 'history': {
+    const target = positional[0];
+    if (!target) {
+      console.log('用法: map-query history <路径> [--limit 15]');
+      process.exit(2);
+    }
+    console.log(mapHistory(root, target, flag('limit', 15)));
+    break;
+  }
   case 'wiring': {
     /*
      * 两种用法：
@@ -118,6 +127,6 @@ switch (cmd) {
     break;
   }
   default:
-    console.log('用法: node scripts/map-query.mjs <tree|lookup|whereis|scope|impact|wiring|contracts|verify|adopt|note|diff> …');
+    console.log('用法: node scripts/map-query.mjs <tree|lookup|whereis|scope|impact|wiring|history|contracts|verify|adopt|note|diff> …');
     process.exit(2);
 }
