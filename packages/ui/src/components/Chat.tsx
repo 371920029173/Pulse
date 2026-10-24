@@ -1005,6 +1005,13 @@ export function Chat({
    */
   const stickToBottomRef = useRef(true);
   const [atBottom, setAtBottom] = useState(true);
+  /*
+   * 渲染窗口：默认只挂最近 120 条（整段全挂 DOM 是那 3GB RSS 的主因之一；
+   * content-visibility 因"滚动传送"已被拿掉，只能靠少渲染）。
+   * 滚到顶部 400px 以内会自动多放一批（见 onScroll），所以正常划动不会等。
+   */
+  const [windowSize, setWindowSize] = useState(120);
+  const visibleFrom = Math.max(0, messages.length - windowSize);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const suggestTimer = useRef<number | null>(null);
 
@@ -1116,6 +1123,8 @@ export function Chat({
 
     const onScroll = () => {
       lastScrollTop = el.scrollTop;
+      /* 预加载：离顶部 400px 以内就多放一批（不等真的滚到顶，否则会看到空白）。 */
+      if (el.scrollTop < 400) setWindowSize((n) => n + 120);
       if (settle !== null) return;
       const near = nearBottom();
       stickToBottomRef.current = near;
@@ -1573,11 +1582,22 @@ export function Chat({
           </div>
         ) : (
           <>
-            {messages.map((msg, i) => (
+            {visibleFrom > 0 ? (
+              <button
+                type="button"
+                className="she-btn she-btn--chip"
+                style={{ margin: '8px auto' }}
+                onClick={() => setWindowSize((n) => n + 120)}
+              >
+                {t('显示更早的消息')}（{visibleFrom}）
+              </button>
+            ) : null}
+            {messages.slice(visibleFrom).map((msg, i) => (
               <MessageBubble
-                key={i}
+                key={visibleFrom + i}
                 msg={msg}
-                index={i}
+                /* 绝对下标：撤销到此 / continue 都按整段历史定位，不能传窗口内的序号 */
+                index={visibleFrom + i}
                 onRewind={onRewindTo}
                 toolResults={toolResults}
                 toolProgress={toolProgress}
