@@ -1442,10 +1442,36 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
          *
          * 排序与措辞在 `armSubagentWrapUp` 里，因为那段要能被测试驱动（那里有整条链路的验证）。
          */
+        const startedAt = Date.now();
         const disarmWrapUp = armSubagentWrapUp(child, budgetMs);
         try {
+          /*
+           * 网络抖动不该等于"子任务死了"。
+           *
+           * 主会话有「继续」按钮兜底，子代理没有——所以这里自己重试：只对瞬时错误、
+           * 最多 3 次、退避后把 brief 换成"接着刚才的位置继续"，硬预算照旧管着。
+           */
+          const transient = (err: unknown) =>
+            /ECONNRESET|ECONNABORTED|ETIMEDOUT|EPIPE|fetch failed|socket|network|aborted|超时|timeout/i.test(
+              err instanceof Error ? err.message : String(err),
+            );
+          const runChild = async () => {
+            let lastErr: unknown;
+            for (let attempt = 1; attempt <= 3; attempt += 1) {
+              if (Date.now() > startedAt + budgetMs) break;
+              try {
+                return await child.chat(attempt === 1 ? brief : '网络中断了，请从刚才中断的位置继续，不要重复已经完成的部分。');
+              } catch (err) {
+                lastErr = err;
+                if (!transient(err) || attempt === 3) throw err;
+                log.warn(`子代理「${req.description}」第 ${attempt} 次请求因网络中断失败，重试：${(err as Error).message}`);
+                await new Promise((r) => setTimeout(r, 1500 * attempt));
+              }
+            }
+            throw lastErr instanceof Error ? lastErr : new Error(String(lastErr ?? '子任务未完成'));
+          };
           const out = await Promise.race([
-            child.chat(brief),
+            runChild(),
             /*
              * `unref` because the timer usually outlives its purpose: a child that finishes in 10
              * seconds leaves this pending, and a caller that asked for a 30-minute budget would
