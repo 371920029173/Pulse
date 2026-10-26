@@ -1428,6 +1428,16 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
       const finish = (result: SubagentResult): SubagentResult => {
         const wtInfo = collectWorktree();
         const harvest = notesFor();
+        /*
+         * 子代理的最终答复**一定要落盘**。
+         *
+         * 以前只有 KB 笔记会落盘，而只读审查任务不写笔记 —— 于是 background 子代理
+         * 跑完了、答案很好，父级手里却什么都没有（2026-10-25 那 4 个就是这样：
+         * 会话里各有 60~96 条、结论都在，父级却判定"没有留下产物"）。
+         */
+        try {
+          writeSubagentResult(parentCfg.workspace.root, childSession.id, result);
+        } catch { /* 写不了产物不能反过来弄丢结果 */ }
         return { ...result, worktree: reclaimWorktree(wtInfo), kbHarvest: harvest };
       };
 
@@ -1538,6 +1548,7 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
           description: req.description,
           ok: true,
           result: `已在后台继续。打开会话「${childSession.title}」（${childSession.id}）可以看它的过程。`
+            + `\n它的最终答复会写到 ${subagentResultRelPath(childSession.id)}（不管它写不写笔记都会有）`
             + `\n它结束时写下的知识库笔记会汇总到 ${harvestDigestRelPath(parentSessionId, childSession.id)}`
             + '（子任务的知识库副本随后会被删除，所以需要的结论用 `fs_read` 从那份摘要里取）。'
             + (worktree
@@ -1641,6 +1652,41 @@ function subagentKbPath(sessionId: string): string | null {
  * 消息（后台子任务结束时父级拿到的路径）都从这里取，两处各自拼一次就是经典的"两份缓存键"问题 ——
  * 其中一处改了、另一处没改，父级会拿到一个指向空气的路径，而它没法分辨"笔记没写"和"路径错了"。
  */
+/** 子代理最终答复的落盘路径（相对工作区），给父级和卡片看。 */
+export function subagentResultRelPath(childSessionId: string): string {
+  return `${join('.she', 'subagent-history', childSessionId, 'result.md')}`;
+}
+
+/*
+ * 无条件写"这个子代理最后说了什么"。
+ *
+ * 和 KB 笔记摘要分开写，因为两者回答的问题不同：摘要回答"它记下了什么"，
+ * 这个文件回答"它交付了什么"。只读任务只会有后者。
+ */
+function writeSubagentResult(root: string, childSessionId: string, result: SubagentResult): string | undefined {
+  try {
+    const rel = subagentResultRelPath(childSessionId);
+    const abs = join(root, rel);
+    mkdirSync(dirname(abs), { recursive: true });
+    const body = [
+      `# ${result.description}`,
+      '',
+      `- 结果: ${result.ok ? '完成' : '未完成'}`,
+      `- 子会话: ${childSessionId}`,
+      result.worktree?.path ? `- 隔离副本: ${result.worktree.path}` : null,
+      '',
+      '---',
+      '',
+      result.result ?? '(无输出)',
+      '',
+    ].filter((l) => l !== null).join('\n');
+    writeFileSync(abs, body, 'utf8');
+    return rel;
+  } catch {
+    return undefined;
+  }
+}
+
 function harvestDigestRelPath(parentSessionId: string, childSessionId: string): string {
   return join(
     sessionStateRelDir(parentSessionId),
