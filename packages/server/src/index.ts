@@ -1438,7 +1438,34 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
         try {
           writeSubagentResult(parentCfg.workspace.root, childSession.id, result);
         } catch { /* 写不了产物不能反过来弄丢结果 */ }
+        if (req.background) notifyParent(result);
         return { ...result, worktree: reclaimWorktree(wtInfo), kbHarvest: harvest };
+      };
+
+      /*
+       * 告诉父会话"后台那个跑完了、产物在哪"。
+       *
+       * 没有这一步，background 就等于"把结果扔进黑洞"——2026-10-25 实测过：
+       * 4 个只读子代理各跑出 3000~4500 字结论，父级手里一个字都没有。
+       */
+      const notifyParent = (result: SubagentResult): void => {
+        const rel = subagentResultRelPath(childSession.id);
+        const note = [
+          `【后台子任务结束】「${result.description}」${result.ok ? '已完成' : '未完成'}。`,
+          `产物：${rel}（用 fs_read 读；完整过程在子会话 ${childSession.id}）`,
+          result.ok ? '' : '它没跑完 —— 需要的话按这个提示重新派一次，别当成"什么都没做"。',
+        ].filter(Boolean).join('\n');
+        try {
+          agents.get(parentSessionId)?.interject(note);
+        } catch { /* 父会话不在跑，不算失败 */ }
+        try {
+          const parent = storeFor(directory).get(parentSessionId);
+          if (parent) {
+            storeFor(directory).update(parentSessionId, {
+              messages: [...(parent.messages ?? []), { role: 'user', content: note }],
+            });
+          }
+        } catch { /* 落盘失败也别弄死子代理的收尾 */ }
       };
 
       const job = (async (): Promise<SubagentResult> => {

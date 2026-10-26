@@ -34,6 +34,7 @@ import {
   type ArrivedToolResult,
 } from './tool-output.js';
 import { describeWaiting, type PendingWait } from './pending-wait.js';
+import { capMessages } from './prompt-cap.js';
 import {
   DEFAULT_BUDGET,
   budgetStop,
@@ -2077,8 +2078,21 @@ export class Agent {
      * 这正是 `prefix-stability.test.ts` 与 `compaction.test.ts` 钉住的东西。
      */
     const fitted = fitToolResultsToBudget(this.history);
-    const { messages } = appliedMessages(fitted, this.compactionState, systemMessage);
-    return { messages: this.withAutoRecall(messages) };
+    const { messages: applied } = appliedMessages(fitted, this.compactionState, systemMessage);
+    /*
+     * 最后一道闸：整个请求不能超过 token 上限。
+     *
+     * 2026-10-26 的事故是这条闸缺位的后果：会话累积到 39,894 条消息，每轮实际发出
+     * 432,724 tokens（run trace 实测），模型窗口之外的部分由服务端自行截断 —— 截断点
+     * 不受我们控制，工具调用与结果配不上对时，表现就是"上下文加载有问题"。
+     *
+     * 阈值以下这里是恒等变换，所以前缀缓存与既有判据都不受影响。
+     */
+    const capped = capMessages(applied);
+    if (capped.dropped > 0) {
+      log.warn(`请求超上限：丢掉最老的 ${capped.dropped} 条消息（SHE_PROMPT_TOKEN_CAP）`);
+    }
+    return { messages: this.withAutoRecall(capped.messages) };
   }
 
   /**
