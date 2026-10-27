@@ -37,6 +37,7 @@ import { describeWaiting, type PendingWait } from './pending-wait.js';
 import { capMessages } from './prompt-cap.js';
 import { composeKbIndexCard } from './kb-index-card.js';
 import { planRecall } from './recall-router.js';
+import { mapImpactLine } from './map-impact-line.js';
 import {
   DEFAULT_BUDGET,
   budgetStop,
@@ -2152,9 +2153,21 @@ export class Agent {
         digest = '';
       }
     }
-    if (!this.autoRecallStatus && !this.autoRecallBlock && !digest) return messages;
+    /*
+     * 地图推送（s5）：这句话提到工作区文件时，把影响面算成一行附在末尾。
+     * 与召回块同位置 —— 只在请求尾部追加，不碰前缀缓存。
+     */
+    let impact = '';
+    if (process.env.SHE_MAP_PUSH !== '0') {
+      try {
+        impact = mapImpactLine(this.config.workspace.root, content);
+      } catch {
+        impact = '';
+      }
+    }
+    if (!this.autoRecallStatus && !this.autoRecallBlock && !digest && !impact) return messages;
     const out = messages.slice();
-    const tail = [this.autoRecallStatus, this.autoRecallBlock, digest].filter(Boolean).join("\n\n");
+    const tail = [this.autoRecallStatus, this.autoRecallBlock, digest, impact].filter(Boolean).join("\n\n");
     out[idx] = { ...messages[idx], content: `${content}\n\n${tail}` };
     return out;
   }
