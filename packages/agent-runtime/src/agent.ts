@@ -2074,6 +2074,8 @@ export class Agent {
   /** 自动召回：按"这一轮那句话"缓存一次查询结果（一轮之内不重复查库）。 */
   private autoRecallFor: string | null = null;
   private autoRecallBlock = '';
+  /** 决策点状态行（s4）：这轮招到几条、id 是什么、不够怎么办。紧贴召回块之前。 */
+  private autoRecallStatus = '';
 
   private messagesForRequest(): { messages: LLMMessage[] } {
     this.persistFrozenSystemMessage();
@@ -2131,6 +2133,7 @@ export class Agent {
     if (this.autoRecallFor !== content) {
       this.autoRecallFor = content;
       this.autoRecallBlock = renderAutoRecall(this.kbEngine, content);
+      this.autoRecallStatus = describeRecall(this.autoRecallBlock, plan.reason);
     }
     /*
      * 地图摘要与【自动召回】同位置（请求末尾）：不破坏前缀缓存，也不需要模型"想起来"。
@@ -2149,9 +2152,9 @@ export class Agent {
         digest = '';
       }
     }
-    if (!this.autoRecallBlock && !digest) return messages;
+    if (!this.autoRecallStatus && !this.autoRecallBlock && !digest) return messages;
     const out = messages.slice();
-    const tail = [this.autoRecallBlock, digest].filter(Boolean).join("\n\n");
+    const tail = [this.autoRecallStatus, this.autoRecallBlock, digest].filter(Boolean).join("\n\n");
     out[idx] = { ...messages[idx], content: `${content}\n\n${tail}` };
     return out;
   }
@@ -4024,4 +4027,20 @@ export class Agent {
     await this.lsp?.dispose();
     this.lsp = null;
   }
+}
+
+/**
+ * 把召回结果说成一行状态。
+ *
+ * 空结果必须**明说**：模型分不清"没找到"和"没查过"，于是两者都不查。
+ * 这一行是 2.0 里最便宜的修复 —— 约 40 字符，不碰前缀缓存。
+ */
+function describeRecall(block: string, why: string): string {
+  const ids = [...block.matchAll(/\[Node: ([^\]]+)\]/g)].map((m) => m[1]).slice(0, 5);
+  if (!ids.length) {
+    return `【本轮自动召回】0 条（${why}）。库里没找到相关的 —— 若这题确有历史依据，用更短的词再 ` +
+      `kb_query 一次，别凭印象答。`;
+  }
+  return `【本轮自动召回】${ids.length}${ids.length === 5 ? '+' : ''} 条（${why}）。id: ${ids.join(', ')}` +
+    ` —— 不够就 kb_query 补查；用到了就在回答里点名出处。`;
 }
