@@ -19,6 +19,7 @@ import { GroupKBEngine } from '../packages/kb/dist/engine.js';
 import { renderAutoRecall } from '../packages/agent-runtime/dist/auto-recall.js';
 import { composeKbIndexCard } from '../packages/agent-runtime/dist/kb-index-card.js';
 import { planRecall } from '../packages/agent-runtime/dist/recall-router.js';
+import { toolHintLine } from '../packages/agent-runtime/dist/tool-hint.js';
 
 let failed = 0;
 function check(name, ok, detail) {
@@ -94,7 +95,19 @@ void strongIds;
 const weak = engine.query('没有召回条件的那条').nodes.slice(0, 5).map((n) => n.title);
 check('弱锚（无 recall_when）仍可检索', weak.some((t) => t.includes('没有召回条件')), weak.join(' | '));
 
-/* ⑤ 空库与坏引擎不抛、不返回垃圾 */
+/* ⑤ 工具提示行：认得出任务就给，闲聊就不给（点名不存在的工具比不提示更糟） */
+const ALL_TOOLS = ['shell', 'fs_read', 'fs_write', 'map_impact', 'kb_query', 'kb_get', 'map_history'];
+const hintCode = toolHintLine('code', ALL_TOOLS);
+const hintChat = toolHintLine('chat', ALL_TOOLS);
+check('工具提示：code 轮点名真注册的工具',
+  hintCode.includes('map_impact') && hintCode.includes('shell'),
+  hintCode.slice(0, 60));
+check('工具提示：chat 轮为空', hintChat === '', JSON.stringify(hintChat));
+check('工具提示：未注册的工具不会被点名',
+  !toolHintLine('writing', ['fs_write']).includes('kb_query'),
+  toolHintLine('writing', ['fs_write']).slice(0, 50));
+
+/* ⑥ 空库与坏引擎不抛、不返回垃圾 */
 const emptyEngine = new GroupKBEngine(new KBStore(join(dir, 'empty.sqlite')), {
   dbPath: join(dir, 'empty.sqlite'), maxChildrenBeforeSplit: 12, dormancyThresholdDays: 30,
   activationBudget: 100, boostOnAccess: 1.5,

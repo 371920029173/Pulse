@@ -38,6 +38,7 @@ import { capMessages } from './prompt-cap.js';
 import { composeKbIndexCard } from './kb-index-card.js';
 import { planRecall } from './recall-router.js';
 import { mapImpactLine } from './map-impact-line.js';
+import { toolHintLine } from './tool-hint.js';
 import {
   DEFAULT_BUDGET,
   budgetStop,
@@ -2132,6 +2133,10 @@ export class Agent {
     /* L2 条件锚路由：闲聊/纯指令不召回（省 token、不污染）；其余按任务类型决定优先组与预算。 */
     const plan = planRecall(content);
     if (plan.kind === 'chat' || !shouldAutoRecall(content)) return messages;
+    /* 工具提示：按这一轮的判定点名 2~3 个最相关的工具（只点名真注册了的）。 */
+    const hint = process.env.SHE_TOOL_HINT === '0'
+      ? ''
+      : toolHintLine(plan.kind, this.allToolDefs.map((t) => t.name));
     if (this.autoRecallFor !== content) {
       this.autoRecallFor = content;
       this.autoRecallBlock = renderAutoRecall(this.kbEngine, content);
@@ -2166,9 +2171,9 @@ export class Agent {
         impact = '';
       }
     }
-    if (!this.autoRecallStatus && !this.autoRecallBlock && !digest && !impact) return messages;
+    if (!hint && !this.autoRecallStatus && !this.autoRecallBlock && !digest && !impact) return messages;
     const out = messages.slice();
-    const tail = [this.autoRecallStatus, this.autoRecallBlock, digest, impact].filter(Boolean).join("\n\n");
+    const tail = [hint, this.autoRecallStatus, this.autoRecallBlock, digest, impact].filter(Boolean).join("\n\n");
     out[idx] = { ...messages[idx], content: `${content}\n\n${tail}` };
     return out;
   }
