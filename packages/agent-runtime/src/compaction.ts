@@ -65,6 +65,26 @@ export function digestOutputTokens(maxChars: number): number {
   return Math.min(16_000, Math.max(4_096, Math.round(maxChars / 2.5)));
 }
 
+/** 摘要至少要有原文的这个比例 —— 否则"摘要"就不是替原文说话，而是把它删了。 */
+export const DIGEST_SOURCE_SHARE = 0.05;
+/** 按比例算出来的绝对上限：再大就不该叫摘要（也吃不掉窗口）。 */
+export const DIGEST_PROPORTIONAL_MAX_CHARS = 60_000;
+
+/**
+ * 这一份摘要能写多少字。
+ *
+ * 两个来源取**大的**：窗口的 1%（原规则，小压缩时不动它）与原文的 5%（新规则，防"把 39k 条
+ * 消息压成 8k"）。上限 6 万字符。
+ *
+ * `sourceChars` 是这次要被替掉的原文总字符数；不传时退回纯窗口规则（保持旧行为）。
+ */
+export function digestCharsFor(windowTokens: number, sourceChars = 0): number {
+  const byWindow = digestMaxChars(windowTokens);
+  if (sourceChars <= 0) return byWindow;
+  const bySource = Math.min(DIGEST_PROPORTIONAL_MAX_CHARS, Math.round(sourceChars * DIGEST_SOURCE_SHARE));
+  return Math.max(byWindow, bySource);
+}
+
 /** 摘要正文的字符上限（见上面三个常量的说明）。 */
 export function digestMaxChars(windowTokens: number): number {
   return Math.min(

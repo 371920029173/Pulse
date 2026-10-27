@@ -100,6 +100,7 @@ import {
   windowFromOverflowError,
   digestInstruction,
   digestMaxChars,
+  digestCharsFor,
   digestOutputTokens,
   DIGEST_SOURCE_MAX_CHARS,
   DIGEST_SOURCE_MIN_CHARS,
@@ -3644,7 +3645,12 @@ export class Agent {
     head: readonly LLMMessage[],
     track?: (c: StreamChunk) => void,
   ): Promise<{ text: string; source: 'model' | 'extractive' }> {
-    const cap = digestMaxChars(this.contextWindow.tokens);
+    /*
+     * 摘要预算 = max(窗口的 1%, 原文的 5%)，上限 6 万字符 —— 见 compaction.ts 的 digestCharsFor。
+     * 只按窗口给会出事故：43 万 token 的窗口识别错（128k vs 1M）时，39k 条消息只剩 8k 字。
+     */
+    const sourceChars = head.reduce((n, m) => n + String(m.content ?? '').length, 0);
+    const cap = digestCharsFor(this.contextWindow.tokens, sourceChars);
     const fallback = () => ({ text: summarizeExtractively(head, cap), source: 'extractive' as const });
     const ask: LLMMessage[] = [
       { role: 'system', content: digestInstruction(cap) },
