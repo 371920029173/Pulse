@@ -17,12 +17,28 @@
 /** 每 token 大约多少字符。与 token 估算其它地方保持一致（中文为主的实测值）。 */
 const CHARS_PER_TOKEN = 3.47;
 
-export const DEFAULT_PROMPT_TOKEN_CAP = 96_000;
+/**
+ * 模型窗口的默认假设：1M。
+ *
+ * AGI-3.5-v2 那台机器上的模型就是 1M 窗口，而早期版本按 128k 猜，结果压缩在 43 万
+ * token 时就反复触发，把整段历史换成了摘要 —— 用户看到的"严重失忆"就是这么来的。
+ * 窗口宁可猜大：猜小了会把合法上下文扔掉（不可逆），猜大了只是这条闸不触发。
+ */
+export const DEFAULT_CONTEXT_WINDOW = 1_000_000;
 
-/** 环境变量 `SHE_PROMPT_TOKEN_CAP`；非法值退回默认（宁可截断，也不要无声地放行）。 */
+/** 上限占窗口的比例：只防真爆，不参与日常压缩决策。 */
+const CAP_SHARE = 0.9;
+
+export function contextWindowTokens(): number {
+  const raw = Number(process.env.SHE_CONTEXT_WINDOW);
+  return Number.isFinite(raw) && raw >= 8_000 ? Math.floor(raw) : DEFAULT_CONTEXT_WINDOW;
+}
+
+/** 环境变量 `SHE_PROMPT_TOKEN_CAP` 显式覆盖；否则取窗口的 90%。 */
 export function promptTokenCap(): number {
   const raw = Number(process.env.SHE_PROMPT_TOKEN_CAP);
-  return Number.isFinite(raw) && raw >= 4_000 ? Math.floor(raw) : DEFAULT_PROMPT_TOKEN_CAP;
+  if (Number.isFinite(raw) && raw >= 4_000) return Math.floor(raw);
+  return Math.floor(contextWindowTokens() * CAP_SHARE);
 }
 
 export interface CappableMessage {

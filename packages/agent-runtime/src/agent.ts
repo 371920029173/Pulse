@@ -35,6 +35,7 @@ import {
 } from './tool-output.js';
 import { describeWaiting, type PendingWait } from './pending-wait.js';
 import { capMessages } from './prompt-cap.js';
+import { composeKbIndexCard } from './kb-index-card.js';
 import {
   DEFAULT_BUDGET,
   budgetStop,
@@ -356,6 +357,13 @@ export class Agent {
    */
   private persistedSystemMessage: string | null = null;
   /** Memo for the `request` event's prefix hash; the inputs rarely change within an agent. */
+  /*
+   * L0 目录卡：构造时算一次就冻住。
+   *
+   * 每轮重算会让 system message 每轮都变，前缀缓存全灭 —— 而它本来描述的是"库的形状"，
+   * 一次会话内几乎不变。要更新就是新会话（与 system-message.json 的冻结语义一致）。
+   */
+  private kbIndexCard = '';
   private prefixHashMemo: { system: string; tools: ToolDefinition[]; count: number; hash: string } | null = null;
   /** Set once the fixed overhead has been logged for this agent. See `beginRun`. */
   private overheadNoticed = false;
@@ -486,6 +494,8 @@ export class Agent {
     this.onTaskEvent = opts?.onTaskEvent ?? null;
     this.isSubagent = Boolean(opts?.isSubagent);
     this.kbReadOnly = opts?.kbReadOnly === true;
+    /* L0 目录卡：构造时算一次就冻住（每轮重算会让系统消息每轮都变，前缀缓存全灭）。 */
+    this.kbIndexCard = composeKbIndexCard(kbEngine);
     /*
      * The run trace is built here rather than in the field initialiser so the workspace root is
      * already available, and so a subagent gets one too: "who did which step" is a question the
