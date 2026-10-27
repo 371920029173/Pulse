@@ -44,7 +44,7 @@ function score(text: string, patterns: RegExp[]): number {
 }
 
 /** 明确是寒暄/应答：这些才值得跳过召回（名单短、可读、改起来不心虚）。 */
-const SMALL_TALK = /^[\s]*(你好|您好|嗨|在吗|在不在|谢谢|谢了|多谢|好的|好|嗯|收到|继续|ok|okay|hi|hello|thanks|thank you)[\s!！。.~]*$/i;
+const SMALL_TALK = /^[\s]*(你好|您好|嗨|在吗|在不在|谢谢|谢了|多谢|好的|好|嗯|收到|继续|明白|明白了|懂了|行|可以|ok|okay|hi|hello|thanks|thank you)[\s!！。.~]*$/i;
 
 /** 明确是寒暄才算"不该查"；其余一律按有可能要查处理。 */
 export function isSmallTalk(text: string): boolean {

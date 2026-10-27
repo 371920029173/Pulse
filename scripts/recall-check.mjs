@@ -21,6 +21,16 @@ import { composeKbIndexCard } from '../packages/agent-runtime/dist/kb-index-card
 import { planRecall } from '../packages/agent-runtime/dist/recall-router.js';
 import { toolHintLine } from '../packages/agent-runtime/dist/tool-hint.js';
 
+/** 状态行长度按真实格式估：见 agent.ts 的 describeRecall（这里只为了量体量）。 */
+function recallStatusLike(block) {
+  const ids = [...String(block).matchAll(/\[Node: ([^\]]+)\]/g)].map((m) => m[1]).slice(0, 5);
+  return ids.length
+    ? `【本轮自动召回】${ids.length} 条（在改代码/查代码，优先查 architecture / project / errors）。id: ${ids.join(', ')} —— 不够就 kb_query 补查；用到了就在回答里点名出处。`
+    : '【本轮自动召回】0 条（在改代码/查代码）。库里没找到相关的 —— 若确有历史依据，用更短的词再 kb_query 一次，别凭印象答。';
+}
+
+const ALL_TOOLS = ['shell', 'fs_read', 'fs_write', 'map_impact', 'kb_query', 'kb_get', 'map_history'];
+
 let failed = 0;
 function check(name, ok, detail) {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  —— ${detail}` : ''}`);
@@ -66,8 +76,18 @@ const positives = [
   '帮我写一份 README 的说明',
   '把这个函数重构一下，测试也要跑',
   '这个项目之前约定的端口是多少',
+  '报错说 ECONNRESET，怎么查',
+  '登录流程是怎么实现的',
+  '写个总结给团队看',
+  '为什么当初选了 pnpm workspace',
+  '改一下 kb-tools.ts 的召回条件',
+  '我们讨论过的多核方案后来怎么定了',
+  '这个接口的字段格式有约定吗',
 ];
-const negatives = ['你好', '谢谢', '在吗', '继续', '好的'];
+const negatives = [
+  '你好', '谢谢', '在吗', '继续', '好的', '收到',
+  '嗯', '好', '明白了', 'hi', 'ok', 'thanks',
+];
 const posKinds = positives.map((q) => planRecall(q).kind);
 const negKinds = negatives.map((q) => planRecall(q).kind);
 check('正集全部要召回（kind≠chat）', posKinds.every((k) => k !== 'chat'), posKinds.join(','));
@@ -95,8 +115,14 @@ void strongIds;
 const weak = engine.query('没有召回条件的那条').nodes.slice(0, 5).map((n) => n.title);
 check('弱锚（无 recall_when）仍可检索', weak.some((t) => t.includes('没有召回条件')), weak.join(' | '));
 
+/* ④-b 体量：召回块与"每轮尾部总量"都要有上限（过度召回最贵的是 token，不是准确率） */
+const codeRecall = renderAutoRecall(engine, '改一下 agent.ts 里的引号处理，报错了');
+check('召回块 ≤2000 字符', String(codeRecall).length <= 2000, `${String(codeRecall).length} 字符`);
+const tailLike = [toolHintLine('code', ALL_TOOLS), recallStatusLike(codeRecall), String(codeRecall)].filter(Boolean).join('\n\n');
+check('每轮尾部（提示+状态+召回）≤2600 字符', tailLike.length <= 2600, `${tailLike.length} 字符`);
+
 /* ⑤ 工具提示行：认得出任务就给，闲聊就不给（点名不存在的工具比不提示更糟） */
-const ALL_TOOLS = ['shell', 'fs_read', 'fs_write', 'map_impact', 'kb_query', 'kb_get', 'map_history'];
+
 const hintCode = toolHintLine('code', ALL_TOOLS);
 const hintChat = toolHintLine('chat', ALL_TOOLS);
 check('工具提示：code 轮点名真注册的工具',
