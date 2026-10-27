@@ -1,4 +1,5 @@
 import type { ToolDefinition, EdgeKind, KBQueryResult, MemoryNode } from '@she/shared';
+import { proposeRecallWhen } from './kb-recall-propose.js';
 import type { GroupKBEngine, KBMemoryPatch, KBReviseResult, KBRetirement, KBQueryResultWithFallback } from '@she/kb';
 import { KB_RETIRED_KEY, KB_VERSION_KEY } from '@she/kb';
 
@@ -444,6 +445,63 @@ function suggestCrossGroupNeighbour(
         ? `\n召回条件：${recallWhen}`
         : '\n这条没有 recall_when（将来靠语义兜底召回）—— 大部分记忆都该有一句触发条件，下次补上更省事。';
       return `Added memory "${title}" to group "${groupName}" [Node: ${mem.id}, Group: ${group.id}]${alongside}${redirected}${triggerNote}${suggestion}`;
+    },
+  );
+
+  reg(
+    {
+      name: 'kb_recall_gaps',
+      description: 'List memory nodes that still have no recall_when ("what future context should recall this"), '
+        + 'with a SUGGESTED trigger for each. Read-only: it proposes, it does not write. '
+        + 'Use it before a batch of kb_edit when an old library predates the field — writing machine-made '
+        + 'templates into the library is how retrieval starts matching the wrong memory.',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: 'How many gaps to list (default 20, max 60)' },
+          offset: { type: 'number', description: 'Skip this many gaps (for paging)' },
+        },
+      },
+    },
+    async (args) => {
+      const n = Number(args.limit);
+      const limit = Number.isFinite(n) && n >= 1 ? Math.min(Math.floor(n), 60) : 20;
+      const o = Number(args.offset);
+      const offset = Number.isFinite(o) && o >= 0 ? Math.floor(o) : 0;
+
+      const store = engine['store'] as unknown as {
+        getAllGroups(): { id: string; name: string }[];
+        getMemoriesByGroup(id: string): MemoryNode[];
+      };
+      const gaps: { id: string; group: string; title: string; when: string }[] = [];
+      let withWhen = 0;
+      for (const g of store.getAllGroups()) {
+        for (const m of store.getMemoriesByGroup(g.id) ?? []) {
+          const md = (m.metadata ?? {}) as Record<string, unknown>;
+          if (typeof md.recallWhen === 'string' && md.recallWhen.trim()) {
+            withWhen += 1;
+            continue;
+          }
+          gaps.push({ id: m.id, group: g.name, title: m.title, when: proposeRecallWhen(m.title, m.content, g.name) });
+        }
+      }
+      const total = withWhen + gaps.length;
+      if (!gaps.length) return `全部 ${total} 条都有 recall_when 了（${withWhen} 条），没有缺口。`;
+
+      const page = gaps.slice(offset, offset + limit);
+      const lines = [
+        `缺 recall_when 的节点：${gaps.length} / ${total}（已有 ${withWhen}）。下面是第 ${offset + 1}–${offset + page.length} 条：`,
+        '',
+      ];
+      for (const [i, gap] of page.entries()) {
+        lines.push(`${offset + i + 1}. 「${gap.title}」[${gap.group}] [Node: ${gap.id}]`);
+        lines.push(`   建议：${gap.when}`);
+      }
+      lines.push('');
+      lines.push('采纳方式：kb_edit nodeId=<Node>（把召回条件补进正文或同时更新 title/内容），或 kb_upsert onExisting="update"。');
+      lines.push('这些是候选，不是结论 —— 一条不对就别写进去，模板化的召回条件会污染检索。');
+      if (offset + page.length < gaps.length) lines.push(`下一页：kb_recall_gaps offset=${offset + page.length}`);
+      return lines.join('\n');
     },
   );
 
