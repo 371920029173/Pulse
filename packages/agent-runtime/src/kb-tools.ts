@@ -224,6 +224,8 @@ export function createKBTools(engine: GroupKBEngine, opts?: KBToolOptions): KBTo
         if (retired) {
           lines.push(`    退役原因：${retired.reason}${retired.replacedBy ? `；替代节点：${retired.replacedBy}` : ''}`);
         }
+        const recallWhen = (node.metadata as Record<string, unknown> | undefined)?.recallWhen;
+        if (typeof recallWhen === 'string' && recallWhen.trim()) lines.push(`    召回条件：${recallWhen.trim()}`);
         lines.push(`    [Node: ${node.id}]`);
       }
 
@@ -352,6 +354,13 @@ function suggestCrossGroupNeighbour(
               + '"add" stores a second node alongside it.',
           },
         },
+        recallWhen: {
+          type: 'string',
+          description: 'What future context should recall this memory — a sentence someone can judge, '
+            + 'e.g. "改 shell 调用或引号处理时" / "用户问上下文压缩是否会多花钱时" / "决定是否引入新依赖时". '
+            + 'Not the file path (that is an anchor of one kind); this is the trigger. '
+            + 'Omit only if you truly cannot state one — the node is still written, marked as having no trigger.',
+        },
         required: ['groupName', 'title', 'content'],
       },
     },
@@ -417,7 +426,11 @@ function suggestCrossGroupNeighbour(
       }
 
       // Maintained write: keeps the target group from growing unbounded.
-      const mem = engine.addMemoryMaintained(group.id, nodeKind, title, content);
+      const recallWhen = typeof args.recallWhen === 'string' ? args.recallWhen.trim() : '';
+      const mem = engine.addMemoryMaintained(
+        group.id, nodeKind, title, content,
+        recallWhen ? { recallWhen } : { noRecallWhen: true },
+      );
       const alongside = sameTitle.length > 0
         ? `（同组已有同题有效节点 ${sameTitle.map((m) => m.id).join(', ')}，按 onExisting="add" 并存）`
         : '';
@@ -427,7 +440,10 @@ function suggestCrossGroupNeighbour(
         ? `\n共振最强的跨组邻居：「${neighbour.title}」[Node: ${neighbour.id}]。要连就调 kb_link（kind="weak"）——`
           + '这里只建议、不自动建边：没有删边的工具，自动建就撤不回来。'
         : '';
-      return `Added memory "${title}" to group "${groupName}" [Node: ${mem.id}, Group: ${group.id}]${alongside}${redirected}${suggestion}`;
+      const triggerNote = recallWhen
+        ? `\n召回条件：${recallWhen}`
+        : '\n这条没有 recall_when（将来靠语义兜底召回）—— 大部分记忆都该有一句触发条件，下次补上更省事。';
+      return `Added memory "${title}" to group "${groupName}" [Node: ${mem.id}, Group: ${group.id}]${alongside}${redirected}${triggerNote}${suggestion}`;
     },
   );
 
