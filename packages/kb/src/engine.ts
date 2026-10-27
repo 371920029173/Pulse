@@ -81,13 +81,20 @@ export interface KBMemoryPatch {
   title?: string;
   content?: string;
   kind?: MemoryNode['kind'];
+  /**
+   * 「将来什么上下文该召回它」。写进 metadata，不动正文。
+   *
+   * 单独列出来是因为它和正文是两种东西：正文是知识，触发条件是检索线索。
+   * 混进正文会让 kb_query 的摘要里全是"什么时候该用我"，反而稀释了知识本身。
+   */
+  recallWhen?: string;
 }
 
 export interface KBReviseResult {
   before: MemoryNode;
   after: MemoryNode;
   /** Which fields actually changed; empty means nothing was written. */
-  changed: Array<'title' | 'content' | 'kind'>;
+  changed: Array<'title' | 'content' | 'kind' | 'recallWhen'>;
   /** Version number of `after`. */
   version: number;
 }
@@ -846,6 +853,10 @@ export class GroupKBEngine {
       if (patch.title !== undefined && patch.title !== before.title) changed.push('title');
       if (patch.content !== undefined && patch.content !== before.content) changed.push('content');
       if (patch.kind !== undefined && patch.kind !== before.kind) changed.push('kind');
+      const beforeWhen = typeof (before.metadata as Record<string, unknown> | undefined)?.recallWhen === 'string'
+        ? String((before.metadata as Record<string, unknown>).recallWhen)
+        : '';
+      if (patch.recallWhen !== undefined && patch.recallWhen !== beforeWhen) changed.push('recallWhen');
       const version = this.getVersion(before);
       if (changed.length === 0) return { before, after: before, changed, version };
 
@@ -862,7 +873,17 @@ export class GroupKBEngine {
         title: patch.title ?? before.title,
         content: patch.content ?? before.content,
         kind: patch.kind ?? before.kind,
-        metadata: { ...before.metadata, [KB_HISTORY_KEY]: history, [KB_VERSION_KEY]: version + 1 },
+        metadata: {
+          ...before.metadata,
+          [KB_HISTORY_KEY]: history,
+          [KB_VERSION_KEY]: version + 1,
+          ...(patch.recallWhen !== undefined
+            ? {
+              recallWhen: patch.recallWhen,
+              ...(patch.recallWhen ? { noRecallWhen: undefined } : { noRecallWhen: true }),
+            }
+            : {}),
+        },
       });
       return { before, after, changed, version: version + 1 };
     });

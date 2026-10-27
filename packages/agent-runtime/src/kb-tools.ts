@@ -547,6 +547,12 @@ function suggestCrossGroupNeighbour(
           title: { type: 'string', description: 'New title (omit to keep)' },
           content: { type: 'string', description: 'New full content (omit to keep). Replaces the text; include what should stay.' },
           kind: { type: 'string', enum: ['text', 'code', 'fact', 'tool_outcome', 'preference'], description: 'New kind (omit to keep)' },
+          recallWhen: {
+            type: 'string',
+            description: 'What future context should recall this memory (one judgeable sentence). '
+              + 'Stored in metadata, not in the body — this is the retrieval trigger, not the knowledge. '
+              + 'Use it to backfill old nodes that were written before the field existed (see kb_recall_gaps).',
+          },
           reason: { type: 'string', description: 'Why it changed — stored with the previous version' },
         },
         required: ['nodeId'],
@@ -557,6 +563,7 @@ function suggestCrossGroupNeighbour(
       const nodeId = String(args.nodeId ?? '').trim();
       if (!nodeId) return 'Error: 必须给 nodeId（kb_query 结果里的 [Node: …]）';
       const patch: KBMemoryPatch = {};
+      if (typeof args.recallWhen === 'string') patch.recallWhen = args.recallWhen.trim();
       if (args.title !== undefined) {
         if (typeof args.title !== 'string' || !args.title.trim()) return 'Error: title 不能为空';
         patch.title = args.title;
