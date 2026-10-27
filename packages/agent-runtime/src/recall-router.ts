@@ -43,9 +43,18 @@ function score(text: string, patterns: RegExp[]): number {
   return patterns.reduce((n, re) => (re.test(text) ? n + 1 : n), 0);
 }
 
+/** 明确是寒暄/应答：这些才值得跳过召回（名单短、可读、改起来不心虚）。 */
+const SMALL_TALK = /^[\s]*(你好|您好|嗨|在吗|在不在|谢谢|谢了|多谢|好的|好|嗯|收到|继续|ok|okay|hi|hello|thanks|thank you)[\s!！。.~]*$/i;
+
+/** 明确是寒暄才算"不该查"；其余一律按有可能要查处理。 */
+export function isSmallTalk(text: string): boolean {
+  return SMALL_TALK.test(String(text ?? ''));
+}
+
 export function planRecall(text: string): RecallPlan {
   const t = String(text ?? '');
   if (!t.trim()) return { kind: 'chat', preferGroups: [], budgetChars: 0, reason: '空消息' };
+  if (isSmallTalk(t)) return { kind: 'chat', preferGroups: [], budgetChars: 0, reason: '寒暄/应答，本轮不召回' };
 
   const code = score(t, CODE_SIGNALS);
   const history = score(t, HISTORY_SIGNALS);
@@ -76,6 +85,15 @@ export function planRecall(text: string): RecallPlan {
       reason: '在写文档，优先查 architecture / project / docs',
     };
   }
-  /* 闲聊/纯指令：不撤回报告，也不注入 —— 少几百 token，且不污染判断。 */
-  return { kind: 'chat', preferGroups: [], budgetChars: 0, reason: '没有记忆依赖信号，本轮不召回' };
+  /*
+   * 到这里说明没认出任务类型。**默认召回一次**，只有明确是寒暄才跳过 ——
+   * 反过来做过一次，就出了事故：`这条会话的登录流程是怎么做的？` 被判成闲聊，
+   * 于是请求里没有召回块，模型自然也不会补查。
+   */
+  return {
+    kind: 'history',
+    preferGroups: ['project', 'decisions', 'errors'],
+    budgetChars: 800,
+    reason: '没认出任务类型，保守召回一次',
+  };
 }

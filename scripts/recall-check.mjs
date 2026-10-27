@@ -41,7 +41,7 @@ const engine = new GroupKBEngine(store, {
 const gShell = engine.createGroup('errors/shell');
 const gDecisions = engine.createGroup('decisions/context');
 engine.addMemoryMaintained(gShell.id, 'fact', 'shell: true 让 Node 拼命令行的原因',
-  '在 Windows 上直接 spawn cmd.exe 会让引号被重新解析，node -p "1+1" 打印 1+1。改用 shell:true 让 Node 自己拼。',
+  '直接调用系统命令行解释器时，引号会被重新解析（实测 node -p "1+1" 打印出 1+1）。改用 shell:true 让 Node 自己拼命令行就不会。',
   { recallWhen: '改 shell 调用、引号处理、Windows 命令行时' });
 engine.addMemoryMaintained(gDecisions.id, 'fact', '上下文压缩会不会让费用增加',
   '压缩会减少重复发送，但模型可能为了补被省掉的上下文多跑几轮，那几轮也要钱。',

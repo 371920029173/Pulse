@@ -33,7 +33,12 @@ const dbArg = args.indexOf('--db');
  * documented behaviour rather than a hidden fallback. `SHE_KB_PATH` is the honest way to point at a
  * real library; with neither, the harness builds one from `fixture.json` and says so.
  */
-const requestedDb = dbArg >= 0 ? args[dbArg + 1] : (process.env.SHE_KB_PATH || '');
+/*
+ * 只认显式的 --db。以前这里还会读 SHE_KB_PATH，于是"外挂共享库"一配上，评测就偷偷改成
+ * 量真实库：按 fixture 写的 44 条被跳过、剩下的全 0%，门禁红得莫名其妙。
+ * 想量真实库就传 --db，并接受"fixture 用例会被跳过"这件事。
+ */
+const requestedDb = dbArg >= 0 ? args[dbArg + 1] : '';
 
 /**
  * Whether an embedding baseline can run.
