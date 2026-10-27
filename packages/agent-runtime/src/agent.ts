@@ -36,6 +36,7 @@ import {
 import { describeWaiting, type PendingWait } from './pending-wait.js';
 import { capMessages } from './prompt-cap.js';
 import { composeKbIndexCard } from './kb-index-card.js';
+import { planRecall } from './recall-router.js';
 import {
   DEFAULT_BUDGET,
   budgetStop,
@@ -2124,7 +2125,9 @@ export class Agent {
     if (idx < 0) return messages;
     const content = messages[idx].content;
     if (typeof content !== 'string') return messages;
-    if (!shouldAutoRecall(content)) return messages;
+    /* L2 条件锚路由：闲聊/纯指令不召回（省 token、不污染）；其余按任务类型决定优先组与预算。 */
+    const plan = planRecall(content);
+    if (plan.kind === 'chat' || !shouldAutoRecall(content)) return messages;
     if (this.autoRecallFor !== content) {
       this.autoRecallFor = content;
       this.autoRecallBlock = renderAutoRecall(this.kbEngine, content);
