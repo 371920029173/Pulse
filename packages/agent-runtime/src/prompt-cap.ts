@@ -36,9 +36,16 @@ export function contextWindowTokens(): number {
 
 /** 环境变量 `SHE_PROMPT_TOKEN_CAP` 显式覆盖；否则取窗口的 90%。 */
 export function promptTokenCap(): number {
+  /*
+   * 默认 **0 = 不截断**。
+   *
+   * 这个开关本来是"防爆"，但它的做法是无声丢最老的消息 —— 模型不知道自己丢了什么，
+   * 也不知道丢了哪一段。溢出路径现在会压出一份 ~10k token 的摘要，那才是有信息的降级。
+   * 所以要这道保险的显式给数：SHE_PROMPT_TOKEN_CAP=900000。
+   */
   const raw = Number(process.env.SHE_PROMPT_TOKEN_CAP);
   if (Number.isFinite(raw) && raw >= 4_000) return Math.floor(raw);
-  return Math.floor(contextWindowTokens() * CAP_SHARE);
+  return 0;
 }
 
 export interface CappableMessage {
@@ -60,6 +67,7 @@ function estimate(text: string): number {
  *   2. 不拆开 `assistant(tool_calls) → tool` 这一组：要丢就丢到它前面的 user 之前。
  */
 export function capMessages<T extends CappableMessage>(messages: T[], capTokens = promptTokenCap()): { messages: T[]; dropped: number } {
+  if (!Number.isFinite(capTokens) || capTokens <= 0) return { messages, dropped: 0 };
   let total = 0;
   for (const m of messages) total += estimate(m.content ?? '') + estimate(JSON.stringify(m.tool_calls ?? []));
   if (total <= capTokens) return { messages, dropped: 0 };

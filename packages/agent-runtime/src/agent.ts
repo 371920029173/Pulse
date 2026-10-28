@@ -30,7 +30,7 @@ import {
 import type { ErrorbookEngineLike, ErrorbookStoreLike, ErrorbookKind } from './errorbook.js';
 import { classifyToolResult, annotateToolResult, isToolFailure, type ToolResultVerdict } from './tool-result.js';
 import {
-  budgetToolResultOnArrival, fitToolResultsToBudget, spillToolOutput, TOOL_RESULT_CONTEXT_CHARS,
+  budgetToolResultOnArrival, fitToolResultsToBudget, spillToolOutput, TOOL_RESULT_CONTEXT_CHARS, toolResultBudgetFor,
   type ArrivedToolResult,
 } from './tool-output.js';
 import { describeWaiting, type PendingWait } from './pending-wait.js';
@@ -2093,7 +2093,8 @@ export class Agent {
      * 仍然是完整的，用户打开会话看到的也还是完整记录。**没到阈值时这里逐字节等于没压**，
      * 这正是 `prefix-stability.test.ts` 与 `compaction.test.ts` 钉住的东西。
      */
-    const fitted = fitToolResultsToBudget(this.history);
+    /* 工具结果预算跟着窗口走：1M 窗口下 16k 字符等于把模型的眼睛蒙住一半。 */
+    const fitted = fitToolResultsToBudget(this.history, toolResultBudgetFor(this.contextWindow.tokens));
     const { messages: applied } = appliedMessages(fitted, this.compactionState, systemMessage);
     /*
      * 最后一道闸：整个请求不能超过 token 上限。
@@ -3351,6 +3352,15 @@ export class Agent {
    * 抬到 1：真到了窗口边缘还是得压，否则会话又会卡死在同一个地方。
    */
   private compactAtShare(): number {
+    /*
+     * 默认**不主动压**（返回 2 意味着阈值 = 窗口的两倍，永远到不了）。
+     *
+     * 理由不是省事，是"压早了纯亏"：模型端拒绝超长时我们已经有兜底（isContextOverflowError），
+     * 而提前压一次要付掉一次摘要调用，还可能把仍然有用的原文换成摘要 —— 用户的原话是
+     * 「压完就那么点，剩下的不够重新解释损失的上下文的十分之一」。
+     * 想要旧行为：SHE_CONTEXT_COMPACT_AT=0.8（或设置页的档位）。
+     */
+    if (process.env.SHE_CONTEXT_COMPACT_AT === undefined && this.config.context?.compactAtShare === undefined) return 2;
     const ctx = (this.config as { context?: { compactAtShare?: number; compactionLevel?: string } }).context;
     /*
      * 档位与显式值的关系：写了 compactAtShare 就以它为准，没写才按档位（保守 0.7 / 平衡 0.8 / 激进 0.9）。

@@ -553,8 +553,10 @@ console.log('\n6. 工具结果的上下文预算：一条结果每一轮都要�
   const lastSent = sent[sent.length - 1] ?? [];
   const sentTools = lastSent.filter((m) => m.role === 'tool');
   check('【关键】恢复出来的旧记录进请求时也被压住（先有记录、后有规则的那一半）',
-    sentTools.length > 0 && sentTools.every((m) => m.content.length <= TOOL_RESULT_CONTEXT_CHARS),
-    `请求里的工具结果 ${sentTools.map((m) => m.content.length).join(', ')} 字符`);
+    sentTools.length > 0
+      && sentTools.every((m) => m.content.length <= 64_000)
+      && sentTools.every((m) => m.content.length <= oversized.length / 10),
+    `请求里的工具结果 ${sentTools.map((m) => m.content.length).join(', ')} 字符（原文 ${oversized.length}）`);
   check('旧记录的去路也按工具给（工具名从调用它的那条 assistant 消息里认出来）',
     sentTools.some((m) => /shell_wait/.test(m.content)),
     (sentTools[0]?.content ?? '').slice(-200));

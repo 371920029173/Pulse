@@ -79,10 +79,19 @@ export const DIGEST_PROPORTIONAL_MAX_CHARS = 60_000;
  * `sourceChars` 是这次要被替掉的原文总字符数；不传时退回纯窗口规则（保持旧行为）。
  */
 export function digestCharsFor(windowTokens: number, sourceChars = 0): number {
+  /*
+   * 目标改成 **~10k token**（约 35,000 字符）。
+   *
+   * 用户的判断：摘要的价值不在省 token，而在于"压完之后模型还能接着干活"。8k 字符（约 2.3k token）
+   * 替掉几万条消息时，模型要重新问一遍才知道发生过什么 —— 那几次追问的代价远高于摘要多写的部分。
+   * 所以下限定在 10k token，再按原文 5% 往上抬，上限 60k 字符。
+   */
+  const DIGEST_TARGET_CHARS = 35_000;
   const byWindow = digestMaxChars(windowTokens);
-  if (sourceChars <= 0) return byWindow;
+  const floor = Math.max(byWindow, DIGEST_TARGET_CHARS);
+  if (sourceChars <= 0) return Math.min(DIGEST_PROPORTIONAL_MAX_CHARS, floor);
   const bySource = Math.min(DIGEST_PROPORTIONAL_MAX_CHARS, Math.round(sourceChars * DIGEST_SOURCE_SHARE));
-  return Math.max(byWindow, bySource);
+  return Math.min(DIGEST_PROPORTIONAL_MAX_CHARS, Math.max(floor, bySource));
 }
 
 /** 摘要正文的字符上限（见上面三个常量的说明）。 */
@@ -101,7 +110,13 @@ export function digestMaxChars(windowTokens: number): number {
  * 数字、报错原文是之后 grep 与 kb_query 唯一的入口，摘要写成读后感就再也找不回来了。
  */
 export function digestInstruction(maxChars: number): string {
-  return `把下面这段对话记录压缩成一份摘要，供之后继续这场对话时使用。
+
+  /*
+   * 这一句是用户明确要求的：压缩**之前**先把关键决议落到备忘板/知识库里。
+   * 因为摘要再长也是摘要 —— 而"为什么这么定"只有写进记忆库才拿得回来。
+   */
+  const BOARD_NOTE = '【重要】收拾上下文之前，先把重要决议/约定/踩坑用 memo_add 或 kb_upsert 记下来 —— 摘要只能概括，决议要能原样找回来。';
+  return BOARD_NOTE + "\n\n" + `把下面这段对话记录压缩成一份摘要，供之后继续这场对话时使用。
 必须保留，并尽量原样保留标识符（文件路径、命令、函数名、数字、报错原文 —— 它们之后要被搜索到）：
 用户的要求、约束与偏好；已经做出的决定和它们的理由；动过或读过的重要文件（带行号更好）；
 跑过的命令与结论（exit code）；发现的坑与失败；还没做完的事和下一步。

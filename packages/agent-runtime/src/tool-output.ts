@@ -60,6 +60,19 @@ import { sessionStateRelDir } from './session-state.js';
 export const TOOL_RESULT_CONTEXT_CHARS = 16_000;
 
 /**
+ * 大窗口下给工具结果更多位置。
+ *
+ * 16k 字符是给小窗口定的（128k 上下文里它已经占 4%）。1M 窗口下它只占 0.5%，
+ * 于是"模型明明能看到整份日志却只拿到 16k"—— 这不是省钱，是把能力关掉一半。
+ * 用户的原话：「不要过度在乎成本控制，将模型的能力放到最大」。
+ */
+export function toolResultBudgetFor(contextWindowTokens: number): number {
+  if (contextWindowTokens >= 512_000) return 64_000;
+  if (contextWindowTokens >= 256_000) return 48_000;
+  return TOOL_RESULT_CONTEXT_CHARS;
+}
+
+/**
  * The split when a result is over budget: three-eighths head, five-eighths tail.
  *
  * Both ends are kept because both carry distinct information and neither is inferable from the
@@ -395,7 +408,11 @@ export interface BudgetableMessage {
  * The tool name comes from the assistant message that made the call, so a restored result still gets
  * the right "how to get the rest" line instead of the generic one.
  */
-export function fitToolResultsToBudget<T extends BudgetableMessage>(history: readonly T[]): T[] {
+export function fitToolResultsToBudget<T extends BudgetableMessage>(
+  history: readonly T[],
+  /* 窗口大就给更多位置：见 toolResultBudgetFor。不传则沿用 16k（小窗口的老行为）。 */
+  budgetChars: number = TOOL_RESULT_CONTEXT_CHARS,
+): T[] {
   const nameOfCall = new Map<string, string>();
   let out: T[] | null = null;
 
@@ -404,8 +421,13 @@ export function fitToolResultsToBudget<T extends BudgetableMessage>(history: rea
       for (const call of msg.tool_calls) nameOfCall.set(call.id, call.function.name);
       return;
     }
-    if (msg.role !== 'tool' || msg.content.length <= TOOL_RESULT_CONTEXT_CHARS) return;
-    const budgeted = budgetToolResult(msg.content, nameOfCall.get(msg.tool_call_id ?? '') ?? '');
+    if (msg.role !== 'tool' || msg.content.length <= budgetChars) return;
+    const budgeted = budgetToolResult(
+      msg.content,
+      nameOfCall.get(msg.tool_call_id ?? '') ?? '',
+      /* 只在窗口更大时显式给预算：小窗口沿用原默认，避免改变既有行长（cost-check 钉住了那一行）。 */
+      budgetChars > TOOL_RESULT_CONTEXT_CHARS ? budgetChars : undefined,
+    );
     if (!budgeted.truncated) return;
     if (!out) out = [...history];
     out[i] = { ...msg, content: budgeted.text };
