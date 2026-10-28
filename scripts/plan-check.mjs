@@ -355,7 +355,38 @@ console.log('\n8. 迁移：2026-09-27 留在会话目录里的计划要收回来
 
 for (const d of workspaces) removeTempDir(d);
 
-/* ── /* ── 依赖声明的三种非法情况必须被拒绝 ─────────────────────────────── */
+/* ── /* ── 并发写：两个实例交替写不丢步骤 ─────────────────────────────── */
+{
+  const dir = mkdtempSync(join(tmpdir(), 'she-plan-conc-'));
+  const one = new PlanStore(dir, 'conc:r1');
+  const two = new PlanStore(dir, 'conc:r1');
+
+  /* 两个实例各自建一份（同一作用域第二个会覆盖，所以这里只建一次再分别加步骤） */
+  const base = one.create('并发', [{ title: 'A' }, { title: 'B' }]);
+  const aId = base.steps[0].id;
+  two.setStepStatus(base.id, aId, 'active', 'two 写的');
+  one.setStepStatus(base.id, base.steps[1].id, 'active', 'one 写的');
+
+  const finalPlan = two.list().find((p) => p.id === base.id) ?? two.list()[0];
+  check('两个实例交替写，步骤一条不少', finalPlan.steps.length === 2, `${finalPlan.steps.length} 步`);
+  const noteOfA = finalPlan.steps.find((x) => x.id === aId)?.note ?? '';
+  check('先写的那条备注还在（没有被后来的整体覆盖）', /two 写的/.test(noteOfA), noteOfA);
+
+  /* 锁被占用 → 必须抛/失败，不能假装写成功 */
+  const file = PlanStore.fileFor(dir, 'conc:r1');
+  writeFileSync(`${file}.lock`, 'held', 'utf8');
+  let refused = false;
+  try {
+    one.setStepStatus(base.id, aId, 'done', '抢不到锁');
+  } catch {
+    refused = true;
+  }
+  rmSync(`${file}.lock`, { force: true });
+  check('锁被占用时写入明确失败（不假装成功）', refused, refused ? 'threw' : 'silently succeeded');
+  rmSync(dir, { recursive: true, force: true });
+}
+
+/* ── 依赖声明的三种非法情况必须被拒绝 ─────────────────────────────── */
 {
   const dir = mkdtempSync(join(tmpdir(), 'she-plan-deps-'));
   const store = new PlanStore(dir, 'deps:r1');

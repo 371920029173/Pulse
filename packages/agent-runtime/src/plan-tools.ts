@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, openSync, unlinkSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ToolDefinition } from '@she/shared';
@@ -271,9 +271,35 @@ export class PlanStore {
   }
 
   private save(plans: Plan[]): void {
-    const tmp = `${this.filePath}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(plans, null, 2), 'utf8');
-    renameSync(tmp, this.filePath);
+    /*
+     * 先抢锁：同一工作区可能有第二个服务端在写同一份计划。抢不到就退避重试，
+     * 最多等约 2 秒（20 × 100ms）—— 计划写入本来就在毫秒级，等 2 秒仍拿不到说明对方卡住了，
+     * 那时**抛错让调用方重试**，比"假装写成功"好得多。
+     */
+    const lock = `${this.filePath}.lock`;
+    let held = false;
+    for (let i = 0; i < 20; i += 1) {
+      try {
+        openSync(lock, 'wx');
+        held = true;
+        break;
+      } catch {
+        const until = Date.now() + 100;
+        while (Date.now() < until) { /* 退避：同步等待，计划写操作本来就很短 */ }
+      }
+    }
+    if (!held) throw new Error(`计划文件被占用（${lock}）：另一个进程正在写，稍后重试`);
+    try {
+      const tmp = `${this.filePath}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify(plans, null, 2), 'utf8');
+      renameSync(tmp, this.filePath);
+    } finally {
+      try {
+        unlinkSync(lock);
+      } catch {
+        /* 锁文件已经不在了（被清理），不算失败 */
+      }
+    }
   }
 
   /**
