@@ -27,7 +27,7 @@ export { Agent, TurnInProgressError } from './agent.js';
 export { getSystemPrompt } from './system-prompt.js';
 export { createKBTools } from './kb-tools.js';
 export { readSkillProfile, writeSkillProfile, type SkillProfile } from './system-prompt.js';
-export { PlanStore, renderPlan, createPlanTools, nextStepOf, planSessions, adoptSessionPlansIntoWorkspace } from './plan-tools.js';
+export { PlanStore, renderPlan, createPlanTools, nextStepOf, planSessions, adoptSessionPlansIntoWorkspace, planAutopilot } from './plan-tools.js';
 export type { Plan, PlanStep, StepStatus, StepFailurePolicy, StepInput, StepUpdate, PlanSessionSummary } from './plan-tools.js';
 export {
   analyzeRequest,

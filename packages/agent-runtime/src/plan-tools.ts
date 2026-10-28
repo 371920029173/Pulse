@@ -1620,12 +1620,37 @@ export function planAutopilot(
     return { proceed: false, signature, reason: '计划不是这一轮在推进的' };
   }
   const parked = plan.steps.find((s) => s.status === 'blocked' && (s.onFailure === 'ask' || s.onFailure === 'stop'));
-  if (parked) return { proceed: false, signature, reason: `步骤「${parked.title}」卡住了，需要你来定` };
+  if (parked) return { proceed: false, signature, reason: `步骤「${parked.title}」(${parked.id}) 卡住了（状态 blocked），需要你来定` };
   const done = new Set(plan.steps.filter((s) => s.status === 'done').map((s) => s.id));
   const runnable = plan.steps.filter(
     (s) => s.status === 'active' || (s.status === 'pending' && s.dependsOn.every((d) => done.has(d))),
   );
-  if (!runnable.length) return { proceed: false, signature, reason: '没有可以继续的步骤' };
+  if (!runnable.length) {
+    /*
+     * 说清卡在哪：每个待办步骤在等谁、等的人现在是什么状态。
+     * 依赖里有 dropped 的，直接点名"永远等不到"——那是唯一需要人改计划的形态。
+     */
+    const byId = new Map(plan.steps.map((s) => [s.id, s]));
+    const waiting = plan.steps
+      .filter((s) => s.status === 'pending' || s.status === 'active')
+      .map((s) => {
+        const blockers = s.dependsOn
+          .filter((d) => !done.has(d))
+          .map((d) => {
+            const dep = byId.get(d);
+            if (!dep) return `${d}（不存在）`;
+            return `${dep.id}「${dep.title}」=${dep.status}${dep.status === 'dropped' ? '（永远等不到）' : ''}`;
+          });
+        return blockers.length ? `${s.id}「${s.title}」在等 ${blockers.join('、')}` : `${s.id}「${s.title}」没有依赖但也没开工`;
+      });
+    return {
+      proceed: false,
+      signature,
+      reason: waiting.length
+        ? `没有可以继续的步骤：${waiting.join('；')}`
+        : '没有可以继续的步骤（计划里已经没有待办）',
+    };
+  }
   if (/[?？]\s*$/.test(String(opts.reply ?? '').trim())) {
     return { proceed: false, signature, reason: '在等你回答问题' };
   }

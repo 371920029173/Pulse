@@ -40,6 +40,7 @@ import {
   getSystemPrompt,
   planSessions,
   PlanStore,
+  planAutopilot,
   adoptSessionPlansIntoWorkspace,
   WORKSPACE_SCOPE,
 } from '../packages/agent-runtime/dist/index.js';
@@ -355,7 +356,25 @@ console.log('\n8. 迁移：2026-09-27 留在会话目录里的计划要收回来
 
 for (const d of workspaces) removeTempDir(d);
 
-/* ── /* ── 并发写：两个实例交替写不丢步骤 ─────────────────────────────── */
+/* ── /* ── 自动续跑：卡住时要点名"卡在哪、等谁" ───────────────────────── */
+{
+  const dir = mkdtempSync(join(tmpdir(), 'she-plan-stuck-'));
+  const store = new PlanStore(dir, 'stuck:r1');
+  const plan = store.create('卡住的计划', [{ title: 'B 前置' }, { title: 'A 依赖 B' }]);
+  const [b, a] = plan.steps;
+  store.setStepStatus(plan.id, a.id, 'pending', undefined, { dependsOn: [b.id] });
+  /* blocked 而不是 dropped：dropped 会级联把 A 也丢掉、计划直接收口，那是另一条既有断言。 */
+  store.setStepStatus(plan.id, b.id, 'blocked', '等外部输入');
+
+  const current = store.list().find((p) => p.id === plan.id) ?? store.list()[0];
+  const decision = planAutopilot(current, { turnStartedAt: 0, reply: '做完了' });
+  check('卡住时不启动续跑', decision.proceed === false, decision.reason);
+  check('卡住的原因点名了被等的那一步', (decision.reason ?? '').includes(b.id), decision.reason ?? '');
+  check('并且说清了那一步现在的状态', /blocked/.test(decision.reason ?? ''), decision.reason ?? '');
+  rmSync(dir, { recursive: true, force: true });
+}
+
+/* ── 并发写：两个实例交替写不丢步骤 ─────────────────────────────── */
 {
   const dir = mkdtempSync(join(tmpdir(), 'she-plan-conc-'));
   const one = new PlanStore(dir, 'conc:r1');
