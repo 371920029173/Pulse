@@ -355,6 +355,33 @@ console.log('\n8. 迁移：2026-09-27 留在会话目录里的计划要收回来
 
 for (const d of workspaces) removeTempDir(d);
 
+/* ── /* ── 依赖声明的三种非法情况必须被拒绝 ─────────────────────────────── */
+{
+  const dir = mkdtempSync(join(tmpdir(), 'she-plan-deps-'));
+  const store = new PlanStore(dir, 'deps:r1');
+  const plan = store.create('依赖校验', [
+    { title: '第一步' },
+    { title: '第二步' },
+  ]);
+  const [a, b] = plan.steps;
+
+  const self = store.setStepStatus(plan.id, a.id, 'pending', undefined, { dependsOn: [a.id] });
+  check('自依赖被拒绝', self.ok === false && /自己/.test(self.reason ?? ''), self.reason ?? '');
+
+  const ghost = store.setStepStatus(plan.id, a.id, 'pending', undefined, { dependsOn: ['s99'] });
+  check('指向不存在的步骤被拒绝', ghost.ok === false && /不存在/.test(ghost.reason ?? ''), ghost.reason ?? '');
+
+  store.setStepStatus(plan.id, b.id, 'dropped', '不做了');
+  const dead = store.setStepStatus(plan.id, a.id, 'pending', undefined, { dependsOn: [b.id] });
+  check('指向 dropped 的依赖被拒绝', dead.ok === false && /dropped/.test(dead.reason ?? ''), dead.reason ?? '');
+
+  const after = store.find ? null : null;
+  void after;
+  const fresh = store.list().find((p) => p.id === plan.id) ?? store.list()[0];
+  check('拒绝之后计划没被破坏', fresh.steps.length === 2, `步骤数 ${fresh.steps.length}`);
+  rmSync(dir, { recursive: true, force: true });
+}
+
 /* ── 坏计划文件的隔离（长程任务硬化） ─────────────────────────────── */
 {
   /*

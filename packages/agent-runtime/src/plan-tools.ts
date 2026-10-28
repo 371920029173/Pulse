@@ -408,6 +408,35 @@ export class PlanStore {
     const plan = this.find(plans, planId);
     if (!plan) return { ok: false, reason: `plan not found (plan_id=${planId})` };
     const step = plan.steps.find((s) => s.id === stepId);
+
+    /*
+     * 依赖声明先校验，再谈状态变更。三种情况都必须**明确拒绝**：
+     * 悄悄修好（过滤掉）会让调用方以为依赖成立，而"为什么这步能开工"就没人答得出来了。
+     */
+    if (declared?.dependsOn) {
+      const deps = declared.dependsOn;
+      const mine = plans.find((p) => p === plan) ?? plan;
+      if (deps.includes(stepId)) {
+        return { ok: false, reason: `依赖不能指向自己（${stepId}）—— 那一步永远等不到` };
+      }
+      const unknown = deps.filter((d) => !mine.steps.some((x) => x.id === d));
+      if (unknown.length) {
+        return {
+          ok: false,
+          reason: `依赖里有不存在的步骤：${unknown.join('、')}。现有步骤：${mine.steps.map((x) => x.id).join(',')}`,
+        };
+      }
+      const dead = deps
+        .map((d) => mine.steps.find((x) => x.id === d))
+        .filter((x): x is NonNullable<typeof x> => Boolean(x) && x!.status === 'dropped')
+        .map((x) => x.id);
+      if (dead.length) {
+        return {
+          ok: false,
+          reason: `依赖里 ${dead.join('、')} 已经是 dropped —— 这一步永远等不到它，改成别的依赖或去掉这一条`,
+        };
+      }
+    }
     if (!step) return { ok: false, reason: `step not found (plan_id=${plan.id}, step_id=${stepId})` };
 
     if (declared?.dependsOn) {
