@@ -27,6 +27,11 @@ const CODE_SIGNALS = [
   /\.(ts|tsx|js|mjs|cjs|py|go|rs|c|h|cc|cpp|java|kt|rb|php|json|ya?ml|toml|sql|sh|ps1|bat|md)\b/i,
   /\b(npm|pnpm|node|git|tsc|eslint|vitest|tsx|docker|kubectl)\b/i,
   /(编译|报错|构建|测试|函数|接口|依赖|重构|修复|实现|改一下|加个|删掉|报错|崩溃|卡死|内存|性能|超时)/,
+  /*
+   * 工程诉求的字面说法。用户报过一次误判：`功能这边也补一补（有的就是勉强能用，一异常就处理不了）`
+   * 落到"没认出任务类型"——而那是最典型的代码任务。这些词进来，就不会再掉下去。
+   */
+  /(补一补|补齐|完善|健壮|鲁棒|容错|兜底|边界|异常|一异常|勉强能用|不稳定|偶发|复现|回归|退化)/,
   /\b(fix|refactor|implement|compile|build|test|debug|error|exception)\b/i,
 ];
 
@@ -52,13 +57,28 @@ export function isSmallTalk(text: string): boolean {
 }
 
 export function planRecall(text: string): RecallPlan {
-  const t = String(text ?? '');
+  /*
+   * 头 10k + 尾 10k：开头交代任务、结尾交代症状，中间那一大坨通常是粘贴进来的原始日志。
+   * 只取开头会漏掉"最后说一句报错了"这种最常见的表述方式（实测过：50 万字符 + 结尾「报错」被判成 history）。
+   */
+  const full = String(text ?? '');
+  const t = full.length <= 20_000 ? full : `${full.slice(0, 10_000)}\n${full.slice(-10_000)}`;
   if (!t.trim()) return { kind: 'chat', preferGroups: [], budgetChars: 0, reason: '空消息' };
   if (isSmallTalk(t)) return { kind: 'chat', preferGroups: [], budgetChars: 0, reason: '寒暄/应答，本轮不召回' };
 
   const code = score(t, CODE_SIGNALS);
   const history = score(t, HISTORY_SIGNALS);
   const writing = score(t, WRITING_SIGNALS);
+
+  /*
+   * 短而无信号 → 寒暄。
+   *
+   * 名单不可能列全（"看看"/"嗯嗯"/"行了"/"随便"/"我懂了"…），而这些短句的共同点是装不下一个
+   * 需要历史支撑的任务。带信号的不受影响："改一下"仍然判 code（改 是信号）。
+   */
+  if (code === 0 && history === 0 && writing === 0 && t.trim().length <= 6) {
+    return { kind: 'chat', preferGroups: [], budgetChars: 0, reason: '短句且无任务信号，按寒暄处理' };
+  }
 
   /* 历史类优先：问"上次为什么这么定"时，代码信号往往只是被提到的对象。 */
   if (history > 0 && history >= code) {

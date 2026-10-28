@@ -16,7 +16,8 @@ const ENV_RE = /\b(SHE_[A-Z0-9_]+)\b/g;
  * 然后是文件、环境变量 —— 越靠前越具体，越不可能和其它记忆撞车。
  */
 export function proposeRecallWhen(title: string, content: string, groupPath: string): string {
-  const text = `${title}\n${content}`;
+  /* 节点正文可能有几万字符（导入的文档），只取前 20k 就够判断触发条件。 */
+  const text = `${title}\n${content}`.slice(0, 20_000);
   const files = [...new Set([...text.matchAll(FILE_RE)].map((m) => m[1]))].slice(0, 2);
   const envs = [...new Set([...text.matchAll(ENV_RE)].map((m) => m[1]))].slice(0, 2);
   const g = String(groupPath ?? '').toLowerCase();

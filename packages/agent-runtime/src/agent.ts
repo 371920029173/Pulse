@@ -2142,9 +2142,15 @@ export class Agent {
     const plan = planRecall(content);
     if (plan.kind === 'chat' || !shouldAutoRecall(content)) return messages;
     /* 工具提示：按这一轮的判定点名 2~3 个最相关的工具（只点名真注册了的）。 */
-    const hint = process.env.SHE_TOOL_HINT === '0'
-      ? ''
-      : toolHintLine(plan.kind, this.allToolDefs.map((t) => t.name));
+    let hint = '';
+    if (process.env.SHE_TOOL_HINT !== '0') {
+      try {
+        hint = toolHintLine(plan.kind, this.allToolDefs.map((t) => t.name));
+      } catch {
+        /* 工具提示是锦上添花：任何异常都降级成"没有提示"，不能让整轮失败 */
+        hint = '';
+      }
+    }
     if (this.autoRecallFor !== content) {
       this.autoRecallFor = content;
       this.autoRecallBlock = renderAutoRecall(this.kbEngine, content);

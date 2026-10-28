@@ -6,7 +6,8 @@ import { join } from 'node:path';
 export function mentionedFiles(root: string, text: string, max = 2): string[] {
   const out: string[] = [];
   const re = /((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.(?:ts|tsx|js|mjs|cjs|py|go|rs|c|h|cc|cpp|json|md|mjs))/g;
-  for (const m of String(text ?? '').matchAll(re)) {
+  /* 只扫前 20k：一屏就够找出被提到的文件，而用户可能贴进来几十万字符的日志。 */
+  for (const m of String(text ?? '').slice(0, 20_000).matchAll(re)) {
     const p = m[1].replace(/\\/g, '/');
     if (out.includes(p)) continue;
     if (!existsSync(join(root, p))) continue;

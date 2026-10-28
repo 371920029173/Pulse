@@ -473,10 +473,21 @@ function suggestCrossGroupNeighbour(
         getAllGroups(): { id: string; name: string }[];
         getMemoriesByGroup(id: string): MemoryNode[];
       };
+      /*
+       * 扫描上限：一次最多看 5,000 个节点。
+       *
+       * 大库（导入型知识库动辄几万节点）全表遍历会让这个工具本身变成一个"卡住"的调用 ——
+       * 而它存在的意义是"帮我补触发条件"，不是"把服务器跑满"。超出时如实说"只扫了这么多"。
+       */
+      const SCAN_CAP = 5_000;
       const gaps: { id: string; group: string; title: string; when: string }[] = [];
       let withWhen = 0;
+      let scanned = 0;
+      let truncated = false;
       for (const g of store.getAllGroups()) {
         for (const m of store.getMemoriesByGroup(g.id) ?? []) {
+          if (scanned >= SCAN_CAP) { truncated = true; break; }
+          scanned += 1;
           const md = (m.metadata ?? {}) as Record<string, unknown>;
           if (typeof md.recallWhen === 'string' && md.recallWhen.trim()) {
             withWhen += 1;
@@ -484,13 +495,15 @@ function suggestCrossGroupNeighbour(
           }
           gaps.push({ id: m.id, group: g.name, title: m.title, when: proposeRecallWhen(m.title, m.content, g.name) });
         }
+        if (truncated) break;
       }
       const total = withWhen + gaps.length;
+      const scanNote = truncated ? `（本次只扫了前 ${SCAN_CAP} 个节点，不是全库）` : '';
       if (!gaps.length) return `全部 ${total} 条都有 recall_when 了（${withWhen} 条），没有缺口。`;
 
       const page = gaps.slice(offset, offset + limit);
       const lines = [
-        `缺 recall_when 的节点：${gaps.length} / ${total}（已有 ${withWhen}）。下面是第 ${offset + 1}–${offset + page.length} 条：`,
+        `缺 recall_when 的节点：${gaps.length} / ${total}（已有 ${withWhen}）${scanNote}。下面是第 ${offset + 1}–${offset + page.length} 条：`,
         '',
       ];
       for (const [i, gap] of page.entries()) {

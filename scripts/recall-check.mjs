@@ -87,11 +87,28 @@ const positives = [
   '把这批日志按时间排一下',
   '这个仓库的发布流程是什么',
   'map_verify 报了 3 个坏分片，怎么修',
+  '功能这边也补一补，有的勉强能用',
+  '一异常就处理不了，得兜底',
+  '这个偶发 bug 复现不了',
+  '回归测试挂了 3 个',
+  '把 shell 那段引号处理加固一下',
+  '子代理超时之后没有产物',
+  '缓存命中率掉了，帮我看看',
+  '这个接口在 429 的时候怎么办',
+  '编排层在断流时重试了吗',
+  'kv 的写放大太严重',
+  '把 build 时间压到 3 分钟以内',
+  '这个页面滚动会传送',
+  '为什么压缩之后模型失忆了',
+  '把 recall_when 补到旧节点上',
 ];
 const negatives = [
   '你好', '谢谢', '在吗', '继续', '好的', '收到',
   '嗯', '好', '明白了', 'hi', 'ok', 'thanks',
   '辛苦了', '晚安', '行吧', '知道了',
+  '看看', '嗯嗯', '好嘞', '先这样', '没事了', '不用了',
+  '你说得对', '有意思', '哈哈哈', '继续吧', '随便',
+  '我懂了', '看起来不错', '可以可以', '行了', '收到收到',
 ];
 const posKinds = positives.map((q) => planRecall(q).kind);
 const negKinds = negatives.map((q) => planRecall(q).kind);
@@ -131,6 +148,21 @@ const codeRecall = renderAutoRecall(engine, '改一下 agent.ts 里的引号处�
 check('召回块 ≤2000 字符', String(codeRecall).length <= 2000, `${String(codeRecall).length} 字符`);
 const tailLike = [toolHintLine('code', ALL_TOOLS), recallStatusLike(codeRecall), String(codeRecall)].filter(Boolean).join('\n\n');
 check('每轮尾部（提示+状态+召回）≤2600 字符', tailLike.length <= 2600, `${tailLike.length} 字符`);
+
+/* ④-c 健壮：异常输入不许抛（这是"一异常就处理不了"那一类问题的最小防线） */
+let threw = '';
+try {
+  planRecall('x'.repeat(500_000));
+  planRecall('');
+  planRecall('！！！？？。');
+  planRecall('x'.repeat(300_000) + ' 报错');
+} catch (err) {
+  threw = String(err);
+}
+check('异常输入不抛（超长/空/纯符号）', threw === '', threw.slice(0, 80));
+check('超长消息仍认得结尾的症状信号',
+  planRecall('x'.repeat(300_000) + ' 报错').kind === 'code',
+  planRecall('x'.repeat(300_000) + ' 报错').kind);
 
 /* ⑤ 工具提示行：认得出任务就给，闲聊就不给（点名不存在的工具比不提示更糟） */
 
