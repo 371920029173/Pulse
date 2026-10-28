@@ -30,7 +30,7 @@
  *
  * 所以每节用一个新的工作区目录：节与节之间看不见，正是模型本身要的性质。
  */
-import { mkdtempSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, existsSync, readdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -354,5 +354,29 @@ console.log('\n8. 迁移：2026-09-27 留在会话目录里的计划要收回来
 }
 
 for (const d of workspaces) removeTempDir(d);
+
+/* ── 坏计划文件的隔离（长程任务硬化） ─────────────────────────────── */
+{
+  /*
+   * 以前 load() 任何异常都 return []，而下一次 save() 就把空数组写回去 —— 用户的计划被静默覆盖。
+   * 这条断言钉住"读不懂要隔离，不能当没有"。
+   */
+  const dir = mkdtempSync(join(tmpdir(), 'she-plan-corrupt-'));
+  const seed = new PlanStore(dir, 'corrupt:r1');
+  const file = PlanStore.fileFor(dir, 'corrupt:r1');
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, '{ this is not json', 'utf8');
+  void seed;
+
+  const reopened = new PlanStore(dir, 'corrupt:r1');
+  const list = reopened.list();
+  const info = reopened.recoveryInfo?.();
+  const backups = readdirSync(dirname(file)).filter((n) => n.includes('.corrupt-'));
+  check('坏计划文件被隔离而不是被当成"没有计划"', Boolean(info) && backups.length >= 1,
+    `recovery=${info ? 'yes' : 'no'} backups=${backups.join(',') || 'none'}`);
+  check('隔离之后仍能正常列出（不抛）', Array.isArray(list), `${list.length} 个计划`);
+  rmSync(dir, { recursive: true, force: true });
+}
+
 console.log(`\n${failures === 0 ? 'PASS' : `FAIL (${failures})`}  plan-check`);
 process.exit(failures === 0 ? 0 : 1);

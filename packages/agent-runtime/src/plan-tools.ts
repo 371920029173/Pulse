@@ -203,6 +203,9 @@ export class PlanStore {
     return join(sessionStateDir(workspaceRoot, scope), 'plans.json');
   }
 
+  /** 上一次 load 发现文件坏了时的隔离位置与原因（给 plan_list 报告用）。 */
+  private recovery: { backup: string; reason: string } | null = null;
+
   private load(): Plan[] {
     try {
       if (!existsSync(this.filePath)) return [];
@@ -224,9 +227,27 @@ export class PlanStore {
           attempts: Number.isFinite(s.attempts) ? Number(s.attempts) : 0,
         })),
       }));
-    } catch {
+    } catch (err) {
+      /*
+       * 读不懂 ≠ 没有。隔离它、记住位置，让用户决定要不要手工捞 ——
+       * 直接 return [] 会让下一次 save() 把这份内容永久覆盖掉（事故形态见文件头）。
+       */
+      const backup = `${this.filePath}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      let where = this.filePath;
+      try {
+        renameSync(this.filePath, backup);
+        where = backup;
+      } catch {
+        /* 连改名都不行（占用/权限）：至少别把内容当成空数组写回去 */
+      }
+      this.recovery = { backup: where, reason: (err as Error)?.message ?? String(err) };
       return [];
     }
+  }
+
+  /** 这次读到过坏文件吗（plan_list 会把它印在输出里）。 */
+  recoveryInfo(): { backup: string; reason: string } | null {
+    return this.recovery;
   }
 
   /**
@@ -1117,9 +1138,20 @@ export function createPlanTools(
     },
     async (a) => {
       const all = plans.list();
-      if (!all.length) return 'No plans yet.';
+      /*
+       * 坏文件报告放在最前面：``你的计划去哪了`` 是这类事故里用户唯一的线索，
+       * 而它必须在 plan_list 这种"看不到计划"的时刻就出现。
+       */
+      const warn = (() => {
+        const r = plans.recoveryInfo?.();
+        return r
+          ? `⚠ 计划文件读不懂，已隔离到 ${r.backup}（原因：${r.reason}）。本次显示的是隔离之后的内容；` +
+            `要恢复旧计划，把那个文件改名回 plans.json 再手工修 JSON。\n\n`
+          : '';
+      })();
+      if (!all.length) return `${warn}No plans yet.`;
       // `all: true` prints every plan in full, the old default (the notes are printed in full either way).
-      if (a?.all === true || a?.all === 'true') return all.map((p) => renderPlan(p)).join('\n\n');
+      if (a?.all === true || a?.all === 'true') return warn + all.map((p) => renderPlan(p)).join('\n\n');
       /*
        * Default: only the CURRENT plan — the open one, or the most recently touched when none is open
        * — plus one line about the rest. A tool result is re-sent on every later request of the
@@ -1131,10 +1163,10 @@ export function createPlanTools(
        */
       const current = plans.active() ?? all[0];
       const others = all.filter((p) => p.id !== current.id);
-      if (!others.length) return renderPlan(current);
+      if (!others.length) return warn + renderPlan(current);
       const open = others.filter((p) => p.status === 'open');
       const openNames = open.map((p) => `${p.id}「${p.title}」${planProgress(p).replace(/^进度 /, '')}`).join('、');
-      return `${renderPlan(current)}\n\n`
+      return `${warn}${renderPlan(current)}\n\n`
         + `（另有 ${others.length} 个计划没有展开：${open.length ? `${open.length} 个仍在进行 ${openNames}，` : ''}`
         + `${others.length - open.length} 个已收口。plan_list all=true 列出全部，plan_get plan_id=… 看其中一个。）`;
     },
