@@ -354,8 +354,11 @@ export class ScheduleStore {
     if (outcome.recovered) {
       this.recovery = outcome.recovered;
       log.error(`定时任务文件无法读取，已保留为备份。原因: ${outcome.recovered.reason}；备份: ${outcome.recovered.backup}`);
-      this.persist();
     }
+    /*
+     * 只写一次：以前 recovery 分支里也写一次、分支外再写一次 —— 每次启动白写一遍盘，
+     * 而且两次写之间没有任何差别。坏文件已经在 loadStateFile 里被隔离，这里落的是空清单。
+     */
     this.persist();
   }
 
