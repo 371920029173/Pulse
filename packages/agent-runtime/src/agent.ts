@@ -2162,7 +2162,8 @@ export class Agent {
     let digest = '';
     if (process.env.SHE_MAP_DIGEST !== '0') {
       try {
-        digest = mapDigest(this.config.workspace.root, 40);
+        /* 大窗口给更多行：1M 窗口下 40 行等于只看到地图的一个角。 */
+        digest = mapDigest(this.config.workspace.root, this.contextWindow.tokens >= 512_000 ? 120 : this.contextWindow.tokens >= 256_000 ? 80 : 40);
       } catch {
         digest = '';
       }

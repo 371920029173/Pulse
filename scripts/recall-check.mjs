@@ -83,15 +83,26 @@ const positives = [
   '改一下 kb-tools.ts 的召回条件',
   '我们讨论过的多核方案后来怎么定了',
   '这个接口的字段格式有约定吗',
+  '她为什么会在第 3 秒掉线',
+  '把这批日志按时间排一下',
+  '这个仓库的发布流程是什么',
+  'map_verify 报了 3 个坏分片，怎么修',
 ];
 const negatives = [
   '你好', '谢谢', '在吗', '继续', '好的', '收到',
   '嗯', '好', '明白了', 'hi', 'ok', 'thanks',
+  '辛苦了', '晚安', '行吧', '知道了',
 ];
 const posKinds = positives.map((q) => planRecall(q).kind);
 const negKinds = negatives.map((q) => planRecall(q).kind);
 check('正集全部要召回（kind≠chat）', posKinds.every((k) => k !== 'chat'), posKinds.join(','));
 check('负集全部不召回（kind=chat）', negKinds.every((k) => k === 'chat'), negKinds.join(','));
+/* 没有明显信号的句子：默认保守召回（认不出来 ≠ 不该查）。 */
+const vague = ['她为什么会在第 3 秒掉线', '把那批东西整理一下'];
+check('无信号句子也召回（认不出来≠不查）',
+  vague.every((q) => planRecall(q).kind !== 'chat'),
+  vague.map((q) => planRecall(q).kind).join(','));
+
 const posHit = posKinds.filter((k) => k !== 'chat').length;
 const negMiss = negKinds.filter((k) => k === 'chat').length;
 check('balanced 指标：漏召回 0，误触发 0',
