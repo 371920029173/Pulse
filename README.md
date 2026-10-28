@@ -27,7 +27,11 @@
 - 回合循环、工具调用、流式输出；工具失败分类（可重试 / 权限 / 策略拒绝 / 参数错…）。
 - **长程任务**：计划是一张图（步骤 + 依赖 + 失败策略）；自动续跑持续到计划没有未完成步骤，
   或撞到轮数/预算上限——不再用"连续两轮没进展"这种轮级门限替模型判断。
-- **压缩与缓存**：摘要冻结、`SHE_*` 预算、tool result 按剩余余量收紧并落盘全文。
+- **上下文管理（2.0）**：**不主动按窗口压缩** —— 等模型端真的拒绝超长才压，压一次给
+  ~10k token 的摘要（按原文 5% 往上抬，上限 60k 字符），并在压缩后提醒一次"重要决议先
+  `memo_add`/`kb_upsert` 记下来"。工具结果预算跟着窗口放大（128k→16k、256k→48k、512k+→64k
+  字符），命令日志的尾部同样放大，全文照旧落盘、退出码行永远保留。摘要冻结与
+  `SHE_*` 预算不变；阈值压缩可显式打开（`SHE_CONTEXT_COMPACT_AT=0.8`）。
 - **自省**：`reflection_check` 对照"实际目标/约束"查漂移与置信度；错题本记录并前置提示。
 - **子代理**：`task_spawn` 同步或 `background: true` 即发即走；`task_status({ ids, wait: true })`
   等全部结束；并发池默认 6（`SHE_SUBAGENT_CONCURRENCY`）；子代理不能再派子代理。
@@ -40,7 +44,7 @@
 命令 | `shell` / `shell_wait`（`ids` + `mode: all\|any`）/ `shell_kill` / `shell_jobs` |
 版本 | `git_status` / `git_diff` / `git_log` |
 地图 | `map_tree` / `map_lookup` / `map_whereis` / `map_scope` / `map_impact` / `map_wiring` / `map_contracts` / `map_verify` / `map_note` |
-知识库 | `kb_query` / `kb_upsert` / `kb_link` / `kb_edit` / `kb_retire` … |
+知识库 | `kb_query` / `kb_upsert` / `kb_link` / `kb_edit` / `kb_retire` / `kb_groups` / `kb_recall_gaps` … |
 协作 | `task_spawn` / `task_status`、`plan_*`、`memo_*`、`schedule_*`、`report_write`、`skill_read` |
 语言服务 | `lsp_definition` / `lsp_references` / `lsp_hover` / `lsp_diagnostics` |
 
@@ -61,7 +65,17 @@
 ### 知识库（`packages/kb`）
 
 - **组结构 + 共振检索**，不引入 embedding：组路径本身就是检索键，边带类型与证据。
-- 每轮请求末尾自动附一小段【自动召回】（结构共振排序，未必对——与当前这句无关就当没看见）。
+- **召回从"模型自愿"改成"默认推送"（2.0）**，五件套，全部落在请求末尾或一次冻结，不动前缀缓存：
+  1. **目录卡**（系统消息里 ≤1400 字符）：库里有哪几组、各多少条、最近写入 —— 模型至少知道
+     "哪些领域有据可查"；
+  2. **条件锚路由**：按这句话判定 改代码 / 问历史 / 写文档 / 寒暄，决定优先查哪几组、预算多少；
+     **寒暄轮零召回**，认不出来时**保守召回**（认不出 ≠ 不该查）；
+  3. **决策点状态行**：每轮末尾一行「本轮自动召回 N 条（原因）。id: … 不够就 kb_query」，
+     **0 条时也明说"库里没找到"**；
+  4. **工具提示行**：点名这轮最相关的 2–3 个工具（只点名真注册了的）；
+  5. **地图推送**：这句话提到工作区文件时，自动附一行影响面（被几处引用 / 要跑哪些 check）。
+- **写入侧 `recall_when`**：`kb_upsert` 记"将来什么上下文该想起它"，`kb_query` 结果里显示；
+  旧节点用 `kb_recall_gaps` 拿候选再逐条 `kb_edit` 补上（只提议、不自动写库）。
 - 节点带版本与历史：编辑保留旧版，退役保留原因与替代者。
 - 可外挂共享：`SHE_KB_PATH` 指向共享库，多工作区共用一份记忆。
 
@@ -100,7 +114,7 @@ Windows 也可以直接用 `SHE.bat` / `SHE-stop.bat`。桌面端打包见 [`doc
 `SHE_WORKSPACE` | 工作区根（沙箱边界） |
 `SHE_PORT` | 服务端口（默认 5577） |
 `SHE_CONTEXT_WINDOW` | 上下文窗口（0 = 按模型名识别） |
-`SHE_CONTEXT_AUTO_COMPACT` / `SHE_CONTEXT_COMPACT_AT` | 自动压缩开关与阈值 |
+`SHE_CONTEXT_AUTO_COMPACT` / `SHE_CONTEXT_COMPACT_AT` | 自动压缩开关与阈值（2.0 默认**不主动压**，只在模型端拒绝超长时压） |
 `SHE_KB_PATH` / `SHE_MAP_PATH` | 共享知识库 / 共享地图目录 |
 `SHE_SUBAGENT_CONCURRENCY` | 子代理并发池（默认 6） |
 `SHE_ALLOW_HISTORY_REDUCTION` | 是否允许裁剪历史（默认关闭；裁头会打掉前缀缓存） |
@@ -108,6 +122,7 @@ Windows 也可以直接用 `SHE.bat` / `SHE-stop.bat`。桌面端打包见 [`doc
 ## 验证
 
 ```bash
+pnpm check:recall      # 召回链路：目录卡稳定 / 正负集各 16 条 / 强锚 recall / 体积上限
 pnpm check:offline     # 不需要任何 API key：构建、单测、离线评测与全部结构检查
 pnpm check:all         # 追加 eval:verify（会调用模型，需要 key）
 ```
