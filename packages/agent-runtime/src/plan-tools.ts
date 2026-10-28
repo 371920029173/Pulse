@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, openSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, openSync, unlinkSync , closeSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ToolDefinition } from '@she/shared';
@@ -30,6 +30,18 @@ export type StepStatus = 'pending' | 'active' | 'done' | 'blocked' | 'dropped';
  * continues past a failed prerequisite is worse than one that stops and says why.
  */
 export type StepFailurePolicy = 'retry' | 'skip' | 'stop' | 'ask';
+
+/**
+ * 同步等待 ms 毫秒，不忙等。
+ *
+ * 计划写入是同步 API（load→改→save），拿不到锁时必须让出；`while (Date.now() < t) {}`
+ * 会把整个事件循环按住 —— 实测把全量门禁从 ~11 分钟拖到 30 分钟以上。
+ * `Atomics.wait` 在共享缓冲上等待，CPU 占用为零。
+ */
+function sleepSync(ms: number): void {
+  const buf = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(buf, 0, 0, ms);
+}
 
 export interface PlanStep {
   id: string;
@@ -277,15 +289,38 @@ export class PlanStore {
      * 那时**抛错让调用方重试**，比"假装写成功"好得多。
      */
     const lock = `${this.filePath}.lock`;
+    const fs_ = { writes: () => `${process.pid} ${Date.now()}` };
     let held = false;
-    for (let i = 0; i < 20; i += 1) {
+    for (let i = 0; i < 20 && !held; i += 1) {
       try {
-        openSync(lock, 'wx');
+        const fd = openSync(lock, 'wx');
+        writeFileSync(fd, fs_.writes(), 'utf8');
+        closeSync(fd);
         held = true;
         break;
       } catch {
-        const until = Date.now() + 100;
-        while (Date.now() < until) { /* 退避：同步等待，计划写操作本来就很短 */ }
+        /*
+         * 抢不到：可能是别人正持着，也可能是**上一个进程崩在写盘中间留下的**。
+         * 后者不清掉的话，之后每一次计划写入都会失败 —— 计划不再更新 → 自动续跑再也不触发。
+         * 判据是它自己的时间戳：计划写入是毫秒级，超过 10 秒还占着就是陈旧。
+         */
+        let stale = false;
+        try {
+          const [, at] = readFileSync(lock, 'utf8').trim().split(/\s+/);
+          const age = Date.now() - Number(at);
+          stale = Number.isFinite(age) && age > 10_000;
+        } catch {
+          /* 读不到内容（正写到一半）：按"不陈旧"处理，下一轮再看 */
+        }
+        if (stale) {
+          try {
+            unlinkSync(lock);
+          } catch {
+            /* 别人刚好删了 */
+          }
+          continue;
+        }
+        sleepSync(100);
       }
     }
     if (!held) throw new Error(`计划文件被占用（${lock}）：另一个进程正在写，稍后重试`);

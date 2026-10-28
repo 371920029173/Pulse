@@ -356,7 +356,25 @@ console.log('\n8. 迁移：2026-09-27 留在会话目录里的计划要收回来
 
 for (const d of workspaces) removeTempDir(d);
 
-/* ── /* ── 自动续跑：卡住时要点名"卡在哪、等谁" ───────────────────────── */
+/* ── /* ── 陈旧锁必须能被接管（否则计划写入永久失败、续跑再也不触发） ───── */
+{
+  const dir = mkdtempSync(join(tmpdir(), 'she-plan-lock-'));
+  const store = new PlanStore(dir, 'lock:r1');
+  const plan = store.create('锁', [{ title: 'A' }]);
+  const file = PlanStore.fileFor(dir, 'lock:r1');
+  /* 模拟"上一个进程崩在写盘中间"：锁文件留着，时间戳是 20 秒前 */
+  writeFileSync(`${file}.lock`, `99999 ${Date.now() - 20_000}`, 'utf8');
+  let ok = true;
+  try {
+    store.setStepStatus(plan.id, plan.steps[0].id, 'active', '陈旧锁之后仍可写');
+  } catch {
+    ok = false;
+  }
+  check('陈旧锁被接管，计划写入仍然成功', ok, ok ? 'written' : 'threw');
+  rmSync(dir, { recursive: true, force: true });
+}
+
+/* ── 自动续跑：卡住时要点名"卡在哪、等谁" ───────────────────────── */
 {
   const dir = mkdtempSync(join(tmpdir(), 'she-plan-stuck-'));
   const store = new PlanStore(dir, 'stuck:r1');
