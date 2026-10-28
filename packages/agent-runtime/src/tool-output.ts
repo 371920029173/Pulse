@@ -298,9 +298,18 @@ export function budgetToolResultOnArrival(
 ): ArrivedToolResult {
   const text = typeof raw === 'string' ? raw : String(raw ?? '');
   const fullChars = text.length;
-  const logCap = Math.min(LOG_RESULT_HEAD_CHARS + LOG_RESULT_TAIL_CHARS, limit);
+  /*
+   * 尾部上限跟着预算走（但 ≤ limit - 头部）。
+   *
+   * 固定 8000 在 16k 预算下是"用掉一半"，在 64k 预算下是"用掉八分之一"—— 大窗口就等于白白
+   * 浪费了 50k 的位置，而那些位置本来能装下整段报错栈。头部保持 1000：它是识别信息，不是内容。
+   */
+  const tailCeiling = limit <= TOOL_RESULT_CONTEXT_CHARS
+    ? LOG_RESULT_TAIL_CHARS /* 小窗口逐字节沿用旧切法：头 1000 + 尾 8000 */
+    : Math.max(LOG_RESULT_TAIL_CHARS, Math.min(LOG_RESULT_TAIL_MAX_CHARS * 4, Math.round(limit * 0.75)));
+  const logCap = Math.min(LOG_RESULT_HEAD_CHARS + tailCeiling, limit);
   const headCap = Math.min(LOG_RESULT_HEAD_CHARS, Math.max(200, Math.floor(logCap * 0.15)));
-  const tailCap = Math.min(LOG_RESULT_TAIL_CHARS, Math.max(headCap, logCap - headCap));
+  const tailCap = Math.min(tailCeiling, Math.max(headCap, logCap - headCap));
   if (!isLogTool(toolName) || fullChars <= headCap + tailCap + LOG_RESULT_SLACK_CHARS) {
     return { ...budgetToolResult(text, toolName, limit), savedTo: null };
   }

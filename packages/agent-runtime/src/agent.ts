@@ -2079,6 +2079,13 @@ export class Agent {
   private autoRecallBlock = '';
   /** 决策点状态行（s4）：这轮招到几条、id 是什么、不够怎么办。紧贴召回块之前。 */
   private autoRecallStatus = '';
+  /**
+   * 压缩后的一次性提醒：``重要决议请记进备忘板``。
+   *
+   * 压缩会把原话换成摘要，而"为什么这么定"只有写进 memo / kb 才拿得回来。用户的要求是
+   * 「提醒模型重要的决议记录一下」—— 所以这里只提醒**一次**，用完即清（每轮都提 = 噪声）。
+   */
+  private compactionNote = '';
 
   private messagesForRequest(): { messages: LLMMessage[] } {
     this.persistFrozenSystemMessage();
@@ -2172,9 +2179,11 @@ export class Agent {
         impact = '';
       }
     }
-    if (!hint && !this.autoRecallStatus && !this.autoRecallBlock && !digest && !impact) return messages;
+    const note = this.compactionNote;
+    this.compactionNote = '';
+    if (!note && !hint && !this.autoRecallStatus && !this.autoRecallBlock && !digest && !impact) return messages;
     const out = messages.slice();
-    const tail = [hint, this.autoRecallStatus, this.autoRecallBlock, digest, impact].filter(Boolean).join("\n\n");
+    const tail = [note, hint, this.autoRecallStatus, this.autoRecallBlock, digest, impact].filter(Boolean).join("\n\n");
     out[idx] = { ...messages[idx], content: `${content}\n\n${tail}` };
     return out;
   }
@@ -3786,6 +3795,9 @@ export class Agent {
       }
       state.afterTokens = after;
       this.compactionState = state;
+    /* 压缩后给下一轮留一句提醒（用一次就清）：重要决议要落到备忘板/知识库，摘要不保留原话。 */
+    this.compactionNote = `【压缩提示】刚刚把 ${state.covered} 条消息换成了摘要 — 摘要只保留结论，原话已不在上下文里。\n` +
+      `如果这期间有重要决议/约定/踩坑还没写下来，先 memo_add 或 kb_upsert 记一条，再继续干活。`;
       this.compactions += 1;
       this.persistCompaction();
       // 紧接着那一次请求会付掉前缀重算的钱，等 usage 回来量它。
