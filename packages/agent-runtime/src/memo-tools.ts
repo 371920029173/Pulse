@@ -25,13 +25,30 @@ export interface MemoEntry {
  * 从 `MemoStore.list` 提出来，是为了让历史迁移也能用**同一个**解析器：坏文件当空、去掉 BOM、"不是数组
  * 就当空"这三条规则各写一遍的话，第二个解析器迟早和第一个不一致。迁移只多知道"文件在哪"。
  */
-function readMemoFile(filePath: string): MemoEntry[] {
+function readMemoFile(
+  filePath: string,
+  onCorrupt?: (backup: string, err: unknown) => void,
+): MemoEntry[] {
   try {
     if (!existsSync(filePath)) return [];
     const raw = readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '');
     const parsed = JSON.parse(raw) as MemoEntry[];
     return Array.isArray(parsed) ? parsed : [];
-  } catch {
+  } catch (err) {
+    if (!onCorrupt) return [];
+    /*
+     * 读不懂就隔离：备忘是用户手写的东西，直接当空等于下一次 add() 把它整份覆盖掉。
+     * 迁移那条路径不传这个回调 —— 它读的是别的工作区，不该去动人家的文件。
+     */
+    const backup = `${filePath}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    let where = filePath;
+    try {
+      renameSync(filePath, backup);
+      where = backup;
+    } catch {
+      /* 改不动至少要让调用方知道 */
+    }
+    onCorrupt(where, err);
     return [];
   }
 }
@@ -50,6 +67,8 @@ function readMemoFile(filePath: string): MemoEntry[] {
  */
 export class MemoStore {
   private filePath: string;
+  /** 上次读到坏文件时的隔离位置与原因（memo_list 会印出来）。 */
+  private recovery: { backup: string; reason: string } | null = null;
 
   constructor(workspaceRoot: string) {
     // 唯一允许拼工作区级路径的方式；文件名的校验在 `workspaceStateFile` 里。
@@ -58,7 +77,14 @@ export class MemoStore {
   }
 
   list(): MemoEntry[] {
-    return readMemoFile(this.filePath);
+    return readMemoFile(this.filePath, (backup, err) => {
+      this.recovery = { backup, reason: (err as Error)?.message ?? String(err) };
+    });
+  }
+
+  /** 这次读到过坏文件吗（memo_list 用）。 */
+  recoveryInfo(): { backup: string; reason: string } | null {
+    return this.recovery;
   }
 
   private save(list: MemoEntry[]): void {
@@ -176,11 +202,21 @@ export function createMemoTools(workspaceRoot: string): {
        * agent told the memo is empty re-notes what it already noted, or reports that the user never
        * recorded anything. The count and the way to see them are stated instead.
        */
+      /*
+       * 坏文件报告放最前面：备忘读不懂时用户最需要知道的就是"东西去哪了"，
+       * 而 memo_list 正是他来看这件事情的地方。
+       */
+      const corrupt = (() => {
+        const r = store.recoveryInfo?.();
+        return r
+          ? `⚠ 备忘文件读不懂，已隔离到 ${r.backup}（原因：${r.reason}）。\n要恢复就把那个文件改名回 memo.json 并修 JSON。\n\n`
+          : '';
+      })();
       if (!shown.length) {
         if (hidden) {
-          return `备忘录里 ${hidden} 条都已标记完成（默认不列出）。要看就带 includeDone=true。`;
+          return corrupt + `备忘录里 ${hidden} 条都已标记完成（默认不列出）。要看就带 includeDone=true。`;
         }
-        return '备忘录为空。';
+        return corrupt + '备忘录为空。';
       }
       const body = shown
         .map((m) => `${m.done ? '[x]' : '[ ]'} ${m.id}  (${m.author === 'user' ? '用户' : '智能体'})  ${m.text}`)

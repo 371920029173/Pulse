@@ -23,6 +23,19 @@ afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 const MEMO_FILE = () => join(dir, '.she', 'memo.json');
 
 describe('MemoStore', () => {
+  it('坏备忘文件被隔离，而不是被当成空、随后被覆盖', () => {
+    const root = mkdtempSync(join(tmpdir(), 'she-memo-corrupt-'));
+    mkdirSync(join(root, '.she'), { recursive: true });
+    writeFileSync(join(root, '.she', 'memo.json'), '{ not json', 'utf8');
+
+    const store = new MemoStore(root);
+    assert.equal(store.list().length, 0, '读不懂时列出为空');
+    const info = store.recoveryInfo();
+    assert.ok(info, '必须记录隔离位置');
+    assert.ok(existsSync(info!.backup), '隔离文件必须真的存在');
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it('adds an entry and reads it back', () => {
     const store = new MemoStore(dir);
     const e = store.add('记得改配置', 'user');
