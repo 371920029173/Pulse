@@ -14,6 +14,7 @@ import { deriveGroups } from './groups.js';
 import { readSymbols, symbolsInFile } from './symbols.js';
 import { logForPath, numStat, gitIn, status } from './gitlayer.js';
 import { gateFor, type GateHit } from './gate.js';
+import { buildMap } from './build.js';
 import type { MapIndex, MapNote, MapNode, MapEdge } from '@she/shared';
 
 export const estimateTokens = (text: string): number => Math.ceil(text.length / 3);
@@ -347,8 +348,29 @@ export interface WhereisResult {
  *   ② 再在展开的分片里给**节点**打分。
  * 这样即使仓里有 10 万文件，扫描量也只跟"相关的那几片"成正比（有上限 2000）。
  */
+/**
+ * 地图过期就重建一次（便宜：git ls-files + 每文件 sha）。
+ *
+ * 判据用 HEAD：索引是在某次构建时对着当时的 HEAD 建的；HEAD 变了、或索引里压根没有这个文件
+ * （新建未提交也一样），就先重建。重建失败不影响查询，只是结果可能旧。
+ */
+function ensureFreshMap(root: string): boolean {
+  try {
+    const git = gitIn(root);
+    const head = git(['rev-parse', 'HEAD']).trim();
+    const idx = loadAll(root).index;
+    if (idx && (idx as unknown as { head?: string }).head === head) return true;
+    buildMap({ root, branch: idx?.branch ?? 'main' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function mapWhereis(root: string, query: string, opts: { limit?: number; maxScan?: number; branch?: string } = {}): WhereisResult {
   const started = Date.now();
+  /* 先确保不是旧地图（旧地图会安静地回答"没有"）。 */
+  const fresh = ensureFreshMap(root);
   const loaded = loadAll(root);
   const limit = opts.limit ?? 5;
   const maxScan = opts.maxScan ?? 2000;
@@ -377,8 +399,33 @@ export function mapWhereis(root: string, query: string, opts: { limit?: number; 
     else byShard.set(key, [node]);
   }
 
+  /* 符号名缓存：读一次，按路径分组（只读索引，不碰磁盘）。 */
+  const symbolsByPath = new Map<string, string[]>();
+  try {
+    const table = readSymbols(root);
+    if (table) {
+      /*
+       * 表是压缩存的：names[i] 是路径，start[i]..start[i+1] 是 arena 里它的符号块。
+       * 块里每行形如 "name kind"，取第一列就是符号名。
+       */
+      for (let i = 0; i < table.names.length; i += 1) {
+        const p = table.names[i]!;
+        const from2 = table.start[i] ?? 0;
+        const to2 = i + 1 < table.start.length ? table.start[i + 1]! : table.arena.length;
+        const names: string[] = [];
+        for (let k = from2; k < to2 && k < table.arena.length; k += 1) {
+          const line = String(table.arena[k] ?? '').trim();
+          const name = line.split(/\s+/)[0];
+          if (name && /^[A-Za-z_$][\w$]*$/.test(name)) names.push(name);
+        }
+        if (names.length) symbolsByPath.set(p, names);
+      }
+    }
+  } catch { /* 符号表坏了就退化成只用标签/路径 */ }
+
   const scoreNode = (node: MapNode) => {
-    const hay = `${node.path} ${node.label ?? ''} ${node.what ?? ''} ${node.when ?? ''}`.toLowerCase();
+    const syms = symbolsByPath.get(node.path) ?? [];
+    const hay = `${node.path} ${node.label ?? ''} ${node.what ?? ''} ${node.when ?? ''} ${syms.join(' ')}`.toLowerCase();
     let score = 0;
     const reasons: string[] = [];
     for (const term of terms) {
@@ -391,7 +438,7 @@ export function mapWhereis(root: string, query: string, opts: { limit?: number; 
         score += 2;
         reasons.push(`说明命中「${term}」`);
       } else {
-        reasons.push(`路径命中「${term}」`);
+        reasons.push(syms.some((n) => n.toLowerCase().includes(term)) ? `符号命中「${term}」` : `路径命中「${term}」`);
       }
     }
     /*
@@ -424,7 +471,30 @@ export function mapWhereis(root: string, query: string, opts: { limit?: number; 
       if (score <= 0 || reasons.length === 0) continue;
       hits.push({ path: node.path, label: node.label, score, reasons, refs: node.inDegree ?? 0 });
     }
-    if (shardsExpanded >= 3) break;
+    /*
+     * 这里原来是 `if (shardsExpanded >= 3) break;` —— 一个没有任何依据的魔法数：
+     * 分片按顶层目录切，只看 3 个等于大部分文件从没被扫过，"地图找不到东西"主要来自这一行。
+     * 预算交给 maxScan，扫了几个分片如实报给调用方。
+     */
+  }
+
+  /*
+   * 第二轮：第一轮零命中，就把还没扫过的分片按同预算再扫一遍。
+   * "这个分片没有命中"不等于"全库没有命中"，而模型只会看到后者。
+   */
+  if (hits.length === 0) {
+    for (const shard of shardScores) {
+      if (scanned >= maxScan) break;
+      shardsExpanded += 1;
+      const take = Math.min(shard.nodes.length, maxScan - scanned);
+      for (const node of shard.nodes.slice(0, take)) {
+        scanned += 1;
+        const { score, reasons } = scoreNode(node);
+        if (score <= 0 || reasons.length === 0) continue;
+        if (hits.some((h) => h.path === node.path)) continue;
+        hits.push({ path: node.path, label: node.label, score, reasons, refs: node.inDegree ?? 0 });
+      }
+    }
   }
 
   hits.sort((a, b) => b.score - a.score || b.refs - a.refs || a.path.localeCompare(b.path));
