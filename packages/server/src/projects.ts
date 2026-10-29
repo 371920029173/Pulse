@@ -1,5 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { readJsonOrQuarantine } from './json-state.js';
+import { createLogger } from '@she/shared';
 import { dirname, resolve } from 'node:path';
+
+const log = createLogger('projects');
 
 /**
  * Directories this process has actually opened.
@@ -15,13 +19,14 @@ interface ProjectFile {
 }
 
 function read(file: string): string[] {
-  try {
-    if (!existsSync(file)) return [];
-    const j = JSON.parse(readFileSync(file, 'utf8')) as Partial<ProjectFile>;
-    return Array.isArray(j.roots) ? j.roots.filter((r) => typeof r === 'string' && r) : [];
-  } catch {
-    return [];
-  }
+  /*
+   * 读不懂就隔离（readJsonOrQuarantine）——"当空"会让下一次 rememberProject 只写一条，
+   * 把用户攒了半年的最近项目列表整份替换掉。
+   */
+  const j = readJsonOrQuarantine<Partial<ProjectFile>>(file, {}, (q) => {
+    log.error(`最近项目文件无法读取，已隔离: ${q.backup}（${q.reason}）`);
+  });
+  return Array.isArray(j.roots) ? j.roots.filter((r) => typeof r === 'string' && r) : [];
 }
 
 export function rememberProject(file: string, root: string): void {

@@ -51,7 +51,8 @@
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync , renameSync } from 'node:fs';
+import { createLogger } from '@she/shared';
 import { dirname, join } from 'node:path';
 
 /** Where the token may be carried. Both are equivalent; neither is a query parameter. */
@@ -231,6 +232,8 @@ export function isPublicRoute(method: string, pathname: string): boolean {
  * by SessionStore and read by code that has no tenant concept, and threading ownership through it
  * would mean every existing writer could silently drop it. Nothing but this module reads this file.
  */
+const log = createLogger('tenancy');
+
 export class TenantLedger {
   private file: string;
   private map: Record<string, string> | null = null;
@@ -254,9 +257,19 @@ export class TenantLedger {
           return out;
         }
       }
-    } catch {
-      // A damaged ledger must not take the server down. Sessions simply read as unowned, which is
-      // the same state as a fresh install, and the next claim rewrites the file.
+    } catch (err) {
+      /*
+       * 坏账本不能让服务端倒下 —— 但也不能**悄悄被下一次 claim 重写掉**：
+       * 会话归属一旦丢了，多开之间就会互相看见对方的会话。
+       * 所以隔离留底 + 日志点名；之后按"全新安装"的状态继续跑。
+       */
+      const backup = `${this.file}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      try {
+        renameSync(this.file, backup);
+        log.error(`会话归属账本无法读取，已隔离: ${backup}（${(err as Error)?.message ?? String(err)}）`);
+      } catch {
+        log.error(`会话归属账本无法读取且无法隔离: ${this.file}`);
+      }
     }
     this.map = {};
     return this.map;
