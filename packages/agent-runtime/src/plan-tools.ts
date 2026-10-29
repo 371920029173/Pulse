@@ -1431,6 +1431,20 @@ export function createPlanTools(
         if (status === 'needs_confirmation' && !open.length) {
           return 'Error: 状态不合法：status=needs_confirmation 但没有待确认的项，那这次交付就是 done';
         }
+        /*
+         * partial / blocked 与 open 的关系是对称的：
+         *   · partial 没写 open → 读者不知道"部分"是哪部分没做；
+         *   · blocked 没写 open → 只说了"卡住"，没说卡在哪、什么能解开它。
+         * 两者都让文档看起来完整，而这正是这套模板要防止的事。
+         */
+        if (status === 'partial' && !open.length) {
+          return 'Error: 状态不合法：status=partial 但没有 open —— 部分完成就必须说清"哪一部分没做/没验证"，'
+            + '每条都写"什么能把它确认掉"；全都做完了就把 status 写成 done';
+        }
+        if (status === 'blocked' && !open.length) {
+          return 'Error: 状态不合法：status=blocked 但没有 open —— 卡住要有卡住的对象：'
+            + '缺了什么信息、哪个外部系统没回、哪个决定还没定；这些就是 open 里的条目';
+        }
 
         /*
          * The plan is the workspace's own record of what has been finished, so this is the one
@@ -1506,6 +1520,14 @@ export function createPlanTools(
           parts.push('', '## 风险', '', ...listLines(delivery.risks, '（无）'));
         }
         parts.push('', '## 待确认', '', ...listLines(delivery.open, '（无——本次交付没有未验证的部分）'));
+        /*
+         * 计划里还没做完的步骤跟着交付一起走：交付文档是**离开对话之后**唯一还在的东西，
+         * 让读者自己去翻 plan_list 等于把"还有什么没做"变成一次考古。
+         */
+        if (delivery.unmet.length) {
+          parts.push('', '## 计划里还没做完', '',
+            ...delivery.unmet.map((u) => `- ${u.plan} · ${u.step.id}「${u.step.title}」（${u.step.status}）`));
+        }
         if (delivery.unmet.length) {
           parts.push('', '### 计划里还没做完的步骤（交付时点）', '',
             ...delivery.unmet.map((u) => `- ${u.plan} · ${u.step.id} ${u.step.title} [${u.step.status}]`));
