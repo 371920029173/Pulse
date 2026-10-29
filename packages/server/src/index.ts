@@ -1310,18 +1310,42 @@ function makeSubagentRunner(parentCfg: SheConfig, parentSessionId: string): Suba
         const archive = join(parentCfg.workspace.root, '.she', 'subagent-history', childSession.id);
         let patchPath: string | undefined;
         try {
-          rmSync(archive, { recursive: true, force: true });
-          mkdirSync(archive, { recursive: true });
+          /*
+           * 先在 staging 里把归档准备好，最后一步才换上去。
+           *
+           * 旧顺序是"先删旧归档、再建新的"：中间任何一步失败，上一份归档就没了、新的也不完整，
+           * 而归档是子代理留下的唯一记录。
+           */
+          const staging = `${archive}.tmp-${process.pid}-${Date.now()}`;
+          rmSync(staging, { recursive: true, force: true });
+          mkdirSync(staging, { recursive: true });
           const childState = join(wt.path, '.she');
-          if (existsSync(childState)) renameSync(childState, join(archive, '.she'));
+          if (existsSync(childState)) renameSync(childState, join(staging, '.she'));
           const patch = diffAgainst(wt.path, wt.head);
           if (patch.trim()) {
-            patchPath = join(archive, 'worktree.patch');
+            patchPath = join(staging, 'worktree.patch');
             writeFileSync(patchPath, patch, 'utf8');
           }
           try {
-            new SessionStore(archive).update(childSession.id, { directory: archive });
+            new SessionStore(staging).update(childSession.id, { directory: archive });
           } catch { /* 记录在归档里；只是 directory 还指着旧路径 */ }
+
+          /* 交换：旧归档改名留底 → staging 上位 → 删旧的。任何时刻都至少有一份完整的。 */
+          const retired = `${archive}.old-${Date.now()}`;
+          let hadArchive = false;
+          try {
+            if (existsSync(archive)) {
+              renameSync(archive, retired);
+              hadArchive = true;
+            }
+          } catch { /* 改名失败就继续：下面的 rename 会替换它 */ }
+          renameSync(staging, archive);
+          if (patchPath) patchPath = join(archive, 'worktree.patch');
+          if (hadArchive) {
+            try {
+              rmSync(retired, { recursive: true, force: true });
+            } catch { /* 删不掉就留着，反正是 .old- 结尾，下次能看出来 */ }
+          }
           try { rememberProject(projectIndexFile(), archive); } catch { /* non-fatal */ }
 
           /* 用户可能正开着这个副本的会话：那就把挂载点搬到归档处，而不是让他在一个刚被删掉的目录上翻页。 */
