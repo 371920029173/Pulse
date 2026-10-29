@@ -284,12 +284,32 @@ export function buildMap(opts: BuildOptions): BuildResult {
   /* 见上：挂边发生在写盘之后，这里必须补一次落盘。 */
   for (const key of touchedShards) writeJsonAtomic(shardPath(root, key), shards.get(key)!);
 
+  /*
+   * 不要传 readCached：这条路径上缓存是空的，读出来每个文件都是空串，
+   * 于是整张符号表被写成空表（2026-10-27 实测 names=0），whereis 因此只剩文件名可匹配。
+   * 符号提取在建图时只跑一次，直接读盘更稳。
+   */
   const symbolTable = buildSymbols({
     root,
     files: files.map((f) => ({ path: f.path, lang: f.lang })),
-    readFile: readCached,
   });
-  writeSymbols(root, symbolTable);
+  /*
+   * 空表就重来一次：用 git ls-files 显式给出 {path, lang}（与手工脚本同一条路，实测可出 6441 个名字）。
+   * 两条路都空才认输 —— 空符号表是"地图找不到东西"的最深一层，不能静默接受。
+   */
+  let finalSymbols = symbolTable;
+  if (!finalSymbols.names.length) {
+    try {
+      const listing = execFileSync('git', ['ls-files'], {
+        cwd: root, encoding: 'utf8', maxBuffer: 512 * 1024 * 1024,
+      }) as unknown as string;
+      const list = listing.split(/\r?\n/).filter((p: string) => Boolean(p))
+        .map((p: string) => ({ path: p, lang: langOf(p) }))
+        .filter((x: { path: string; lang: string }) => ['ts', 'tsx', 'js', 'jsx', 'py', 'go', 'rs'].includes(x.lang));
+      finalSymbols = buildSymbols({ root, files: list });
+    } catch { /* 连 git 都读不到：保持空表，下面的告警会说 */ }
+  }
+  writeSymbols(root, finalSymbols);
 
   const index: MapIndex = {
     schemaVersion: MAP_SCHEMA_VERSION,

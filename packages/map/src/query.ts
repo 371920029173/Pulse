@@ -405,20 +405,21 @@ export function mapWhereis(root: string, query: string, opts: { limit?: number; 
     const table = readSymbols(root);
     if (table) {
       /*
-       * 表是压缩存的：names[i] 是路径，start[i]..start[i+1] 是 arena 里它的符号块。
-       * 块里每行形如 "name kind"，取第一列就是符号名。
+       * names[i] 是**符号名**，它出现的位置在 arena[start[i] .. start[i]+count[i]]，
+       * 每条形如 "path:line:kind:E"。把 path 归到符号名上，whereis 才能按符号匹配。
        */
       for (let i = 0; i < table.names.length; i += 1) {
-        const p = table.names[i]!;
+        const sym = table.names[i]!;
         const from2 = table.start[i] ?? 0;
-        const to2 = i + 1 < table.start.length ? table.start[i + 1]! : table.arena.length;
-        const names: string[] = [];
-        for (let k = from2; k < to2 && k < table.arena.length; k += 1) {
-          const line = String(table.arena[k] ?? '').trim();
-          const name = line.split(/\s+/)[0];
-          if (name && /^[A-Za-z_$][\w$]*$/.test(name)) names.push(name);
+        const count = table.count[i] ?? 0;
+        for (let k = from2; k < from2 + count && k < table.arena.length; k += 1) {
+          const entry = String(table.arena[k] ?? '');
+          const path = entry.slice(0, entry.lastIndexOf(':', entry.lastIndexOf(':', entry.lastIndexOf(':') - 1) - 1));
+          if (!path) continue;
+          const list = symbolsByPath.get(path) ?? [];
+          if (!list.includes(sym)) list.push(sym);
+          symbolsByPath.set(path, list);
         }
-        if (names.length) symbolsByPath.set(p, names);
       }
     }
   } catch { /* 符号表坏了就退化成只用标签/路径 */ }

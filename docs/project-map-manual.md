@@ -113,3 +113,18 @@ pnpm map:query adopt <别的工作区根> [--prefix 旧路径=新路径 …]
 - 地图只存**路径、标签、边、注记**，不存文件正文；
 - `.env`、密钥、二进制、>2MB 文件永不索引；
 - `.she/` 在 gitignore 里，不进仓库；想共用：`SHE_MAP_PATH`（对称 `SHE_KB_PATH`）。
+
+
+## 自维护（2026-10-27）
+
+地图的"找不到东西"几乎都不是检索坏了，而是**地图过期或符号表为空** —— 两种都不报错。
+
+- `scripts/map-autolabel.mjs`：从导出符号机械生成标签（只写缺标签的，不覆盖手工标注）。
+- `scripts/map-autolabel-zh.mjs --refresh`：把文件里第一段中文注释也写进 `what`，
+  让中文查询（如「召回 路由」）能命中。
+- `scripts/map-build-symbols.mjs`：单独建符号表（`git ls-files` + 正则，纯离线）。
+- `scripts/map-recall-check.mjs`：断言"符号表非空、标签覆盖 ≥95%、符号名查询有命中、
+  中文查询命中 recall-router"，已接成 `pnpm check:maprecall` 并进门禁。
+
+`buildMap` 自己也会建符号表；若建出来是空表，会退回 `git ls-files` 再建一次
+（空符号表 = whereis 只剩文件名可匹配）。
