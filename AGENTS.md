@@ -109,6 +109,17 @@ plain UTF-8.
 file we cannot use is *moved aside*, never overwritten: an earlier build treated any parse
 failure as "no data" and saved that over the user's conversations.
 
+**The same rule applies to every hand-rolled state file, not only `state-file.ts`.** Found by
+audit on 2026-10-27: `plans.json`, `memo.json`, the recent-projects list and the tenancy ledger
+all did `try { JSON.parse(...) } catch { return [] }` — so one bad byte meant "empty", and the
+next write replaced the user's file with that emptiness. A plan, a memo list and a session
+ownership map all went through that shape. If you add a state file, read it with
+`readJsonOrQuarantine` (server) or `loadStateFile` (everything under `.she/`), and make the
+corrupt copy visible where a person will look for it (`memo_list`, `plan_list`, the recovery
+banner) — a quarantined file nobody is told about is the same as a lost one. The rule is that a
+file we cannot use is *moved aside*, never overwritten: an earlier build treated any parse
+failure as "no data" and saved that over the user's conversations.
+
 **Two command controls, two different guarantees.** `DESTRUCTIVE_PATTERNS` is a denylist
 (fail-open — it only blocks forms someone thought of). `allowedCommands` is a denylist's
 opposite: fail-closed, refusing everything not named, checking *every* command in a line

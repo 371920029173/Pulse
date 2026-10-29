@@ -31,6 +31,7 @@
  * 所以每节用一个新的工作区目录：节与节之间看不见，正是模型本身要的性质。
  */
 import { mkdtempSync, mkdirSync, readFileSync, existsSync, readdirSync, writeFileSync, rmSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -44,6 +45,7 @@ import {
   adoptSessionPlansIntoWorkspace,
   WORKSPACE_SCOPE,
 } from '../packages/agent-runtime/dist/index.js';
+const distEntry = new URL('../packages/agent-runtime/dist/index.js', import.meta.url).href;
 import { removeTempDir } from './lib/temp.mjs';
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -389,6 +391,35 @@ for (const d of workspaces) removeTempDir(d);
   check('卡住时不启动续跑', decision.proceed === false, decision.reason);
   check('卡住的原因点名了被等的那一步', (decision.reason ?? '').includes(b.id), decision.reason ?? '');
   check('并且说清了那一步现在的状态', /blocked/.test(decision.reason ?? ''), decision.reason ?? '');
+  rmSync(dir, { recursive: true, force: true });
+}
+
+/* ── 真跨进程：两个独立 node 进程写同一份计划 ─────────────────────── */
+{
+  const dir = mkdtempSync(join(tmpdir(), 'she-plan-xproc-'));
+  const store = new PlanStore(dir, 'xproc:r1');
+  const plan = store.create('跨进程', [{ title: 'A' }]);
+  const stepId = plan.steps[0].id;
+
+  const worker = join(dir, 'worker.mjs');
+  writeFileSync(worker, [
+    "import { PlanStore } from " + JSON.stringify(distEntry) + ";", 
+    'const [dir, planId, stepId, note] = process.argv.slice(2);',
+    "const s = new PlanStore(dir, 'xproc:r1');",
+    "s.setStepStatus(planId, stepId, 'active', note);",
+  ].join('\n'), 'utf8');
+
+  const run = (note) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [worker, dir, plan.id, stepId, note], { stdio: 'ignore' });
+    child.on('exit', (code) => resolve(code ?? 1));
+  });
+
+  const [c1, c2] = await Promise.all([run('进程一'), run('进程二')]);
+  const after = (new PlanStore(dir, 'xproc:r1')).list().find((p) => p.id === plan.id);
+  const step = after?.steps.find((x) => x.id === stepId);
+  check('两个独立进程都能写完（都不报错）', c1 === 0 && c2 === 0, `codes=${c1},${c2}`);
+  check('跨进程写之后步骤还在、备注是其中一条', Boolean(step) && /进程[一二]/.test(step.note ?? ''),
+    `note=${step?.note ?? '(none)'}`);
   rmSync(dir, { recursive: true, force: true });
 }
 
