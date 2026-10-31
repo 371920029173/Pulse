@@ -190,3 +190,18 @@ pnpm pack:win         # 打 Windows 安装包；结尾自动跑 check:packaged
 | `scripts/durability-check.mjs` | 持久化与重启：设置/会话/组/定时任务在硬杀后仍然在 |
 | `scripts/map-note.mjs` | 写标签/注记：单条（`--path --label-text --what --when` / `--kind --text`）或批量（`--json`，支持 `--dry`） |
 | `scripts/map-suggest.mjs` | 批量**初筛候选标签**（测试取 describe/it、md 取一级标题、脚本取首行注释），只输出不写盘 |
+
+
+## 会话原文档案：`scripts/rebuild-transcript.mjs`
+
+把一个会话被压缩掉的原文重建成可读档案（只读原会话，不写回）：
+
+```bash
+node scripts/rebuild-transcript.mjs <工作区> <会话 id> [--all]
+```
+
+- 读 `.she/sessions/<id>/compacted/*.jsonl`（每行 `{role, content, tool_calls?}`）；
+- **那些文件是同一条对话的多个快照**（第一行都相同、条数递增），所以默认只取最大的一份；
+  `--all` 才按快照顺序输出并标出每份的增量；
+- 产出 `<id>-full.md` / `<id>-full.txt` / `<id>-index.tsv`（序号 / 角色 / 字符数 / 预览，
+  60 MB 的文件靠它按区间跳读）。

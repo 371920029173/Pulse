@@ -2455,8 +2455,24 @@ function agentFor(
 
 /** Persist a session's live transcript into its stored session record. */
 function persistHistory(id?: string): void {
-  const sid = id || activeAgentId || sessions.getActive()?.id;
+  /*
+   * 没有点名会话时，以**服务端记录的 active 会话**为准，而不是 activeAgentId。
+   *
+   * `activeAgentId` 会被"点开另一个会话看一眼"改写（见 agentFor 里的赋值），
+   * 于是不带 id 的落盘会把 A 的历史写进 B —— 下次打开 B 就看到别人的上下文。
+   * 两者不一致时**两份都落**，宁多写一次，也不要把跑着的那份丢掉。
+   */
+  const serverActive = sessions.getActive()?.id ?? null;
+  const sid = id || serverActive || activeAgentId;
   if (!sid) return;
+  if (!id && activeAgentId && activeAgentId !== sid && agents.has(activeAgentId)) {
+    persistOne(activeAgentId);
+  }
+  persistOne(sid);
+}
+
+/** 把某一个会话的内存历史落盘；不存在就什么都不做。 */
+function persistOne(sid: string): void {
   const a = agents.get(sid);
   if (!a) return;
   try {
