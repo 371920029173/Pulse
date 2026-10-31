@@ -51,6 +51,13 @@ export interface PlanStep {
   detail?: string;
   note?: string;
   /**
+   * 这一步"做完了"的证据：命令与退出码、file:line、测试结果。
+   *
+   * 交付门禁早就在检查证据了，但那是**整份交付**层面；计划里的单步却只有 `done` 两个字。
+   * 结果是：计划显示 8/8 完成，而没有任何一处能说明凭什么。可选字段，老计划不受影响。
+   */
+  evidence?: string[];
+  /**
    * Ids of steps that must be `done` before this one may start or be finished.
    *
    * Always present on a step read back from the store (defaults to `[]`), so a caller never has
@@ -97,6 +104,13 @@ export interface Plan {
   sessionId?: string;
   createdAt: string;
   updatedAt: string;
+  /**
+   * 状态变更时间线（最多 200 条）。
+   *
+   * 只记"谁从什么变成什么"，不记全文 —— 它要回答的问题是"这个计划什么时候停的、
+   * 哪一步被改回去过"，而不是重放整段对话。
+   */
+  log?: Array<{ at: string; step: string; from: string; to: string; note?: string }>;
 }
 
 /** Every valid step status, in the order the tool schema advertises them. */
@@ -463,8 +477,9 @@ export class PlanStore {
     stepId: string,
     status: StepStatus,
     note?: string,
-    declared?: { dependsOn?: string[]; onFailure?: StepFailurePolicy },
+    declared?: { dependsOn?: string[]; onFailure?: StepFailurePolicy; evidence?: string[] },
   ): StepUpdate {
+    const evidenceDecl = declared?.evidence;
     const plans = this.load();
     const plan = this.find(plans, planId);
     if (!plan) return { ok: false, reason: `plan not found (plan_id=${planId})` };
@@ -545,11 +560,25 @@ export class PlanStore {
       }
     }
 
+    const fromStatus = step.status;
     step.status = status;
     if (status === 'blocked') step.attempts += 1;
     if (note !== undefined) step.note = note;
     step.updatedAt = now;
     plan.updatedAt = now;
+    /*
+     * 时间线：只记"谁从什么变成什么"。上限 200 条，丢最老的 ——
+     * 它要回答"这个计划什么时候停的、哪一步被改回去过"，不是重放全文。
+     */
+    if (fromStatus !== status) {
+      const log = plan.log ?? (plan.log = []);
+      log.push({ at: now, step: step.id, from: fromStatus, to: status, ...(note ? { note } : {}) });
+      if (log.length > 200) log.splice(0, log.length - 200);
+    }
+    if (evidenceDecl && evidenceDecl.length) {
+      const list = step.evidence ?? (step.evidence = []);
+      for (const e of evidenceDecl) if (!list.includes(e)) list.push(e);
+    }
 
     if (status === 'done') this.activateNext(plan);
 
@@ -819,6 +848,11 @@ export function looksLikeEvidence(text: string): boolean {
 
 export interface RenderPlanOptions {
   /**
+   * 附上"最近的状态变更"。默认关：plan_update / plan_add_steps 的输出是一份契约，
+   * 多一段会改变所有按输出比对的断言；想看历史的是 plan_get，它显式打开。
+   */
+  trail?: boolean;
+  /**
    * Print a step's note ONLY for the ids in this set; every other step prints without one.
    *
    * `plan_update` runs once per step of progress — a dozen times on a long task — and the notes
@@ -885,7 +919,14 @@ function stepLine(s: PlanStep, opts?: RenderPlanOptions): string {
   const policy = s.onFailure !== 'stop' ? `  失败策略: ${s.onFailure}` : '';
   const tries = s.attempts > 0 ? `  已试 ${s.attempts} 次` : '';
   const showNote = s.note && (!opts?.notesOnly || opts.notesOnly.has(s.id));
-  return `  ${STATUS_MARK[s.status]} ${s.id} ${s.title}${deps}${policy}${tries}${showNote ? `  — ${s.note}` : ''}`;
+  /*
+   * 证据标记：done 但没有证据时明确写出来。
+   * 这一行存在的理由和交付门禁一样 —— "完成"要有可核对的东西，否则它只是一句话。
+   */
+  const ev = s.evidence?.length
+    ? `  证据 ${s.evidence.length} 条`
+    : (s.status === 'done' ? '  ⚠ 无证据' : '');
+  return `  ${STATUS_MARK[s.status]} ${s.id} ${s.title}${deps}${policy}${tries}${ev}${showNote ? `  — ${s.note}` : ''}`;
 }
 
 export function renderPlan(plan: Plan, opts?: RenderPlanOptions): string {
@@ -907,6 +948,17 @@ export function renderPlan(plan: Plan, opts?: RenderPlanOptions): string {
    * finished one.
    */
   lines.push(nextLine(plan));
+  /*
+   * 时间线：最近 8 条。它回答的是"这个计划什么时候停的、哪一步被改回去过"，
+   * 而这些在只看状态标记时是看不出来的。
+   */
+  const trail = opts?.trail ? (plan.log ?? []).slice(-8) : [];
+  if (trail.length) {
+    lines.push('', '最近的状态变更（新 → 旧）：');
+    for (const t of [...trail].reverse()) {
+      lines.push(`  ${t.at.slice(5, 16).replace('T', ' ')}  ${t.step}: ${t.from} → ${t.to}${t.note ? `  — ${t.note}` : ''}`);
+    }
+  }
   return lines.join('\n');
 }
 
@@ -1117,7 +1169,8 @@ export function createPlanTools(
           step_id: { type: 'string', description: 'Step id, e.g. s1' },
           status: { type: 'string', enum: STEP_STATUSES, description: 'New status (optional if you are only declaring depends_on / on_failure)' },
           note: { type: 'string', description: 'Optional short note (blocker, finding, evidence)' },
-          depends_on: {
+          evidence: { type: 'array', items: { type: 'string' }, description: 'What proves this step is done: a command and its exit code, a file:line, a test result. Optional, but a done step without evidence is marked as such in plan_get.' },
+        depends_on: {
             type: 'array',
             items: { type: 'string' },
             description: 'Ids of steps that must be done before this one; replaces the current list',
@@ -1131,7 +1184,8 @@ export function createPlanTools(
       const planId = String(a.plan_id ?? '');
       const stepId = String(a.step_id ?? '');
       const raw = String(a.status ?? '');
-      const declares = Array.isArray(a.depends_on) || typeof a.on_failure === 'string';
+      const declares = Array.isArray(a.depends_on) || typeof a.on_failure === 'string'
+        || Array.isArray(a.evidence);
       if (!raw && !declares) {
         return `Error: 必须给 status 或 depends_on / on_failure 之一（只给 plan_id 和 step_id 不知道该改什么）`;
       }
@@ -1158,6 +1212,7 @@ export function createPlanTools(
         a.note ? String(a.note) : undefined,
         {
           dependsOn: Array.isArray(a.depends_on) ? (a.depends_on as string[]) : undefined,
+        evidence: Array.isArray(a.evidence) ? (a.evidence as string[]).map((x) => String(x)).filter(Boolean) : undefined,
           onFailure: FAILURE_POLICIES.includes(a.on_failure as StepFailurePolicy)
             ? (a.on_failure as StepFailurePolicy)
             : undefined,
@@ -1281,7 +1336,7 @@ export function createPlanTools(
       if (!targetId) return 'No plans yet.';
       const plan = plans.get(targetId);
       if (!plan) return `Error: plan not found (plan_id=${targetId})`;
-      return renderPlan(plan);
+      return renderPlan(plan, { trail: true });
     },
   );
 

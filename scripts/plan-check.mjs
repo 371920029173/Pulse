@@ -41,6 +41,7 @@ import {
   getSystemPrompt,
   planSessions,
   PlanStore,
+  renderPlan,
   planAutopilot,
   adoptSessionPlansIntoWorkspace,
   WORKSPACE_SCOPE,
@@ -358,7 +359,42 @@ console.log('\n8. 迁移：2026-09-27 留在会话目录里的计划要收回来
 
 for (const d of workspaces) removeTempDir(d);
 
-/* ── /* ── 陈旧锁必须能被接管（否则计划写入永久失败、续跑再也不触发） ───── */
+/* ── /* ── 长程任务升级：证据 + 时间线 ─────────────────────────────── */
+{
+  const dir = mkdtempSync(join(tmpdir(), 'she-plan-ev-'));
+  const store = new PlanStore(dir, 'ev:r1');
+  const plan = store.create('证据与时间线', [{ title: 'A' }]);
+  const a = plan.steps[0];
+
+  store.setStepStatus(plan.id, a.id, 'active', '开工');
+  store.setStepStatus(plan.id, a.id, 'done', '做完了', { evidence: ['node --test 42/42 通过'] });
+
+  const after = store.list().find((p) => p.id === plan.id);
+  const step = after.steps.find((x) => x.id === a.id);
+  check('证据被记在步上', (step.evidence ?? []).length === 1, JSON.stringify(step.evidence));
+  /*
+   * 创建计划时第一步直接被激活（不走 setStepStatus），所以时间线从 active→done 起。
+   * 判据取"记到了 done" + "再变一次就多一条"，比数固定条数稳。
+   */
+  const logBefore = (after.log ?? []).length;
+  check('时间线记下了到 done 的那一次',
+    logBefore >= 1 && after.log.some((l) => l.to === 'done'),
+    (after.log ?? []).map((l) => `${l.from}→${l.to}`).join(','));
+  store.setStepStatus(plan.id, a.id, 'blocked', '回退检查');
+  const logAfter = (store.list().find((p) => p.id === plan.id).log ?? []).length;
+  check('每次状态变化都进时间线', logAfter === logBefore + 1, `${logBefore} → ${logAfter}`);
+  const rendered = renderPlan(after, { trail: true });
+  check('渲染里有时间线一节', rendered.includes('最近的状态变更'), rendered.split('\n').slice(-2).join(' | '));
+
+  /* done 且无证据 → 渲染标 ⚠ 无证据 */
+  const p2 = store.create('无证据', [{ title: 'B' }]);
+  store.setStepStatus(p2.id, p2.steps[0].id, 'done', '直接标完成');
+  const r2 = renderPlan(store.list().find((p) => p.id === p2.id), { trail: true });
+  check('done 无证据会被标出来', r2.includes('无证据'), r2.split('\n')[2] ?? '');
+  rmSync(dir, { recursive: true, force: true });
+}
+
+/* ── 陈旧锁必须能被接管（否则计划写入永久失败、续跑再也不触发） ───── */
 {
   const dir = mkdtempSync(join(tmpdir(), 'she-plan-lock-'));
   const store = new PlanStore(dir, 'lock:r1');
