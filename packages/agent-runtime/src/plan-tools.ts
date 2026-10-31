@@ -3,6 +3,8 @@ import { join, resolve, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ToolDefinition } from '@she/shared';
 import { highFindings, renderGuardrailRefusal, scanOutbound } from './guardrail.js';
+import { TaskTreeStore } from './task-tree.js';
+import { registerTaskTreeTools } from './tree-tools.js';
 import {
   sessionStateDir,
   listSessionIds,
@@ -1690,6 +1692,9 @@ export function createPlanTools(
       return `Error: ${err instanceof Error ? err.message : String(err)}`;
     }
   };
+
+  /* 任务树：与计划放同一套工具里（用户要求），但语义不同 —— 树不自增不推动，只在出口汇报。 */
+  registerTaskTreeTools(reg, new TaskTreeStore(workspaceRoot, sessionId));
 
   return { definitions, execute, store: plans };
 }
