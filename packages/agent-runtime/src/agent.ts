@@ -16,7 +16,7 @@ import { renderAutoRecall, shouldAutoRecall } from './auto-recall.js';
 import { OpenAIProvider } from './providers/openai.js';
 import { AnthropicProvider } from './providers/anthropic.js';
 import { classifyLlmFailure, failureLabel } from './providers/stream-failure.js';
-import { getSystemPrompt, readSkillProfile } from './system-prompt.js';
+import { SYSTEM_PROMPT_VERSION, getSystemPrompt, readSkillProfile } from './system-prompt.js';
 import type { ToolSet } from '@she/sandbox';
 import { PendingPatchStore, CheckpointStore, resolveInsideWorkspace } from '@she/sandbox';
 import { createKBTools } from './kb-tools.js';
@@ -2236,7 +2236,7 @@ export class Agent {
 
   /** What the prompt was built for: a record made under other settings is not reused. */
   private frozenSystemKey(): string {
-    return JSON.stringify([resolve(this.config.workspace.root), this.config.automationMode !== false, this.kbReadOnly, this.isSubagent]);
+    return JSON.stringify([SYSTEM_PROMPT_VERSION, resolve(this.config.workspace.root), this.config.automationMode !== false, this.kbReadOnly, this.isSubagent]);
   }
 
   /**
@@ -2258,13 +2258,23 @@ export class Agent {
   private restoreFrozenSystemMessage(): void {
     const file = this.frozenSystemFile();
     if (!file) return;
-    let rec: { v?: unknown; key?: unknown; prompt?: unknown; calibration?: unknown } | null;
+    let rec: { v?: unknown; key?: unknown; prompt?: unknown; calibration?: unknown; promptHash?: unknown } | null;
     try {
       rec = JSON.parse(readFileSync(file, 'utf8'));
     } catch {
       return;
     }
     if (!rec || rec.v !== 1 || rec.key !== this.frozenSystemKey()) return;
+    /*
+     * 提示词本身变了，冻结的那份就不再复用。
+     *
+     * `frozenSystemKey` 里只有工作区/自动化/只读/子代理四项，**不含代码版本** —— 于是提示词改过之后
+     * （比如新增一节任务树纪律），所有老会话仍会拿回旧提示词：它们看得到新工具，却没人告诉它什么时候用。
+     * 2026-11-01 实测：14 个会话的 system-message.json 里没有一个含 "Task tree"。
+     *
+     * 代价说清楚：改了提示词，老会话下一轮会重付一次全量前缀（这就是它本该付的 —— 头部确实变了）。
+     * 没改的时候，hash 一致，照旧逐字节复用。
+     */
     if (typeof rec.prompt !== 'string' || !rec.prompt || typeof rec.calibration !== 'string') return;
     this.systemPrompt = rec.prompt;
     this.calibrationBlock = rec.calibration;
@@ -2293,6 +2303,7 @@ export class Agent {
       log.warn(`system message not recorded for this session: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+
 
   /** First 12 hex of sha256(system message + tool table): equal values, identical prompt head. */
   private prefixHash(): string {

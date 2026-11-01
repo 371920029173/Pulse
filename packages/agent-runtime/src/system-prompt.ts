@@ -1,4 +1,17 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
+
+/**
+ * 提示词模板的版本号。**改了提示词里"代码侧"的任何一节，就把这个数字加一。**
+ *
+ * 为什么需要它：每个会话的系统消息按会话冻结（`system-message.json`），否则重建 Agent 会换掉缓存前缀、
+ * 让整段历史按全价重付一次。但冻结的键原来只有「工作区 / 自动化 / 只读 KB / 子代理」四项，
+ * **不含提示词本身的版本** —— 于是代码里新加的一节（比如任务树纪律）永远到不了老会话：
+ * 它们拿得到新工具，却没人告诉它什么时候用。2026-11-01 实测 14 个会话全都没有那一节。
+ *
+ * 用常量而不是"哈希拼出来的提示词"：用户中途改 `.she/rules.md` / skills 属于**同一个会话内的正常变化**，
+ * 那种情况必须继续冻结（这是 prefix-stability 的判据之一）；只有模板变了才该作废。
+ */
+export const SYSTEM_PROMPT_VERSION = 2;
 import { join, dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
