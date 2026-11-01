@@ -37,6 +37,14 @@ export function renderTree(file: TreeFile, opts?: { trail?: boolean }): string {
       walk(n.id, depth + 1);
     }
   };
+  /*
+   * 先把根节点（目标本身）打出来，再走子节点。
+   *
+   * `walk(rootId, 0)` 是"列出 rootId 的子节点"，根自己永远不在里面 —— 于是一棵只建了
+   * "目标 + 一个子任务"的树会把目标那一行整个藏掉，而计数却是 2。
+   */
+  const rootNode = file.nodes.find((n) => n.id === file.rootId);
+  if (rootNode) lines.push(line(rootNode, 0));
   walk(file.rootId, 0);
 
   const pendingQ = file.nodes.flatMap((n) => n.questions.filter((q) => !q.answeredAt).map((q) => ({ n, q })));
@@ -231,14 +239,23 @@ export function registerTaskTreeTools(
     },
     async (a) => {
       try {
-        const q = store.ask(String(a.id), {
+        /*
+         * 不给 id 就挂到"正在做的那个节点"：无人值守时的提问总是关于手上这条分支，
+         * 而漏传 id 换来一句"没有这个节点：undefined"对模型没有任何信息量。
+         */
+        const treeNow = store.get();
+        const fallback = treeNow?.nodes.find((n) => n.status === 'active')
+          ?? treeNow?.nodes.find((n) => n.status !== 'done' && n.status !== 'dropped');
+        const nodeId = String(a.id ?? '') || fallback?.id || '';
+        if (!nodeId) return 'Error: 树里没有可挂的节点 —— 先 tree_create，或用 id 指定一个节点';
+        const q = store.ask(nodeId, {
           text: String(a.text),
           options: Array.isArray(a.options) ? (a.options as string[]).map(String) : [],
           recommend: String(a.recommend),
           blocking: a.blocking === true,
           reversible: a.reversible !== false,
         });
-        return `已提问 ${q.id}（节点 ${a.id}），截止 ${q.deadlineAt}。`
+        return `已提问 ${q.id}（节点 ${nodeId}），截止 ${q.deadlineAt}。`
           + `\n${q.reversible ? '到期按设置处理（相信→自动采纳，不相信→继续搁置）' : '这是不可逆问题：**永远不会**自动采纳，只会等你回答'}`
           + (q.blocking ? '\n标记为 blocking：若到期仍无人回答且设置为「不相信」，这棵树的该分支将判定无法继续。' : '');
       } catch (err) {

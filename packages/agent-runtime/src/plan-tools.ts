@@ -1709,6 +1709,14 @@ export function createPlanTools(
     },
   );
 
+  /*
+   * 任务树工具与计划工具挂在同一张表上（模型侧就是"计划那一块"的按键）。
+   *
+   * 位置很关键：必须在下面 `definitions` 那次快照**之前**注册。上一版放在快照之后，
+   * 于是六个工具都"能执行但模型不知道存在"—— 判据全绿，功能等于没有。
+   */
+  registerTaskTreeTools(reg, new TaskTreeStore(workspaceRoot, sessionId));
+
   const definitions = Array.from(toolMap.values()).map((t) => t.def);
   const execute = async (name: string, args: Record<string, unknown>): Promise<string> => {
     const entry = toolMap.get(name);
@@ -1720,8 +1728,6 @@ export function createPlanTools(
     }
   };
 
-  /* 任务树：与计划放同一套工具里（用户要求），但语义不同 —— 树不自增不推动，只在出口汇报。 */
-  registerTaskTreeTools(reg, new TaskTreeStore(workspaceRoot, sessionId));
 
   return { definitions, execute, store: plans };
 }

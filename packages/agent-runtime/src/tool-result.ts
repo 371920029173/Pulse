@@ -420,6 +420,16 @@ const RULES: Rule[] = [
    * a more specific diagnosis. `没有可用的 batch` belongs here rather than under
    * `unavailable`: the tool IS installed, there is simply nothing for it to work on yet.
    */
+  /*
+   * 任务树的提问没有可挂的节点（`tree_ask` 省略 id，而树里还没有任何节点）。
+   *
+   * 归 precondition 而不是 invalid_args：换个参数没用，得先有树。
+   */
+  {
+    kind: 'precondition',
+    re: /树里没有可挂的节点/i,
+    from: 'tree-tools.ts `tree_ask`',
+  },
   {
     kind: 'precondition',
     re: /没有可用的|当前没有|no matching pending|尚未|还没有|后台任务已达上限/i,

@@ -129,6 +129,28 @@ const dir = mkdtempSync(join(tmpdir(), 'she-tree-check-'));
   check('刚建好的树不会被误判为预算用尽', normal.budget().exhausted === false, normal.budget().reason);
 }
 
+/* ⑩ 工具真的注册给模型了吗（不是"实现了"而已） */
+{
+  const { createPlanTools } = await import('../packages/agent-runtime/dist/plan-tools.js');
+  const ws = join(dir, '..', 'tree-reg-' + Math.random().toString(36).slice(2, 8));
+  mkdirSync(ws, { recursive: true });
+  const tools = createPlanTools(ws, 'sess_reg');
+  const names = tools.definitions.map((d) => d.name);
+  const want = ['tree_create', 'tree_add', 'tree_update', 'tree_get', 'tree_ask', 'tree_report'];
+  check('【关键】六个 tree_* 都在模型可见的工具表里（definitions 快照之后注册就等于没有）',
+    want.every((n) => names.includes(n)),
+    `tool count=${names.length}, missing=${want.filter((n) => !names.includes(n)).join(',') || 'none'}`);
+
+  /* 端到端：建树 → 省略 id 提问 → 渲染里能看见目标本身 */
+  await tools.execute('tree_create', { title: '判据树', subtasks: ['第一步'] });
+  const reply = await tools.execute('tree_ask', { text: '选哪个？', options: ['A', 'B'], recommend: 'A', reversible: true });
+  check('tree_ask 省略 id 也能用，回执写的是节点 id 而不是 undefined',
+    /节点 n\d+/.test(reply) && !reply.includes('undefined'), reply.split('\n')[0]);
+  const shown = await tools.execute('tree_get', {});
+  check('渲染里有目标节点（walk(rootId) 只列子节点，根要单独打）',
+    /\[.\] n1 判据树/.test(shown), shown.split('\n').slice(0, 3).join(' | '));
+}
+
 rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `\n${failed} 项 FAIL` : '\n全部 PASS');
 process.exit(failed ? 1 : 0);
