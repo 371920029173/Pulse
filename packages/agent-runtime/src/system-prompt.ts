@@ -11,7 +11,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 
  * 用常量而不是"哈希拼出来的提示词"：用户中途改 `.she/rules.md` / skills 属于**同一个会话内的正常变化**，
  * 那种情况必须继续冻结（这是 prefix-stability 的判据之一）；只有模板变了才该作废。
  */
-export const SYSTEM_PROMPT_VERSION = 3;
+export const SYSTEM_PROMPT_VERSION = 4;
 import { join, dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -699,7 +699,7 @@ anyway.
   const TASK_TREE_SECTION = subagent ? '' : [
     '## Task tree (unattended work)',
     '',
-    'When the job is long **and nobody is watching**, use the task tree (`tree_*`) instead of `plan_*`:',
+    '**A long task defaults to the task tree (`tree_*`), not `plan_*`** - it keeps running on its own:',
     '',
     '- `tree_create` the goal, then **grow it as you learn**: `tree_add` a subtask under a node, or a sibling',
     '  of it when you discover a second path.',
