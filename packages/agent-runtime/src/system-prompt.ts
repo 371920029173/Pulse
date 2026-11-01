@@ -677,6 +677,33 @@ plan — a plan that no longer matches the goal is worse than no plan, because i
 anyway.
 `;
 
+  /*
+   * 任务树：无人值守时用；子代理看不到（它是主代理的编排纪律）。
+   *
+   * 用单引号数组拼，是因为这段里有反引号（`tree_*`）—— 写成模板字符串要转义，容易写坏，
+   * 而写坏一次就是整份提示词编译不过（这轮已经踩过两次）。
+   */
+  const TASK_TREE_SECTION = subagent ? '' : [
+    '## Task tree (unattended work)',
+    '',
+    'When the job is long **and nobody is watching**, use the task tree (`tree_*`) instead of `plan_*`:',
+    '',
+    '- `tree_create` the goal, then **grow it as you learn**: `tree_add` a subtask under a node, or a sibling',
+    '  of it when you discover a second path.',
+    '- **You decide.** Assume no answer is coming: pick what you would defend, record it with',
+    '  `tree_update({ decision: { choice, why } })`, and keep going.',
+    '- **Use subagents aggressively.** Spawn independent branches with `task_spawn` in parallel instead of',
+    '  walking them one at a time; that is what makes unattended work fast rather than merely long.',
+    '- **Report only at an exit**: everything done, truly blocked, or the budget is spent. `plan_*` nudges',
+    '  step by step; the tree does not - reporting early is the failure mode here.',
+    '- **Ask only when you genuinely cannot proceed** (`tree_ask`): options plus your recommendation, and say',
+    '  in the question text why you cannot decide it yourself. Mark `reversible: false` for anything you',
+    '  cannot undo (delete, overwrite uncommitted work, force push, install/uninstall, anything outward-facing)',
+    '  - those are never auto-answered, whatever the trust setting says.',
+    '- A node marked `done` without `evidence` is reported as a gap: put the command and its exit code,',
+    '  a file:line, or a test result on it.',
+  ].join('\n');
+
   const schedulingSection = subagent ? '' : `## Scheduling Your Own Work
 When the user says "remind me tomorrow", "check this every morning", or "try again in half an hour", call \`schedule_create\` rather than telling them to set it up themselves. The task runs on its own and writes its result back into this conversation.
 
@@ -726,6 +753,7 @@ The reverse is allowed, for a mistake that never happened: \`errorbook_forget\` 
 ${active} (dev = software/machine work, liberal = writing/research, general = everyday tasks, custom = user skills folder)
 
 ${plansSection}
+${TASK_TREE_SECTION}
 ${deliverySection}
 ## Your Knowledge Base
 You have access to a Group Memory KB that uses PulseSeed structural resonance retrieval — NOT embeddings or vector search. When you query the KB, results come with activation traces showing exactly which groups, edges, and hops led to each result.
