@@ -104,7 +104,10 @@ describe('SandboxShell', () => {
 
   it('should detect destructive commands', () => {
     assert.equal(shell.isDestructive('rm -rf /'), true);
-    assert.equal(shell.isDestructive('git push origin main'), true);
+    // 普通 push 是日常动作；只有强推改写远端历史才是不可逆的。
+    assert.equal(shell.isDestructive('git push origin main'), false);
+    assert.equal(shell.isDestructive('git push --force origin main'), true);
+    assert.equal(shell.isDestructive('git push -f origin main'), true);
     assert.equal(shell.isDestructive('git reset --hard HEAD'), true);
     assert.equal(shell.isDestructive('fdisk /dev/sda'), true);
     assert.equal(shell.isDestructive('mkfs.ext4 /dev/sda1'), true);

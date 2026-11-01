@@ -562,9 +562,9 @@ console.log('\n=== 真隔离的可用性与提示 ===');
   check('后果文案：rm -rf 说清是递归删除且不可撤销',
     describeDestructive('rm -rf /tmp/x').some((c) => c.includes('递归') && c.includes('无法撤销')),
     JSON.stringify(describeDestructive('rm -rf /tmp/x')));
-  check('后果文案：git push 说清远端历史会被改写',
-    describeDestructive('git push origin main').some((c) => c.includes('远端')),
-    JSON.stringify(describeDestructive('git push origin main')));
+  check('后果文案：强推说清远端历史会被改写（普通 push 不算危险）',
+    describeDestructive('git push --force origin main').some((c) => c.includes('远端')),
+    JSON.stringify(describeDestructive('git push --force origin main')));
   check('后果文案：普通命令没有后果条目（不能什么都标红）',
     describeDestructive('echo hi').length === 0, JSON.stringify(describeDestructive('echo hi')));
 

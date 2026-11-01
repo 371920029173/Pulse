@@ -1646,7 +1646,12 @@ export function Chat({
           </div>
           <div className={styles.confirmTicket}>{pendingConfirm.ticket_id}</div>
           <div className={styles.confirmActions}>
-            <button className={styles.confirmYes} onClick={onConfirm} disabled={isLoading}>{t('确认执行')}</button>
+                            {/*
+                  * 这里原来写着 `disabled={isLoading}` —— 而"等确认"的时候这一轮并没有结束（run 是 PAUSED，
+                  * SSE 还开着），所以 isLoading 一直是 true，按钮永远点不动。用 pendingConfirm 判断：
+                  * 卡片还在就等于"正等着你点"，必须可点。
+                  */}
+                <button className={styles.confirmYes} onClick={onConfirm} disabled={isLoading && !pendingConfirm}>{t('确认执行')}</button>
             <button className={styles.confirmNo} onClick={onDismissConfirm} disabled={isLoading}>{t('取消')}</button>
           </div>
         </div>

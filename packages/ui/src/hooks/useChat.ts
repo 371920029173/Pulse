@@ -952,7 +952,11 @@ export function useChat(sessionId?: string | null) {
   }, [isLoading, dispatchSend, healStaleTurn, serverTurnRunning]);
 
   const confirmPending = useCallback(() => {
-    if (!pendingConfirm || isLoading) return;
+    /*
+     * 只挡"没有待确认项"这一种；不再要求 `!isLoading` —— 等确认时这一轮本就还在跑。
+     * 重复点击靠下一行的 setPendingConfirm(null) 挡：第二次进来 pendingConfirm 已经是 null。
+     */
+    if (!pendingConfirm) return;
     const ticketId = pendingConfirm.ticket_id;
     setIsLoading(true);
     setPendingConfirm(null);

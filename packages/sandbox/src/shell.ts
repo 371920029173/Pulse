@@ -21,7 +21,13 @@ export const DESTRUCTIVE_PATTERNS: RegExp[] = [
   /\bformat\s/i,
   /\bfdisk\b/i,
   /\bmkfs\b/i,
-  /git\s+push/i,
+  /*
+   * 只拦**强推**，不拦普通 push。
+   *
+   * 一开始拦的是 /git\s+push/，结果每次推送都要确认一次 —— 而"把提交推上去"是这条流水线里最普通的动作，
+   * 天天要按的确认框只会被无脑点掉，等于把这个闸废掉。真正不可逆的是改写远端历史：--force / -f。
+   */
+  /git\s+push\b[^\n]*\s(--force|-f)(\s|$)/i,
   /git\s+reset\s+--hard/i,
   /\bshutdown\b/i,
   /\breboot\b/i,
@@ -47,7 +53,7 @@ const DESTRUCTIVE_CONSEQUENCES: Array<[RegExp, string]> = [
   [/\bformat\s/i, '格式化磁盘/分区，该分区上的数据全部丢失'],
   [/\bfdisk\b/i, '改写分区表，可能导致整块盘的数据不可读'],
   [/\bmkfs\b/i, '重新创建文件系统，该分区原有数据全部丢失'],
-  [/git\s+push/i, '把本地提交推到远端分支 —— 别人已经拉到的历史会被改写或覆盖，而且退不回来'],
+  [/git\s+push\b[^\n]*\s(--force|-f)(\s|$)/i, '强推：改写远端分支历史 —— 别人已经拉到的提交会被覆盖，而且退不回来'],
   [/git\s+reset\s+--hard/i, '丢弃所有未提交的改动（工作区被强制回退，改不回来）'],
   [/\bshutdown\b/i, '关机：未保存的文档和正在跑的任务都会中断'],
   [/\breboot\b/i, '重启：未保存的文档和正在跑的任务都会中断'],
