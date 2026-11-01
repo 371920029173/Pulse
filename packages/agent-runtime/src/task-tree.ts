@@ -360,6 +360,29 @@ export class TaskTreeStore {
     return { auto, stillPending, blocked };
   }
 
+  /**
+   * 该收口了没有。
+   *
+   * 出口不能只靠模型自己想起来 —— 墙钟、节点数、单节点失败次数任何一个到顶，这棵树继续跑
+   * 只是在烧时间和钱。判断放在这里，由 `tree_get`（模型每一步都会顺手看一眼）报出来，
+   * 而不是等它自觉调用 `tree_report`。
+   */
+  budget(): { exhausted: boolean; reason: string } {
+    const file = this.load();
+    if (!file) return { exhausted: false, reason: '' };
+    const open = file.nodes.filter((n) => n.status !== 'done' && n.status !== 'dropped');
+    if (!open.length) return { exhausted: false, reason: '' };
+    const minutes = (Date.now() - Date.parse(file.createdAt)) / 60_000;
+    if (minutes > this.settings.maxMinutes) {
+      return { exhausted: true, reason: `已跑 ${Math.round(minutes)} 分钟，超过预算 ${this.settings.maxMinutes} 分钟` };
+    }
+    if (file.nodes.length >= this.settings.maxNodes) {
+      return { exhausted: true, reason: `节点数 ${file.nodes.length} 已达上限 ${this.settings.maxNodes}` };
+    }
+    const dead = open.find((n) => n.attempts >= this.settings.maxNodeAttempts);
+    if (dead) return { exhausted: true, reason: `${dead.id}「${dead.title}」已连续失败 ${dead.attempts} 次` };
+    return { exhausted: false, reason: '' };
+  }
   /** 出口判定：没有可推进节点时，是"全完成"还是"受阻/预算用尽"。 */
   outcome(startedAt: number): { outcome: 'success' | 'blocked' | 'partial'; reason: string } {
     const file = this.load();

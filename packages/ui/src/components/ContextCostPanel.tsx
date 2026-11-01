@@ -196,6 +196,12 @@ export function ContextCostPanel({ onClose }: { onClose: () => void }) {
   const [priceCached, setPriceCached] = useState('');
   const [level, setLevel] = useState<CompressionChoice | null>(null);
   const [allowHistory, setAllowHistory] = useState<boolean | null>(null);
+  /*
+   * 任务树的无人值守策略。`null` = 还没加载完 —— 保存时据此决定"要不要把这个字段写回去"，
+   * 因为一个没加载完就按保存的界面，会把用户的设置悄悄改回默认值。
+   */
+  const [treeTrust, setTreeTrust] = useState<boolean | null>(null);
+  const [treeTimeout, setTreeTimeout] = useState<string>('');
 
   /**
    * 用户是否动过草稿。
@@ -209,6 +215,17 @@ export function ContextCostPanel({ onClose }: { onClose: () => void }) {
   const load = useCallback(async (opts: { force?: boolean } = {}) => {
     try {
       const data = await fetchJSON<ContextPlan>('/api/context/plan');
+      /*
+       * 树的策略在 `/api/settings` 里，不在 context/plan 里：它跟花钱无关，跟"没人在场时敢不敢
+       * 自己拍板"有关。单独拉一次，失败了不影响这个面板的其余部分。
+       */
+      try {
+        const s = await fetchJSON<{ tree?: { trustModel?: boolean; answerTimeoutMinutes?: number } }>('/api/settings');
+        if (!dirty.current || opts.force) {
+          if (typeof s.tree?.trustModel === 'boolean') setTreeTrust(s.tree.trustModel);
+          if (typeof s.tree?.answerTimeoutMinutes === 'number') setTreeTimeout(String(s.tree.answerTimeoutMinutes));
+        }
+      } catch { /* 读不到就不显示，不挡住其它设置 */ }
       setPlan(data);
       setError(null);
       if (!dirty.current || opts.force) {
@@ -260,6 +277,12 @@ export function ContextCostPanel({ onClose }: { onClose: () => void }) {
         compression: level,
         pricing: priceBody(),
       };
+      if (treeTrust !== null || treeTimeout.trim() !== '') {
+        body.tree = {
+          ...(treeTrust !== null ? { trustModel: treeTrust } : {}),
+          ...(treeTimeout.trim() !== '' && Number(treeTimeout) > 0 ? { answerTimeoutMinutes: Number(treeTimeout) } : {}),
+        };
+      }
       // 唯一一个会删用户东西的开关：只有界面确实加载过它（`!== null`）才写，
       // 免得"面板还没加载完就按保存"把它悄悄关掉或打开。
       if (allowHistory !== null) body.allowHistoryReduction = allowHistory;
@@ -499,6 +522,41 @@ export function ContextCostPanel({ onClose }: { onClose: () => void }) {
               {alloc?.historyReduction
                 ? t('本轮会压缩历史记录（已允许，且档位为「激进」）。')
                 : t('本轮不压缩任何历史记录。')}
+            </p>
+          </section>
+
+          {/*
+            * 任务树：无人值守时才用得上，所以放在"成本"面板而不是主界面上 —— 它的代价就是钱和时间。
+            * 不可逆的问题永远不走自动，这一行必须写在界面上，否则"相信"两个字会被读成"什么都信"。
+            */}
+          <section className={styles.section}>
+            <label className={styles.checkRow}>
+              <input
+                type="checkbox"
+                checked={treeTrust === true}
+                onChange={(e) => { dirty.current = true; setTreeTrust(e.target.checked); }}
+              />
+              <span>
+                {t('无人值守时：提问超时后按模型的推荐值自动执行（「相信」）')}
+                <em className={styles.warn}>
+                  {t('只对可逆的问题生效。删文件、覆盖未提交改动、对外发布这类不可逆的问题永远会等你，没有开关。')}
+                </em>
+              </span>
+            </label>
+            <label className={styles.checkRow}>
+              <span>{t('超时（分钟）')}</span>
+              <input
+                type="number"
+                min={1}
+                value={treeTimeout}
+                onChange={(e) => { dirty.current = true; setTreeTimeout(e.target.value); }}
+                style={{ width: 80 }}
+              />
+            </label>
+            <p className={styles.note}>
+              {treeTrust === true
+                ? t('当前：超时后自动走推荐值（可逆问题）。不可逆问题仍然等你。')
+                : t('当前：超时后只搁置，不自动执行 —— 需要你回来回答。')}
             </p>
           </section>
 

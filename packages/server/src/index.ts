@@ -3878,6 +3878,21 @@ const STREAM_PERSIST_MS = 10_000;
         compactAtShare: config.context.compactAtShare,
         pricing: { ...config.context.pricing },
       },
+      /* 任务树策略：原样回传环境里那份，界面据此显示开关状态。 */
+      tree: (() => {
+        const n = (key: string, dflt: number) => {
+          const v = Number(process.env[key]);
+          return Number.isFinite(v) && v > 0 ? v : dflt;
+        };
+        const trust = (process.env.SHE_TREE_TRUST ?? '').trim().toLowerCase();
+        return {
+          trustModel: ['1', 'true', 'yes', 'on'].includes(trust),
+          answerTimeoutMinutes: n('SHE_TREE_TIMEOUT_MIN', 5),
+          maxMinutes: n('SHE_TREE_MAX_MINUTES', 120),
+          maxNodes: n('SHE_TREE_MAX_NODES', 60),
+          maxNodeAttempts: n('SHE_TREE_MAX_TRIES', 3),
+        };
+      })(),
     });
   });
 
@@ -3935,6 +3950,19 @@ router.put('/api/settings', async (req, res) => {
       /** 从窗口的百分之多少开始压。0.1 ~ 1 之间。 */
       compactAtShare?: number;
       compactionLevel?: string;
+      /**
+       * 任务树的无人值守策略。
+       *
+       * 只有**可逆**问题会走「相信」自动采纳；不可逆的一律搁置 —— 那条规则没有开关，
+       * 所以这里没有对应字段，免得让人以为能把它打开。
+       */
+      tree?: {
+        trustModel?: boolean;
+        answerTimeoutMinutes?: number;
+        maxMinutes?: number;
+        maxNodes?: number;
+        maxNodeAttempts?: number;
+      };
     }>(req);
 
     const prevWorkspaceRoot = config.workspace.root;
@@ -3984,6 +4012,26 @@ router.put('/api/settings', async (req, res) => {
       config.sandbox.allowAllCommands = body.allowAllCommands;
       config.sandbox.denyDestructiveByDefault = !body.allowAllCommands;
       setEnv('SHE_ALLOW_ALL_COMMANDS', body.allowAllCommands ? 'true' : 'false');
+    }
+
+    /*
+     * 任务树策略写进 .env，重启后还在（`treeSettingsFromEnv()` 在构造树时读）。
+     * 只在显式给了合法值时才改 —— 传 undefined 不该把用户的设置抹回默认。
+     */
+    if (body.tree && typeof body.tree === 'object') {
+      if (typeof body.tree.trustModel === 'boolean') {
+        setEnv('SHE_TREE_TRUST', body.tree.trustModel ? '1' : '0');
+      }
+      const positives: Array<[keyof NonNullable<typeof body.tree>, string]> = [
+        ['answerTimeoutMinutes', 'SHE_TREE_TIMEOUT_MIN'],
+        ['maxMinutes', 'SHE_TREE_MAX_MINUTES'],
+        ['maxNodes', 'SHE_TREE_MAX_NODES'],
+        ['maxNodeAttempts', 'SHE_TREE_MAX_TRIES'],
+      ];
+      for (const [field, key] of positives) {
+        const v = body.tree[field];
+        if (typeof v === 'number' && Number.isFinite(v) && v > 0) setEnv(key, String(Math.round(v)));
+      }
     }
 
     if (typeof body.kbDbPath === 'string') {

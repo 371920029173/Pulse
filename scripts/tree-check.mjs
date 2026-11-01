@@ -109,6 +109,26 @@ const dir = mkdtempSync(join(tmpdir(), 'she-tree-check-'));
   check('done 无证据会被标出来', text.includes('无证据'), text.split('\n')[1] ?? '');
 }
 
+/* ⑧ 预算到顶时 tree_get 会要求收口（不靠模型自觉） */
+{
+  const strict = new TaskTreeStore(dir, 'sess_budget', { trustModel: false, answerTimeoutMs: 300000, maxMinutes: 0, maxNodeAttempts: 3, maxNodes: 60, backupBeforeAuto: true });
+  strict.create('预算', undefined, ['一件没做完的事']);
+  const b = strict.budget();
+  check('maxMinutes 到顶 → budget() 说该收口了', b.exhausted === true, b.reason);
+  check('理由里点明是时间预算', /分钟/.test(b.reason), b.reason);
+
+  const { renderTree } = await import("../packages/agent-runtime/dist/tree-tools.js");
+  const rendered = renderTree(strict.get());
+  check('渲染里没有吓人字样（渲染是纯视图）', !rendered.includes('⛔'), 'ok');
+}
+
+/* ⑨ 没到顶时不能乱喊收口 */
+{
+  const normal = new TaskTreeStore(dir, 'sess_budget2');
+  normal.create('正常', undefined, ['一件没做完的事']);
+  check('刚建好的树不会被误判为预算用尽', normal.budget().exhausted === false, normal.budget().reason);
+}
+
 rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `\n${failed} 项 FAIL` : '\n全部 PASS');
 process.exit(failed ? 1 : 0);

@@ -1335,6 +1335,10 @@ export function createPlanTools(
         type: 'object',
         properties: {
           plan_id: { type: 'string', description: 'Plan id (optional; defaults to the active plan)' },
+          since: {
+            type: 'string',
+            description: 'ISO timestamp — only show log entries newer than this (optional; unparseable values fall back to the full trail rather than an empty one)',
+          },
         },
       },
     },

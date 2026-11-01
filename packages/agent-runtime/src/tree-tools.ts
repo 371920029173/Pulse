@@ -198,7 +198,13 @@ export function registerTaskTreeTools(
       const head = swept.auto.length
         ? `（无人值守：${swept.auto.length} 个超时问题按「相信」自动采纳了推荐值）\n`
         : swept.blocked ? '（有 blocking 问题超时未答且策略为「不相信」→ 这棵树的某个分支无法继续）\n' : '';
-      return head + renderTree(file, { trail: a.trail === true });
+      /*
+       * 预算到顶时把话说到「必须收口」这一层：只写"超时了"模型会继续做下一步，
+       * 而这条信息出现的唯一理由就是让它停手汇报。
+       */
+      const budget = store.budget();
+      const must = budget.exhausted ? `⛔ 预算用尽：${budget.reason} —— 现在必须 tree_report（summary/outcome 会自动判成 partial 或 blocked），不要再加节点、不要再开新分支。\n` : '';
+      return head + must + renderTree(file, { trail: a.trail === true });
     },
   );
 
