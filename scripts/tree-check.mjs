@@ -193,6 +193,22 @@ const dir = mkdtempSync(join(tmpdir(), 'she-tree-check-'));
   check('已经 tree_report 过的树不再续跑', d6.proceed === false, d6.reason ?? '');
 }
 
+/* ⑫ 多实例一致性：工具侧写完，autopilot 那份立刻要看得见 */
+{
+  const a = new TaskTreeStore(dir, 'fresh_a');
+  const b = new TaskTreeStore(dir, 'fresh_a');
+  const beforeB = b.get();
+  a.create('一致性', undefined, ['一件事']);
+  check('B 在 A 建树之前读是空的', beforeB === null || beforeB.nodes.length === 0, String(beforeB === null));
+  const seen = b.get();
+  check('【关键】A 写完之后 B 立刻看得见（缓存必须是文件，不是内存）', Boolean(seen && seen.nodes.length > 0), 'nodes=' + (seen ? seen.nodes.length : 0));
+
+  const node = a.get().nodes.find((n) => n.status !== 'done');
+  a.update(node.id, { status: 'done', evidence: ['跨实例可见性'] });
+  const afterB = b.get().nodes.find((n) => n.id === node.id);
+  check('A 改状态后 B 也看得见', afterB.status === 'done', afterB.status);
+}
+
 rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `\n${failed} 项 FAIL` : '\n全部 PASS');
 process.exit(failed ? 1 : 0);

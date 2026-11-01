@@ -147,7 +147,7 @@ export class TaskTreeStore {
   }
 
   private load(): TreeFile | null {
-    if (this.data) return this.data;
+    // 每次真读盘：同一会话有多个实例（工具侧 / autopilot），内存缓存会让它们各自停在旧快照上。
     const loaded = readTreeFile(this.file, (backup, reason) => { this.recovery = { backup, reason }; });
     this.data = loaded;
     return loaded;
@@ -213,9 +213,14 @@ export class TaskTreeStore {
     return file;
   }
 
-  private node(id: string): TreeNode {
-    const file = this.load();
-    if (!file) throw new Error('还没有任务树（先 tree_create）');
+  /**
+   * 在**调用方手里那份** file 里找节点。
+   *
+   * 不要再在这里 load()：那是另一份对象图。`ask`/`update`/`answer` 都先 load 一次，改的是那份；
+   * 这里再 load 一次会返回新对象，改完 save 的却是原来那份 —— 改动静默丢失。缓存还在时它"碰巧"能用，
+   * 所以一直没被发现，直到把缓存去掉才暴露。
+   */
+  private nodeIn(file: TreeFile, id: string): TreeNode {
     const n = file.nodes.find((x) => x.id === id);
     if (!n) throw new Error(`没有这个节点：${id}`);
     return n;
@@ -230,17 +235,17 @@ export class TaskTreeStore {
 
     let parentId: string | null = null;
     if (opts.siblingOf) {
-      const sib = this.node(opts.siblingOf);
+      const sib = this.nodeIn(file, opts.siblingOf);
       parentId = sib.parentId;
     } else if (opts.parentId) {
-      parentId = this.node(opts.parentId).id;
+      parentId = this.nodeIn(file, opts.parentId).id;
     } else {
       throw new Error('给 parentId（子任务）或 siblingOf（同级任务）之一');
     }
     const at = NOW();
     const node: TreeNode = {
       id: `n${file.nodes.length + 1}`, parentId, title: opts.title, intent: opts.intent,
-      kind: parentId && this.node(parentId).parentId === null ? 'task' : 'subtask',
+      kind: parentId && this.nodeIn(file, parentId).parentId === null ? 'task' : 'subtask',
       status: 'pending', dependsOn: [], evidence: [], decisions: [], questions: [],
       attempts: 0, log: [], createdAt: at, updatedAt: at,
     };
@@ -259,7 +264,7 @@ export class TaskTreeStore {
   }): TreeNode {
     const file = this.load();
     if (!file) throw new Error('还没有任务树');
-    const node = this.node(id);
+    const node = this.nodeIn(file, id);
     const from = node.status;
     if (opts.status) {
       node.status = opts.status;
@@ -286,7 +291,7 @@ export class TaskTreeStore {
   ask(id: string, q: { text: string; options: string[]; recommend: string; blocking?: boolean; reversible?: boolean }): TreeQuestion {
     const file = this.load();
     if (!file) throw new Error('还没有任务树');
-    const node = this.node(id);
+    const node = this.nodeIn(file, id);
     const at = NOW();
     const question: TreeQuestion = {
       id: randomUUID().slice(0, 8),
@@ -310,7 +315,7 @@ export class TaskTreeStore {
   answer(id: string, questionId: string, answer: string): TreeQuestion {
     const file = this.load();
     if (!file) throw new Error('还没有任务树');
-    const node = this.node(id);
+    const node = this.nodeIn(file, id);
     const q = node.questions.find((x) => x.id === questionId);
     if (!q) throw new Error(`没有这个问题：${questionId}`);
     q.answer = answer;
