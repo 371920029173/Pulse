@@ -854,6 +854,8 @@ export interface RenderPlanOptions {
    * 多一段会改变所有按输出比对的断言；想看历史的是 plan_get，它显式打开。
    */
   trail?: boolean;
+  /** 只看这个时间之后的变更（ISO 字符串）。解析不了就当没给 —— 宁可全给，也不要静默空。 */
+  since?: string;
   /**
    * Print a step's note ONLY for the ids in this set; every other step prints without one.
    *
@@ -954,7 +956,10 @@ export function renderPlan(plan: Plan, opts?: RenderPlanOptions): string {
    * 时间线：最近 8 条。它回答的是"这个计划什么时候停的、哪一步被改回去过"，
    * 而这些在只看状态标记时是看不出来的。
    */
-  const trail = opts?.trail ? (plan.log ?? []).slice(-8) : [];
+  const trailRaw = opts?.trail ? (plan.log ?? []) : [];
+  const trail = (opts?.since
+    ? trailRaw.filter((t) => Date.parse(t.at) >= Date.parse(opts.since!) || Number.isNaN(Date.parse(opts.since!)))
+    : trailRaw).slice(-8);
   if (trail.length) {
     lines.push('', '最近的状态变更（新 → 旧）：');
     for (const t of [...trail].reverse()) {
@@ -1338,7 +1343,7 @@ export function createPlanTools(
       if (!targetId) return 'No plans yet.';
       const plan = plans.get(targetId);
       if (!plan) return `Error: plan not found (plan_id=${targetId})`;
-      return renderPlan(plan, { trail: true });
+      return renderPlan(plan, { trail: true, since: typeof a.since === 'string' ? String(a.since) : undefined });
     },
   );
 
@@ -1429,6 +1434,7 @@ export function createPlanTools(
        * asked nicely to follow: a heading nobody fills in is worse than no heading, because the
        * document then LOOKS complete.
        */
+      let deliveryEvidenceNote = '';
       let delivery: {
         status: 'done' | 'partial' | 'needs_confirmation' | 'blocked';
         conclusion: string;
@@ -1525,6 +1531,23 @@ export function createPlanTools(
         const unfinished = plans.openPlans().flatMap((p) => p.steps
           .filter((s) => s.status !== 'done' && s.status !== 'dropped')
           .map((step) => ({ plan: p.title, step })));
+
+        /*
+         * "done 但没证据"的步骤：计划说完成了，却没有任何一处能核对。
+         * full 模式直接拒绝（那是"可复查"的承诺），brief 只在回执里提醒。
+         */
+        const noEvidence = plans.openPlans().flatMap((p) => p.steps
+          .filter((s) => s.status === 'done' && !(s.evidence ?? []).length)
+          .map((s) => ({ plan: p.title, step: s })));
+        if (noEvidence.length) {
+          const names = noEvidence.map((u) => `${u.plan} ${u.step.id}「${u.step.title}」`).join('、');
+          if (mode === 'full') {
+            return `Error: 计划里有 ${noEvidence.length} 步标了 done 却没有证据：${names} ——`
+              + '用 plan_update 带 evidence 补上（命令与退出码 / file:line / 测试结果），'
+              + '或把它改成 dropped 并说明原因，再交付。';
+          }
+          deliveryEvidenceNote = `⚠ 计划里有 ${noEvidence.length} 步标了 done 却没有证据：${names}（已写进交付的「待确认」之外，请自行核对）`;
+        }
         if (status === 'done' && unfinished.length) {
           return `Error: status=done 但本工作区的计划还没有做完：`
             + `${unfinished.map((u) => `${u.plan} ${u.step.id} ${u.step.title}（${u.step.status}）`).join('、')}——`
@@ -1770,6 +1793,26 @@ export function planAutopilot(
   }
   if (/[?？]\s*$/.test(String(opts.reply ?? '').trim())) {
     return { proceed: false, signature, reason: '在等你回答问题' };
+  }
+  /*
+   * 停滞检测：同一步已经失败到阈值，就别再推它了。
+   *
+   * 没有这条时，`retry` 等于"永远再试一次"：第四、第五次都在同一个坑里，
+   * 而每一轮的 nudge 都写着"下一步就是它" —— 看起来在推进，实际没动。
+   */
+  const stallTries = Number(process.env.SHE_PLAN_STALL_TRIES) > 0
+    ? Math.floor(Number(process.env.SHE_PLAN_STALL_TRIES))
+    : 3;
+  const stalled = plan.steps.filter(
+    (x) => (x.status === 'blocked' || x.status === 'active') && (x.attempts ?? 0) >= stallTries,
+  );
+  if (stalled.length) {
+    return {
+      proceed: false,
+      signature,
+      reason: `卡住了：${stalled.map((x) => `${x.id}「${x.title}」已试 ${x.attempts} 次`).join('、')}`
+        + ' —— 别再重试同一种做法：换一条路、把这一步拆小，或明确标成 dropped 并说明原因。',
+    };
   }
   const left = plan.steps.filter((s) => s.status === 'pending' || s.status === 'active').length;
   const next = runnable.find((s) => s.status === 'active') ?? runnable[0]!;
