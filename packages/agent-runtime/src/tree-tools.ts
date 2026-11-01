@@ -147,6 +147,8 @@ export function registerTaskTreeTools(
       parameters: {
         type: 'object',
         properties: {
+          halt: { type: 'boolean', description: '急停：立刻停止自动续跑（不需要重启后端）。用 note 说明原因。' },
+          resume: { type: 'boolean', description: '解除急停，让自动续跑恢复。' },
           id: { type: 'string' },
           status: { type: 'string', enum: ['pending', 'active', 'blocked', 'shelved', 'done', 'dropped'] },
           note: { type: 'string' },
@@ -165,6 +167,13 @@ export function registerTaskTreeTools(
       },
     },
     async (a) => {
+      /* 急停 / 恢复：这条路必须能在不重启后端的情况下用，否则卡住的循环只能靠重启收场。 */
+      if (a.halt === true || a.resume === true) {
+        if (a.halt === true) store.halt(String(a.note ?? '用户/模型主动急停'));
+        else store.resume();
+        const after = store.get();
+        return (a.halt === true ? '已急停：自动续跑停止。' : '已恢复：自动续跑继续。') + '\n' + (after ? renderTree(after) : '（还没有任务树）');
+      }
       try {
         const n = store.update(String(a.id), {
           status: a.status ? String(a.status) as TreeStatus : undefined,

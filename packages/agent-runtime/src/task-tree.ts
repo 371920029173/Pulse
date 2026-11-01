@@ -65,6 +65,14 @@ export interface TreeFile {
   nodes: TreeNode[];
   createdAt: string;
   updatedAt: string;
+  /**
+   * 急停标记。
+   *
+   * 2026-11-01 的教训：自动续跑一旦卡在错的状态上，用户手上没有任何办法叫停，只能重启后端。
+   * 这个标记就是那个"刹车"：写进文件后，下一次判断立刻停，不需要重启、不需要重新加载代码。
+   */
+  aborted?: { at: string; reason: string };
+
   /** 到达过出口的汇报（只会有一份最终汇报，但保留历史便于排错）。 */
   reports: Array<{ at: string; outcome: 'success' | 'blocked' | 'partial'; summary: string }>;
 }
@@ -395,7 +403,23 @@ export class TaskTreeStore {
    * 从来没有 save。后果有两个：汇报在重启后消失；`treeAutopilot` 看 `reports.length` 判断
    * "已经收口"，于是永远判成没收口、无限续跑。
    */
-  recordReport(outcome: 'success' | 'blocked' | 'partial', summary: string): void {
+  /** 刹车：写一个 aborted 标记，下一次 autopilot 判断立刻停。 */
+  halt(reason: string): void {
+    const file = this.load();
+    if (!file) return;
+    file.aborted = { at: NOW(), reason };
+    file.updatedAt = NOW();
+    this.save(file);
+  }
+
+  /** 解除急停：把 aborted 清掉，自动续跑恢复。 */
+  resume(): void {
+    const file = this.load();
+    if (!file) return;
+    delete file.aborted;
+    file.updatedAt = NOW();
+    this.save(file);
+  }  recordReport(outcome: 'success' | 'blocked' | 'partial', summary: string): void {
     const file = this.load();
     if (!file) return;
     file.reports.push({ at: NOW(), outcome, summary });
@@ -458,6 +482,7 @@ export function treeAutopilot(
   const file = store.get();
   const signature = file ? file.nodes.map((n) => `${n.id}:${n.status}`).join(',') : '';
   if (!file) return { proceed: false, signature, reason: '没有任务树' };
+  if (file.aborted) return { proceed: false, signature, reason: `已被急停：${file.aborted.reason}（tree_update 里清掉 aborted 可恢复）` };
   if (file.reports.length > 0) return { proceed: false, signature, reason: '这棵树已经 tree_report 过了' };
   if (Date.parse(file.updatedAt) < opts.turnStartedAt) {
     return { proceed: false, signature, reason: '这棵树不是这一轮在推进的' };

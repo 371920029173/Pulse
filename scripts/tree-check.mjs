@@ -209,6 +209,23 @@ const dir = mkdtempSync(join(tmpdir(), 'she-tree-check-'));
   check('A 改状态后 B 也看得见', afterB.status === 'done', afterB.status);
 }
 
+/* ⑬ 急停 / 恢复 */
+{
+  const s = new TaskTreeStore(dir, 'halt_a');
+  s.create('会卡住的树', undefined, ['一件事']);
+  const before = treeAutopilot(s, { turnStartedAt: Date.now() - 1000, reply: '继续' });
+  check('（前提）正常情况下它会继续', before.proceed === true, before.reason ?? '');
+
+  s.halt('用户要求停');
+  const halted = treeAutopilot(s, { turnStartedAt: Date.now() - 1000, reply: '继续' });
+  check('【关键】急停之后不再续跑（不需要重启）', halted.proceed === false, halted.reason ?? '');
+  check('理由里说明是被急停', /急停/.test(halted.reason ?? ''), halted.reason ?? '');
+
+  s.resume();
+  const resumed = treeAutopilot(s, { turnStartedAt: Date.now() - 1000, reply: '继续' });
+  check('解除急停后恢复续跑', resumed.proceed === true, resumed.reason ?? '');
+}
+
 rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `\n${failed} 项 FAIL` : '\n全部 PASS');
 process.exit(failed ? 1 : 0);
