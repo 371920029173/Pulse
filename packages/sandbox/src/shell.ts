@@ -33,6 +33,40 @@ export const DESTRUCTIVE_PATTERNS: RegExp[] = [
   /\bdd\s+if=/i,
 ];
 
+
+/**
+ * 这条命令会造成什么后果，逐条说清。
+ *
+ * 与 `DESTRUCTIVE_PATTERNS` 一一对应、同序：加了一条模式就必须配一句后果，否则确认框里会出现
+ * 一条"为什么不能点"的空话 —— 而空话正是用户盲目点确定的原因。
+ */
+const DESTRUCTIVE_CONSEQUENCES: Array<[RegExp, string]> = [
+  [/rm\s+.*-[a-z]*r[a-z]*f|rm\s+.*-[a-z]*f[a-z]*r|rm\s+-rf/i, '递归强制删除，删掉的文件不进回收站，无法撤销'],
+  [/del\s+\/s/i, '递归删除目录下的所有文件（del /s），不进回收站'],
+  [/rmdir\s+\/s/i, '递归删除整个目录树（rmdir /s）'],
+  [/\bformat\s/i, '格式化磁盘/分区，该分区上的数据全部丢失'],
+  [/\bfdisk\b/i, '改写分区表，可能导致整块盘的数据不可读'],
+  [/\bmkfs\b/i, '重新创建文件系统，该分区原有数据全部丢失'],
+  [/git\s+push/i, '把本地提交推到远端分支 —— 别人已经拉到的历史会被改写或覆盖，而且退不回来'],
+  [/git\s+reset\s+--hard/i, '丢弃所有未提交的改动（工作区被强制回退，改不回来）'],
+  [/\bshutdown\b/i, '关机：未保存的文档和正在跑的任务都会中断'],
+  [/\breboot\b/i, '重启：未保存的文档和正在跑的任务都会中断'],
+  [/\breg\s+delete\b/i, '删除注册表项，删错会导致程序或系统功能无法启动'],
+  [/\bnet\s+stop\b/i, '停止系统服务：依赖它的功能会立刻不可用'],
+  [/\btaskkill\b/i, '强制结束进程：该进程未保存的工作会丢失'],
+  [/:()\s*\{.*\|.*&\s*\}\s*;?\s*:/, 'fork 炸弹：会把机器资源耗尽，只能硬重启'],
+  [/>\s*\/dev\/null/, '把输出重定向到 /dev/null，可能覆盖或丢弃正在写的内容'],
+  [/\bdd\s+if=/i, 'dd 直接写块设备：写错目标盘就是整盘数据丢失'],
+];
+
+/** 命中的后果，按模式顺序去重返回；没有命中返回空数组。 */
+export function describeDestructive(command: string): string[] {
+  const out: string[] = [];
+  for (const [re, text] of DESTRUCTIVE_CONSEQUENCES) {
+    if (re.test(command) && !out.includes(text)) out.push(text);
+  }
+  return out;
+}
 const IS_WINDOWS = platform() === 'win32';
 
 /**

@@ -456,7 +456,7 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
   if (outsideAllow === false) {
     effectiveRule = t('除阅读类命令外，一律需要你点确认');
   } else if (outsidePolicy === 'all') {
-    effectiveRule = t('一切命令直接放行、不再询问，且直接在主机上运行（不在真隔离里，也不是 WSL）');
+    effectiveRule = t('危险命令会先请你确认并说明后果，其余命令直接放行；命令直接在主机上运行（不在真隔离里，也不是 WSL）');
   } else if (outsidePolicy === 'deny') {
     effectiveRule = t('工作区内自由执行；工作区外的写操作直接拒绝');
   } else {
@@ -696,7 +696,7 @@ export function Settings({ onClose, theme, onToggleTheme, background, locale, on
               {
                 id: 'all' as const,
                 title: t('所有'),
-                desc: t('什么都不问，包括工作区外；命令直接在主机上运行（真隔离让开）。仅限你完全信任的本地环境。'),
+                desc: t('除了危险命令（会先请你确认并说明后果），其余都不问，包括工作区外；命令直接在主机上运行（真隔离让开）。仅限你完全信任的本地环境。'),
               },
               {
                 id: 'deny' as const,

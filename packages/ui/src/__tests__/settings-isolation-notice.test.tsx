@@ -94,10 +94,10 @@ describe('设置页 · 沙箱与权限', () => {
     await waitFor(() => expect(screen.queryByText(NOTICE_ONLY)).toBeNull());
   });
 
-  it('【关键】「所有」档的"现在的实际规则"自己写明直接在主机上运行（不看提示也不会误读）', async () => {
+  it('【关键】「所有」档的"现在的实际规则"写明危险命令先问、其余直接在主机上运行（不看提示也不会误读）', async () => {
     show({ notice: null, policy: 'all' });
     expect(
-      await screen.findByText('一切命令直接放行、不再询问，且直接在主机上运行（不在真隔离里，也不是 WSL）'),
+      await screen.findByText('危险命令会先请你确认并说明后果，其余命令直接放行；命令直接在主机上运行（不在真隔离里，也不是 WSL）'),
     ).toBeTruthy();
   });
 

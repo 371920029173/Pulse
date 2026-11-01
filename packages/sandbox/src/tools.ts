@@ -8,7 +8,7 @@ import type {
   ToolDefinition, SandboxResult, SandboxJobView, SandboxJobKillReason,
 } from '@she/shared';
 import type { SandboxShell } from './shell.js';
-import { classifyCommand, codeExecutionDisclosure, shellDialectDisclosure } from './shell.js';
+import { classifyCommand, codeExecutionDisclosure, shellDialectDisclosure, describeDestructive } from './shell.js';
 import type { IsolationInEffect } from '@she/shared';
 
 /**
@@ -1320,8 +1320,30 @@ type BoundaryDecision =
 function boundaryDecision(name: string, args: Record<string, unknown>): BoundaryDecision {
   const policy = outsideWorkspace;
 
-  // 「勾选 + 所有」= 用户明确说了不在乎边界。这一档连问都不问，也是唯一一档会跳过分类的。
-  if (policy.allow && policy.policy === 'all') return { kind: 'allow' };
+  /*
+   * 「勾选 + 所有」= 用户明确说了不在乎边界 —— 但**不等于**不在乎危险命令。
+   *
+   * 这一档原来直接 allow，于是 `rm -rf` 连问都不问。要的规则是：这一档下危险命令**请示**，
+   * 并把后果写进确认框；其余一律直接放行。
+   *
+   * 为什么"危险"不交给 `shell` 内部的 denylist 判：那一层只能拒（DENIED），没法问人；问人这件事
+   * 只有这一层能做（`tickets.issue`）。两层分工不变：这里问，那边执行。
+   */
+  if (policy.allow && policy.policy === 'all') {
+    if (name === 'shell') {
+      const command = String(args.command ?? '');
+      if (shell.isDestructive(command)) {
+        const consequences = describeDestructive(command);
+        return {
+          kind: 'confirm',
+          reason: consequences.length
+            ? `危险命令，需要你确认：${consequences.join('；')}。`
+            : '危险命令，需要你确认：这一步不可撤销。',
+        };
+      }
+    }
+    return { kind: 'allow' };
+  }
 
   if (name === 'shell') {
     const command = String(args.command ?? '');

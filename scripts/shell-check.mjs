@@ -534,8 +534,8 @@ console.log('\n=== 真隔离的可用性与提示 ===');
   check('【关键】设置页真的读了 isolation.notice 并渲染出来（否则"用户看不见"照旧）',
     /d\.isolation\?\.notice/.test(settingsTsx) && /\{isolationNotice && \(/.test(settingsTsx)
     && /\{isolationNotice\}/.test(settingsTsx));
-  check('  界面上那句"实际规则"也说明了「所有」档直接在主机上跑（与 isolationNotice 同一件事）',
-    /一切命令直接放行、不再询问，且直接在主机上运行/.test(settingsTsx));
+  check('  界面上那句"实际规则"也说明了「所有」档危险命令先问、其余直接放行（与真实行为同一句话）',
+    /危险命令会先请你确认并说明后果/.test(settingsTsx) && /直接在主机上运行/.test(settingsTsx));
 }
 
 /* ── 危险命令拦截能不能在「所有」模式下留下 ── */
@@ -553,6 +553,45 @@ console.log('\n=== 真隔离的可用性与提示 ===');
   check('同一档位下普通命令照常跑（不是一刀切全拒）', (passed.stdout ?? '').includes('ok'), (passed.stdout ?? '').trim());
 
   rmSync(ws, { recursive: true, force: true });
+}
+
+/* ── 所有档：危险命令请示并标注后果，其余直接放行 ── */
+{
+  const { describeDestructive } = await import('../packages/sandbox/dist/shell.js');
+
+  check('后果文案：rm -rf 说清是递归删除且不可撤销',
+    describeDestructive('rm -rf /tmp/x').some((c) => c.includes('递归') && c.includes('无法撤销')),
+    JSON.stringify(describeDestructive('rm -rf /tmp/x')));
+  check('后果文案：git push 说清远端历史会被改写',
+    describeDestructive('git push origin main').some((c) => c.includes('远端')),
+    JSON.stringify(describeDestructive('git push origin main')));
+  check('后果文案：普通命令没有后果条目（不能什么都标红）',
+    describeDestructive('echo hi').length === 0, JSON.stringify(describeDestructive('echo hi')));
+
+  const { createTools } = await import('../packages/sandbox/dist/tools.js');
+  const { SandboxShell: Shell2 } = await import('../packages/sandbox/dist/shell.js');
+  const ws2 = mkdtempSync(join(tmpdir(), "she-ask-"));
+  const shell2 = new Shell2(ws2, { allowAllCommands: true, denyDestructiveByDefault: false });
+  const tools2 = createTools(shell2, ws2, {
+    allowAllCommands: true,
+    outsideWorkspace: { allow: true, policy: "all" },
+  });
+
+  const refused = await tools2.execute("shell", { command: "rm -rf /tmp/whatever" });
+  let parsed = null;
+  try { parsed = JSON.parse(refused); } catch { /* 不是 JSON 就是没走确认 */ }
+  check('【关键】所有档下 rm -rf 要请示（needs_confirm），不能直接跑',
+    Boolean(parsed && parsed.needs_confirm), String(refused).slice(0, 160));
+  check('  请示里带着后果（不是一句干巴巴的「危险」）',
+    Boolean(parsed && typeof parsed.reason === 'string' && parsed.reason.includes('递归')),
+    parsed?.reason ?? String(refused).slice(0, 120));
+
+  const ran = await tools2.execute("shell", { command: "echo hello-ask-mode" });
+  check('同一档下普通命令直接放行（没有变成什么都问）',
+    String(ran).includes('hello-ask-mode') && !String(ran).includes('needs_confirm'),
+    String(ran).slice(0, 120));
+
+  rmSync(ws2, { recursive: true, force: true });
 }
 
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`);
