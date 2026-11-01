@@ -12,7 +12,7 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { TaskTreeStore, DEFAULT_TREE_SETTINGS } from '../packages/agent-runtime/dist/task-tree.js';
+import { TaskTreeStore, DEFAULT_TREE_SETTINGS, treeAutopilot } from '../packages/agent-runtime/dist/task-tree.js';
 
 let failed = 0;
 function check(name, ok, detail) {
@@ -149,6 +149,48 @@ const dir = mkdtempSync(join(tmpdir(), 'she-tree-check-'));
   const shown = await tools.execute('tree_get', {});
   check('渲染里有目标节点（walk(rootId) 只列子节点，根要单独打）',
     /\[.\] n1 判据树/.test(shown), shown.split('\n').slice(0, 3).join(' | '));
+}
+
+/* ⑪ 自动续跑：会继续，但只在真的走得动时继续 */
+{
+  const now = () => Date.now();
+
+  const a = new TaskTreeStore(dir, 'auto_a');
+  a.create('把 A 做完', undefined, ['第一步', '第二步']);
+  const d1 = treeAutopilot(a, { turnStartedAt: now() - 1000, reply: '我先做第一步' });
+  check('【关键】还有节点没做完 → 自动继续（不是停下来等人）', d1.proceed === true, d1.reason ?? '');
+  check('nudge 写明「不要停下来等我确认」', /不要停下来等我/.test(d1.nudge ?? ''), (d1.nudge ?? '').slice(0, 70));
+  check('nudge 写明出口是 tree_report', /tree_report/.test(d1.nudge ?? ''), 'ok');
+
+  const b = new TaskTreeStore(dir, 'auto_b');
+  b.create('做完了', undefined, ['唯一一步']);
+  for (const n of b.get().nodes) b.update(n.id, { status: 'done' });
+  const d2 = treeAutopilot(b, { turnStartedAt: now() - 1000, reply: '好了' });
+  check('全部完成 → 停止续跑', d2.proceed === false, d2.reason ?? '');
+
+  const c = new TaskTreeStore(dir, 'auto_c');
+  c.create('等你答', undefined, ['一件事']);
+  const act = c.get().nodes.find((n) => n.status === 'active') ?? c.get().nodes[0];
+  c.ask(act.id, { text: '要不要删？', options: ['删', '不删'], recommend: '不删', blocking: true, reversible: false });
+  const d3 = treeAutopilot(c, { turnStartedAt: now() - 1000, reply: '等你' });
+  check('blocking 问题未答 → 停止续跑（不空转）', d3.proceed === false, d3.reason ?? '');
+
+  const e = new TaskTreeStore(dir, 'auto_d', { trustModel: false, answerTimeoutMs: 300000, maxMinutes: 0, maxNodeAttempts: 3, maxNodes: 60, backupBeforeAuto: true });
+  e.create('预算用尽', undefined, ['一件事']);
+  const d4 = treeAutopilot(e, { turnStartedAt: now() - 1000, reply: '继续' });
+  check('预算到顶 → 停止续跑', d4.proceed === false, d4.reason ?? '');
+  check('理由里点明该 tree_report 了', /tree_report/.test(d4.reason ?? ''), d4.reason ?? '');
+
+  const f = new TaskTreeStore(dir, 'auto_e');
+  f.create('昨天的树', undefined, ['一件事']);
+  const d5 = treeAutopilot(f, { turnStartedAt: now() + 60_000, reply: '聊点别的' });
+  check('这一轮没碰过的树不会被自动续跑（旧树不是常备指令）', d5.proceed === false, d5.reason ?? '');
+
+  const g = new TaskTreeStore(dir, 'auto_f');
+  g.create('已收口', undefined, ['一件事']);
+  g.recordReport('success', '收到这里');
+  const d6 = treeAutopilot(g, { turnStartedAt: now() - 1000, reply: '完了' });
+  check('已经 tree_report 过的树不再续跑', d6.proceed === false, d6.reason ?? '');
 }
 
 rmSync(dir, { recursive: true, force: true });

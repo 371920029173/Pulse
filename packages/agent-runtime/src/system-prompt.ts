@@ -11,7 +11,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 
  * 用常量而不是"哈希拼出来的提示词"：用户中途改 `.she/rules.md` / skills 属于**同一个会话内的正常变化**，
  * 那种情况必须继续冻结（这是 prefix-stability 的判据之一）；只有模板变了才该作废。
  */
-export const SYSTEM_PROMPT_VERSION = 2;
+export const SYSTEM_PROMPT_VERSION = 3;
 import { join, dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -707,8 +707,9 @@ anyway.
     '  `tree_update({ decision: { choice, why } })`, and keep going.',
     '- **Use subagents aggressively.** Spawn independent branches with `task_spawn` in parallel instead of',
     '  walking them one at a time; that is what makes unattended work fast rather than merely long.',
-    '- **Report only at an exit**: everything done, truly blocked, or the budget is spent. `plan_*` nudges',
-    '  step by step; the tree does not - reporting early is the failure mode here.',
+    '- **It keeps running by itself.** When you pause without a tool call the loop resumes the tree, so do',
+    '  not stop to report progress or to ask for permission. Only `tree_report` at an exit: everything done,',
+    '  truly blocked, or the budget is spent. Reporting early is the failure mode here.',
     '- **Ask only when you genuinely cannot proceed** (`tree_ask`): options plus your recommendation, and say',
     '  in the question text why you cannot decide it yourself. Mark `reversible: false` for anything you',
     '  cannot undo (delete, overwrite uncommitted work, force push, install/uninstall, anything outward-facing)',

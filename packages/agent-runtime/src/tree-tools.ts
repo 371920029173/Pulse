@@ -316,7 +316,7 @@ export function registerTaskTreeTools(
         parts.push('', `⚠ 有 ${noEvidence.length} 个节点标了 done 却没有证据：${noEvidence.map((n) => n.id).join('、')}`
           + '（把证据补上，或把它改成 dropped 并说明原因）');
       }
-      file.reports.push({ at: new Date().toISOString(), outcome, summary: String(a.summary) });
+      store.recordReport(outcome, String(a.summary));
       return parts.join('\n');
     },
   );

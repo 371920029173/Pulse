@@ -21,6 +21,7 @@ import type { ToolSet } from '@she/sandbox';
 import { PendingPatchStore, CheckpointStore, resolveInsideWorkspace } from '@she/sandbox';
 import { createKBTools } from './kb-tools.js';
 import { createPlanTools, planAutopilot } from './plan-tools.js';
+import { TaskTreeStore, treeAutopilot } from './task-tree.js';
 import { createPreflightTools, PreflightStore } from './preflight.js';
 import type { PreflightRecord } from './preflight.js';
 import {
@@ -219,6 +220,16 @@ export class Agent {
    * without stopping the agent.
    */
   private pendingInterjections: Array<{ text: string; images?: Array<{ path: string; mime: string }> }> = [];
+
+  /** 任务树：每会话一棵。自动续跑时读它 —— 与 plan 并存，谁这一轮动过就续谁。 */
+  private treeStoreCache: TaskTreeStore | null = null;
+
+  /** 会话 id 为空（无状态调用）时没有树：树按 chat 归属，没有 chat 就没有树。 */
+  private treeStore(): TaskTreeStore | null {
+    if (!this.sessionId) return null;
+    if (!this.treeStoreCache) this.treeStoreCache = new TaskTreeStore(this.config.workspace.root, this.sessionId);
+    return this.treeStoreCache;
+  }
 
   /** This conversation's plan store, read by the plan autopilot at the end of each model reply. */
   private planStore?: ReturnType<typeof createPlanTools>['store'];
@@ -1331,7 +1342,21 @@ export class Agent {
       if (!response.tool_calls?.length) {
         if (autopilotOn && autopilotRounds < autopilotMax && this.planStore) {
           const reply = typeof response.content === 'string' ? response.content : '';
-          const decision = planAutopilot(this.planStore.mine(), { turnStartedAt, reply });
+          /*
+           * 计划先说话；计划不续跑，再看任务树。
+           *
+           * 两套东西语义不同（plan = 人盯着逐步推；tree = 无人值守、自己长分支、只在出口汇报），
+           * 但**都要自动跑**。第一版把树做成"不推动、只在出口汇报"，于是模型干一段就停下来等人 ——
+           * 那不是高级计划，那是会写日记的待办清单。
+           */
+          const planDecision = planAutopilot(this.planStore.mine(), { turnStartedAt, reply });
+          let decision = planDecision;
+          let fromTree = false;
+          if (!planDecision.proceed) {
+            const tree = this.treeStore();
+            const treeDecision = tree ? treeAutopilot(tree, { turnStartedAt, reply }) : null;
+            if (treeDecision?.proceed) { decision = treeDecision as typeof planDecision; fromTree = true; }
+          }
           if (decision.proceed && decision.nudge) {
             /*
              * 不再按"连续两轮签名相同"停。签名相同只说明它两轮在做同一类动作，
@@ -1343,7 +1368,7 @@ export class Agent {
             const nudge: LLMMessage = { role: 'user', content: decision.nudge };
             this.history.push(nudge);
             messages.push(nudge);
-            onChunk?.({ type: 'status', content: '计划还没做完，自动继续下一步' });
+            onChunk?.({ type: 'status', content: fromTree ? '任务树还有没做完的节点，自动继续' : '计划还没做完，自动继续下一步' });
             continue;
           }
         }

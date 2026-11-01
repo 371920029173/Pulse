@@ -383,6 +383,21 @@ export class TaskTreeStore {
     if (dead) return { exhausted: true, reason: `${dead.id}「${dead.title}」已连续失败 ${dead.attempts} 次` };
     return { exhausted: false, reason: '' };
   }
+  /**
+   * 记一次出口汇报并**落盘**。
+   *
+   * 原来 `tree_report` 只做了 `file.reports.push(...)` —— 改的是 `get()` 返回的那个内存对象，
+   * 从来没有 save。后果有两个：汇报在重启后消失；`treeAutopilot` 看 `reports.length` 判断
+   * "已经收口"，于是永远判成没收口、无限续跑。
+   */
+  recordReport(outcome: 'success' | 'blocked' | 'partial', summary: string): void {
+    const file = this.load();
+    if (!file) return;
+    file.reports.push({ at: NOW(), outcome, summary });
+    file.updatedAt = NOW();
+    this.save(file);
+  }
+
   /** 出口判定：没有可推进节点时，是"全完成"还是"受阻/预算用尽"。 */
   outcome(startedAt: number): { outcome: 'success' | 'blocked' | 'partial'; reason: string } {
     const file = this.load();
@@ -403,4 +418,79 @@ export class TaskTreeStore {
     }
     return { outcome: 'partial', reason: '仍有可推进的节点，但本轮到此为止' };
   }
+}
+
+
+export interface TreeAutopilotDecision {
+  /** True when the turn should keep going instead of handing control back. */
+  proceed: boolean;
+  /** The message that resumes the work, when `proceed`. */
+  nudge?: string;
+  /** Node statuses, so the caller can tell a round that moved the tree from one that did not. */
+  signature: string;
+  /** Why it stopped, for the status line. */
+  reason?: string;
+}
+
+/**
+ * 这棵任务树该不该让这一轮继续跑。
+ *
+ * 「任务树是个自动跑的高级计划」—— 用户 2026-11-01 的原话。第一版把它做成了"只在出口汇报、
+ * 不推动"，于是模型干完一段就停下来等人：那不是高级计划，那是会写日记的待办清单。
+ *
+ * 判定与 `planAutopilot` 同构（同样只看这一轮动过的树、同样只在真的走不下去时交还），差别是
+ * 停下条件按树的语义：
+ *   - 已经 tree_report 过（收口）→ 停；
+ *   - 有 blocking 问题还没答案 → 停（那是在等你）；
+ *   - 预算到顶（墙钟/节点数/单节点失败）→ 停，让模型去 tree_report；
+ *   - 没有可推进的节点 → 停；
+ *   - 回复以问号结尾 → 停（模型在问你）。
+ */
+export function treeAutopilot(
+  store: TaskTreeStore,
+  opts: { turnStartedAt: number; reply: string },
+): TreeAutopilotDecision {
+  const file = store.get();
+  const signature = file ? file.nodes.map((n) => `${n.id}:${n.status}`).join(',') : '';
+  if (!file) return { proceed: false, signature, reason: '没有任务树' };
+  if (file.reports.length > 0) return { proceed: false, signature, reason: '这棵树已经 tree_report 过了' };
+  if (Date.parse(file.updatedAt) < opts.turnStartedAt) {
+    return { proceed: false, signature, reason: '这棵树不是这一轮在推进的' };
+  }
+
+  /* 有人没答的 blocking 问题 = 在等你，自动续跑只会空转。 */
+  const waiting = file.nodes
+    .flatMap((n) => n.questions.map((q) => ({ n, q })))
+    .filter(({ q }) => !q.answeredAt && q.blocking);
+  if (waiting.length) {
+    const { n, q } = waiting[0]!;
+    return { proceed: false, signature, reason: `在等你回答：${q.text}（节点 ${n.id}）` };
+  }
+
+  const budget = store.budget();
+  if (budget.exhausted) {
+    return { proceed: false, signature, reason: `预算用尽：${budget.reason} —— 该 tree_report 了` };
+  }
+
+  const open = file.nodes.filter((n) => n.status !== 'done' && n.status !== 'dropped');
+  if (!open.length) return { proceed: false, signature, reason: '所有节点都已完成或放弃' };
+
+  const runnable = open.filter((n) => n.status === 'active' || n.status === 'pending');
+  if (!runnable.length) {
+    return { proceed: false, signature, reason: `没有可推进的节点（剩下的都在等：${open.map((n) => `${n.id}=${n.status}`).join('、')}）` };
+  }
+
+  if (/[?？]\s*$/.test(String(opts.reply ?? '').trim())) {
+    return { proceed: false, signature, reason: '在等你回答问题' };
+  }
+
+  const next = runnable.find((n) => n.status === 'active') ?? runnable[0]!;
+  return {
+    proceed: true,
+    signature,
+    nudge: `[自动续跑] 任务树还有 ${open.length} 个节点没做完，下一个可推进的是「${next.title}」（${next.id}）。`
+      + '先 tree_get 看一眼当前状态，然后直接干活：做完用 tree_update 记状态与证据；'
+      + '发现新分支就 tree_add 长出来；只有需要我提供只有我知道的信息、或要做不可逆的操作时才 tree_ask。'
+      + '不要停下来等我确认。全部做完、真的受阻、或预算用尽时，用 tree_report 收口。',
+  };
 }
