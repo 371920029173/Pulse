@@ -79,6 +79,28 @@ export interface TreeSettings {
   backupBeforeAuto: boolean;
 }
 
+/**
+ * 从环境变量读树设置（设置页写的就是这几个键）。
+ *
+ * 默认：不信任、5 分钟、120 分钟、单节点 3 次、60 节点。
+ * **不可逆问题不走自动**这一条不在设置里 —— 它是硬规则，不给开关。
+ */
+export function treeSettingsFromEnv(env: NodeJS.ProcessEnv = process.env): TreeSettings {
+  const num = (key: string, dflt: number): number => {
+    const raw = Number(env[key]);
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : dflt;
+  };
+  const trust = String(env.SHE_TREE_TRUST ?? '').toLowerCase();
+  return {
+    trustModel: trust === '1' || trust === 'true' || trust === 'yes' || trust === 'on',
+    answerTimeoutMs: num('SHE_TREE_TIMEOUT_MIN', 5) * 60_000,
+    maxMinutes: num('SHE_TREE_MAX_MINUTES', 120),
+    maxNodeAttempts: num('SHE_TREE_MAX_TRIES', 3),
+    maxNodes: num('SHE_TREE_MAX_NODES', 60),
+    backupBeforeAuto: true,
+  };
+}
+
 export const DEFAULT_TREE_SETTINGS: TreeSettings = {
   trustModel: false,
   answerTimeoutMs: 5 * 60_000,
@@ -108,12 +130,14 @@ function readTreeFile(file: string, onCorrupt: (backup: string, reason: string) 
 }
 
 export class TaskTreeStore {
+  private settings: TreeSettings;
   private dir: string;
   private file: string;
   private recovery: { backup: string; reason: string } | null = null;
   private data: TreeFile | null = null;
 
-  constructor(private workspaceRoot: string, private sessionId: string, private settings: TreeSettings = DEFAULT_TREE_SETTINGS) {
+  constructor(private workspaceRoot: string, private sessionId: string, settings?: TreeSettings) {
+    this.settings = settings ?? treeSettingsFromEnv();
     this.dir = sessionStateDir(workspaceRoot, sessionId);
     this.file = join(this.dir, 'tree.json');
   }
