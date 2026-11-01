@@ -1159,6 +1159,17 @@ export function loadConfig(workspaceRoot?: string): SheConfig {
   if (env.SHE_DENY_DESTRUCTIVE === '0' || env.SHE_DENY_DESTRUCTIVE === 'false') {
     config.sandbox.denyDestructiveByDefault = false;
   }
+  /*
+   * 显式要回危险命令拦截。
+   *
+   * 顺序很重要：上面「允许所有命令」那一段已经把 `denyDestructiveByDefault` 设成 false，
+   * 所以这一条必须后置。它存在的理由是一个真实理解差异 —— "所有模式"在用户脑子里是
+   * "除了危险命令什么都不管"，而实现里那一档连危险命令也放开了；想两者都要的人，
+   * 现在可以写 SHE_ALLOW_ALL_COMMANDS=true + SHE_DENY_DESTRUCTIVE=true。
+   */
+  if (env.SHE_DENY_DESTRUCTIVE === '1' || env.SHE_DENY_DESTRUCTIVE === 'true') {
+    config.sandbox.denyDestructiveByDefault = true;
+  }
 
   /*
    * 工作区边界。「允许工作区外命令」+ 三档策略。

@@ -538,5 +538,22 @@ console.log('\n=== 真隔离的可用性与提示 ===');
     /一切命令直接放行、不再询问，且直接在主机上运行/.test(settingsTsx));
 }
 
+/* ── 危险命令拦截能不能在「所有」模式下留下 ── */
+{
+  const { SandboxShell } = await import('../packages/sandbox/dist/index.js');
+  const ws = mkdtempSync(join(tmpdir(), "she-deny-"));
+  const base = { outsideWorkspace: { allow: true, policy: "all" }, allowAllCommands: true };
+
+  const on = new SandboxShell(ws, { ...base, denyDestructiveByDefault: true });
+  const denied = await on.exec("rm -rf /tmp/whatever");
+  check('【关键】允许所有命令 + 显式拦截 → 破坏性命令仍被拒', /DENIED/.test(denied.stderr ?? ''), (denied.stderr ?? '').slice(0, 80));
+
+  const off = new SandboxShell(ws, { ...base, denyDestructiveByDefault: false });
+  const passed = await off.exec("echo ok");
+  check('同一档位下普通命令照常跑（不是一刀切全拒）', (passed.stdout ?? '').includes('ok'), (passed.stdout ?? '').trim());
+
+  rmSync(ws, { recursive: true, force: true });
+}
+
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`);
 process.exit(failures === 0 ? 0 : 1);

@@ -373,7 +373,7 @@ export class TaskTreeStore {
     const open = file.nodes.filter((n) => n.status !== 'done' && n.status !== 'dropped');
     if (!open.length) return { exhausted: false, reason: '' };
     const minutes = (Date.now() - Date.parse(file.createdAt)) / 60_000;
-    if (minutes > this.settings.maxMinutes) {
+    if (minutes >= this.settings.maxMinutes) {
       return { exhausted: true, reason: `已跑 ${Math.round(minutes)} 分钟，超过预算 ${this.settings.maxMinutes} 分钟` };
     }
     if (file.nodes.length >= this.settings.maxNodes) {
