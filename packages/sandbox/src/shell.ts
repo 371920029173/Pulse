@@ -46,6 +46,31 @@ export const DESTRUCTIVE_PATTERNS: RegExp[] = [
  * 与 `DESTRUCTIVE_PATTERNS` 一一对应、同序：加了一条模式就必须配一句后果，否则确认框里会出现
  * 一条"为什么不能点"的空话 —— 而空话正是用户盲目点确定的原因。
  */
+/**
+ * git 类：只有**操作位置在工作区外**时才值得打扰用户（2026-11-02 用户的口径）。
+ *
+ * 理由：在自己的仓库里强推/回退，是这个工作区本来就允许的事，用户天天在做；而同一个命令指到
+ * 工作区外的另一个仓库，就是"动别人的东西"，那才该问。其余危险命令（删除、格式化、关机……）
+ * 与位置无关，照旧一律问。
+ */
+const REPOSITORY_SCOPED: RegExp[] = [
+  /git\s+push\b[^\n]*\s(--force|-f)(\s|$)/i,
+  /git\s+reset\s+--hard/i,
+];
+
+/** 这条命令属于哪一类：与位置无关的（always）／只在工作区外才问的（repository）／不危险（none）。 */
+export function destructiveScope(command: string): 'always' | 'repository' | 'none' {
+  const repo = REPOSITORY_SCOPED.some((re) => { re.lastIndex = 0; return re.test(command); });
+  const always = DESTRUCTIVE_PATTERNS.some((re) => {
+    // 两张表里的 git 正则是各自写的字面量，对象不同：按 source+flags 比，不按引用比。
+    if (REPOSITORY_SCOPED.some((r) => r.source === re.source && r.flags === re.flags)) return false;
+    re.lastIndex = 0;
+    return re.test(command);
+  });
+  // DESTRUCTIVE_PATTERNS 里仍含 git 两条（严格模式下照拦），所以要单独再判一次"只在工作区外才算"
+  if (always) return 'always';
+  return repo ? 'repository' : 'none';
+}
 const DESTRUCTIVE_CONSEQUENCES: Array<[RegExp, string]> = [
   [/rm\s+.*-[a-z]*r[a-z]*f|rm\s+.*-[a-z]*f[a-z]*r|rm\s+-rf/i, '递归强制删除，删掉的文件不进回收站，无法撤销'],
   [/del\s+\/s/i, '递归删除目录下的所有文件（del /s），不进回收站'],
@@ -1697,6 +1722,64 @@ export class SandboxShell {
       /* 工作区外：下面按绝对值再比一次，凭据按设计就在那儿。 */
     }
     return this.protectedReason(isAbsolute(requestedPath) ? requestedPath : join(this.workspaceRoot, requestedPath));
+  }
+
+  /**
+   * 文件工具用的路径解析：工作区内照旧，工作区**外**按「允许工作区外」的档位决定。
+   *
+   * 为什么不让 `fs_*` 永远只许工作区内（2026-11-02 用户拍板）：同样一件事，`shell` 能读
+   * `D:\资料\x.md`，`fs_read` 却被拒 —— 模型只好先撞一次墙再换成 powershell 绕。规则应该由
+   * **档位**回答，而不是由"你用了哪个工具"回答。
+   *
+   * 三档的处置（与 `outsideWorkspace` 一一对应）：
+   *   - allow=false / policy=deny：拒（写和读都拒，与原来一致）；
+   *   - policy=readonly：读放行，**写拒**（要写就换「所有」档，那是有意的一次选择）；
+   *   - policy=all：读写都放行。
+   *
+   * 受保护文件（kb.sqlite / control-token）在这之后仍然照查，任何档位都碰不到。
+   */
+  /**
+   * 由工具层设定越界档位。
+   *
+   * 为什么需要这个：`SandboxShell` 自己的 config 默认是 `{allow:true, policy:"readonly"}`（config.ts 的缺省），
+   * 而 `createTools` 会按 `allowAllCommands` 推出另一套。两套不一致时，`fs_*` 会按 shell 的默认值放行 ——
+   * 实测后果：`allowAllCommands:false` 的工具集里，`fs_read ../../../etc/passwd` 一路走到 ENOENT 而不是被拒。
+   * 工具层是"用户到底选了什么"的那一侧，所以以它为准，显式同步过来。
+   */
+  configureOutside(settings: { allow: boolean; policy: 'all' | 'readonly' | 'deny' }): void {
+    this.config.outsideWorkspace = settings;
+  }
+  /** 这个路径是不是在工作区外（不抛错，只回答）。工具层用它决定"要不要问人"。 */
+  pathIsOutside(requestedPath: string): boolean {
+    try {
+      resolveInsideWorkspace(this.workspaceRoot, requestedPath);
+      return false;
+    } catch {
+      return true;
+    }
+  }
+  resolveFile(requestedPath: string, opts: { write: boolean }): string {
+    const policy = this.config.outsideWorkspace ?? { allow: false, policy: 'readonly' as const };
+    let resolved: string;
+    let outside = false;
+    try {
+      resolved = resolveInsideWorkspace(this.workspaceRoot, requestedPath);
+    } catch {
+      /* 工作区外：下面按档位判，允许时用绝对路径。 */
+      outside = true;
+      resolved = isAbsolute(requestedPath) ? resolve(requestedPath) : join(this.workspaceRoot, requestedPath);
+    }
+
+    const reason = this.protectedReason(resolved) ?? this.protectedReasonFor(requestedPath);
+    if (reason) throw new Error(reason);
+
+    if (!outside) return resolved;
+    if (!policy.allow) throw new Error(`Path escapes workspace（工作区外，且「允许工作区外」没开）：${resolved}`);
+    if (policy.policy === 'deny') throw new Error(`Path escapes workspace（工作区外，且档位是「拒绝」）：${resolved}`);
+    if (policy.policy === 'readonly' && opts.write) {
+      throw new Error(`Path escapes workspace（档位是「只读」：工作区外只能读，写要换成「所有」档）：${resolved}`);
+    }
+    return resolved;
   }
 
   validatePath(requestedPath: string): string {

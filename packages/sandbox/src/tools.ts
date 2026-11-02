@@ -8,7 +8,7 @@ import type {
   ToolDefinition, SandboxResult, SandboxJobView, SandboxJobKillReason,
 } from '@she/shared';
 import type { SandboxShell } from './shell.js';
-import { classifyCommand, codeExecutionDisclosure, shellDialectDisclosure, describeDestructive } from './shell.js';
+import { classifyCommand, codeExecutionDisclosure, shellDialectDisclosure, describeDestructive, destructiveScope, workspaceEscapeReason } from './shell.js';
 import type { IsolationInEffect } from '@she/shared';
 
 /**
@@ -367,6 +367,8 @@ export function createTools(
    */
   const outsideWorkspace = opts?.outsideWorkspace
     ?? { allow: allowAll, policy: allowAll ? 'all' as const : 'readonly' as const };
+  // 以工具层这份为准（它是"用户到底选了什么"的那一侧）。替身 shell 没有这个方法，跳过即可。
+  if (typeof shell.configureOutside === 'function') shell.configureOutside(outsideWorkspace);
   const root = resolve(workspaceRoot);
 
   /** Where a blocked call says "still waiting"; set per call by the agent. */
@@ -602,7 +604,7 @@ export function createTools(
   reg(
     {
       name: 'fs_read',
-      description: 'Read a file within the workspace. Optionally specify startLine and endLine (1-indexed) to read a range.',
+      description: 'Read a file (workspace; outside when the setting allows). Optional startLine/endLine (1-indexed).',
       parameters: {
         type: 'object',
         properties: {
@@ -614,7 +616,7 @@ export function createTools(
       },
     },
     async (args) => {
-      const filePath = shell.validatePath(args.path as string);
+      const filePath = shell.resolveFile(args.path as string, { write: false });
       const content = withoutBom(await readFile(filePath, 'utf-8'));
       const startLine = args.startLine as number | undefined;
       const endLine = args.endLine as number | undefined;
@@ -646,7 +648,7 @@ export function createTools(
     },
     async (args) => {
       const rel = String(args.path ?? '');
-      const filePath = shell.validatePath(rel);
+      const filePath = shell.resolveFile(rel, { write: true });
       const next = String(args.content ?? '');
       let before = '';
       try {
@@ -685,7 +687,7 @@ export function createTools(
   reg(
     {
       name: 'fs_list',
-      description: 'List files and directories within the workspace.',
+      description: 'List files/dirs (workspace; outside if allowed).',
       parameters: {
         type: 'object',
         properties: {
@@ -696,7 +698,7 @@ export function createTools(
       },
     },
     async (args) => {
-      const dirPath = shell.validatePath(args.path as string);
+      const dirPath = shell.resolveFile(args.path as string, { write: false });
       const recursive = (args.recursive as boolean) ?? false;
 
       async function listDir(dir: string, prefix: string): Promise<string[]> {
@@ -743,7 +745,7 @@ export function createTools(
     },
     async (args) => {
       const pattern = args.pattern as string;
-      const searchPath = shell.validatePath((args.path as string) ?? '.');
+      const searchPath = shell.resolveFile((args.path as string) ?? '.', { write: false });
       const globFilter = args.glob as string | undefined;
       /*
        * 三个为"模型真的会用"而加的参数：忽略大小写、上下文、结果上限。
@@ -1262,7 +1264,7 @@ export function createTools(
       },
     },
     async (args) => {
-      const filePath = shell.validatePath(args.path as string);
+      const filePath = shell.resolveFile(args.path as string, { write: false });
       const prompt = String(args.prompt || 'Describe this screenshot for a coding agent: UI text, errors, layout, and actionable next steps.');
       const visionUrl = process.env.SHE_VISION_URL || '';
       if (!visionUrl) {
@@ -1332,7 +1334,16 @@ function boundaryDecision(name: string, args: Record<string, unknown>): Boundary
   if (policy.allow && policy.policy === 'all') {
     if (name === 'shell') {
       const command = String(args.command ?? '');
-      if (shell.isDestructive(command)) {
+      /*
+       * git 类只在**操作位置在工作区外**时才问（用户 2026-11-02 的口径）：自己的仓库里强推/回退
+       * 是日常操作；指到工作区外的另一个仓库才是"动别人的东西"。其余危险命令与位置无关，照旧问。
+       */
+      const scope = destructiveScope(command);
+      const cwdArg = typeof args.cwd === 'string' ? args.cwd : '';
+      const locationOutside = (cwdArg.trim() !== '' && shell.pathIsOutside(cwdArg))
+        || Boolean(workspaceEscapeReason(command, root));
+      const needsAsk = scope === 'always' || (scope === 'repository' && locationOutside);
+      if (needsAsk) {
         const consequences = describeDestructive(command);
         return {
           kind: 'confirm',
@@ -1383,6 +1394,20 @@ function boundaryDecision(name: string, args: Record<string, unknown>): Boundary
    * 只是"要不要逐条批准"；`computer_*` 另有 `SHE_ALLOW_COMPUTER_USE` 这道独立的闸（见文件里那一段
    * 注释），两件事不能互相代表。
    */
+  /*
+   * fs_write 写工作区外：档位决定处置（「所有」在上面已经早退放行）。
+   * 只读档问一次（批准后放行），拒绝档直接拒 —— 与 shell 的越界写同一套口径。
+   */
+  if (name === 'fs_write') {
+    const target = String(args.path ?? '');
+    if (target && shell.pathIsOutside(target)) {
+      if (policy.policy === 'deny') {
+        return { kind: 'refuse', reason: '路径在工作区外，且档位是「拒绝工作区外操作」。' };
+      }
+      return { kind: 'confirm', reason: `写工作区外的文件：${target}。档位是「只读」，一次一批准。` };
+    }
+  }
+
   if (toolMap.get(name)?.def.isDangerous && !policy.allow) {
     return { kind: 'confirm', reason: '未允许工作区外命令：此操作需要人工批准。' };
   }

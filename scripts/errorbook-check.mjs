@@ -62,7 +62,17 @@ cfg.workspace.root = dir;
 const store = new KBStore(join(dir, 'kb.sqlite'));
 const engine = new GroupKBEngine(store, { ...cfg.kb, dbPath: join(dir, 'kb.sqlite') });
 const shell = new SandboxShell(dir, pinHostSandbox(cfg.sandbox));
+/*
+ * 越界档位显式设成「拒绝」：这个脚本需要一次**真实**的策略拒绝来验"它不会被记成错题"。
+ * 默认（allowAllCommands:true → 所有）下工作区外的 fs_read 已经放行，那样断言就空转了。
+ */
 const sandboxTools = createTools(shell, dir, { allowAllCommands: true });
+
+/*
+ * 只给"工作区外被拒"那条用例用：2026-11-02 之后「所有」档会放行工作区外的 fs_read，
+ * 要验"真实的策略拒绝不会被记成错题"，就得有一个真的会拒的工具集。
+ */
+const denyOutsideTools = createTools(shell, dir, { allowAllCommands: true, outsideWorkspace: { allow: true, policy: 'deny' } });
 
 /*
  * The engine and the store are passed separately because that is where the two halves of the
@@ -110,15 +120,15 @@ console.log('\n=== 真实工具失败 → 真的写进 KB ===');
      * 它仍然是"真实工具产生的真实拒绝"，只是不该被记成 agent 的错题，所以它在下面既验 kind，
      * 又验"没被写进书"。
      */
-    ['fs_read 工作区外', 'fs_read', { path: '../../../etc/passwd' }, 'policy_denied'],
+    ['fs_read 工作区外', 'fs_read', { path: '../../../etc/passwd' }, 'policy_denied', denyOutsideTools],
     ['未知工具', 'definitely_not_a_tool', {}, 'unavailable'],
     ['grep 无匹配', 'grep', { pattern: NO_MATCH }, 'empty'],
   ];
 
   let recordable = 0;
   const policyDenials = [];
-  for (const [label, name, args, expected] of cases) {
-    const raw = await run(sandboxTools, name, args);
+  for (const [label, name, args, expected, toolsetOverride] of cases) {
+    const raw = await run(toolsetOverride ?? sandboxTools, name, args);
     const v = classifyToolResult(name, raw);
     check(`${label} → ${expected}`, v.kind === expected,
       `实际 ${v.kind}\n原始返回: ${String(raw).slice(0, 200)}`);

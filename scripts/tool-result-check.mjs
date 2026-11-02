@@ -101,6 +101,10 @@ console.log('\n=== 真实工具产出的结果 ===');
    * A check may only be this dangerous by accident, never on purpose.
    */
   const destructiveProbe = 'rm -rf ./.she-check-destructive-probe';
+  /* 工作区外、但确实存在的一个文件：用来证明「所有」档下 fs_read 真的放行了（而不是"允许了但读不到"）。 */
+  const outsideReadable = join(tmpdir(), `she-outside-readable-${process.pid}.txt`);
+  writeFileSync(outsideReadable, 'outside ok', 'utf8');
+
   const cases = [
     // [label, toolset, name, args, expected kind]
     ['grep 无匹配', sandboxTools, 'grep', { pattern: 'zzz_no_such_symbol_zzz' }, 'empty'],
@@ -114,7 +118,11 @@ console.log('\n=== 真实工具产出的结果 ===');
      */
     ['破坏性命令先要确认（不是失败）', strictTools, 'shell', { command: destructiveProbe }, 'none'],
     ['fs_read 文件不存在', sandboxTools, 'fs_read', { path: 'nope/missing.ts' }, 'not_found'],
-    ['fs_read 工作区外（越权）', sandboxTools, 'fs_read', { path: '../../../etc/passwd' }, 'policy_denied'],
+    // 「允许工作区外」= 所有时，fs_read 越界已经不算是越权了（2026-11-02 用户要求放开）。
+    // 拒绝路径改用「档位=拒绝」的工具集来验 —— 那条规则仍然必须生效。
+    ['fs_read 工作区外（被拒档）', strictTools, 'fs_read', { path: '../../../etc/passwd' }, 'policy_denied'],
+    // 反过来也要钉住：所有档下它必须成功，否则等于把功能改回去了。
+    ['fs_read 工作区外（所有档，允许）', sandboxTools, 'fs_read', { path: outsideReadable }, 'none'],
     ['未知工具', sandboxTools, 'definitely_not_a_tool', {}, 'unavailable'],
     ['plan_update 状态词写错', planTools, 'plan_update', { plan_id: 'p', step_id: 's', status: '乱七八糟' }, 'invalid_args'],
     ['kb_query 无结果', kbTools, 'kb_query', { query: 'zzz_nothing_matches_zzz' }, 'empty'],

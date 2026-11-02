@@ -594,5 +594,36 @@ console.log('\n=== 真隔离的可用性与提示 ===');
   rmSync(ws2, { recursive: true, force: true });
 }
 
+/* ── 工作区外：fs_* 按档位放开；git 类危险命令看位置 ── */
+{
+  const outside = mkdtempSync(join(tmpdir(), 'she-outside-'));
+  const outsideFile = join(outside, 'note.txt');
+  writeFileSync(outsideFile, '外部内容', 'utf8');
+
+  const allShell = new (await import('../packages/sandbox/dist/shell.js')).SandboxShell(mkdtempSync(join(tmpdir(), 'she-in-')), { allowAllCommands: true, denyDestructiveByDefault: false, outsideWorkspace: { allow: true, policy: 'all' } });
+  const allTools = (await import('../packages/sandbox/dist/tools.js')).createTools(allShell, allShell.root, { allowAllCommands: true, outsideWorkspace: { allow: true, policy: 'all' } });
+
+  check('【关键】「所有」档：fs_read 能读工作区外', String(await allTools.execute('fs_read', { path: outsideFile })).includes('外部内容'), '');
+  const wrote = await allTools.execute('fs_write', { path: join(outside, 'w.txt'), content: 'hi' });
+  check('【关键】「所有」档：fs_write 能写工作区外', !String(wrote).includes('needs_confirm'), String(wrote).slice(0, 60));
+
+  const roShell = new (await import('../packages/sandbox/dist/shell.js')).SandboxShell(mkdtempSync(join(tmpdir(), 'she-in2-')), { allowAllCommands: false, denyDestructiveByDefault: true, outsideWorkspace: { allow: true, policy: 'readonly' } });
+  const roTools = (await import('../packages/sandbox/dist/tools.js')).createTools(roShell, roShell.root, { allowAllCommands: false, outsideWorkspace: { allow: true, policy: 'readonly' } });
+  check('「只读」档：读工作区外放行', String(await roTools.execute('fs_read', { path: outsideFile })).includes('外部内容'), '');
+  check('「只读」档：写工作区外要问人', String(await roTools.execute('fs_write', { path: join(outside, 'n.txt'), content: 'x' })).includes('needs_confirm'), '');
+
+  const shellAll = new (await import('../packages/sandbox/dist/shell.js')).SandboxShell(mkdtempSync(join(tmpdir(), 'she-in3-')), { allowAllCommands: true, denyDestructiveByDefault: false, outsideWorkspace: { allow: true, policy: 'all' } });
+  const toolsAll = (await import('../packages/sandbox/dist/tools.js')).createTools(shellAll, shellAll.root, { allowAllCommands: true, outsideWorkspace: { allow: true, policy: 'all' } });
+  check('工作区内的 git 强推：不问（自己的仓库是日常）', !String(await toolsAll.execute('shell', { command: 'git push --force origin main', cwd: '.' })).includes('needs_confirm'), '');
+  check('【关键】指到工作区外的 git 强推：要问', String(await toolsAll.execute('shell', { command: 'git push --force origin main', cwd: outside })).includes('needs_confirm'), '');
+  check('与位置无关的危险命令照旧要问（rm -rf）', String(await toolsAll.execute('shell', { command: 'rm -rf /tmp/x' })).includes('needs_confirm'), '');
+
+  const { destructiveScope } = await import('../packages/sandbox/dist/shell.js');
+  check('分类器：git 强推是 repository 类', destructiveScope('git push --force origin main') === 'repository', destructiveScope('git push --force origin main'));
+  check('分类器：rm -rf 是 always 类', destructiveScope('rm -rf /tmp/x') === 'always', destructiveScope('rm -rf /tmp/x'));
+
+  rmSync(outside, { recursive: true, force: true });
+}
+
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`);
 process.exit(failures === 0 ? 0 : 1);
