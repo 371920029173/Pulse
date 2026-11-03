@@ -23,8 +23,14 @@ function line(n: TreeNode, depth: number): string {
 /** 树的只读渲染：按父子顺序展开，末尾附待答问题与最近决策。 */
 export function renderTree(file: TreeFile, opts?: { trail?: boolean }): string {
   const lines: string[] = [];
-  const done = file.nodes.filter((n) => n.status === 'done').length;
-  lines.push(`任务树（会话 ${file.sessionId}）— ${done}/${file.nodes.length} 完成`);
+  /*
+   * 根节点不算"任务"：它是目标本身，状态永远是 active，要等 tree_report 才收口。
+   * 原来分母用 file.nodes.length，于是"7 个子任务做完、只差收口"也显示成 0/8 ——
+   * 用户看到的就是"这树怎么一直不动"（2026-11-03 实测）。
+   */
+  const tasks = file.nodes.filter((n) => n.id !== file.rootId);
+  const done = tasks.filter((n) => n.status === 'done').length;
+  lines.push(`任务树（会话 ${file.sessionId}）— ${done}/${tasks.length} 完成`);
   const byParent = new Map<string | null, TreeNode[]>();
   for (const n of file.nodes) {
     const list = byParent.get(n.parentId) ?? [];

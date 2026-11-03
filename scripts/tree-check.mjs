@@ -247,6 +247,17 @@ const dir = mkdtempSync(join(tmpdir(), 'she-tree-check-'));
   check('节点数到顶后 tree_add 会被拒（不是悄悄长）', /上限/.test(grew), grew);
 }
 
+/* ⑮ 进度分母不含根节点（否则"都做完了只差收口"也显示 0/N） */
+{
+  const s15 = new TaskTreeStore(dir, 'count_a');
+  s15.create('目标', undefined, ['子一', '子二']);
+  const nodes15 = s15.get().nodes.filter((n) => n.id !== s15.get().rootId);
+  for (const n of nodes15) s15.update(n.id, { status: 'done', evidence: ['x'] });
+  const { renderTree: render15 } = await import('../packages/agent-runtime/dist/tree-tools.js');
+  const text15 = render15(s15.get());
+  check('【关键】两个子任务都做完 → 显示 2/2（不是 2/3）', /2\/2 完成/.test(text15), text15.split('\n')[0]);
+}
+
 rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `\n${failed} 项 FAIL` : '\n全部 PASS');
 process.exit(failed ? 1 : 0);
