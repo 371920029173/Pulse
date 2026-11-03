@@ -81,9 +81,11 @@ export interface TreeSettings {
   /** 相信模型 → 到期自动采纳推荐值；默认不信任（安全侧）。 */
   trustModel: boolean;
   answerTimeoutMs: number;
-  maxMinutes: number;
+  /** 墙钟预算（分钟）。**不设 = 不限制**；设 0 = 立刻到顶。 */
+  maxMinutes?: number;
   maxNodeAttempts: number;
-  maxNodes: number;
+  /** 节点数上限。**不设 = 不限制**；设 0 = 立刻到顶。 */
+  maxNodes?: number;
   backupBeforeAuto: boolean;
 }
 
@@ -102,7 +104,11 @@ export function treeSettingsFromEnv(env: NodeJS.ProcessEnv = process.env): TreeS
   return {
     trustModel: trust === '1' || trust === 'true' || trust === 'yes' || trust === 'on',
     answerTimeoutMs: num('SHE_TREE_TIMEOUT_MIN', 5) * 60_000,
-    maxMinutes: num('SHE_TREE_MAX_MINUTES', 120),
+    // 预算两项：只有用户显式设置了才有上限；不设 = 不限制（用户 2026-11-02 的口径）
+    ...(env.SHE_TREE_MAX_MINUTES !== undefined && Number(env.SHE_TREE_MAX_MINUTES) >= 0
+      ? { maxMinutes: Math.floor(Number(env.SHE_TREE_MAX_MINUTES)) } : {}),
+    ...(env.SHE_TREE_MAX_NODES !== undefined && Number(env.SHE_TREE_MAX_NODES) >= 0
+      ? { maxNodes: Math.floor(Number(env.SHE_TREE_MAX_NODES)) } : {}),
     maxNodeAttempts: num('SHE_TREE_MAX_TRIES', 3),
     maxNodes: num('SHE_TREE_MAX_NODES', 60),
     backupBeforeAuto: true,
@@ -112,9 +118,8 @@ export function treeSettingsFromEnv(env: NodeJS.ProcessEnv = process.env): TreeS
 export const DEFAULT_TREE_SETTINGS: TreeSettings = {
   trustModel: false,
   answerTimeoutMs: 5 * 60_000,
-  maxMinutes: 120,
+  // 预算不设 = 不限制
   maxNodeAttempts: 3,
-  maxNodes: 60,
   backupBeforeAuto: true,
 };
 
@@ -239,7 +244,7 @@ export class TaskTreeStore {
     const file = this.load();
     if (!file) throw new Error('还没有任务树（先 tree_create）');
     const limit = this.settings.maxNodes;
-    if (file.nodes.length >= limit) throw new Error(`节点数已达上限 ${limit}（防止无限分裂）；请先收掉分支再长`);
+    if (typeof limit === 'number' && file.nodes.length >= limit) throw new Error(`节点数已达上限 ${limit}（防止无限分裂）；请先收掉分支再长`);
 
     let parentId: string | null = null;
     if (opts.siblingOf) {
@@ -386,10 +391,14 @@ export class TaskTreeStore {
     const open = file.nodes.filter((n) => n.status !== 'done' && n.status !== 'dropped');
     if (!open.length) return { exhausted: false, reason: '' };
     const minutes = (Date.now() - Date.parse(file.createdAt)) / 60_000;
-    if (minutes >= this.settings.maxMinutes) {
+    /*
+     * 预算不设 = 不限制（用户 2026-11-02 的口径）。`0` 仍然有含义：立刻到顶。
+     * 所以判的是 `typeof === number`，不是"有没有值"。
+     */
+    if (typeof this.settings.maxMinutes === 'number' && minutes >= this.settings.maxMinutes) {
       return { exhausted: true, reason: `已跑 ${Math.round(minutes)} 分钟，超过预算 ${this.settings.maxMinutes} 分钟` };
     }
-    if (file.nodes.length >= this.settings.maxNodes) {
+    if (typeof this.settings.maxNodes === 'number' && file.nodes.length >= this.settings.maxNodes) {
       return { exhausted: true, reason: `节点数 ${file.nodes.length} 已达上限 ${this.settings.maxNodes}` };
     }
     const dead = open.find((n) => n.attempts >= this.settings.maxNodeAttempts);
@@ -437,7 +446,8 @@ export class TaskTreeStore {
     if (stuck.length === open.length) {
       return { outcome: 'blocked', reason: `所有剩余节点都卡住：${stuck.map((n) => `${n.id} ${n.title}(${n.status})`).join('、')}` };
     }
-    const overTime = Date.now() - startedAt > this.settings.maxMinutes * 60_000;
+    const overTime = typeof this.settings.maxMinutes === 'number'
+      && Date.now() - startedAt > this.settings.maxMinutes * 60_000;
     const overTries = open.some((n) => n.attempts >= this.settings.maxNodeAttempts);
     if (overTime || overTries) {
       return {

@@ -226,6 +226,26 @@ const dir = mkdtempSync(join(tmpdir(), 'she-tree-check-'));
   check('解除急停后恢复续跑', resumed.proceed === true, resumed.reason ?? '');
 }
 
+/* ⑭ 预算默认不限制（用户 2026-11-02：不设 = 不限制） */
+{
+  const def = new TaskTreeStore(dir, 'budget_default');
+  def.create('默认不设预算', undefined, ['一件事']);
+  const b = def.budget();
+  check('默认设置下预算不限制（跑久一点不会被判收口）', b.exhausted === false, b.reason);
+  check('默认设置里 maxMinutes / maxNodes 都是 undefined',
+    DEFAULT_TREE_SETTINGS.maxMinutes === undefined && DEFAULT_TREE_SETTINGS.maxNodes === undefined,
+    JSON.stringify({ m: DEFAULT_TREE_SETTINGS.maxMinutes, n: DEFAULT_TREE_SETTINGS.maxNodes }));
+
+  /* 设了上限就要真的生效 —— 否则"可配置"只是装饰 */
+  const exp = new TaskTreeStore(dir, 'budget_exp', { trustModel: false, answerTimeoutMs: 300000, maxNodeAttempts: 3, backupBeforeAuto: true, maxNodes: 1 });
+  exp.create('设了上限', undefined, ['一件事']);
+  const eb = exp.budget();
+  check('显式设了 maxNodes 就会被判到顶', eb.exhausted === true, eb.reason);
+  let grew = '';
+  try { exp.add({ parentId: exp.get().rootId, title: '再来一个' }); } catch (e) { grew = String(e.message); }
+  check('节点数到顶后 tree_add 会被拒（不是悄悄长）', /上限/.test(grew), grew);
+}
+
 rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `\n${failed} 项 FAIL` : '\n全部 PASS');
 process.exit(failed ? 1 : 0);

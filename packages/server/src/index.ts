@@ -3880,17 +3880,21 @@ const STREAM_PERSIST_MS = 10_000;
       },
       /* 任务树策略：原样回传环境里那份，界面据此显示开关状态。 */
       tree: (() => {
-        const n = (key: string, dflt: number) => {
-          const v = Number(process.env[key]);
-          return Number.isFinite(v) && v > 0 ? v : dflt;
+        /* 预算两项：没设（或设成负数）就回 null —— 界面要说"不限制"，不能编一个默认值。 */
+        const budget = (key: string): number | null => {
+          const raw = process.env[key];
+          if (raw === undefined || raw.trim() === '') return null;
+          const v = Number(raw);
+          if (!Number.isFinite(v) || v < 0) return null;
+          return v;
         };
         const trust = (process.env.SHE_TREE_TRUST ?? '').trim().toLowerCase();
         return {
           trustModel: ['1', 'true', 'yes', 'on'].includes(trust),
-          answerTimeoutMinutes: n('SHE_TREE_TIMEOUT_MIN', 5),
-          maxMinutes: n('SHE_TREE_MAX_MINUTES', 120),
-          maxNodes: n('SHE_TREE_MAX_NODES', 60),
-          maxNodeAttempts: n('SHE_TREE_MAX_TRIES', 3),
+          answerTimeoutMinutes: budget('SHE_TREE_TIMEOUT_MIN') ?? 5,
+          maxMinutes: budget('SHE_TREE_MAX_MINUTES'),
+          maxNodes: budget('SHE_TREE_MAX_NODES'),
+          maxNodeAttempts: budget('SHE_TREE_MAX_TRIES') ?? 3,
         };
       })(),
     });
@@ -4030,7 +4034,12 @@ router.put('/api/settings', async (req, res) => {
       ];
       for (const [field, key] of positives) {
         const v = body.tree[field];
-        if (typeof v === 'number' && Number.isFinite(v) && v > 0) setEnv(key, String(Math.round(v)));
+        /*
+         * `null` = 不限制（用户 2026-11-02 的口径）。写成 -1：treeSettingsFromEnv 把负数当"没设"，
+         * 于是预算项真的不存在。0 仍然有含义 —— 立刻到顶，所以不能拿 0 当"不限制"。
+         */
+        if (v === null) { setEnv(key, '-1'); continue; }
+        if (typeof v === 'number' && Number.isFinite(v) && v >= 0) setEnv(key, String(Math.round(v)));
       }
     }
 
