@@ -14,8 +14,13 @@ import { dirname, resolve } from 'node:path';
  *   - the canonical file is the only file loaded (no double-load shadowing)
  */
 export function parseEnvFile(text: string): Record<string, string> {
+  /*
+   * 先剥掉 BOM。实测（本仓 .env 就带 BOM）：`\uFEFFSHE_LLM_PROVIDER` 与 `SHE_LLM_PROVIDER` 是两个键，
+   * 于是**第一条设置被静默忽略** —— 一类最难发现的故障，看起来只是"默认值生效了"。
+   */
+  const body = text.replace(/^\uFEFF/, '');
   const out: Record<string, string> = {};
-  for (const line of text.split(/\r?\n/)) {
+  for (const line of body.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
     const eq = trimmed.indexOf('=');

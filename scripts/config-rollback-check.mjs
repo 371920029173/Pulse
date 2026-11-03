@@ -411,5 +411,15 @@ if (failures) {
   console.log(`${failures} 项失败`);
   process.exit(1);
 }
+/* ── .env 带 BOM 时，第一个键不能被静默丢掉 ── */
+{
+  const { parseEnvFile } = await import('../packages/shared/dist/env.js');
+  const withBom = parseEnvFile('\uFEFFSHE_LLM_PROVIDER=openai\nSHE_PORT=4577\n');
+  const plain = parseEnvFile('SHE_LLM_PROVIDER=openai\nSHE_PORT=4577\n');
+  check('【关键】带 BOM 的 .env 解析出同一个键名（第一条设置不会消失）',
+    withBom.SHE_LLM_PROVIDER === 'openai' && Object.keys(withBom).length === Object.keys(plain).length,
+    JSON.stringify(Object.keys(withBom)));
+}
+
 console.log('配置回退检查通过');
 void rmSync;
