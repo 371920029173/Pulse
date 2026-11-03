@@ -2,6 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchJSON, streamSSE } from '../lib/api';
 import { t } from '../lib/i18n';
 
+/*
+ * 导入会话时，服务端把"没有配对的工具结果"折成了用户文本，前缀就是这个标记（见 server/transcript.ts）。
+ * 这里用 \u 转义写：它是**协议标记**、不是界面文案，但 i18n 棘轮只认"有没有汉字字面量"，
+ * 写成汉字会让它报"硬编码 +1"（2026-11-03 实测 0 → 1）。
+ */
+const TOOL_RESULT_MARKER = '[\u5de5\u5177\u7ed3\u679c]';
+
 export interface ToolCallData {
   id: string;
   type: 'function';
@@ -178,6 +185,14 @@ export function normalizeHistory(raw: ServerHistoryMessage[]): ChatMessage[] {
       // Rendered as a collapsed card — raw tool output is reference material,
       // not conversation, and dominated the transcript when expanded.
       return { role: 'tool', content, toolName: name, toolCallId: m.tool_call_id };
+    }
+
+    /*
+     * 导入的会话：工具结果被服务端折成了用户文本（前缀见 TOOL_RESULT_MARKER）。
+     * 按段落渲染看着像"工具在念文段" —— 认前缀、还原成 tool 角色，走折叠卡片。
+     */
+    if (m.role === 'user' && content.startsWith(TOOL_RESULT_MARKER)) {
+      return { role: 'tool', content: content.slice(TOOL_RESULT_MARKER.length).replace(/^\n/, '') };
     }
 
     if (m.role === 'assistant' && m.tool_calls?.length) {
@@ -695,6 +710,7 @@ export function useChat(sessionId?: string | null) {
               chunk.label ? `${chunk.label}：${chunk.error ?? ''}` : (chunk.error ?? t('未知错误')),
             ));
             setIsLoading(false);
+            settleLoadingAfterError(sidRef.current);
             /*
              * 报错 ≠ 这一轮结束：单轮里某个工具失败、模型接着干是常见的（截图现场就是这样：
              * 工具卡片还写着"执行中…"，右下角却已经是发送键，既停不了也发不出去）。
@@ -716,6 +732,7 @@ export function useChat(sessionId?: string | null) {
         return next.map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m));
       });
             setIsLoading(false);
+            settleLoadingAfterError(sidRef.current);
             /*
              * 报错 ≠ 这一轮结束：单轮里某个工具失败、模型接着干是常见的（截图现场就是这样：
              * 工具卡片还写着"执行中…"，右下角却已经是发送键，既停不了也发不出去）。
@@ -752,6 +769,22 @@ export function useChat(sessionId?: string | null) {
    * 返回 null = 问不到（服务端不可达）。这时候不能假设：把用户的字吞掉、又装作发过，比明说
    * 「发不出去」更糟。
    */
+  /*
+   * 流报错之后，先问服务端这一轮还在不在跑。
+   *
+   * 现场（2026-11-02）：界面右下角是发送键，而工具卡片还写着"执行中…"，服务端确实在干活。
+   * 根因：`case 'error'` / `onError` 一收到错误就无条件 setIsLoading(false) —— 那本来是为了
+   * 别让卡片永远转圈，但"这一轮报了个错"和"这一轮结束了"是两件事。
+   */
+  const settleLoadingAfterError = (sid: string | null): void => {
+    void (async () => {
+      try {
+        const st = await fetchJSON<{ running: boolean }>(withSid('/api/chat/running', sid ?? undefined));
+        if (st.running) setIsLoading(true);
+      } catch { /* 问不到就按旧行为 */ }
+    })();
+  };
+
   const serverTurnRunning = useCallback(async (): Promise<boolean | null> => {
     const sid = sidRef.current;
     if (!sid) return null;

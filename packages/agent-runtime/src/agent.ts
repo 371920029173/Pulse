@@ -22,6 +22,7 @@ import { PendingPatchStore, CheckpointStore, resolveInsideWorkspace } from '@she
 import { createKBTools } from './kb-tools.js';
 import { createPlanTools, planAutopilot } from './plan-tools.js';
 import { TaskTreeStore, treeAutopilot } from './task-tree.js';
+import { stripInjectedContext } from './injected-context.js';
 import { createPreflightTools, PreflightStore } from './preflight.js';
 import type { PreflightRecord } from './preflight.js';
 import {
@@ -143,6 +144,7 @@ export class TurnInProgressError extends Error {
     this.name = 'TurnInProgressError';
   }
 }
+
 
 export class Agent {
   private provider: LLMProvider;
@@ -1336,6 +1338,16 @@ export class Agent {
       }
 
       response = this.usableToolCalls(response);
+      /*
+       * 落盘前洗掉注入块：模型有时会把这些临时上下文复述进自己的输出（2026-11-03 实测），
+       * 一旦落盘就会在压缩里越滚越大。请求里照旧带着，只是不存。
+       */
+      if (typeof response.content === 'string') {
+        const cleaned = stripInjectedContext(response.content);
+        if (cleaned !== response.content) {
+          response = { ...response, content: cleaned };
+        }
+      }
       this.history.push(response);
       messages.push(response);
 

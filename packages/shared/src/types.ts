@@ -548,3 +548,11 @@ export interface SandboxJobView {
  */
 export type SandboxJobKillReason = 'timeout' | 'lifetime' | 'capacity' | 'user' | 'shutdown';
 
+
+/**
+ * 导入会话时"没有配对的工具结果"会被折成一条用户文本，前缀就是这个标记。
+ *
+ * 放在 shared 里，是因为它同时被两侧读：服务端写（transcript.ts），界面认（useChat.ts）。
+ * 界面那份不能写字面量 —— i18n 棘轮会把它当成"没翻译的界面文案"（2026-11-03 实测 0 → 1）。
+ */
+export const TOOL_RESULT_MARKER = '[工具结果]';

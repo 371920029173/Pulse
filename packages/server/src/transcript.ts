@@ -17,6 +17,7 @@
  * the next request is still a valid chat completion.
  */
 import type { LLMMessage, ToolCall } from '@she/shared';
+import { TOOL_RESULT_MARKER } from '@she/shared';
 
 export function transcriptToMessages(
   source: string,
@@ -816,7 +817,7 @@ function repairProtocol(messages: LLMMessage[]): LLMMessage[] {
     if (owner?.role === 'assistant' && m.tool_call_id && ids.has(m.tool_call_id)) {
       folded.push({ ...m });
     } else {
-      const note = `[工具结果]\n${m.content}`;
+      const note = `${TOOL_RESULT_MARKER}\n${m.content}`;
       const last = folded[folded.length - 1];
       if (last && last.role === 'user' && !last.tool_calls) last.content = `${last.content}\n\n${note}`;
       else folded.push({ role: 'user', content: note });
