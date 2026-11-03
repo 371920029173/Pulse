@@ -1352,7 +1352,7 @@ export class Agent {
       messages.push(response);
 
       if (!response.tool_calls?.length) {
-        if (autopilotOn && autopilotRounds < autopilotMax && this.planStore) {
+        if (autopilotOn && autopilotRounds < autopilotMax) {
           const reply = typeof response.content === 'string' ? response.content : '';
           /*
            * 计划先说话；计划不续跑，再看任务树。
@@ -1361,7 +1361,14 @@ export class Agent {
            * 但**都要自动跑**。第一版把树做成"不推动、只在出口汇报"，于是模型干一段就停下来等人 ——
            * 那不是高级计划，那是会写日记的待办清单。
            */
-          const planDecision = planAutopilot(this.planStore.mine(), { turnStartedAt, reply });
+          /*
+           * 没有计划就不判计划 —— 但不能因此跳过树。审计发现（2026-11-03）：整块被
+           * `&& this.planStore` 包住，于是"没有 plan store 的会话里树永远不续跑"，
+           * 而 treeStore() 本身并不依赖 planStore。
+           */
+          const planDecision = this.planStore
+            ? planAutopilot(this.planStore.mine(), { turnStartedAt, reply })
+            : { proceed: false as const, signature: '', reason: '没有计划' };
           let decision = planDecision;
           let fromTree = false;
           if (!planDecision.proceed) {

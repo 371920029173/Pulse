@@ -284,6 +284,20 @@ const dir = mkdtempSync(join(tmpdir(), 'she-tree-check-'));
   check('【关键】失败次数不累计：修好后 budget() 不该再判用尽', b.exhausted === false, b.reason);
 }
 
+/* ⑰ 不可逆方向不许悄悄回滚（审计 2026-11-03） */
+{
+  const t17 = new TaskTreeStore(dir, 'trans_a');
+  t17.create('目标', undefined, ['子一']);
+  const n17 = t17.get().nodes.find((n) => n.id !== t17.get().rootId);
+  t17.update(n17.id, { status: 'done', evidence: ['x'] });
+  let threw = '';
+  try { t17.update(n17.id, { status: 'active' }); } catch (e) { threw = String(e.message); }
+  check('【关键】done 不能改回 active（完成不能被悄悄撤销）', /已经是 done/.test(threw), threw);
+  let threw2 = '';
+  try { t17.update(n17.id, { status: 'active', force: true }); } catch (e) { threw2 = String(e.message); }
+  check('显式 force 可以重开（留痕，不是禁止）', threw2 === '', threw2);
+}
+
 rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `\n${failed} 项 FAIL` : '\n全部 PASS');
 process.exit(failed ? 1 : 0);

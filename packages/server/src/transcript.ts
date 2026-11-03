@@ -801,28 +801,60 @@ function mergeAdjacent(messages: LLMMessage[]): LLMMessage[] {
  * A chat completion rejects a tool result with no call, and a call with no
  * result. Either one makes the transplanted conversation impossible to continue,
  * so both are folded into ordinary text instead of being dropped.
+ *
+ * Folding is deliberately two passes. The single-pass version decided each tool
+ * message while reading owners out of the same array it was pushing folded text
+ * into; an orphan result became a `user` message sitting between an assistant
+ * and its own tool_result, so the NEXT (legitimate) tool message found that user
+ * as its "owner", failed `owner.role !== 'assistant'`, and was folded too. The
+ * rebuild loop below then saw a call with no results and dropped its
+ * `tool_calls`, leaving only `[调用 x]` text — one orphan degraded every tool
+ * round after it, and the imported conversation stopped being continuable.
+ *
+ * So pass one only *labels*: a tool message counts as paired when its id was
+ * declared by an assistant that appeared before it (a result always follows its
+ * call). Nothing is inserted yet, so the labelling cannot be affected by the
+ * folding. Pass two emits the paired results unchanged and parks the orphans'
+ * text in a buffer that is flushed only where it cannot split a call from its
+ * results — before the next non-tool message, or at the end.
  */
 function repairProtocol(messages: LLMMessage[]): LLMMessage[] {
-  const folded: LLMMessage[] = [];
-  for (const m of messages) {
-    if (m.role !== 'tool') {
-      folded.push({ ...m });
+  const declared = new Set<string>();
+  const paired = new Array<boolean>(messages.length).fill(false);
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role === 'assistant') {
+      for (const tc of m.tool_calls ?? []) if (tc.id) declared.add(tc.id);
       continue;
     }
-    let owner: LLMMessage | undefined;
-    for (let i = folded.length - 1; i >= 0; i--) {
-      if (folded[i].role !== 'tool') { owner = folded[i]; break; }
-    }
-    const ids = new Set(owner?.role === 'assistant' ? (owner.tool_calls ?? []).map((t) => t.id) : []);
-    if (owner?.role === 'assistant' && m.tool_call_id && ids.has(m.tool_call_id)) {
-      folded.push({ ...m });
-    } else {
-      const note = `${TOOL_RESULT_MARKER}\n${m.content}`;
-      const last = folded[folded.length - 1];
-      if (last && last.role === 'user' && !last.tool_calls) last.content = `${last.content}\n\n${note}`;
-      else folded.push({ role: 'user', content: note });
-    }
+    if (m.role === 'tool') paired[i] = Boolean(m.tool_call_id) && declared.has(m.tool_call_id!);
   }
+
+  const folded: LLMMessage[] = [];
+  let pending: string[] = [];
+  const flush = (): void => {
+    if (!pending.length) return;
+    const note = pending.join('\n\n');
+    pending = [];
+    const last = folded[folded.length - 1];
+    if (last && last.role === 'user' && !last.tool_calls) {
+      last.content = last.content.trim() ? `${last.content}\n\n${note}` : note;
+    } else {
+      folded.push({ role: 'user', content: note });
+    }
+  };
+
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role === 'tool') {
+      if (paired[i]) folded.push({ ...m });
+      else pending.push(`${TOOL_RESULT_MARKER}\n${m.content}`);
+      continue;
+    }
+    flush();
+    folded.push({ ...m });
+  }
+  flush();
 
   const out: LLMMessage[] = [];
   for (let i = 0; i < folded.length; i++) {

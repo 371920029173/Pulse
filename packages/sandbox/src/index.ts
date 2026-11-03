@@ -19,6 +19,7 @@ export type {
 export { createTools } from './tools.js';
 export type { ToolSet } from './tools.js';
 export { ConfirmTicketStore } from './tickets.js';
+export type { TicketRecoveryInfo } from './tickets.js';
 export type { ConfirmTicket } from './tickets.js';
 export { PendingPatchStore } from './patches.js';
 export type { PendingPatch } from './patches.js';

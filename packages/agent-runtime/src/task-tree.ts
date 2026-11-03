@@ -274,12 +274,21 @@ export class TaskTreeStore {
     note?: string;
     evidence?: string[];
     decision?: { choice: string; why: string; auto?: boolean };
+    /** 允许把 done/dropped 的节点重开。只给"确实要重开"的场景用，它会在时间线里留痕。 */
+    force?: boolean;
   }): TreeNode {
     const file = this.load();
     if (!file) throw new Error('还没有任务树');
     const node = this.nodeIn(file, id);
     const from = node.status;
     if (opts.status) {
+      const from = node.status;
+      if (from === 'done' && opts.status !== 'done' && opts.force !== true) {
+        throw new Error(`节点 ${id} 已经是 done，不能改回 ${opts.status}（要重开请显式 force: true，它会留在时间线里）`);
+      }
+      if (from === 'dropped' && opts.status !== 'dropped' && opts.force !== true) {
+        throw new Error(`节点 ${id} 已经 dropped，不能改回 ${opts.status}（要重开请显式 force: true）`);
+      }
       node.status = opts.status;
       if (opts.status === 'blocked') node.attempts += 1;
       /*

@@ -542,7 +542,7 @@ export class RunRecorder {
   /** The turn stopped to wait for a human. */
   awaiting(kind: 'confirm' | 'apply', info: { ticketId?: string; tool?: string; path?: string; summary?: string }): RunEvent | null {
     return this.write(kind, this.capAll({
-      ticket_id: info.ticketId,
+      ticket_id: info.ticketId ? '<已隐去>' : undefined,
       tool: info.tool,
       path: info.path,
       text: info.summary,
