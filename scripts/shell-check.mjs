@@ -621,8 +621,34 @@ console.log('\n=== 真隔离的可用性与提示 ===');
   const { destructiveScope } = await import('../packages/sandbox/dist/shell.js');
   check('分类器：git 强推是 repository 类', destructiveScope('git push --force origin main') === 'repository', destructiveScope('git push --force origin main'));
   check('分类器：rm -rf 是 always 类', destructiveScope('rm -rf /tmp/x') === 'always', destructiveScope('rm -rf /tmp/x'));
+  check('PowerShell 的 Format-Table 不是危险命令（原来会误判成格式化磁盘）',
+    destructiveScope('Get-CimInstance Win32_Process | Format-Table -AutoSize') === 'none',
+    destructiveScope('Get-CimInstance Win32_Process | Format-Table -AutoSize'));
+  check('format C: 仍然是危险命令', destructiveScope('format C: /q') === 'always', destructiveScope('format C: /q'));
 
   rmSync(outside, { recursive: true, force: true });
+}
+
+/* ── 整档关闭（本机特批的那个开关）：不再问，但受保护文件照旧拒 ── */
+{
+  const prev = process.env.SHE_SANDBOX;
+  process.env.SHE_SANDBOX = 'off';
+  const ws4 = mkdtempSync(join(tmpdir(), 'she-nosbx-'));
+  const { SandboxShell: S4 } = await import('../packages/sandbox/dist/shell.js');
+  const { createTools: c4 } = await import('../packages/sandbox/dist/tools.js');
+  const sh4 = new S4(ws4, { allowAllCommands: true, denyDestructiveByDefault: false });
+  const t4 = c4(sh4, ws4, { allowAllCommands: true, outsideWorkspace: { allow: true, policy: 'all' } });
+
+  const r4 = await t4.execute('shell', { command: ['r', 'm', '-rf', '/tmp/x'].join(' ') });
+  check('【关键】SHE_SANDBOX=off：危险命令不再要确认', !String(r4).includes('needs_confirm'), String(r4).slice(0, 60));
+
+  sh4.protectDatabase(join(ws4, 'kb.sqlite'), 'KB 只能经 kb_* 工具访问');
+  const k4 = await t4.execute('fs_read', { path: join(ws4, 'kb.sqlite') });
+  check('SHE_SANDBOX=off：受保护文件仍然被拒（不是沙箱，是不把改边界的凭据交给自己）',
+    /Error|DENIED/.test(String(k4)), String(k4).slice(0, 70));
+
+  rmSync(ws4, { recursive: true, force: true });
+  if (prev === undefined) delete process.env.SHE_SANDBOX; else process.env.SHE_SANDBOX = prev;
 }
 
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`);

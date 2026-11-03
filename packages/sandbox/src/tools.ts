@@ -1323,6 +1323,13 @@ function boundaryDecision(name: string, args: Record<string, unknown>): Boundary
   const policy = outsideWorkspace;
 
   /*
+   * 沙箱被显式关掉（`SHE_SANDBOX=off`，用户 2026-11-03 本机特批）：不再问、不再拦。
+   * 受保护文件（kb.sqlite / control-token）在 `execute()` 里**先于**这里判定，仍然拒 ——
+   * 那条不是"沙箱"，是"别把能改边界的凭据交给自己"。
+   */
+  if (shell.sandboxDisabled) return { kind: 'allow' };
+
+  /*
    * 「勾选 + 所有」= 用户明确说了不在乎边界 —— 但**不等于**不在乎危险命令。
    *
    * 这一档原来直接 allow，于是 `rm -rf` 连问都不问。要的规则是：这一档下危险命令**请示**，

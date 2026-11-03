@@ -18,7 +18,14 @@ export const DESTRUCTIVE_PATTERNS: RegExp[] = [
   /rm\s+.*-[a-z]*r[a-z]*f|rm\s+.*-[a-z]*f[a-z]*r|rm\s+-rf/i,
   /del\s+\/s/i,
   /rmdir\s+\/s/i,
-  /\bformat\s/i,
+  /*
+   * 只在"格式化**盘符**"时算危险。
+   *
+   * 原来写的是 /\bformat\s/i，于是 PowerShell 的 `Format-Table` / `Format-List` 全被判成格式化磁盘 ——
+   * 实测（2026-11-03）：一条 `Get-CimInstance … | Format-Table` 直接弹"格式化磁盘/分区，数据全部丢失"的确认框。
+   * 判据要的是"会毁数据的那一条"，不是"名字里带 format"。
+   */
+  /\bformat\s+[a-z]:/i,
   /\bfdisk\b/i,
   /\bmkfs\b/i,
   /*
@@ -1758,6 +1765,16 @@ export class SandboxShell {
       return true;
     }
   }
+  /**
+   * 沙箱是不是被显式关掉了（`SHE_SANDBOX=off`）。
+   *
+   * 用户 2026-11-03 在本机特批：这一档下不再问、也不再拦越界。**只认显式的 off**，
+   * 没设、设成 0、设成别的字，一律按"沙箱开着"处理 —— 这种开关不能靠含糊值打开。
+   * 受保护文件（kb.sqlite / control-token）不在这条之内：它们的检查在更前面，照旧拒。
+   */
+  get sandboxDisabled(): boolean {
+    return String(process.env.SHE_SANDBOX ?? '').trim().toLowerCase() === 'off';
+  }
   resolveFile(requestedPath: string, opts: { write: boolean }): string {
     const policy = this.config.outsideWorkspace ?? { allow: false, policy: 'readonly' as const };
     let resolved: string;
@@ -1773,6 +1790,7 @@ export class SandboxShell {
     const reason = this.protectedReason(resolved) ?? this.protectedReasonFor(requestedPath);
     if (reason) throw new Error(reason);
 
+    if (this.sandboxDisabled) return resolved;
     if (!outside) return resolved;
     if (!policy.allow) throw new Error(`Path escapes workspace（工作区外，且「允许工作区外」没开）：${resolved}`);
     if (policy.policy === 'deny') throw new Error(`Path escapes workspace（工作区外，且档位是「拒绝」）：${resolved}`);
