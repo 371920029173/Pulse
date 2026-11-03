@@ -105,9 +105,31 @@ record('不再有内联的 wrap-up 定时器残留',
 console.log('\n  父智能体工具:', parentTools.join(', '));
 console.log('  子智能体工具:', childTools.join(', '));
 
+/* ── 后台派发：不能"刚发出去就算完成"（用户 2026-11-02 报的问题） ── */
+{
+  const { createSubagentTools } = await import('../packages/agent-runtime/dist/subagent-tools.js');
+  const seen = [];
+  /*
+   * runner 在 background 模式下"立刻返回、其实还在跑" —— 真实运行时就是这种行为。
+   * 判据钉的是：这时不该报完成，否则卡片刚发就绿、模型以为活干完了。
+   */
+  const fakeRunner = {
+    async run(req) { return { description: req.description, ok: true, result: "（后台继续跑）", handoff: req.handoff }; },
+    status: () => [],
+  };
+  const bgTools = createSubagentTools(fakeRunner, { onProgress: (e) => seen.push(e) });
+  const text = await bgTools.execute("task_spawn", { tasks: [{ description: "后台那件事", prompt: "干点活", background: true }] });
+  const phases = seen.map((e) => e.phase);
+  record("后台派发不发 done 事件（否则卡片刚发就绿）", !phases.includes("done"), phases.join(","));
+  record("后台派发给出仍在跑的读数", phases.includes("heartbeat"), phases.join(","));
+  record("回执标成后台运行中而不是完成", /后台运行中/.test(String(text)), String(text).split("\n")[0]);
+  record("回执让模型用 task_status 去查（别假设已完成）", /task_status/.test(String(text)), "");
+}
+
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length} 通过 / ${failed.length} 失败`);
 
 store.close();
 removeTempDir(dir);
+
 process.exit(failed.length ? 1 : 0);

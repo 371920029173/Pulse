@@ -695,6 +695,17 @@ export function useChat(sessionId?: string | null) {
               chunk.label ? `${chunk.label}：${chunk.error ?? ''}` : (chunk.error ?? t('未知错误')),
             ));
             setIsLoading(false);
+            /*
+             * 报错 ≠ 这一轮结束：单轮里某个工具失败、模型接着干是常见的（截图现场就是这样：
+             * 工具卡片还写着"执行中…"，右下角却已经是发送键，既停不了也发不出去）。
+             * 所以先问一句服务端；它还在跑就把"停止"键留着。
+             */
+            void (async () => {
+              try {
+                const st = await fetchJSON<{ running: boolean }>(withSid('/api/chat/running', sidRef.current ?? undefined));
+                if (st.running) setIsLoading(true);
+              } catch { /* 问不到就按旧行为 */ }
+            })();
             break;
         }
       },
@@ -704,7 +715,18 @@ export function useChat(sessionId?: string | null) {
         // Clear sticky streaming dots so the UI does not look still-alive.
         return next.map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m));
       });
-      setIsLoading(false);
+            setIsLoading(false);
+            /*
+             * 报错 ≠ 这一轮结束：单轮里某个工具失败、模型接着干是常见的（截图现场就是这样：
+             * 工具卡片还写着"执行中…"，右下角却已经是发送键，既停不了也发不出去）。
+             * 所以先问一句服务端；它还在跑就把"停止"键留着。
+             */
+            void (async () => {
+              try {
+                const st = await fetchJSON<{ running: boolean }>(withSid('/api/chat/running', sidRef.current ?? undefined));
+                if (st.running) setIsLoading(true);
+              } catch { /* 问不到就按旧行为 */ }
+            })();
       window.dispatchEvent(new CustomEvent('she:stream-failed', { detail: { message: err.message } }));
       // The view dropped. The turn belongs to that conversation and keeps
       // running; coming back shows the result. Stopping here is what made

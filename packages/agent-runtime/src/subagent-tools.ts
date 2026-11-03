@@ -917,6 +917,14 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
      * 超出排队；结果按原索引写回，顺序与 tasks 一致。
      */
     const limit = Math.max(1, Math.min(16, Number(process.env.SHE_SUBAGENT_CONCURRENCY) || 6));
+    /*
+     * 后台派发的任务要单独记账。
+     *
+     * 现场（用户 2026-11-02）：`task_spawn({background:true})` 刚发出去，卡片就显示"完成" ——
+     * 因为 `runner.run` 在后台模式下**立刻返回**（子代理还在跑），而这里拿到返回值就发 done。
+     * 模型于是以为活干完了，实际它才刚开始。
+     */
+    const backgrounded = new Set<string>();
     const results: Array<Awaited<ReturnType<SubagentRunner['run']>>> = new Array(tasks.length);
     let next = 0;
     const worker = async (): Promise<void> => {
@@ -944,7 +952,16 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
               elapsedMs: p.elapsedMs,
             }),
           });
-          opts?.onProgress?.({ phase: 'done', description: t.description, ok: r.ok });
+          if (t.background) {
+            /*
+             * 后台模式：`run` 一返回就代表"已派出去"，不代表干完了。
+             * 这里发一条仍在跑的读数，卡片就会停在"进行中"，而不是刚发就绿。
+             */
+            backgrounded.add(t.description);
+            opts?.onProgress?.({ phase: 'heartbeat', description: t.description, steps: 0, activity: '后台运行中', elapsedMs: 0 });
+          } else {
+            opts?.onProgress?.({ phase: 'done', description: t.description, ok: r.ok });
+          }
           results[i] = r;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -955,9 +972,10 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
     };
     await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, () => worker()));
 
-    const lines: string[] = [`完成 ${results.length} 个子任务`, ''];
+    const lines: string[] = [`派发 ${results.length} 个子任务${backgrounded.size ? `（其中 ${backgrounded.size} 个在后台继续跑）` : ''}`, ''];
     for (const r of results) {
-      lines.push(`### [${r.ok ? '完成' : '失败'}] ${r.description}`);
+      const stateWord = r.ok ? (backgrounded.has(r.description) ? '后台运行中' : '完成') : '失败';
+      lines.push(`### [${stateWord}] ${r.description}`);
       const h = r.handoff;
       if (h?.deliverable) lines.push(`- 交付物：${h.deliverable}`);
       if (h?.scope?.length) lines.push(`- 允许改动：${h.scope.join('、')}`);
@@ -994,6 +1012,10 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
       '以上是子智能体返回的摘要。原始过程没有进入本对话；如需细节请再指派。'
       + '若有隔离副本，它的改动还在副本里，需要时按上面的路径取用。',
     );
+    if (backgrounded.size) {
+      lines.push('', '后台的那些还没有结束：用 `task_status` 查它们的状态（进行中 / 已结束）。'
+        + '不要假设已经完成 —— 它们跑完后会自己把结果写回本会话。');
+    }
     return lines.join('\n');
   };
 
