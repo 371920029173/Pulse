@@ -184,7 +184,8 @@ const dir = mkdtempSync(join(tmpdir(), 'she-tree-check-'));
   const f = new TaskTreeStore(dir, 'auto_e');
   f.create('昨天的树', undefined, ['一件事']);
   const d5 = treeAutopilot(f, { turnStartedAt: now() + 60_000, reply: '聊点别的' });
-  check('这一轮没碰过的树不会被自动续跑（旧树不是常备指令）', d5.proceed === false, d5.reason ?? '');
+  check('上次会话留下的、还没做完的树，这一轮照样续跑（重启后能接着做）', d5.proceed === true,
+    d5.reason ?? '');
 
   const g = new TaskTreeStore(dir, 'auto_f');
   g.create('已收口', undefined, ['一件事']);

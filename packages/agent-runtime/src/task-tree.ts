@@ -494,9 +494,12 @@ export function treeAutopilot(
   if (!file) return { proceed: false, signature, reason: '没有任务树' };
   if (file.aborted) return { proceed: false, signature, reason: `已被急停：${file.aborted.reason}（tree_update 里清掉 aborted 可恢复）` };
   if (file.reports.length > 0) return { proceed: false, signature, reason: '这棵树已经 tree_report 过了' };
-  if (Date.parse(file.updatedAt) < opts.turnStartedAt) {
-    return { proceed: false, signature, reason: '这棵树不是这一轮在推进的' };
-  }
+  /*
+   * 不再看"是不是这一轮动过的"：树是每会话一棵，文件位置已经回答了归属问题。
+   * 原来那条闸是从 plan 抄过来的（plan 是工作区级、跨会话共享，才需要它），抄到树上就变成
+   * "重启一次或隔一轮说继续，树就再也不自动跑"。真正该拦的是下面这几条：已报告、已急停、
+   * 有人在等你回答、没有可推进的节点。
+   */
 
   /* 有人没答的 blocking 问题 = 在等你，自动续跑只会空转。 */
   const waiting = file.nodes
