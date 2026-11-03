@@ -639,7 +639,7 @@ console.log('\n=== 真隔离的可用性与提示 ===');
   const sh4 = new S4(ws4, { allowAllCommands: true, denyDestructiveByDefault: false });
   const t4 = c4(sh4, ws4, { allowAllCommands: true, outsideWorkspace: { allow: true, policy: 'all' } });
 
-  const r4 = await t4.execute('shell', { command: ['r', 'm', '-rf', '/tmp/x'].join(' ') });
+  const r4 = await t4.execute('shell', { command: ['r', 'm', '-rf', './probe-dir'].join(' ') });
   check('【关键】SHE_SANDBOX=off：危险命令不再要确认', !String(r4).includes('needs_confirm'), String(r4).slice(0, 60));
 
   sh4.protectDatabase(join(ws4, 'kb.sqlite'), 'KB 只能经 kb_* 工具访问');

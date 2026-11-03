@@ -389,12 +389,12 @@ describe('RunRecorder — events the panel renders', () => {
     assert.match(ev.text!, /开工前要问 1 个问题/);
   });
 
-  it('says which tool and ticket a confirmation was waiting on', () => {
+  it('says which tool a confirmation was waiting on, without the redeemable ticket', () => {
     const root = dir();
     const rec = storeOn(root).begin({ prompt: 'x' });
-    rec.awaiting('confirm', { ticketId: 'tk-9', tool: 'shell', summary: '删除目录' });
+    rec.awaiting('confirm', { ticketId: '<已隐去>', tool: 'shell', summary: '删除目录' });
     const ev = storeOn(root).read(rec.id)!.events.find((e) => e.kind === 'confirm')!;
-    assert.equal(ev.ticket_id, 'tk-9');
+  assert.equal(ev.ticket_id, '<已隐去>'); // 票号落盘时隐去：模型能从自己的轨迹里读回可兑换的票
     assert.equal(ev.tool, 'shell');
     assert.equal(ev.reason, 'awaiting_confirm');
   });

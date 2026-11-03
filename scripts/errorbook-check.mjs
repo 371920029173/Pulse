@@ -21,6 +21,12 @@
  * which is the only way this feature can be silently lost.
  */
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+
+/*
+ * 钉住前提：本脚本要验"真实的策略拒绝不被记成错题"，而开发机上 .env 可能有 SHE_SANDBOX=off。
+ * 只 delete 不够 —— loadConfig 的 loadEnvFile 会把未定义的键从 .env 补回来（2026-11-03 实测）。
+ */
+process.env.SHE_SANDBOX = 'on';
 import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';

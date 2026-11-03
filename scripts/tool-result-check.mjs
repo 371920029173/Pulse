@@ -15,6 +15,14 @@
  * section 2 fails the moment a new error message appears that no rule recognises.
  */
 import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, statSync } from 'node:fs';
+
+/*
+ * 这个检查要验的是"沙箱开着时的分类"，不能被开发机上的 SHE_SANDBOX=off 带跑偏。
+ * 现场（2026-11-03）：.env 里加了这个开关之后，本脚本里"破坏性命令先要确认"与
+ * "fs_read 工作区外"两条直接失败 —— 不是功能坏了，是检查吃到了环境。
+ * 检查脚本必须自己钉住它依赖的前提（AGENTS.md：别依赖环境状态）。
+ */
+process.env.SHE_SANDBOX = 'on';
 import { join, resolve, dirname, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';

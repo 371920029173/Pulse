@@ -175,9 +175,12 @@ console.log('\n2. 失败、停在人工确认、被中断——三种结局分�
   const pausedRun = store.list({ limit: 10 }).find((r) => r.id === paused.id);
   check('停在等确认的一轮折成 paused', pausedRun.state === 'paused', JSON.stringify(pausedRun));
   check('paused 的理由是 awaiting_confirm', pausedRun.reason === 'awaiting_confirm', pausedRun.reason);
-  check('paused 的轨迹里写明工单和工具',
-    store.read(paused.id).events.some((e) => e.kind === 'confirm' && e.ticket_id === 'tk-1' && e.tool === 'shell'),
-    null);
+  check('paused 的轨迹里写明在等谁（工具与摘要），但不写明可兑换的票号',
+    store.read(paused.id).events.some((e) => e.kind === 'confirm' && e.tool === 'shell' && e.ticket_id === '<已隐去>'),
+    JSON.stringify(store.read(paused.id).events.filter((e) => e.kind === 'confirm')));
+  check('【关键】轨迹里不许出现明文票号（模型能从自己的轨迹里读回来）',
+    !JSON.stringify(store.read(paused.id).events).includes('tk-1'),
+    JSON.stringify(store.read(paused.id).events).slice(0, 200));
 
   const stopped = store.begin({ prompt: '会被中断的一轮' });
   stopped.tool({ name: 'shell', result: 'ok', ok: true });
