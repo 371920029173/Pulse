@@ -1843,7 +1843,15 @@ export class SandboxShell {
      * way to be expressed, and that is not a shell command.
      */
     const protectedInCommand = this.protectedReasonInCommand(command);
-    if (protectedInCommand && !options?.allowDestructive) return deny(protectedInCommand);
+    /*
+     * 这里**不再**因为"人工已确认"（allowDestructive）放行。
+     *
+     * 现场（2026-11-03 审计）：终端端点确认过票之后调用 `exec(command, { allowDestructive: wouldRefuse })`，
+     * 于是 `del /s /q .she\kb.sqlite` 这种"既命中破坏性模式、又点名受保护文件"的命令，
+     * 人一点确认就把受保护文件那道闸一起抬起来了 —— 而这恰恰是 tools.ts 明说不能发生的事
+     * （"规则不是先问，是这条路不通"）。
+     */
+    if (protectedInCommand) return deny(protectedInCommand);
 
     /*
      * Allowlist first.
@@ -1862,7 +1870,11 @@ export class SandboxShell {
       return deny('destructive command blocked by sandbox policy');
     }
 
-    const escape = workspaceEscapeReason(command, this.workspaceRoot);
+    /*
+     * 整档关闭（`SHE_SANDBOX=off`）时不做越界判定 —— 否则会和 `fs_*` 分叉：
+     * `fs_write` 到工作区外放行、`copy` 到同一个地方却被 DENIED（2026-11-03 审计实测）。
+     */
+    const escape = this.sandboxDisabled ? null : workspaceEscapeReason(command, this.workspaceRoot);
     if (escape) {
       /*
        * 越界**不等于**拒绝。

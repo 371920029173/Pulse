@@ -924,7 +924,7 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
      * 因为 `runner.run` 在后台模式下**立刻返回**（子代理还在跑），而这里拿到返回值就发 done。
      * 模型于是以为活干完了，实际它才刚开始。
      */
-    const backgrounded = new Set<string>();
+    const backgrounded = new Set<number>();
     const results: Array<Awaited<ReturnType<SubagentRunner['run']>>> = new Array(tasks.length);
     let next = 0;
     const worker = async (): Promise<void> => {
@@ -957,7 +957,7 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
              * 后台模式：`run` 一返回就代表"已派出去"，不代表干完了。
              * 这里发一条仍在跑的读数，卡片就会停在"进行中"，而不是刚发就绿。
              */
-            backgrounded.add(t.description);
+            backgrounded.add(i);
             opts?.onProgress?.({ phase: 'heartbeat', description: t.description, steps: 0, activity: '后台运行中', elapsedMs: 0 });
           } else {
             opts?.onProgress?.({ phase: 'done', description: t.description, ok: r.ok });
@@ -973,8 +973,9 @@ export function createSubagentTools(runner: SubagentRunner, opts?: SubagentToolO
     await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, () => worker()));
 
     const lines: string[] = [`派发 ${results.length} 个子任务${backgrounded.size ? `（其中 ${backgrounded.size} 个在后台继续跑）` : ''}`, ''];
-    for (const r of results) {
-      const stateWord = r.ok ? (backgrounded.has(r.description) ? '后台运行中' : '完成') : '失败';
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i]!;
+      const stateWord = r.ok ? (backgrounded.has(i) ? '后台运行中' : '完成') : '失败';
       lines.push(`### [${stateWord}] ${r.description}`);
       const h = r.handoff;
       if (h?.deliverable) lines.push(`- 交付物：${h.deliverable}`);

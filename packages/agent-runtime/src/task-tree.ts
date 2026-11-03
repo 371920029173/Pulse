@@ -110,7 +110,7 @@ export function treeSettingsFromEnv(env: NodeJS.ProcessEnv = process.env): TreeS
     ...(env.SHE_TREE_MAX_NODES !== undefined && Number(env.SHE_TREE_MAX_NODES) >= 0
       ? { maxNodes: Math.floor(Number(env.SHE_TREE_MAX_NODES)) } : {}),
     maxNodeAttempts: num('SHE_TREE_MAX_TRIES', 3),
-    maxNodes: num('SHE_TREE_MAX_NODES', 60),
+    // （maxNodes 只由上面那行"显式设置才加"给值；这里再写一次会把"不限制"和 0 都覆盖成 60）
     backupBeforeAuto: true,
   };
 }
@@ -282,6 +282,12 @@ export class TaskTreeStore {
     if (opts.status) {
       node.status = opts.status;
       if (opts.status === 'blocked') node.attempts += 1;
+      /*
+       * 回到 active/done 就把计数清零：`attempts` 的语义（budget() 的文案、outcome() 的判断）是
+       * **连续**失败。原来只加不减，于是一个已经修好、正在推进的节点在历史上撞过 3 次之后，
+       * budget() 永远判"预算用尽"，tree_get 一直喊必须收口，这个节点再也推不动。
+       */
+      else node.attempts = 0;
       if (from !== opts.status) {
         node.log.push({ at: NOW(), from, to: opts.status, ...(opts.note ? { note: opts.note } : {}) });
         if (node.log.length > 200) node.log.splice(0, node.log.length - 200);
@@ -388,7 +394,7 @@ export class TaskTreeStore {
   budget(): { exhausted: boolean; reason: string } {
     const file = this.load();
     if (!file) return { exhausted: false, reason: '' };
-    const open = file.nodes.filter((n) => n.status !== 'done' && n.status !== 'dropped');
+    const open = file.nodes.filter((n) => n.id !== file.rootId && n.status !== 'done' && n.status !== 'dropped');
     if (!open.length) return { exhausted: false, reason: '' };
     const minutes = (Date.now() - Date.parse(file.createdAt)) / 60_000;
     /*
@@ -440,7 +446,7 @@ export class TaskTreeStore {
   outcome(startedAt: number): { outcome: 'success' | 'blocked' | 'partial'; reason: string } {
     const file = this.load();
     if (!file) return { outcome: 'blocked', reason: '还没有任务树' };
-    const open = file.nodes.filter((n) => n.status !== 'done' && n.status !== 'dropped');
+    const open = file.nodes.filter((n) => n.id !== file.rootId && n.status !== 'done' && n.status !== 'dropped');
     if (!open.length) return { outcome: 'success', reason: '所有节点都已完成或明确放弃' };
     const stuck = open.filter((n) => n.status === 'blocked' || n.status === 'shelved');
     if (stuck.length === open.length) {
@@ -515,7 +521,7 @@ export function treeAutopilot(
     return { proceed: false, signature, reason: `预算用尽：${budget.reason} —— 该 tree_report 了` };
   }
 
-  const open = file.nodes.filter((n) => n.status !== 'done' && n.status !== 'dropped');
+    const open = file.nodes.filter((n) => n.id !== file.rootId && n.status !== 'done' && n.status !== 'dropped');
   if (!open.length) return { proceed: false, signature, reason: '所有节点都已完成或放弃' };
 
   const runnable = open.filter((n) => n.status === 'active' || n.status === 'pending');

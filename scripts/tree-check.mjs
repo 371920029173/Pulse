@@ -258,6 +258,32 @@ const dir = mkdtempSync(join(tmpdir(), 'she-tree-check-'));
   check('【关键】两个子任务都做完 → 显示 2/2（不是 2/3）', /2\/2 完成/.test(text15), text15.split('\n')[0]);
 }
 
+/* ⑯ 三处审计发现的回归钉 */
+{
+  /* ① env 路径：不设 = 不限制；设 0 = 立刻到顶（曾经被一行无条件覆盖成 60） */
+  const { treeSettingsFromEnv } = await import('../packages/agent-runtime/dist/task-tree.js');
+  check('不设 SHE_TREE_MAX_NODES → 不限制（undefined）', treeSettingsFromEnv({}).maxNodes === undefined,
+    JSON.stringify(treeSettingsFromEnv({}).maxNodes));
+  check('设 SHE_TREE_MAX_NODES=0 → 0（立刻到顶），不是 60', treeSettingsFromEnv({ SHE_TREE_MAX_NODES: '0' }).maxNodes === 0,
+    JSON.stringify(treeSettingsFromEnv({ SHE_TREE_MAX_NODES: '0' }).maxNodes));
+
+  /* ② 根节点不是任务：子任务全完成 → success，而不是永远 partial */
+  const o = new TaskTreeStore(dir, 'outcome_root');
+  o.create('目标', undefined, ['子一']);
+  const kid = o.get().nodes.find((n) => n.id !== o.get().rootId);
+  o.update(kid.id, { status: 'done', evidence: ['x'] });
+  const oc = o.outcome(Date.now());
+  check('【关键】子任务全完成 → outcome=success（根节点不能再把树卡在 partial）', oc.outcome === 'success', oc.reason);
+
+  /* ③ attempts 记的是"连续失败"：回到 active 要清零，否则修好的节点永远被判预算用尽 */
+  const r = new TaskTreeStore(dir, 'attempts_reset');
+  r.create('目标', undefined, ['子一']);
+  const k = r.get().nodes.find((n) => n.id !== r.get().rootId);
+  for (let i = 0; i < 3; i++) { r.update(k.id, { status: 'blocked' }); r.update(k.id, { status: 'active' }); }
+  const b = r.budget();
+  check('【关键】失败次数不累计：修好后 budget() 不该再判用尽', b.exhausted === false, b.reason);
+}
+
 rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `\n${failed} 项 FAIL` : '\n全部 PASS');
 process.exit(failed ? 1 : 0);
