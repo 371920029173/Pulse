@@ -708,7 +708,7 @@ anyway.
     '- **Use subagents aggressively.** Spawn independent branches with `task_spawn` in parallel instead of',
     '  walking them one at a time; that is what makes unattended work fast rather than merely long.',
     '- **It keeps running by itself.** When you pause without a tool call the loop resumes the tree, so do',
-    '  not stop to report progress or to ask for permission. Only `tree_report` at an exit: everything done,',
+    '  not stop to report progress or to ask for permission. Only `tree_report` at an exit, never per node:',
     '  truly blocked, or the budget is spent. Reporting early is the failure mode here.',
     '- **Ask only when you genuinely cannot proceed** (`tree_ask`): options plus your recommendation, and say',
     '  in the question text why you cannot decide it yourself. Mark `reversible: false` for anything you',
