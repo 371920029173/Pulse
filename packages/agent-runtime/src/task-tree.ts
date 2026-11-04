@@ -12,10 +12,12 @@
  *   · **不可逆的问题永远不走自动**（哪怕设置是"相信"），一律搁置 —— 无人值守 + 不可逆 + 自动决策
  *     三者同时成立时，错一次就是数据没了。
  *
- * 存储：`.she/tasks/<sessionId>/tree.json`（每 chat 一棵，不跨 chat 同步）。坏文件隔离、写入加锁，
- * 与 plans.json 同一套纪律。
+ * 存储：`.she/sessions/<会话>/trees/<treeId>.json`，当前是哪一棵记在 `trees/active`。
+ * 一个会话可以有**多棵**树（用户 2026-11-04："允许模型删除任务树、创建任务树（无论是否已有）"），
+ * 但删到一棵不剩会被**拒绝**：没有当前树时所有 tree_* 都没有落点，那个状态在用户眼里就是"树丢了"。
+ * 坏文件隔离、写入加锁，与 plans.json 同一套纪律。
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, openSync, closeSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, openSync, closeSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ToolDefinition } from '@she/shared';
@@ -77,6 +79,17 @@ export interface TreeFile {
   reports: Array<{ at: string; outcome: 'success' | 'blocked' | 'partial'; summary: string }>;
 }
 
+/** `list()` 的一行：够你在几棵之间挑一棵，不含节点正文。 */
+export interface TreeSummary {
+  id: string;
+  title: string;
+  done: number;
+  total: number;
+  active: boolean;
+  reports: number;
+  updatedAt: string;
+}
+
 export interface TreeSettings {
   /** 相信模型 → 到期自动采纳推荐值；默认不信任（安全侧）。 */
   trustModel: boolean;
@@ -125,6 +138,12 @@ export const DEFAULT_TREE_SETTINGS: TreeSettings = {
 
 const NOW = () => new Date().toISOString();
 
+/** 当前活动树记在这个文件里（内容就是树 id，一行）。 */
+const ACTIVE_NAME = 'active';
+
+/** 树 id 的形状：进文件名，所以只允许文件系统安全的字符。 */
+const TREE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
 /** 树文件读不懂就隔离（与 plans/memo 同一纪律：绝不"当空"随后覆盖）。 */
 function readTreeFile(file: string, onCorrupt: (backup: string, reason: string) => void): TreeFile | null {
   try {
@@ -145,31 +164,179 @@ function readTreeFile(file: string, onCorrupt: (backup: string, reason: string) 
 export class TaskTreeStore {
   private settings: TreeSettings;
   private dir: string;
-  private file: string;
+  /** 一棵树一个文件，就在这个目录里。 */
+  private treesDir: string;
+  /** 旧版单文件（每会话一棵）：只在迁移时读一次，之后原样留着。 */
+  private legacyFile: string;
+  /** 本次 load/save 面对的那棵树。active 变了它就跟着变；没有树时为 null。 */
+  private file: string | null = null;
   private recovery: { backup: string; reason: string } | null = null;
   private data: TreeFile | null = null;
+  /**
+   * 迁移只做一次（每个实例一次）。
+   *
+   * 不设这个标记的话，每次 `load()` 都会去 stat 一次旧文件 —— 而迁移会把旧文件改名，
+   * 于是"改名失败"（权限/被占用）时每次访问都会尝试一遍复制，写出第二棵一模一样的树。
+   */
+  private migrateTried = false;
 
   constructor(private workspaceRoot: string, private sessionId: string, settings?: TreeSettings) {
     this.settings = settings ?? treeSettingsFromEnv();
     this.dir = sessionStateDir(workspaceRoot, sessionId);
-    this.file = join(this.dir, 'tree.json');
+    this.treesDir = join(this.dir, 'trees');
+    this.legacyFile = join(this.dir, 'tree.json');
   }
 
   recoveryInfo(): { backup: string; reason: string } | null {
     return this.recovery;
   }
 
+  /* ────────────────────────── 路径与目录 ────────────────────────── */
+
+  private treePath(id: string): string {
+    // 白名单而不是"拼一下试试"：id 会进文件名，`..` 拼进去就是逃出这个会话的目录。
+    if (!TREE_ID_RE.test(id) || id.includes('..')) throw new Error(`任务树 id 不合法：${JSON.stringify(id)}`);
+    return join(this.treesDir, `${id}.json`);
+  }
+
+  /** 这个会话现有的树 id（按名字排序，稳定）。读不懂的文件不在这里（它们已被隔离成 .corrupt-*）。 */
+  private treeIds(): string[] {
+    let names: string[] = [];
+    try {
+      names = readdirSync(this.treesDir);
+    } catch {
+      return [];
+    }
+    return names
+      .filter((n) => n.endsWith('.json'))
+      .map((n) => n.slice(0, -'.json'.length))
+      // 只认能拼回同一个路径的名字：手工塞进来的怪名字当"不认识"，而不是当成一棵树。
+      .filter((id) => TREE_ID_RE.test(id) && !id.includes('..'))
+      .sort();
+  }
+
+  private activePath(): string {
+    return join(this.treesDir, ACTIVE_NAME);
+  }
+
+  private writeActive(id: string): void {
+    mkdirSync(this.treesDir, { recursive: true });
+    const path = this.activePath();
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, id, 'utf8');
+    renameSync(tmp, path);
+  }
+
+  private newId(): string {
+    // 时间前缀让人一眼看出先后，随机后缀防止同一毫秒建两棵撞名。
+    return `t${Date.now().toString(36)}-${randomUUID().slice(0, 4)}`;
+  }
+
+  /**
+   * 首次访问时的迁移：旧版每会话一棵 `tree.json` → `trees/<id>.json`。
+   *
+   * 三个决定值得写下来：
+   *   1. **原文件不删**，改名为 `tree.json.migrated-<ts>`（用户 2026-11-04："迁移旧文件时不得删除原文件"）。
+   *      迁移是"复制并留证"，不是"搬走"：删掉它等于把回滚的可能也删掉了，而这份数据是用户
+   *      唯一的一份任务历史。
+   *   2. 只在 `trees/` 里**一个 .json 都没有**时才迁。否则已经在新布局上了，再把旧文件塞进来
+   *      会凭空多出一棵谁也认不出来的树。
+   *   3. 迁完写 `trees/active` 指向新 id。不写的话下一次访问就得靠"猜一棵"，而猜错的表现
+   *      是"读到另一棵树上"—— 在用户眼里就是树丢了。
+   */
+  private migrateLegacy(): void {
+    if (this.migrateTried) return;
+    this.migrateTried = true;
+    if (!existsSync(this.legacyFile)) return;
+    if (this.treeIds().length) return;
+    /*
+     * 用 readTreeFile 而不是裸 JSON.parse：读不懂的旧文件必须走同一条隔离路径
+     * （改名成 .corrupt-<ts> 并让 recoveryInfo 报出来），否则"迁移"会把一份坏文件
+     * 变成一棵……不存在的树，而用户不会被告知任何事。
+     */
+    const old = readTreeFile(this.legacyFile, (backup, reason) => { this.recovery = { backup, reason }; });
+    if (!old) return;
+    const id = this.newId();
+    try {
+      mkdirSync(this.treesDir, { recursive: true });
+      this.writeTree(this.treePath(id), old);
+      this.writeActive(id);
+    } catch (err) {
+      // 复制失败就别改名：旧文件必须留在原地，下一次访问还能重试。
+      this.recovery = { backup: this.legacyFile, reason: `迁移失败：${(err as Error)?.message ?? String(err)}` };
+      return;
+    }
+    try {
+      renameSync(this.legacyFile, `${this.legacyFile}.migrated-${NOW().replace(/[:.]/g, '-')}`);
+    } catch { /* 改不动也留着原名：内容已经复制过去了，不丢 */ }
+  }
+
+  /* ────────────────────────── 读 / 写 ────────────────────────── */
+
+  /**
+   * 当前是哪一棵。
+   *
+   * 指针丢失或指向一棵已经删掉的树时**修指针而不是报错**：能读到的树就不该因为一行指针坏了
+   * 变成"没有任务树"。挑最近更新的那棵，并把指针补回去。
+   */
+  activeId(): string | null {
+    this.migrateLegacy();
+    const ids = this.treeIds();
+    if (!ids.length) return null;
+    let pointer = '';
+    try {
+      pointer = readFileSync(this.activePath(), 'utf8').trim();
+    } catch { /* 还没有 active 文件 */ }
+    if (pointer && ids.includes(pointer)) return pointer;
+    const picked = this.pickMostRecent(ids);
+    try { this.writeActive(picked); } catch { /* 指针写不进去也照样能读 */ }
+    return picked;
+  }
+
+  /**
+   * 指针丢了时挑哪一棵：最近改动过的那棵。
+   *
+   * 用 `updatedAt` 而不是文件 mtime：任务树每次写都是"读进来改完整体重写"，两者大体一致，
+   * 但 updatedAt 是内容自己声明的，跨文件系统/拷贝之后仍然是对的。读不懂的一律排最后。
+   */
+  private pickMostRecent(ids: string[]): string {
+    let best = ids[0]!;
+    let bestAt = '';
+    for (const id of ids) {
+      let at = '';
+      try {
+        const f = JSON.parse(readFileSync(this.treePath(id), 'utf8').replace(/^\uFEFF/, '')) as TreeFile;
+        at = String(f.updatedAt ?? '');
+      } catch { at = ''; }
+      if (at > bestAt) { bestAt = at; best = id; }
+    }
+    return best;
+  }
+
+  /** 每次真读盘：同一会话有多个实例（工具侧 / autopilot），内存缓存会让它们各自停在旧快照上。 */
   private load(): TreeFile | null {
-    // 每次真读盘：同一会话有多个实例（工具侧 / autopilot），内存缓存会让它们各自停在旧快照上。
+    const id = this.activeId();
+    if (!id) {
+      this.file = null;
+      this.data = null;
+      return null;
+    }
+    this.file = this.treePath(id);
     const loaded = readTreeFile(this.file, (backup, reason) => { this.recovery = { backup, reason }; });
     this.data = loaded;
     return loaded;
   }
 
-  /** 写入：加锁（跨进程）+ 原子替换，与 plans.json 同一套。 */
+  /** 写入**当前那棵**：加锁（跨进程）+ 原子替换，与 plans.json 同一套。 */
   private save(next: TreeFile): void {
-    mkdirSync(this.dir, { recursive: true });
-    const lock = `${this.file}.lock`;
+    if (!this.file) throw new Error('没有当前任务树（先 tree_create）');
+    this.writeTree(this.file, next);
+    this.data = next;
+  }
+
+  private writeTree(path: string, next: TreeFile): void {
+    mkdirSync(this.treesDir, { recursive: true });
+    const lock = `${path}.lock`;
     let held = false;
     for (let i = 0; i < 20 && !held; i += 1) {
       try {
@@ -192,10 +359,9 @@ export class TaskTreeStore {
     }
     if (!held) throw new Error(`任务树文件被占用（${lock}）：稍后重试`);
     try {
-      const tmp = `${this.file}.${process.pid}.tmp`;
+      const tmp = `${path}.${process.pid}.tmp`;
       writeFileSync(tmp, JSON.stringify(next, null, 2), 'utf8');
-      renameSync(tmp, this.file);
-      this.data = next;
+      renameSync(tmp, path);
     } finally {
       try { unlinkSync(lock); } catch { /* ignore */ }
     }
@@ -205,10 +371,39 @@ export class TaskTreeStore {
     return this.load();
   }
 
-  /** 建根（一棵树只有一根）。 */
-  create(title: string, intent?: string, subtasks: string[] = []): TreeFile {
-    const existing = this.load();
-    if (existing?.rootId) throw new Error('这个会话已经有任务树了；要改请在树上加子任务（tree_add），或用 tree_report 收尾');
+  /* ────────────────────────── 多棵树 ────────────────────────── */
+
+  /**
+   * 列出这个会话的所有树（当前那棵排第一，并标 active）。
+   *
+   * `done` / `total` 不含根节点，与 `renderTree` 的分母一致 —— 两处算法要是不一样，
+   * 用户在列表里看到 3/3、点进去看到 2/3 这种"同一棵两个数"就会发生。
+   */
+  list(): TreeSummary[] {
+    this.migrateLegacy();
+    const active = this.activeId();
+    const out: TreeSummary[] = [];
+    for (const id of this.treeIds()) {
+      const file = readTreeFile(this.treePath(id), (backup, reason) => { this.recovery = { backup, reason }; });
+      if (!file) continue; // 坏文件已被隔离；recoveryInfo 会告诉用户到哪里去找
+      const tasks = (file.nodes ?? []).filter((n) => n.id !== file.rootId);
+      const root = (file.nodes ?? []).find((n) => n.id === file.rootId);
+      out.push({
+        id,
+        title: root?.title ?? '（空树）',
+        done: tasks.filter((n) => n.status === 'done').length,
+        total: tasks.length,
+        active: id === active,
+        reports: (file.reports ?? []).length,
+        updatedAt: String(file.updatedAt ?? ''),
+      });
+    }
+    out.sort((a, b) => (a.active === b.active ? b.updatedAt.localeCompare(a.updatedAt) : a.active ? -1 : 1));
+    return out;
+  }
+
+  /** 建好一棵树的数据（不落盘）。create / createNew 共用，好让两棵树的构造规则不可能分叉。 */
+  private buildTree(title: string, intent?: string, subtasks: string[] = []): TreeFile {
     const at = NOW();
     const root: TreeNode = {
       id: 'n1', parentId: null, title, intent, kind: 'goal', status: 'active',
@@ -221,10 +416,83 @@ export class TaskTreeStore {
         dependsOn: [], evidence: [], decisions: [], questions: [], attempts: 0, log: [], createdAt: at, updatedAt: at,
       });
     });
-    const file: TreeFile = { v: 1, sessionId: this.sessionId, rootId: root.id, nodes, createdAt: at, updatedAt: at, reports: [] };
-    this.save(file);
+    return { v: 1, sessionId: this.sessionId, rootId: root.id, nodes, createdAt: at, updatedAt: at, reports: [] };
+  }
+
+  /**
+   * 总是新建一棵，并把它设为当前树。
+   *
+   * 与 `create()` 的差别就是"不再拒绝"（用户 2026-11-04：创建任务树"无论是否已有"）：
+   * 用户要开第二件事的时候，被迫把第一棵的节点全标掉才能开工，那不是约束，那是刁难。
+   */
+  createNew(title: string, intent?: string, subtasks: string[] = []): TreeFile {
+    this.migrateLegacy();
+    const file = this.buildTree(title, intent, subtasks);
+    const id = this.newId();
+    const path = this.treePath(id);
+    this.writeTree(path, file);
+    this.writeActive(id);
+    this.file = path;
+    this.data = file;
     return file;
   }
+
+  /** 建根（一棵树只有一根）。已有当前树时仍然拒绝 —— 要另起一棵请用 createNew。 */
+  create(title: string, intent?: string, subtasks: string[] = []): TreeFile {
+    const existing = this.load();
+    if (existing?.rootId) {
+      throw new Error('当前这棵任务树已经建好了；要在这棵树上加子任务用 tree_add，'
+        + '要另起一棵（这个会话可以有不止一棵树）用 tree_create（它会成为当前树）');
+    }
+    return this.createNew(title, intent, subtasks);
+  }
+
+  /** 切到另一棵树。不存在就报错，并把现有的列出来 —— 只报"没有"等于让调用方去猜。 */
+  switch(id: string): TreeFile {
+    this.migrateLegacy();
+    const ids = this.treeIds();
+    if (!ids.includes(id)) {
+      throw new Error(`没有这棵任务树：${id}（现有：${ids.join('、') || '一棵都没有'}）`);
+    }
+    this.writeActive(id);
+    this.file = this.treePath(id);
+    this.data = null;
+    const loaded = this.load();
+    if (!loaded) throw new Error(`任务树 ${id} 读不出来（文件可能刚被删或损坏）；用 tree_list 看现有哪几棵`);
+    return loaded;
+  }
+
+  /**
+   * 删掉一棵树。
+   *
+   * **删完一棵不剩就拒绝**：所有 tree_* 都作用在"当前树"上，没有当前树时 tree_get 会报
+   * "还没有任务树"、tree_update 会报"没有这个节点"—— 那些提示会让模型以为树坏了，
+   * 于是重新建一棵、把刚才的进展全丢掉。宁可拒绝，也不要进入那个状态。
+   *
+   * 删的是当前树时，指针改指到剩下最近的那一棵（走 `activeId()` 的修补逻辑），
+   * 而不是留在原地指向一个已经不存在的文件。
+   */
+  remove(id: string): { id: string; activeId: string } {
+    this.migrateLegacy();
+    const ids = this.treeIds();
+    if (!ids.includes(id)) {
+      throw new Error(`没有这棵任务树：${id}（现有：${ids.join('、') || '一棵都没有'}）`);
+    }
+    if (ids.length <= 1) {
+      throw new Error(`不能删「${id}」：这是这个会话最后一棵任务树，删掉就没有当前树了 —— `
+        + '一个会话至少要保留一棵（否则 tree_get / tree_update / tree_report 都没有落点，'
+        + '看起来就像树丢了）。要换内容请先用 tree_create 建一棵新的（它会成为当前树），再删这棵。');
+    }
+    unlinkSync(this.treePath(id));
+    this.file = null;
+    this.data = null;
+    const next = this.activeId();
+    // activeId() 只在指针丢掉/悬空时才重算；删掉的正好是当前树时，这两种情况都成立。
+    if (!next) throw new Error(`删掉 ${id} 之后找不到剩下的任务树（目录：${this.treesDir}）`);
+    return { id, activeId: next };
+  }
+
+  /* ────────────────────────── 当前树上的操作 ────────────────────────── */
 
   /**
    * 在**调用方手里那份** file 里找节点。
@@ -411,23 +679,21 @@ export class TaskTreeStore {
      * 所以判的是 `typeof === number`，不是"有没有值"。
      */
     if (typeof this.settings.maxMinutes === 'number' && minutes >= this.settings.maxMinutes) {
-      return { exhausted: true, reason: `已跑 ${Math.round(minutes)} 分钟，超过预算 ${this.settings.maxMinutes} 分钟` };
+      return { exhausted: true, reason: `这棵树已经跑了 ${Math.round(minutes)} 分钟，你设的上限是 ${this.settings.maxMinutes} 分钟` };
     }
     if (typeof this.settings.maxNodes === 'number' && file.nodes.length >= this.settings.maxNodes) {
-      return { exhausted: true, reason: `节点数 ${file.nodes.length} 已达上限 ${this.settings.maxNodes}` };
+      return { exhausted: true, reason: `节点数是 ${file.nodes.length}，你设的上限是 ${this.settings.maxNodes}` };
     }
     const dead = open.find((n) => n.attempts >= this.settings.maxNodeAttempts);
     if (dead) return { exhausted: true, reason: `${dead.id}「${dead.title}」已连续失败 ${dead.attempts} 次` };
     return { exhausted: false, reason: '' };
   }
+
   /**
-   * 记一次出口汇报并**落盘**。
+   * 刹车：写一个 aborted 标记，下一次 autopilot 判断立刻停。
    *
-   * 原来 `tree_report` 只做了 `file.reports.push(...)` —— 改的是 `get()` 返回的那个内存对象，
-   * 从来没有 save。后果有两个：汇报在重启后消失；`treeAutopilot` 看 `reports.length` 判断
-   * "已经收口"，于是永远判成没收口、无限续跑。
+   * 它只动**当前这棵**：另一棵树上正在跑的东西不该因为这一棵被叫停而停下。
    */
-  /** 刹车：写一个 aborted 标记，下一次 autopilot 判断立刻停。 */
   halt(reason: string): void {
     const file = this.load();
     if (!file) return;
@@ -443,7 +709,16 @@ export class TaskTreeStore {
     delete file.aborted;
     file.updatedAt = NOW();
     this.save(file);
-  }  recordReport(outcome: 'success' | 'blocked' | 'partial', summary: string): void {
+  }
+
+  /**
+   * 记一次出口汇报并**落盘**。
+   *
+   * 原来 `tree_report` 只做了 `file.reports.push(...)` —— 改的是 `get()` 返回的那个内存对象，
+   * 从来没有 save。后果有两个：汇报在重启后消失；`treeAutopilot` 看 `reports.length` 判断
+   * "已经收口"，于是永远判成没收口、无限续跑。
+   */
+  recordReport(outcome: 'success' | 'blocked' | 'partial', summary: string): void {
     const file = this.load();
     if (!file) return;
     file.reports.push({ at: NOW(), outcome, summary });
@@ -467,7 +742,7 @@ export class TaskTreeStore {
     if (overTime || overTries) {
       return {
         outcome: 'partial',
-        reason: overTime ? `超过时间预算 ${this.settings.maxMinutes} 分钟` : `有节点已连续失败 ${this.settings.maxNodeAttempts} 次`,
+        reason: overTime ? `跑得比你设的 ${this.settings.maxMinutes} 分钟久` : `有节点已连续失败 ${this.settings.maxNodeAttempts} 次`,
       };
     }
     return { outcome: 'partial', reason: '仍有可推进的节点，但本轮到此为止' };
@@ -499,6 +774,9 @@ export interface TreeAutopilotDecision {
  *   - 预算到顶（墙钟/节点数/单节点失败）→ 停，让模型去 tree_report；
  *   - 没有可推进的节点 → 停；
  *   - 回复以问号结尾 → 停（模型在问你）。
+ *
+ * 多棵树之后它看的是**当前那棵**（`store.get()` 就是 active）：另一棵收口了不代表这棵也该停，
+ * 反过来也一样。判据 ⑳ 钉的就是这一条。
  */
 export function treeAutopilot(
   store: TaskTreeStore,
@@ -513,7 +791,7 @@ export function treeAutopilot(
     return { proceed: false, signature, reason: '这棵树已经收口（success）' };
   }
   /*
-   * 不再看"是不是这一轮动过的"：树是每会话一棵，文件位置已经回答了归属问题。
+   * 不再看"是不是这一轮动过的"：树是每会话私有，文件位置已经回答了归属问题。
    * 原来那条闸是从 plan 抄过来的（plan 是工作区级、跨会话共享，才需要它），抄到树上就变成
    * "重启一次或隔一轮说继续，树就再也不自动跑"。真正该拦的是下面这几条：已报告、已急停、
    * 有人在等你回答、没有可推进的节点。
@@ -530,10 +808,10 @@ export function treeAutopilot(
 
   const budget = store.budget();
   if (budget.exhausted) {
-    return { proceed: false, signature, reason: `预算用尽：${budget.reason} —— 该 tree_report 了` };
+    return { proceed: false, signature, reason: `到这里为止：${budget.reason} —— 该收口了（tree_report）` };
   }
 
-    const open = file.nodes.filter((n) => n.id !== file.rootId && n.status !== 'done' && n.status !== 'dropped');
+  const open = file.nodes.filter((n) => n.id !== file.rootId && n.status !== 'done' && n.status !== 'dropped');
   if (!open.length) return { proceed: false, signature, reason: '所有节点都已完成或放弃' };
 
   const runnable = open.filter((n) => n.status === 'active' || n.status === 'pending');
@@ -554,6 +832,6 @@ export function treeAutopilot(
     nudge: `[自动续跑] 任务树还有 ${open.length} 个节点没做完，下一个可推进的是「${next.title}」（${next.id}）。`
       + '先 tree_get 看一眼当前状态，然后直接干活：做完用 tree_update 记状态与证据；'
       + '发现新分支就 tree_add 长出来；只有需要我提供只有我知道的信息、或要做不可逆的操作时才 tree_ask。'
-      + '不要停下来等我确认。全部做完、真的受阻、或预算用尽时，用 tree_report 收口。',
+      + '不要停下来等我确认。全部做完、真的受阻、或到你设的上限了时，用 tree_report 收口。',
   };
 }

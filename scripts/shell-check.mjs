@@ -29,6 +29,13 @@
  *   node scripts/shell-check.mjs
  */
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+
+/*
+ * 钉住前提：本脚本验的是"沙箱开着时"的判定（确认框、越界拒绝、受保护文件）。
+ * 开发机的 .env 里可能有 SHE_SANDBOX=off —— 只 delete 不够（loadConfig 会从 .env 补回），
+ * 必须显式写一个非 off 的值。2026-11-04 实测：不钉它，六条断言一起红。
+ */
+process.env.SHE_SANDBOX = 'on';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';

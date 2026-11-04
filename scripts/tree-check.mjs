@@ -7,9 +7,11 @@
  *   3. 超时 + 相信 → 采纳推荐值并留痕（auto=true）；
  *   4. 超时 + 不相信 + blocking → 判定受阻；
  *   5. done 无证据会被标出来；
- *   6. 坏文件隔离、每会话一棵树（不跨 chat）。
+ *   6. 坏文件隔离、每会话一棵树（不跨 chat）；
+ *   7. 多棵树：建第二棵不干扰第一棵、切换后 autopilot 跟的是当前树、
+ *      删最后一棵被拒且那棵还在、旧单文件能迁移且原文件仍在。
  */
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readdirSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { TaskTreeStore, DEFAULT_TREE_SETTINGS, treeAutopilot } from '../packages/agent-runtime/dist/task-tree.js';
@@ -321,6 +323,165 @@ const dir = mkdtempSync(join(tmpdir(), 'she-tree-check-'));
   q19.ask(q19.get().rootId, { text: '删不删？', options: ['删', '不删'], recommend: '不删', blocking: true, reversible: false });
   const d19b = treeAutopilot(q19, { turnStartedAt: Date.now() - 1000, reply: '继续' });
   check('真的有 blocking 问题未答时仍然停（这是该停的那一种）', d19b.proceed === false, d19b.reason ?? '');
+}
+
+/* ⑳ 多棵树：互不干扰、切换、autopilot 跟当前树、删最后一棵被拒（用户 2026-11-04） */
+{
+  const s = new TaskTreeStore(dir, 'multi_a');
+  s.create('第一棵：把 A 做完', undefined, ['A-1', 'A-2']);
+  const firstId = s.activeId();
+  const firstNodes = s.get().nodes.map((n) => `${n.id}=${n.status}`).join(',');
+
+  /* ① 已有树时也能再建一棵，新的成为当前树 */
+  s.createNew('第二棵：把 B 做完', undefined, ['B-1']);
+  const secondId = s.activeId();
+  const secondTree = s.get();
+  check('【关键】已有树时 tree_create/createNew 不再被拒，新树成为当前树',
+    secondId !== firstId && secondTree.nodes[0].title === '第二棵：把 B 做完',
+    `${firstId} → ${secondId}；当前根=${secondTree.nodes[0].title}`);
+
+  /* ② 两棵互不干扰：改一棵不影响另一棵 */
+  const secondKid = secondTree.nodes.find((n) => n.id !== secondTree.rootId);
+  s.update(secondKid.id, { status: 'done', evidence: ['写进第二棵的证据'] });
+  s.switch(firstId);
+  const firstBack = s.get();
+  const firstSignature = firstBack.nodes.map((n) => `${n.id}=${n.status}`).join(',');
+  const leaked = firstBack.nodes.some((n) => n.evidence.includes('写进第二棵的证据'));
+  check('【关键】改第二棵不影响第一棵（状态与证据都没串）',
+    firstSignature === firstNodes && !leaked, `第一棵=${firstSignature}`);
+  const secondStill = new TaskTreeStore(dir, 'multi_a').list().find((t) => t.id === secondId);
+  check('第二棵自己的进度还在（1/1 完成），切换只是换指针',
+    secondStill.done === 1 && secondStill.total === 1 && secondStill.active === false,
+    JSON.stringify(secondStill));
+
+  /* ③ tree_list 标出当前树与条数 */
+  const listed = s.list();
+  check('list() 列出全部树、当前树排第一并标 active',
+    listed.length === 2 && listed[0].id === firstId && listed[0].active === true
+      && listed.filter((t) => t.active).length === 1,
+    listed.map((t) => `${t.active ? '*' : ''}${t.id}`).join(' '));
+
+  /* ④ 切到第一棵后 autopilot 跟的是它；第一棵还有活 → 续跑 */
+  const otherStore = new TaskTreeStore(dir, 'multi_a');
+  otherStore.switch(secondId);
+  check('cross-instance: a store created before the switch sees it (the pointer lives on disk)', s.get().nodes[0].title.includes('B'), s.get().nodes[0].title);
+  s.switch(firstId);
+
+  const dFirst = treeAutopilot(s, { turnStartedAt: Date.now() - 1000, reply: '继续' });
+  check('【关键】切到第一棵后自动续跑跟的是第一棵（它还有活 → 继续）', dFirst.proceed === true, dFirst.reason ?? '');
+
+  /* ②' 把第二棵收口：切过去之后就不该续跑了（不是"这个会话有没有活"） */
+  s.switch(secondId);
+  const done2 = s.get().nodes.find((n) => n.id !== s.get().rootId);
+  if (done2.status !== 'done') s.update(done2.id, { status: 'done', evidence: ['B 完成'] });
+  s.recordReport('success', '第二棵做完了');
+  const dSecond = treeAutopilot(s, { turnStartedAt: Date.now() - 1000, reply: '继续' });
+  check('【关键】切到已收口的第二棵 → 停止续跑（续跑看的是当前树，不是"还有别棵有活"）',
+    dSecond.proceed === false && /收口/.test(dSecond.reason ?? ''), dSecond.reason ?? '');
+
+  s.switch(firstId);
+  const dFirstAgain = treeAutopilot(s, { turnStartedAt: Date.now() - 1000, reply: '继续' });
+  check('切回第一棵又重新续跑（autopilot 跟 active 那棵走）', dFirstAgain.proceed === true, dFirstAgain.reason ?? '');
+
+  /* ⑤ 两棵时删掉一棵是允许的，指针自动挪到剩下的那棵 */
+  const delSecond = s.remove(secondId);
+  const afterDel = s.list();
+  check('两棵时删掉一棵可以，剩下的那棵成为当前树',
+    afterDel.length === 1 && afterDel[0].id === firstId && delSecond.activeId === firstId
+      && s.get().nodes[0].title === '第一棵：把 A 做完',
+    `剩 ${afterDel.map((t) => t.id).join(',')}，当前 ${delSecond.activeId}`);
+
+  /* ⑥ 删最后一棵被拒，而且那棵还在 */
+  let refuse = '';
+  try { s.remove(firstId); } catch (e) { refuse = String(e.message); }
+  const survived = s.get();
+  check('【关键】只剩一棵时删除被拒，并且那棵还在（文件与内容都没动）',
+    refuse.length > 0 && survived !== null && s.activeId() === firstId
+      && survived.nodes[0].title === '第一棵：把 A 做完',
+    refuse || '没有报错（这是 bug）');
+  check('拒删的文案说清为什么（至少要保留一棵）', /至少/.test(refuse) && /一棵/.test(refuse), refuse);
+  check('拒删之后那棵树仍然可以正常改（不是删了一半的残骸）',
+    (() => { try { s.update(firstBack.nodes.find((n) => n.id !== firstBack.rootId).id, { status: 'active' }); return true; } catch { return false; } })());
+}
+
+/* ㉑ 旧单文件迁移：内容过来、原文件还在（用户 2026-11-04） */
+{
+  const legDir = join(dir, '.she', 'sessions', 'sess_legacy');
+  mkdirSync(legDir, { recursive: true });
+  const at = new Date().toISOString();
+  const legacy = {
+    v: 1, sessionId: 'sess_legacy', rootId: 'n1',
+    nodes: [
+      { id: 'n1', parentId: null, title: '迁移过来的目标', kind: 'goal', status: 'active', dependsOn: [], evidence: [], decisions: [], questions: [], attempts: 0, log: [], createdAt: at, updatedAt: at },
+      { id: 'n2', parentId: 'n1', title: '迁移过来的子任务', kind: 'subtask', status: 'pending', dependsOn: [], evidence: [], decisions: [], questions: [], attempts: 0, log: [], createdAt: at, updatedAt: at },
+    ],
+    createdAt: at, updatedAt: at, reports: [],
+  };
+  writeFileSync(join(legDir, 'tree.json'), JSON.stringify(legacy, null, 2), 'utf8');
+
+  const mig = new TaskTreeStore(dir, 'sess_legacy');
+  const got = mig.get();
+  const treeFiles = readdirSync(join(legDir, 'trees')).filter((f) => f.endsWith('.json'));
+  check('【关键】旧的 tree.json 被迁成 trees/<id>.json，并成为当前树',
+    got !== null && got.nodes[0].title === '迁移过来的目标' && got.nodes.length === 2 && treeFiles.length === 1,
+    `trees/=${treeFiles.join(',') || '空'}`);
+
+  const kept = readdirSync(legDir).filter((f) => f.startsWith('tree.json'));
+  check('【关键】迁移后原文件仍在（改名留证，不删除）',
+    kept.length === 1 && existsSync(join(legDir, kept[0])), kept.join(',') || '没了');
+  check('迁移过来的原文件内容没被改写（还是那份 JSON）',
+    JSON.parse(readFileSync(join(legDir, kept[0]), 'utf8')).nodes[0].title === '迁移过来的目标');
+
+  check('迁移后 active 指向它', mig.activeId() === treeFiles[0].slice(0, -'.json'.length), String(mig.activeId()));
+
+  const added = mig.add({ parentId: got.rootId, title: '迁移后新增的节点' });
+  check('迁移后的树是可写的（不是只读副本）',
+    added.id === 'n3' && new TaskTreeStore(dir, 'sess_legacy').get().nodes.length === 3, added.id);
+
+  /* 再建一棵只影响 trees/，不会把旧文件再迁一遍 */
+  mig.createNew('迁移会话里的第二棵');
+  const after = new TaskTreeStore(dir, 'sess_legacy');
+  const list = after.list();
+  check('迁移会话里也能再多一棵，且旧文件没被重复迁移',
+    list.length === 2 && readdirSync(legDir).filter((f) => f.startsWith('tree.json')).length === 1,
+    list.map((t) => `${t.active ? '*' : ''}${t.title}`).join(' | '));
+}
+
+/* ㉒ 多棵树之后，三个新工具在模型可见的工具表里，并且端到端能用 */
+{
+  const { createPlanTools } = await import('../packages/agent-runtime/dist/plan-tools.js');
+  const ws = join(dir, '..', 'tree-reg-multi-' + Math.random().toString(36).slice(2, 8));
+  mkdirSync(ws, { recursive: true });
+  const tools = createPlanTools(ws, 'sess_reg_multi');
+  const names = tools.definitions.map((d) => d.name);
+  const want = ['tree_create', 'tree_list', 'tree_switch', 'tree_delete'];
+  check('【关键】tree_list / tree_switch / tree_delete 都在模型可见的工具表里',
+    want.every((n) => names.includes(n)), `missing=${want.filter((n) => !names.includes(n)).join(',') || 'none'}`);
+
+  const created = await tools.execute('tree_create', { title: '工具面第一棵', subtasks: ['一步'] });
+  check('tree_create 回执写明新建并成为当前树，且表头带「第 N 棵/共 M 棵」',
+    /已新建一棵任务树/.test(created) && /第 1 棵\/共 1 棵/.test(created), created.split('\n')[0]);
+
+  await tools.execute('tree_create', { title: '工具面第二棵' });
+  const listed = await tools.execute('tree_list', {});
+  check('tree_list 列出两棵并标出当前树', /共 2 棵/.test(listed) && /▶/.test(listed),
+    listed.split('\n').slice(0, 3).join(' | '));
+
+  const ids = [...listed.matchAll(/(t[0-9a-z]+-[0-9a-f]+)/g)].map((m) => m[1]);
+  const current = await tools.execute('tree_get', {});
+  check('tree_get 的表头也能看出是第几棵/共几棵', /第 \d+ 棵\/共 2 棵/.test(current), current.split('\n')[0]);
+
+  const sw = await tools.execute('tree_switch', { id: ids[1] });
+  check('tree_switch 切过去后渲染的是那棵树',
+    /已切换到任务树/.test(sw) && /工具面第一棵/.test(sw), sw.split('\n')[0]);
+
+  const delErr = await tools.execute('tree_delete', { id: ids[0] });
+  check('两棵时 tree_delete 成功', /已删除任务树/.test(delErr), delErr.split('\n')[0]);
+  const lastErr = await tools.execute('tree_delete', { id: ids[1] });
+  check('【关键】删最后一棵时工具返回 Error（不是默默删掉）',
+    /^Error:/.test(lastErr) && /至少/.test(lastErr), lastErr.split('\n')[0]);
+  const still = await tools.execute('tree_list', {});
+  check('被拒之后那棵树还在（tree_list 仍能看到 1 棵）', /共 1 棵/.test(still), still.split('\n')[0]);
 }
 
 rmSync(dir, { recursive: true, force: true });

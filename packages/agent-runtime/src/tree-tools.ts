@@ -1,8 +1,14 @@
 /*
- * 任务树的工具面：tree_create / tree_add / tree_update / tree_get / tree_ask / tree_report。
+ * 任务树的工具面：tree_create / tree_add / tree_update / tree_get / tree_ask / tree_report
+ * 以及多棵树之后的 tree_list / tree_switch / tree_delete。
  *
  * 注册方式跟随 plan-tools 的 `reg(def, fn)` 约定，因此可以直接挂在同一个工具集里
  * （用户要求："模型侧的按键和计划放一块就好"）。
+ *
+ * 多棵树的理由（用户 2026-11-04）：一个会话里常常有**几件互不相干的活**。原来 tree_create
+ * 第二棵会被拒，模型只好把新活硬塞进旧树里，旧树的进度就被搅成一团 —— 拒绝创建不是约束，
+ * 是逼着调用方造假。现在 create 总是新建并把新树设为当前树，切换/删除各有一个工具，
+ * 只有"删到一棵不剩"才拒绝（见 task-tree.ts 的 remove）。
  */
 import { TaskTreeStore, type TreeStatus, type TreeNode, type TreeFile } from './task-tree.js';
 import type { ToolDefinition } from '@she/shared';
@@ -20,8 +26,13 @@ function line(n: TreeNode, depth: number): string {
   return `${'  '.repeat(depth)}${MARK[n.status]} ${n.id} ${n.title}${ev}${q}${tries}${n.note ? `  — ${n.note}` : ''}`;
 }
 
-/** 树的只读渲染：按父子顺序展开，末尾附待答问题与最近决策。 */
-export function renderTree(file: TreeFile, opts?: { trail?: boolean }): string {
+/**
+ * 树的只读渲染：按父子顺序展开，末尾附待答问题与最近决策。
+ *
+ * `index` / `total` 是"这是第几棵、一共几棵"（多棵树之后必须有，否则模型看到一份渲染
+ * 根本不知道自己现在站在哪棵树上，而 tree_update 又只作用于当前那棵 —— 那是会写错的）。
+ */
+export function renderTree(file: TreeFile, opts?: { trail?: boolean; index?: number; total?: number }): string {
   const lines: string[] = [];
   /*
    * 根节点不算"任务"：它是目标本身，状态永远是 active，要等 tree_report 才收口。
@@ -30,7 +41,13 @@ export function renderTree(file: TreeFile, opts?: { trail?: boolean }): string {
    */
   const tasks = file.nodes.filter((n) => n.id !== file.rootId);
   const done = tasks.filter((n) => n.status === 'done').length;
-  lines.push(`任务树（会话 ${file.sessionId}）— ${done}/${tasks.length} 完成`);
+  /*
+   * 第 N 棵/共 M 棵插在计数**之前**、用 `·` 隔开，且不改动后半段（"…/… 完成"）。
+   * 现有判据（scripts/tree-check.mjs ⑮）是按 `/2\/2 完成/` 匹配的，动后半段就是
+   * 把一条与本改动无关的断言弄坏。
+   */
+  const where = opts?.index && opts.total ? ` · 第 ${opts.index} 棵/共 ${opts.total} 棵` : '';
+  lines.push(`任务树（会话 ${file.sessionId}）${where} — ${done}/${tasks.length} 完成`);
   const byParent = new Map<string | null, TreeNode[]>();
   for (const n of file.nodes) {
     const list = byParent.get(n.parentId) ?? [];
@@ -83,11 +100,25 @@ export function registerTaskTreeTools(
 ): void {
   const startedAt = opts?.startedAt ?? Date.now();
 
+  /**
+   * 渲染当前树，并顺带标出"第几棵/共几棵"。
+   *
+   * 每次渲染多读一次所有树文件（`store.list()`），几棵树的规模下完全可以接受 ——
+   * 换来的是模型永远知道自己在哪棵树上，这个信息比那几毫秒值钱。
+   */
+  const render = (file: TreeFile, extra?: { trail?: boolean }): string => {
+    const all = store.list();
+    const idx = all.findIndex((t) => t.active) + 1;
+    return renderTree(file, { ...extra, index: idx > 0 ? idx : 1, total: all.length });
+  };
+
   /* ── tree_create ── */
   reg(
     {
       name: 'tree_create',
-      description: 'Create the task tree for THIS conversation (one tree per chat; it does not sync across chats). '
+      description: 'Create a task tree for THIS conversation and make it the current tree. '
+        + 'You may have SEVERAL trees in one conversation: calling this always creates a NEW one (even if a tree already exists) '
+        + 'and switches to it, so the previous tree stays untouched — use tree_list / tree_switch / tree_delete to work between them. '
         + 'Use it for unattended long work: you are expected to decide and solve things yourself, and only report at the exit '
         + '(all done / truly blocked / budget exhausted). Unlike plan_*, the tree is not pushed step by step; you grow it as you go '
         + 'with tree_add (subtask under a node, or a sibling of it).',
@@ -103,9 +134,80 @@ export function registerTaskTreeTools(
     },
     async (a) => {
       try {
-        const file = store.create(String(a.title), a.intent ? String(a.intent) : undefined,
+        const file = store.createNew(String(a.title), a.intent ? String(a.intent) : undefined,
           Array.isArray(a.subtasks) ? (a.subtasks as string[]).map(String) : []);
-        return renderTree(file);
+        return `已新建一棵任务树（id ${store.activeId()}），它就是当前树。\n${render(file)}`;
+      } catch (err) {
+        return `Error: ${(err as Error).message}`;
+      }
+    },
+  );
+
+  /* ── tree_list ── */
+  reg(
+    {
+      name: 'tree_list',
+      description: 'List every task tree in this conversation: id, goal, done/total nodes, how many reports it has, when it was last '
+        + 'updated, and which one is CURRENT (the tree that tree_add / tree_update / tree_get / tree_report operate on). '
+        + 'Use it before tree_switch / tree_delete, or when you are unsure which tree you are working on.',
+      parameters: { type: 'object', properties: {} },
+    },
+    async () => {
+      const all = store.list();
+      if (!all.length) return '这个会话还没有任务树（先 tree_create）';
+      const rows = all.map((t) => `${t.active ? '▶' : ' '} ${t.id}  ${t.title}  — ${t.done}/${t.total} 完成`
+        + `${t.reports ? `，已汇报 ${t.reports} 次` : ''}  更新于 ${t.updatedAt.slice(0, 16).replace('T', ' ')}`);
+      return [
+        `任务树共 ${all.length} 棵（▶ = 当前树，tree_* 都作用于它）：`,
+        ...rows,
+        '',
+        '切换用 tree_switch（id）；删掉某一棵用 tree_delete（id，至少保留一棵）。',
+      ].join('\n');
+    },
+  );
+
+  /* ── tree_switch ── */
+  reg(
+    {
+      name: 'tree_switch',
+      description: 'Make another task tree the CURRENT one. Everything (tree_add / tree_update / tree_get / tree_report, and the '
+        + 'autopilot that continues the work) then acts on the switched-to tree; the tree you left keeps its state untouched. '
+        + 'The id comes from tree_list.',
+      parameters: {
+        type: 'object',
+        properties: { id: { type: 'string', description: 'Tree id from tree_list' } },
+        required: ['id'],
+      },
+    },
+    async (a) => {
+      try {
+        const file = store.switch(String(a.id));
+        return `已切换到任务树 ${String(a.id)}。现在 tree_* 都作用于它。\n${render(file)}`;
+      } catch (err) {
+        return `Error: ${(err as Error).message}`;
+      }
+    },
+  );
+
+  /* ── tree_delete ── */
+  reg(
+    {
+      name: 'tree_delete',
+      description: 'Delete one task tree by id (a tree that has become irrelevant: finished, superseded, or a mistaken one). '
+        + 'Refused when it is the LAST tree in this conversation — at least one must remain, because every other tree_* tool acts on '
+        + 'the current tree. Deleting the current tree moves the pointer to another one. This cannot be undone.',
+      parameters: {
+        type: 'object',
+        properties: { id: { type: 'string', description: 'Tree id from tree_list' } },
+        required: ['id'],
+      },
+    },
+    async (a) => {
+      try {
+        const { id, activeId } = store.remove(String(a.id));
+        const after = store.get();
+        const head = `已删除任务树 ${id}；当前树改成 ${activeId}。`;
+        return after ? `${head}\n${render(after)}` : head;
       } catch (err) {
         return `Error: ${(err as Error).message}`;
       }
@@ -116,8 +218,9 @@ export function registerTaskTreeTools(
   reg(
     {
       name: 'tree_add',
-      description: 'Grow the tree while working: a SUBTASK (parentId) or a SIBLING of an existing node (siblingOf). '
-        + 'Add nodes when you discover work that the plan did not foresee — that is the point of the tree.',
+      description: 'Grow the CURRENT tree while working: a SUBTASK (parentId) or a SIBLING of an existing node (siblingOf). '
+        + 'Add nodes when you discover work that the plan did not foresee — that is the point of the tree. '
+        + 'If the work belongs to a different goal, tree_create a new tree instead of hanging it here.',
       parameters: {
         type: 'object',
         properties: {
@@ -137,7 +240,7 @@ export function registerTaskTreeTools(
           title: String(a.title),
           intent: a.intent ? String(a.intent) : undefined,
         });
-        return `已加节点 ${n.id}「${n.title}」（父 ${n.parentId ?? '—'}）。\n${renderTree(store.get()!)}`;
+        return `已加节点 ${n.id}「${n.title}」（父 ${n.parentId ?? '—'}）。\n${render(store.get()!)}`;
       } catch (err) {
         return `Error: ${(err as Error).message}`;
       }
@@ -148,7 +251,7 @@ export function registerTaskTreeTools(
   reg(
     {
       name: 'tree_update',
-      description: 'Update one node: status, note, evidence (a command and its exit code, a file:line, a test result), '
+      description: 'Update one node of the CURRENT tree: status, note, evidence (a command and its exit code, a file:line, a test result), '
         + 'or record a decision (choice + why, and whether it was made automatically). A node marked done without evidence is flagged.',
       parameters: {
         type: 'object',
@@ -178,7 +281,7 @@ export function registerTaskTreeTools(
         if (a.halt === true) store.halt(String(a.note ?? '用户/模型主动急停'));
         else store.resume();
         const after = store.get();
-        return (a.halt === true ? '已急停：自动续跑停止。' : '已恢复：自动续跑继续。') + '\n' + (after ? renderTree(after) : '（还没有任务树）');
+        return (a.halt === true ? '已急停：自动续跑停止。' : '已恢复：自动续跑继续。') + '\n' + (after ? render(after) : '（还没有任务树）');
       }
       try {
         const n = store.update(String(a.id), {
@@ -193,7 +296,7 @@ export function registerTaskTreeTools(
             }
             : undefined,
         });
-        return `${n.id} → ${n.status}\n${renderTree(store.get()!)}`;
+        return `${n.id} → ${n.status}\n${render(store.get()!)}`;
       } catch (err) {
         return `Error: ${(err as Error).message}`;
       }
@@ -204,8 +307,9 @@ export function registerTaskTreeTools(
   reg(
     {
       name: 'tree_get',
-      description: 'Read the tree: nodes, statuses, pending questions (with their deadline), and — with trail — the recent '
-        + 'status changes and the decisions taken automatically.',
+      description: 'Read the CURRENT tree: nodes, statuses, pending questions (with their deadline), and — with trail — the recent '
+        + 'status changes and the decisions taken automatically. The header says which tree it is (第 N 棵/共 M 棵); '
+        + 'use tree_list to see the others and tree_switch to change which one this is.',
       parameters: {
         type: 'object',
         properties: { trail: { type: 'boolean', description: 'Include recent transitions and automatic decisions' } },
@@ -226,8 +330,8 @@ export function registerTaskTreeTools(
        * 而这条信息出现的唯一理由就是让它停手汇报。
        */
       const budget = store.budget();
-      const must = budget.exhausted ? `⛔ 预算用尽：${budget.reason} —— 现在必须 tree_report（summary/outcome 会自动判成 partial 或 blocked），不要再加节点、不要再开新分支。\n` : '';
-      return head + must + renderTree(file, { trail: a.trail === true });
+      const must = budget.exhausted ? `⛔ 到这里为止：${budget.reason} —— 现在必须 tree_report（summary/outcome 会自动判成 partial 或 blocked），不要再加节点、不要再开新分支。\n` : '';
+      return head + must + render(file, { trail: a.trail === true });
     },
   );
 
@@ -283,9 +387,9 @@ export function registerTaskTreeTools(
   reg(
     {
       name: 'tree_report',
-      description: 'The ONLY way a task tree ends: report at the exit. Three exits — everything done, truly blocked, or budget '
-        + 'exhausted (partial). Include per-node evidence, the decisions you took automatically, the questions left shelved, and '
-        + 'what you did not verify.',
+      description: 'The ONLY way a task tree ends: report at the exit of the CURRENT tree. Three exits — everything done, truly blocked, '
+        + 'or budget exhausted (partial). Include per-node evidence, the decisions you took automatically, the questions left shelved, and '
+        + 'what you did not verify. Reporting closes THIS tree only; another tree in the same conversation keeps its own state.',
       parameters: {
         type: 'object',
         properties: {
