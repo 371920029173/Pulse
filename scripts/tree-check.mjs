@@ -311,6 +311,18 @@ const dir = mkdtempSync(join(tmpdir(), 'she-tree-check-'));
   check('success 报告之后停止续跑', d18b.proceed === false, d18b.reason ?? '');
 }
 
+/* ⑲ 结尾问号不是停止条件（用户：会续跑但只跑一次） */
+{
+  const q19 = new TaskTreeStore(dir, 'question_a');
+  q19.create('还有活', undefined, ['子一', '子二']);
+  const d19 = treeAutopilot(q19, { turnStartedAt: Date.now() - 1000, reply: '要我继续吗？' });
+  check('【关键】回复以问号结尾不再让它停（否则每次只跑一轮）', d19.proceed === true, d19.reason ?? '');
+
+  q19.ask(q19.get().rootId, { text: '删不删？', options: ['删', '不删'], recommend: '不删', blocking: true, reversible: false });
+  const d19b = treeAutopilot(q19, { turnStartedAt: Date.now() - 1000, reply: '继续' });
+  check('真的有 blocking 问题未答时仍然停（这是该停的那一种）', d19b.proceed === false, d19b.reason ?? '');
+}
+
 rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `\n${failed} 项 FAIL` : '\n全部 PASS');
 process.exit(failed ? 1 : 0);

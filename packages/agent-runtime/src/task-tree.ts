@@ -541,9 +541,11 @@ export function treeAutopilot(
     return { proceed: false, signature, reason: `没有可推进的节点（剩下的都在等：${open.map((n) => `${n.id}=${n.status}`).join('、')}）` };
   }
 
-  if (/[?？]\s*$/.test(String(opts.reply ?? '').trim())) {
-    return { proceed: false, signature, reason: '在等你回答问题' };
-  }
+  /*
+   * 这里**不再**用"回复以问号结尾"当作停止条件（2026-11-04）：
+   * 树续跑一轮后回复常以"要不要我…？"收尾，那条规则会让它每次只跑一轮。
+   * 真要求人回答请用 `tree_ask`（带 deadline / blocking）；标点不是提问通道。
+   */
 
   const next = runnable.find((n) => n.status === 'active') ?? runnable[0]!;
   return {
