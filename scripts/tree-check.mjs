@@ -298,6 +298,19 @@ const dir = mkdtempSync(join(tmpdir(), 'she-tree-check-'));
   check('显式 force 可以重开（留痕，不是禁止）', threw2 === '', threw2);
 }
 
+/* ⑱ 只有 success 报告才停止续跑（partial 不是终点） */
+{
+  const p18 = new TaskTreeStore(dir, 'partial_a');
+  p18.create('还有活没干完', undefined, ['子一', '子二']);
+  p18.recordReport('partial', '先停一下');
+  const d18 = treeAutopilot(p18, { turnStartedAt: Date.now() - 1000, reply: '继续' });
+  check('【关键】partial 报告之后仍然续跑（否则报过一次就永远停住）', d18.proceed === true, d18.reason ?? '');
+
+  p18.recordReport('success', '全做完了');
+  const d18b = treeAutopilot(p18, { turnStartedAt: Date.now() - 1000, reply: '继续' });
+  check('success 报告之后停止续跑', d18b.proceed === false, d18b.reason ?? '');
+}
+
 rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `\n${failed} 项 FAIL` : '\n全部 PASS');
 process.exit(failed ? 1 : 0);

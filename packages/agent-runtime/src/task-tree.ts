@@ -508,7 +508,10 @@ export function treeAutopilot(
   const signature = file ? file.nodes.map((n) => `${n.id}:${n.status}`).join(',') : '';
   if (!file) return { proceed: false, signature, reason: '没有任务树' };
   if (file.aborted) return { proceed: false, signature, reason: `已被急停：${file.aborted.reason}（tree_update 里清掉 aborted 可恢复）` };
-  if (file.reports.length > 0) return { proceed: false, signature, reason: '这棵树已经 tree_report 过了' };
+  const lastReport = file.reports[file.reports.length - 1];
+  if (lastReport && lastReport.outcome === 'success') {
+    return { proceed: false, signature, reason: '这棵树已经收口（success）' };
+  }
   /*
    * 不再看"是不是这一轮动过的"：树是每会话一棵，文件位置已经回答了归属问题。
    * 原来那条闸是从 plan 抄过来的（plan 是工作区级、跨会话共享，才需要它），抄到树上就变成
